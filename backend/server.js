@@ -90,6 +90,10 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
 // Routes
 const ordersRouter = require('./routes/orders');
 app.use('/api/orders', ordersRouter);
+const clientsRouter = require('./routes/clients');
+app.use('/api/clients', clientsRouter);
+const productsRouter = require('./routes/products');
+app.use('/api/products', productsRouter);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
