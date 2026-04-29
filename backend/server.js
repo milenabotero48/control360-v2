@@ -69,7 +69,15 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/logout', authenticate, (req, res) => {
   res.json({ message: 'Logout exitoso' });
 });
-
+// TEST: Generar token válido
+app.get('/api/test-token', (req, res) => {
+  const token = jwt.sign(
+    { uid: '3oUbFf2KvgbC97FXQFb8PHpwNBW2', email: 'sandra@empresa.com', role: 'comercial' },
+    process.env.JWT_SECRET,
+    { expiresIn: '24h' }
+  );
+  res.json({ token });
+});
 app.get('/api/auth/me', authenticate, async (req, res) => {
   try {
     const userDoc = await db.collection('users').doc(req.user.uid).get();
@@ -79,6 +87,9 @@ app.get('/api/auth/me', authenticate, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+// Routes
+const ordersRouter = require('./routes/orders');
+app.use('/api/orders', ordersRouter);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
