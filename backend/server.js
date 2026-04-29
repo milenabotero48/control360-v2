@@ -94,6 +94,8 @@ const clientsRouter = require('./routes/clients');
 app.use('/api/clients', clientsRouter);
 const productsRouter = require('./routes/products');
 app.use('/api/products', productsRouter);
+const quotationsRouter = require('./routes/quotations');
+app.use('/api/quotations', quotationsRouter);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
