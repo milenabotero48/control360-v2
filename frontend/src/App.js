@@ -3,6 +3,7 @@ import Login from './Login';
 import Dashboard from './Dashboard';
 import DashboardMaykol from './DashboardMaykol';
 
+
 function App() {
   const [user, setUser] = useState(null);
   const [currentDashboard, setCurrentDashboard] = useState('admin');
@@ -51,6 +52,8 @@ function App() {
           >
             🚚 Logística
           </button>
+
+          
         </div>
 
         <div style={styles.headerRight}>
@@ -64,6 +67,7 @@ function App() {
       <main style={styles.main}>
         {currentDashboard === 'admin' && <Dashboard user={user} />}
         {currentDashboard === 'maykol' && <DashboardMaykol user={user} />}
+       
       </main>
     </div>
   );
