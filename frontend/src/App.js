@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import Login from './Login';
 import Dashboard from './Dashboard';
+import DashboardMaykol from './DashboardMaykol';
 
 function App() {
   const [user, setUser] = useState(null);
+  const [currentDashboard, setCurrentDashboard] = useState('admin');
 
   useEffect(() => {
     const savedUser = localStorage.getItem('user');
@@ -26,6 +28,31 @@ function App() {
     <div style={styles.container}>
       <header style={styles.header}>
         <h1 style={styles.logo}>Control360</h1>
+        
+        <div style={styles.nav}>
+          <button
+            onClick={() => setCurrentDashboard('admin')}
+            style={{
+              ...styles.navBtn,
+              background: currentDashboard === 'admin' ? '#fff' : 'transparent',
+              color: currentDashboard === 'admin' ? '#667eea' : '#fff'
+            }}
+          >
+            📊 Admin
+          </button>
+          
+          <button
+            onClick={() => setCurrentDashboard('maykol')}
+            style={{
+              ...styles.navBtn,
+              background: currentDashboard === 'maykol' ? '#fff' : 'transparent',
+              color: currentDashboard === 'maykol' ? '#667eea' : '#fff'
+            }}
+          >
+            🚚 Logística
+          </button>
+        </div>
+
         <div style={styles.headerRight}>
           <span style={styles.userEmail}>{user.email}</span>
           <button onClick={handleLogout} style={styles.logoutBtn}>
@@ -35,7 +62,8 @@ function App() {
       </header>
 
       <main style={styles.main}>
-        <Dashboard user={user} />
+        {currentDashboard === 'admin' && <Dashboard user={user} />}
+        {currentDashboard === 'maykol' && <DashboardMaykol user={user} />}
       </main>
     </div>
   );
@@ -54,12 +82,28 @@ const styles = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)'
+    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
+    gap: '40px'
   },
   logo: {
     margin: 0,
     fontSize: '28px',
-    fontWeight: 'bold'
+    fontWeight: 'bold',
+    minWidth: '150px'
+  },
+  nav: {
+    display: 'flex',
+    gap: '10px',
+    flex: 1
+  },
+  navBtn: {
+    padding: '10px 20px',
+    border: 'none',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    fontSize: '14px',
+    fontWeight: '600',
+    transition: 'all 0.2s'
   },
   headerRight: {
     display: 'flex',
