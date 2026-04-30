@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import Login from './Login';
+import Dashboard from './Dashboard';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -23,44 +24,19 @@ function App() {
 
   return (
     <div style={styles.container}>
-      <div style={styles.header}>
-        <h1>Control360</h1>
-        <button onClick={handleLogout} style={styles.logoutBtn}>
-          Cerrar sesión
-        </button>
-      </div>
-
-      <div style={styles.dashboard}>
-        <h2>Bienvenido, {user.email}</h2>
-        <p>Dashboard en construcción...</p>
-        
-        <div style={styles.grid}>
-          <div style={styles.card}>
-            <h3>📋 Órdenes</h3>
-            <p>Gestionar órdenes de servicio</p>
-          </div>
-          <div style={styles.card}>
-            <h3>👥 Clientes</h3>
-            <p>Base de datos de clientes</p>
-          </div>
-          <div style={styles.card}>
-            <h3>📦 Productos</h3>
-            <p>Catálogo de productos</p>
-          </div>
-          <div style={styles.card}>
-            <h3>🎯 Cotizaciones</h3>
-            <p>Crear y aprobar cotizaciones</p>
-          </div>
-          <div style={styles.card}>
-            <h3>🚚 Logística</h3>
-            <p>Rastreo de entregas</p>
-          </div>
-          <div style={styles.card}>
-            <h3>🔧 Taller</h3>
-            <p>Gestión de reparaciones</p>
-          </div>
+      <header style={styles.header}>
+        <h1 style={styles.logo}>Control360</h1>
+        <div style={styles.headerRight}>
+          <span style={styles.userEmail}>{user.email}</span>
+          <button onClick={handleLogout} style={styles.logoutBtn}>
+            Cerrar sesión
+          </button>
         </div>
-      </div>
+      </header>
+
+      <main style={styles.main}>
+        <Dashboard user={user} />
+      </main>
     </div>
   );
 }
@@ -74,10 +50,25 @@ const styles = {
   header: {
     background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
     color: 'white',
-    padding: '20px',
+    padding: '20px 40px',
     display: 'flex',
     justifyContent: 'space-between',
-    alignItems: 'center'
+    alignItems: 'center',
+    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)'
+  },
+  logo: {
+    margin: 0,
+    fontSize: '28px',
+    fontWeight: 'bold'
+  },
+  headerRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '20px'
+  },
+  userEmail: {
+    fontSize: '14px',
+    opacity: 0.9
   },
   logoutBtn: {
     padding: '10px 20px',
@@ -86,26 +77,11 @@ const styles = {
     border: '1px solid white',
     borderRadius: '6px',
     cursor: 'pointer',
-    fontSize: '14px'
+    fontSize: '14px',
+    transition: 'background 0.2s'
   },
-  dashboard: {
-    padding: '40px',
-    maxWidth: '1200px',
-    margin: '0 auto'
-  },
-  grid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
-    gap: '20px',
-    marginTop: '30px'
-  },
-  card: {
-    background: 'white',
-    padding: '20px',
-    borderRadius: '8px',
-    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
-    cursor: 'pointer',
-    transition: 'transform 0.2s'
+  main: {
+    padding: '20px'
   }
 };
 
