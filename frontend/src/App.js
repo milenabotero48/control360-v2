@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import Login from './Login';
 import Dashboard from './Dashboard';
 import DashboardMaykol from './DashboardMaykol';
-
+import DashboardTaller from './DashboardTaller';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -53,7 +53,16 @@ function App() {
             🚚 Logística
           </button>
 
-          
+          <button
+            onClick={() => setCurrentDashboard('taller')}
+            style={{
+              ...styles.navBtn,
+              background: currentDashboard === 'taller' ? '#fff' : 'transparent',
+              color: currentDashboard === 'taller' ? '#667eea' : '#fff'
+            }}
+          >
+            🔧 Taller
+          </button>
         </div>
 
         <div style={styles.headerRight}>
@@ -67,7 +76,7 @@ function App() {
       <main style={styles.main}>
         {currentDashboard === 'admin' && <Dashboard user={user} />}
         {currentDashboard === 'maykol' && <DashboardMaykol user={user} />}
-       
+        {currentDashboard === 'taller' && <DashboardTaller user={user} />}
       </main>
     </div>
   );
