@@ -3,6 +3,7 @@ import Login from './Login';
 import Dashboard from './Dashboard';
 import DashboardMaykol from './DashboardMaykol';
 import DashboardTaller from './DashboardTaller';
+import ConfigEmpresas from './ConfigEmpresas';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -29,7 +30,20 @@ function App() {
     <div style={styles.container}>
       <header style={styles.header}>
         <h1 style={styles.logo}>Control360</h1>
-        
+
+        {user.role === 'admin' && (
+          <button
+            onClick={() => setCurrentDashboard('config')}
+            style={{
+              ...styles.navBtn,
+              background: currentDashboard === 'config' ? '#fff' : 'transparent',
+              color: currentDashboard === 'config' ? '#667eea' : '#fff'
+            }}
+          >
+            ⚙️ Configurar
+          </button>
+        )}
+
         <div style={styles.nav}>
           <button
             onClick={() => setCurrentDashboard('admin')}
@@ -41,7 +55,7 @@ function App() {
           >
             📊 Admin
           </button>
-          
+
           <button
             onClick={() => setCurrentDashboard('maykol')}
             style={{
@@ -77,6 +91,7 @@ function App() {
         {currentDashboard === 'admin' && <Dashboard user={user} />}
         {currentDashboard === 'maykol' && <DashboardMaykol user={user} />}
         {currentDashboard === 'taller' && <DashboardTaller user={user} />}
+        {currentDashboard === 'config' && user.role === 'admin' && <ConfigEmpresas user={user} />}
       </main>
     </div>
   );
@@ -96,7 +111,7 @@ const styles = {
     justifyContent: 'space-between',
     alignItems: 'center',
     boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)',
-    gap: '40px'
+    gap: '20px'
   },
   logo: {
     margin: 0,
