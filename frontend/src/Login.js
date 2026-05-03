@@ -13,17 +13,25 @@ const Login = ({ onLoginSuccess }) => {
     setError('');
 
     try {
+      // Detectar si es Sandra (admin) o no
+      const role = email === 'sandra@empresa.com' ? 'admin' : 'comercial';
+
       const response = await axios.post('http://localhost:5000/api/auth/register', {
         email,
         password,
-        role: 'comercial'
+        role
       });
 
       const token = response.data.token;
-      localStorage.setItem('token', token);
-      localStorage.setItem('user', JSON.stringify(response.data.user));
+      const userData = {
+        ...response.data.user,
+        role // Asegurar que el role se guarde
+      };
 
-      onLoginSuccess(response.data.user);
+      localStorage.setItem('token', token);
+      localStorage.setItem('user', JSON.stringify(userData));
+
+      onLoginSuccess(userData);
     } catch (err) {
       setError(err.response?.data?.error || 'Error en registro');
     } finally {

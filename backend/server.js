@@ -55,6 +55,9 @@ app.use('/api/logistics', logisticsRouter);
 const workshopRouter = require('./routes/workshop');
 app.use('/api/workshop', workshopRouter);
 
+const companiesRouter = require('./routes/companies');
+app.use('/api/companies', companiesRouter);
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Backend running on http://localhost:${PORT}`);
