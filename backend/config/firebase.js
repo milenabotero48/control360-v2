@@ -1,10 +1,12 @@
 const admin = require('firebase-admin');
 const serviceAccount = require('../serviceAccountKey.json');
 
-const app = admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: 'https://control360-v2.firebaseio.com'
-});
+// Inicialización única y segura
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+}
 
 const db = admin.firestore();
 

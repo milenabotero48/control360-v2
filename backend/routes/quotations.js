@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const authenticate = require('../middleware/auth');
+const { authenticate, validarTenant } = require('../middleware/auth');
 const { getDocuments, createDocument, getDocument, updateDocument } = require('../services/firestore');
 
 // GET /api/quotations - Listar todas las cotizaciones
