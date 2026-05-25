@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="%PUBLIC_URL%/favicon_control360.svg" />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/favicon_control360.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#1a0a3c" />
+    <meta name="description" content="Control360 — Sistema operativo para empresas de servicios" />
+    <meta name="apple-mobile-web-app-title" content="Control360" />
+    <meta name="application-name" content="Control360" />
+    <title>Control360</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+      #root { min-height: 100vh; }
+    </style>
+  </head>
+  <body>
+    <noscript>Necesitas activar JavaScript para usar Control360.</noscript>
+    <div id="root"></div>
+  </body>
+</html>

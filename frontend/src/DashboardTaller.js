@@ -1,31 +1,34 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-
+ 
 const DashboardTaller = ({ user }) => {
   const [trabajos, setTrabajos] = useState([]);
   const [loading, setLoading] = useState(true);
   const token = localStorage.getItem('token');
-
+ 
   const cargarTrabajos = async () => {
     try {
       const response = await axios.get('http://localhost:5000/api/workshop', {
         headers: { Authorization: `Bearer ${token}` }
       });
-      if (response.data) {
+      if (response.data && Array.isArray(response.data)) {
         setTrabajos(response.data);
+      } else {
+        setTrabajos([]);
       }
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error cargando trabajos:', error);
+      setTrabajos([]);
     }
     setLoading(false);
   };
-
+ 
   useEffect(() => {
     cargarTrabajos();
     const intervalo = setInterval(cargarTrabajos, 5000);
     return () => clearInterval(intervalo);
   }, [token]);
-
+ 
   const cambiarEstado = async (id, nuevoEstado) => {
     try {
       await axios.put(
@@ -35,14 +38,10 @@ const DashboardTaller = ({ user }) => {
       );
       cargarTrabajos();
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error cambiando estado:', error);
     }
   };
-
-  if (loading) {
-    return <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>Cargando trabajos...</div>;
-  }
-
+ 
   const obtenerColor = (estado) => {
     const colores = {
       'PENDING_INSPECTION': '#ffc107',
@@ -52,7 +51,34 @@ const DashboardTaller = ({ user }) => {
     };
     return colores[estado] || '#666';
   };
-
+ 
+  const obtenerEtiqueta = (estado) => {
+    const etiquetas = {
+      'PENDING_INSPECTION': 'Pendiente',
+      'IN_REPAIR': 'En Reparación',
+      'TESTING': 'Prueba',
+      'READY': 'Listo'
+    };
+    return etiquetas[estado] || estado || 'Sin estado';
+  };
+ 
+  const formatearFecha = (fecha) => {
+    if (!fecha) return 'Sin fecha';
+    try {
+      return new Date(fecha).toLocaleTimeString();
+    } catch {
+      return 'Fecha inválida';
+    }
+  };
+ 
+  if (loading) {
+    return (
+      <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>
+        Cargando trabajos...
+      </div>
+    );
+  }
+ 
   return (
     <div style={{ padding: '40px', maxWidth: '1400px', margin: '0 auto' }}>
       <h2 style={{ margin: '0 0 10px 0', fontSize: '28px', fontWeight: 'bold', color: '#333' }}>
@@ -61,7 +87,7 @@ const DashboardTaller = ({ user }) => {
       <p style={{ color: '#999', marginBottom: '30px' }}>
         Inspección y reparación de equipos
       </p>
-
+ 
       {trabajos.length === 0 ? (
         <div style={{
           background: 'white',
@@ -80,7 +106,7 @@ const DashboardTaller = ({ user }) => {
         }}>
           {trabajos.map((trabajo) => (
             <div
-              key={trabajo.id}
+              key={trabajo.id || Math.random()}
               style={{
                 background: 'white',
                 borderRadius: '8px',
@@ -88,6 +114,7 @@ const DashboardTaller = ({ user }) => {
                 overflow: 'hidden'
               }}
             >
+              {/* HEADER TARJETA */}
               <div style={{
                 background: '#f5f5f5',
                 padding: '15px',
@@ -97,7 +124,7 @@ const DashboardTaller = ({ user }) => {
                 alignItems: 'center'
               }}>
                 <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '600' }}>
-                  Extintor: {trabajo.extinguisher_id}
+                  Extintor: {trabajo.extinguisher_id || 'Sin ID'}
                 </h3>
                 <span style={{
                   background: obtenerColor(trabajo.status),
@@ -107,37 +134,51 @@ const DashboardTaller = ({ user }) => {
                   fontSize: '11px',
                   fontWeight: '600'
                 }}>
-                  {trabajo.status}
+                  {obtenerEtiqueta(trabajo.status)}
                 </span>
               </div>
-
+ 
+              {/* CUERPO TARJETA */}
               <div style={{ padding: '20px' }}>
+ 
+                {/* ORDEN ID - CORREGIDO: guard para undefined */}
                 <p style={{ margin: '0 0 15px 0', fontSize: '14px' }}>
-                  <strong>Orden:</strong> {trabajo.order_id.substring(0, 8)}
+                  <strong>Orden:</strong>{' '}
+                  {trabajo.order_id
+                    ? trabajo.order_id.substring(0, 8)
+                    : 'Sin orden'}
                 </p>
-
-                <div style={{
-                  background: '#f9f9f9',
-                  padding: '12px',
-                  borderRadius: '6px',
-                  marginBottom: '15px',
-                  fontSize: '13px'
-                }}>
-                  <p style={{ margin: '0 0 10px 0', fontWeight: '600' }}>📋 Checklist:</p>
-                  {trabajo.inspection_checklist && Object.entries(trabajo.inspection_checklist).map(([clave, valor]) => (
-                    <div key={clave} style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      marginBottom: '6px',
-                      color: valor ? '#28a745' : '#999'
-                    }}>
-                      <span>{valor ? '✓' : '○'}</span>
-                      <span>{clave.replace(/_/g, ' ')}</span>
-                    </div>
-                  ))}
-                </div>
-
+ 
+                {/* CHECKLIST */}
+                {trabajo.inspection_checklist &&
+                  Object.keys(trabajo.inspection_checklist).length > 0 && (
+                  <div style={{
+                    background: '#f9f9f9',
+                    padding: '12px',
+                    borderRadius: '6px',
+                    marginBottom: '15px',
+                    fontSize: '13px'
+                  }}>
+                    <p style={{ margin: '0 0 10px 0', fontWeight: '600' }}>📋 Checklist:</p>
+                    {Object.entries(trabajo.inspection_checklist).map(([clave, valor]) => (
+                      <div
+                        key={clave}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          marginBottom: '6px',
+                          color: valor ? '#28a745' : '#999'
+                        }}
+                      >
+                        <span>{valor ? '✓' : '○'}</span>
+                        <span>{clave.replace(/_/g, ' ')}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+ 
+                {/* BOTONES DE ESTADO */}
                 <div style={{ display: 'flex', gap: '10px' }}>
                   {trabajo.status === 'PENDING_INSPECTION' && (
                     <button
@@ -195,7 +236,8 @@ const DashboardTaller = ({ user }) => {
                   )}
                 </div>
               </div>
-
+ 
+              {/* FOOTER TARJETA */}
               <div style={{
                 background: '#f5f5f5',
                 padding: '10px 15px',
@@ -203,13 +245,13 @@ const DashboardTaller = ({ user }) => {
                 fontSize: '11px',
                 color: '#999'
               }}>
-                {new Date(trabajo.updated_at).toLocaleTimeString()}
+                🕐 {formatearFecha(trabajo.updated_at)}
               </div>
             </div>
           ))}
         </div>
       )}
-
+ 
       <div style={{
         textAlign: 'center',
         color: '#999',
@@ -221,5 +263,5 @@ const DashboardTaller = ({ user }) => {
     </div>
   );
 };
-
+ 
 export default DashboardTaller;
