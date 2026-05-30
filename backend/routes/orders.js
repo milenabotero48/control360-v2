@@ -656,6 +656,26 @@ router.post('/', authenticate, async (req, res) => {
     const esPagoVirtual = formaPago && formaPago !== 'Efectivo' && !esCxc;
     const marcarPagoAdelantado = pagoAdelantado === true && esPagoVirtual && !!fotoTransferenciaUrl;
 
+    // ── Mini-Ola 2.6: calcular sectorId de la orden ────────────────────────
+    // Regla: si hay sucursal → toma sucursal.sectorId (fallback cliente.sectorId).
+    // Si NO hay sucursal → toma cliente.sectorId.
+    // Si ninguno tiene → null (queda "Sin Asignar" en logística).
+    let sectorIdOrden = null;
+    if (clienteId) {
+      try {
+        const clienteDoc = await db.collection('clients').doc(clienteId).get();
+        if (clienteDoc.exists) {
+          const cli = clienteDoc.data();
+          if (sucursalId) {
+            const suc = (cli.sucursales || []).find(s => s.id === sucursalId);
+            sectorIdOrden = (suc && suc.sectorId) || cli.sectorId || null;
+          } else {
+            sectorIdOrden = cli.sectorId || null;
+          }
+        }
+      } catch { /* sin sector, queda null */ }
+    }
+
     const nuevaOrden = {
       numeroOrden,
       tipoOrden: tipoFinal,
@@ -679,6 +699,7 @@ router.post('/', authenticate, async (req, res) => {
       sucursalId: sucursalId || null,
       sucursalNombre: sucursalNombre || '',
       sucursalDireccion: sucursalDireccion || '',
+      sectorId: sectorIdOrden,        // Mini-Ola 2.6: sector resuelto para logística
       empresaId: empresaId || '',
       empresaNombre: empresaNombre || '',
       ivaPct,

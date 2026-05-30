@@ -65,12 +65,44 @@ router.get('/ordenes', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.post('/asignar', async (req, res) => {
   try {
-    const { mensajeroId, mensajeroNombre, mensajeroCelular, ordenIds } = req.body;
+    const { mensajeroId, mensajeroNombre, mensajeroCelular, ordenIds, forzarReasignar } = req.body;
     if (!mensajeroId || !ordenIds?.length) {
       return res.status(400).json({ error: 'mensajeroId y ordenIds requeridos' });
     }
 
     const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const esAdmin = req.user?.role === 'admin';
+
+    // ── Mini-Ola 2.6: bloqueo doble asignación ─────────────────────────────
+    // Validamos primero TODAS las órdenes antes de hacer cualquier cambio.
+    // Si alguna ya está asignada a otro mensajero, rechazamos a menos que
+    // sea admin con flag forzarReasignar=true.
+    const conflictos = [];
+    for (const oid of ordenIds) {
+      const snap = await db.collection('orders').doc(oid).get();
+      if (!snap.exists) {
+        return res.status(404).json({ error: `Orden ${oid} no encontrada` });
+      }
+      const od = snap.data();
+      const yaAsignada = od.mensajeroId && od.mensajeroId !== '' && od.mensajeroId !== mensajeroId;
+      if (yaAsignada) {
+        conflictos.push({
+          ordenId: oid,
+          numeroOrden: od.numeroOrden,
+          mensajeroActual: od.mensajeroNombre || 'Otro mensajero'
+        });
+      }
+    }
+
+    if (conflictos.length > 0 && !(esAdmin && forzarReasignar)) {
+      return res.status(409).json({
+        error: esAdmin
+          ? 'Hay órdenes ya asignadas. Confirma reasignación.'
+          : `Hay ${conflictos.length} orden(es) ya asignada(s) a otro mensajero. Solo el admin puede reasignar.`,
+        conflictos,
+        requiereConfirmacion: esAdmin
+      });
+    }
 
     const batch = db.batch();
     const hoy = new Date().toISOString().split('T')[0];
@@ -1128,6 +1160,77 @@ router.get('/resumen-mensajeros', async (req, res) => {
 
     res.json(Object.values(porMensajero));
   } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/logistica/orden/:id/asignar-sector — Mini-Ola 2.6
+// Permite a Sandra/comercial asignar el sector a una orden desde Logística
+// cuando llega sin él. Importante: ADEMÁS de actualizar la orden, GRABA el
+// sector en el cliente o sucursal correspondiente para que futuras órdenes
+// del mismo cliente lo tengan automáticamente.
+// Body: { sectorId: 'sec_norte' }
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/orden/:id/asignar-sector', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { sectorId } = req.body;
+    if (!sectorId) return res.status(400).json({ error: 'sectorId requerido' });
+
+    const ordenRef = db.collection('orders').doc(id);
+    const ordenSnap = await ordenRef.get();
+    if (!ordenSnap.exists) return res.status(404).json({ error: 'Orden no encontrada' });
+    const orden = ordenSnap.data();
+
+    // 1. Actualizar el sectorId en la orden
+    await ordenRef.update({
+      sectorId,
+      sectorAsignadoPor: req.user.email,
+      sectorAsignadoEn: new Date().toISOString(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // 2. Grabar el sector en el cliente o sucursal (para futuras órdenes)
+    if (orden.clienteId) {
+      try {
+        const clienteRef = db.collection('clients').doc(orden.clienteId);
+        const clienteSnap = await clienteRef.get();
+        if (clienteSnap.exists) {
+          const cliente = clienteSnap.data();
+          if (orden.sucursalId) {
+            // Grabar en la sucursal
+            const sucursales = (cliente.sucursales || []).map(s =>
+              s.id === orden.sucursalId ? { ...s, sectorId } : s
+            );
+            await clienteRef.update({
+              sucursales,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          } else {
+            // Grabar en el cliente general
+            await clienteRef.update({
+              sectorId,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('No se pudo grabar sector en cliente:', e.message);
+      }
+    }
+
+    await auditar({
+      accion: 'ASIGNAR_SECTOR_ORDEN',
+      descripcion: `${req.user.email} asignó sector ${sectorId} a orden ${orden.numeroOrden}`,
+      usuarioId: req.user.uid || req.user.id,
+      usuarioEmail: req.user.email,
+      documento: orden.numeroOrden,
+    });
+
+    res.json({ ok: true, sectorId, ordenId: id });
+  } catch (e) {
+    console.error('PUT asignar-sector orden:', e);
     res.status(500).json({ error: e.message });
   }
 });

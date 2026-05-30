@@ -56,6 +56,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [mensajeros, setMensajeros]       = useState([]);
   const [trabajadores, setTrabajadores]   = useState([]);
   const [formasPagoConfig, setFormasPago] = useState([]);
+  const [sectores, setSectores]           = useState([]); // Mini-Ola 2.6
   const [cxcCliente, setCxcCliente]       = useState([]);
   const [clienteSel, setClienteSel]       = useState(null);
   const [sucursalSel, setSucursalSel]     = useState(null);
@@ -148,7 +149,12 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
     } catch { setMensajeros([]); setTrabajadores([]); }
   };
   const cargarFormasPago = async () => {
-    try { const r = await axios.get(API + '/configuracion', { headers }); setFormasPago((r.data && r.data.formasPago ? r.data.formasPago : []).filter(f => f.activa)); } catch { setFormasPago([]); }
+    try {
+      const r = await axios.get(API + '/configuracion', { headers });
+      setFormasPago((r.data && r.data.formasPago ? r.data.formasPago : []).filter(f => f.activa));
+      // Mini-Ola 2.6: catálogo de sectores
+      setSectores((r.data && r.data.sectores ? r.data.sectores : []).filter(s => s.activo));
+    } catch { setFormasPago([]); setSectores([]); }
   };
   const cargarCxcCliente = async (clienteId) => {
     try { const r = await axios.get(API + '/cxc', { headers }); const cli = (r.data && r.data.clientes ? r.data.clientes : []).find(c => c.clienteId === clienteId); setCxcCliente(cli ? cli.ordenes || [] : []); } catch { setCxcCliente([]); }
@@ -427,11 +433,31 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                     <div style={{ ...s.sucOpt, border: !sucursalSel ? '2px solid #7c3aed' : '2px solid #e5e7eb', background: !sucursalSel ? '#ede9fe' : '#f9fafb' }} onClick={() => setSucursalSel(null)}>
                       <strong style={{ fontSize: 13 }}>Sede principal</strong>
                       <span style={{ fontSize: 11, color: '#9ca3af' }}>{clienteSel.direccionPrincipal}</span>
+                      {/* Mini-Ola 2.6: sector del cliente */}
+                      {clienteSel.sectorId && (() => {
+                        const sec = sectores.find(s => s.id === clienteSel.sectorId);
+                        if (!sec) return null;
+                        return (
+                          <span style={{ display: 'inline-block', marginTop: 4, padding: '2px 8px', borderRadius: 10, background: sec.color || '#6b7280', color: '#fff', fontSize: 10, fontWeight: 700 }}>
+                            📍 {sec.etiqueta}
+                          </span>
+                        );
+                      })()}
                     </div>
                     {clienteSel.sucursales.map((suc, i) => (
                       <div key={i} style={{ ...s.sucOpt, border: sucursalSel && sucursalSel.id === suc.id ? '2px solid #7c3aed' : '2px solid #e5e7eb', background: sucursalSel && sucursalSel.id === suc.id ? '#ede9fe' : '#f9fafb' }} onClick={() => setSucursalSel(suc)}>
                         <strong style={{ fontSize: 13 }}>{suc.nombre}</strong>
                         <span style={{ fontSize: 11, color: '#9ca3af' }}>{suc.direccion} · {suc.encargado}</span>
+                        {/* Mini-Ola 2.6: sector de la sucursal */}
+                        {suc.sectorId && (() => {
+                          const sec = sectores.find(s => s.id === suc.sectorId);
+                          if (!sec) return null;
+                          return (
+                            <span style={{ display: 'inline-block', marginTop: 4, padding: '2px 8px', borderRadius: 10, background: sec.color || '#6b7280', color: '#fff', fontSize: 10, fontWeight: 700 }}>
+                              📍 {sec.etiqueta}
+                            </span>
+                          );
+                        })()}
                       </div>
                     ))}
                   </div>

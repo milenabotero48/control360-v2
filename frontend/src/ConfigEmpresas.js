@@ -28,7 +28,7 @@ const TabEmpresas = ({ token }) => {
   const [logoFile, setLogoFile] = useState(null);
   const [mensaje, setMensaje] = useState(null);
   const fileInputRef = useRef();
-  const [formData, setFormData] = useState({ name: '', nit: '', address: '', phone: '', cellphone: '', email: '', iva: '' });
+  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '' });
   const [errores, setErrores] = useState({});
 
   useEffect(() => { cargarEmpresas(); }, []);
@@ -72,6 +72,7 @@ const TabEmpresas = ({ token }) => {
     if (!formData.name.trim()) e.name = 'Nombre requerido';
     if (!/^\d{8,}$/.test(formData.nit)) e.nit = 'Mínimo 8 dígitos numéricos';
     if (!formData.address.trim()) e.address = 'Dirección requerida';
+    if (!formData.ciudad.trim()) e.ciudad = 'Ciudad requerida (Google Maps la necesita)';
     if (!/^\d{7,}$/.test(formData.phone)) e.phone = 'Mínimo 7 dígitos';
     if (!/^\d{10}$/.test(formData.cellphone)) e.cellphone = 'Exactamente 10 dígitos';
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) e.email = 'Email inválido';
@@ -106,7 +107,7 @@ const TabEmpresas = ({ token }) => {
 
   const handleEditar = (emp) => {
     setEditando(emp.id);
-    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '' });
+    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '' });
     setLogoPreview(emp.logo || null); setLogoFile(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -119,7 +120,7 @@ const TabEmpresas = ({ token }) => {
     } catch { mostrarMensaje('Error al eliminar', 'error'); }
   };
 
-  const resetForm = () => { setFormData({ name: '', nit: '', address: '', phone: '', cellphone: '', email: '', iva: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
+  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
 
   const campo = (label, key, tipo = 'text', placeholder = '') => (
     <div style={S.campo}>
@@ -149,7 +150,7 @@ const TabEmpresas = ({ token }) => {
               {logoPreview && <button type="button" onClick={() => { setLogoPreview(null); setLogoFile(null); }} style={{ padding: '6px 12px', background: '#fff0f0', color: '#dc3545', border: '1px solid #dc3545', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>Quitar logo</button>}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 18 }}>
-              {campo('Nombre Empresa', 'name')}{campo('NIT', 'nit', 'text', '88273572')}{campo('Dirección', 'address')}{campo('Teléfono', 'phone', 'text', '6022226686')}{campo('Celular', 'cellphone', 'text', '3148361622')}{campo('Email', 'email', 'email', 'empresa@correo.com')}{campo('IVA (%)', 'iva', 'text', '19')}
+              {campo('Nombre Empresa', 'name')}{campo('NIT', 'nit', 'text', '88273572')}{campo('Dirección', 'address')}{campo('Ciudad', 'ciudad', 'text', 'Cali')}{campo('Teléfono', 'phone', 'text', '6022226686')}{campo('Celular', 'cellphone', 'text', '3148361622')}{campo('Email', 'email', 'email', 'empresa@correo.com')}{campo('IVA (%)', 'iva', 'text', '19')}
             </div>
             <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
               <button type="submit" disabled={guardando} style={{ ...S.btnPrimario, opacity: guardando ? 0.7 : 1 }}>{guardando ? 'Guardando...' : editando ? '💾 Actualizar' : '✅ Crear Empresa'}</button>
@@ -173,6 +174,7 @@ const TabEmpresas = ({ token }) => {
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, color: '#555', marginBottom: 16 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>📍 Dirección</span><span>{emp.address}</span></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>🏙 Ciudad</span><span>{emp.ciudad || <span style={{ color: '#dc2626', fontStyle: 'italic' }}>Falta agregar</span>}</span></div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>📞 Teléfono</span><span>{emp.phone}</span></div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>✉️ Email</span><span>{emp.email}</span></div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>💰 IVA</span><span>{emp.iva}%</span></div>
@@ -996,17 +998,238 @@ const TabRetenciones = ({ token }) => {
   );
 };
 
+// ════════════════════════════════════════════════════════════════════════════════
+// PESTAÑA 7: SECTORES (Mini-Ola 2.6)
+// ─────────────────────────────────────────────────────────────────────────────
+// Catálogo de sectores geográficos que se aplican a clientes y sucursales.
+// Cada admin define los suyos (Cali: Norte/Sur/Centro/Oriente/Occidente/
+// Periferia; Medellín: El Poblado/Laureles/etc.).
+//
+// Sandra puede asignar el sector al crear el cliente, al crear/editar la
+// sucursal o desde Logística cuando llega una orden sin sector. Si una orden
+// tiene sucursal → toma sucursal.sectorId. Si no → toma cliente.sectorId.
+// Si ninguno tiene → queda como "Sin Asignar" en logística.
+// ════════════════════════════════════════════════════════════════════════════════
+const COLORES_SECTOR = [
+  '#0284c7', '#dc2626', '#16a34a', '#7c3aed', '#f59e0b',
+  '#0891b2', '#be185d', '#65a30d', '#6366f1', '#6b7280'
+];
+
+const TabSectores = ({ token }) => {
+  const [sectores, setSectores] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [guardando, setGuardando] = useState(false);
+  const [mensaje, setMensaje] = useState(null);
+  const [nuevo, setNuevo] = useState({ etiqueta: '', color: COLORES_SECTOR[0] });
+  const [agregando, setAgregando] = useState(false);
+
+  useEffect(() => { cargar(); /* eslint-disable-next-line */ }, []);
+
+  const cargar = async () => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`${API}/configuracion`, { headers: { Authorization: `Bearer ${token}` } });
+      setSectores(r.data.sectores || []);
+    } catch { }
+    setLoading(false);
+  };
+
+  const mostrarMsg = (texto, tipo = 'success') => {
+    setMensaje({ texto, tipo });
+    setTimeout(() => setMensaje(null), 3000);
+  };
+
+  const guardar = async (lista) => {
+    setGuardando(true);
+    try {
+      await axios.put(`${API}/configuracion/sectores`, { sectores: lista }, { headers: { Authorization: `Bearer ${token}` } });
+      setSectores(lista);
+      mostrarMsg('✅ Sectores guardados');
+    } catch (e) {
+      mostrarMsg('❌ ' + (e.response?.data?.error || 'Error al guardar'), 'error');
+    }
+    setGuardando(false);
+  };
+
+  const generarId = (etiqueta) => {
+    const base = 'sec_' + etiqueta.toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/_+|_+$/g, '')
+      .slice(0, 30);
+    let id = base;
+    let n = 1;
+    while (sectores.some(s => s.id === id)) {
+      id = base + '_' + (++n);
+    }
+    return id;
+  };
+
+  const agregar = () => {
+    if (!nuevo.etiqueta.trim()) return mostrarMsg('Etiqueta requerida', 'error');
+    const lista = [...sectores, {
+      id: generarId(nuevo.etiqueta),
+      etiqueta: nuevo.etiqueta.trim(),
+      color: nuevo.color,
+      activo: true,
+      orden: sectores.length + 1
+    }];
+    guardar(lista);
+    setNuevo({ etiqueta: '', color: COLORES_SECTOR[0] });
+    setAgregando(false);
+  };
+
+  const editarCampo = (idx, campo, valor) => {
+    const lista = sectores.map((s, i) => i === idx ? { ...s, [campo]: valor } : s);
+    setSectores(lista);
+  };
+
+  const toggleActivo = (idx) => guardar(sectores.map((s, i) => i === idx ? { ...s, activo: !s.activo } : s));
+
+  const eliminar = (idx) => {
+    const s = sectores[idx];
+    if (!window.confirm(`¿Eliminar "${s.etiqueta}"? Los clientes y sucursales con este sector quedarán sin sector hasta que les asignes otro.`)) return;
+    guardar(sectores.filter((_, i) => i !== idx));
+  };
+
+  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#667eea' }}>Cargando sectores...</div>;
+
+  return (
+    <div>
+      {mensaje && (
+        <div style={{ ...S.msg, background: mensaje.tipo === 'error' ? '#fff0f0' : '#f0fff4', borderColor: mensaje.tipo === 'error' ? '#dc3545' : '#28a745', color: mensaje.tipo === 'error' ? '#dc3545' : '#28a745' }}>
+          {mensaje.texto}
+        </div>
+      )}
+
+      <div style={S.card}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: '#1a1a2e' }}>📍 Sectores geográficos</h3>
+            <p style={{ margin: '4px 0 0', fontSize: 13, color: '#888' }}>
+              Agrupan clientes y sucursales para organizar las rutas de logística.
+            </p>
+          </div>
+          <button onClick={() => setAgregando(true)} style={S.btnPrimario} disabled={guardando}>
+            + Agregar
+          </button>
+        </div>
+
+        <div style={{ background: '#eff6ff', border: '1px solid #93c5fd', borderRadius: 8, padding: '10px 14px', margin: '12px 0 16px', fontSize: 12, color: '#1e3a8a' }}>
+          💡 <strong>Tip:</strong> al crear el cliente o sucursal, podrás elegir su sector. Al crear órdenes,
+          el sector se calcula automáticamente. En Logística verás las órdenes agrupadas por sector para optimizar la ruta del mensajero.
+        </div>
+
+        {agregando && (
+          <div style={{ background: '#f8f9ff', border: '1px solid #e8ecff', borderRadius: 10, padding: 16, marginBottom: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginBottom: 12 }}>
+              <div style={S.campo}>
+                <label style={S.label}>Nombre del sector *</label>
+                <input style={S.input}
+                  value={nuevo.etiqueta}
+                  onChange={e => setNuevo(p => ({ ...p, etiqueta: e.target.value }))}
+                  placeholder="Ej: Aguablanca, Yumbo, Jamundí..." />
+              </div>
+              <div style={S.campo}>
+                <label style={S.label}>Color</label>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                  {COLORES_SECTOR.map(c => (
+                    <button key={c} type="button"
+                      onClick={() => setNuevo(p => ({ ...p, color: c }))}
+                      style={{
+                        width: 28, height: 28, borderRadius: '50%',
+                        background: c, cursor: 'pointer',
+                        border: nuevo.color === c ? '3px solid #1a1a2e' : '2px solid #fff',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.15)'
+                      }} />
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={agregar} style={S.btnPrimario} disabled={guardando}>Agregar</button>
+              <button onClick={() => setAgregando(false)} style={S.btnSecundario}>Cancelar</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {sectores.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+              No hay sectores configurados todavía.
+            </div>
+          )}
+
+          {sectores.map((s, idx) => (
+            <div key={s.id || idx} style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 16px',
+              background: s.activo ? '#fff' : '#f8f8f8',
+              border: '1px solid #e2e8f0', borderRadius: 8,
+              opacity: s.activo ? 1 : 0.6
+            }}>
+              {/* Indicador color */}
+              <div style={{
+                width: 28, height: 28, borderRadius: '50%',
+                background: s.color || '#6b7280',
+                flexShrink: 0,
+                boxShadow: '0 1px 3px rgba(0,0,0,0.15)'
+              }} />
+
+              {/* Etiqueta */}
+              <input style={{ ...S.input, flex: 1, fontSize: 13, padding: '6px 10px' }}
+                value={s.etiqueta}
+                onChange={e => editarCampo(idx, 'etiqueta', e.target.value)}
+                onBlur={() => guardar(sectores)} />
+
+              {/* Selector color */}
+              <div style={{ display: 'flex', gap: 4 }}>
+                {COLORES_SECTOR.slice(0, 6).map(c => (
+                  <button key={c} type="button"
+                    onClick={() => { editarCampo(idx, 'color', c); guardar(sectores.map((ss, i) => i === idx ? { ...ss, color: c } : ss)); }}
+                    style={{
+                      width: 18, height: 18, borderRadius: '50%',
+                      background: c, cursor: 'pointer',
+                      border: s.color === c ? '2px solid #1a1a2e' : '2px solid #e5e7eb'
+                    }} />
+                ))}
+              </div>
+
+              {/* Acciones */}
+              <div style={{ display: 'flex', gap: 6, marginLeft: 8 }}>
+                <button onClick={() => toggleActivo(idx)} style={{
+                  padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  fontSize: 11, fontWeight: 600,
+                  background: s.activo ? '#fef3c7' : '#dcfce7',
+                  color: s.activo ? '#92400e' : '#166534'
+                }}>
+                  {s.activo ? 'Desactivar' : 'Activar'}
+                </button>
+                <button onClick={() => eliminar(idx)} style={{
+                  padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  fontSize: 12, background: '#fee2e2', color: '#991b1b'
+                }}>🗑️</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ConfigEmpresas = ({ user }) => {
   const [tab, setTab] = useState('empresas');
   const [cajas, setCajas] = useState([]);
   const [empresas, setEmpresas] = useState([]);
   const token = localStorage.getItem('token');
 
-  // Ola 2.5 FIX: cargar cajas siempre al montar (no solo cuando entra en pestaña Cajas)
-  // Antes el dropdown de Formas de pago aparecía vacío si entrabas directo sin pasar por Cajas.
   useEffect(() => {
     axios.get(`${API}/companies`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => setEmpresas(r.data || [])).catch(() => {});
+    // Mini-Ola 2.6 (también heredado de Ola 2.5): cargar cajas siempre, no solo
+    // cuando se entra a la pestaña Cajas. Si no, el dropdown de Formas de pago
+    // queda vacío al ingresar directo.
     axios.get(`${API}/cajas`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => setCajas(Array.isArray(r.data) ? r.data : [])).catch(() => {});
   }, [token]);
@@ -1016,6 +1239,7 @@ const ConfigEmpresas = ({ user }) => {
     { key: 'formasPago',    label: '💳 Formas de pago' },
     { key: 'categorias',    label: '📂 Categorías de egresos' },
     { key: 'retenciones',   label: '🧾 Retenciones' },
+    { key: 'sectores',      label: '📍 Sectores' },
     { key: 'cajas',         label: '🏦 Cajas' },
     { key: 'certificados',  label: '📜 Certificados' },
   ];
@@ -1045,6 +1269,7 @@ const ConfigEmpresas = ({ user }) => {
       {tab === 'formasPago' && <TabFormasPago token={token} cajas={cajas} />}
       {tab === 'categorias' && <TabCategorias token={token} />}
       {tab === 'retenciones'   && <TabRetenciones token={token} />}
+      {tab === 'sectores'      && <TabSectores token={token} />}
     {tab === 'cajas'         && <TabCajas token={token} onCajasChange={setCajas} empresas={empresas} />}
       {tab === 'certificados'  && <TabCertificados token={token} empresas={empresas} />}
     </div>

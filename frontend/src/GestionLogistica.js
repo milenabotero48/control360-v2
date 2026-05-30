@@ -930,6 +930,12 @@ const GestionLogistica = ({ user }) => {
   const [filtroExtEstado, setFiltroExtEstado] = useState('prestado');
   const [exito, setExito]               = useState('');
   const [error, setError]               = useState('');
+  // Mini-Ola 2.6: catálogo de sectores
+  const [sectores, setSectores]         = useState([]);
+  // Mini-Ola 2.6: modal Reasignar (solo admin)
+  const [modalReasignar, setModalReasignar] = useState(null);
+  // Mini-Ola 2.6: modal Asignar Sector (cuando llega orden sin sector)
+  const [modalAsignarSector, setModalAsignarSector] = useState(null);
 
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
@@ -962,15 +968,88 @@ const GestionLogistica = ({ user }) => {
 
   useEffect(() => { cargar(); }, [cargar]);
 
+  // Mini-Ola 2.6: cargar catálogo de sectores
+  useEffect(() => {
+    axios.get(`${API}/configuracion`, { headers })
+      .then(r => setSectores((r.data?.sectores || []).filter(s => s.activo)))
+      .catch(() => setSectores([]));
+    // eslint-disable-next-line
+  }, [token]);
+
+  // Mini-Ola 2.6: agrupar órdenes por sector
+  const ordenesPorSector = (() => {
+    const grupos = {};
+    sectores.forEach(s => { grupos[s.id] = { sector: s, ordenes: [] }; });
+    grupos['_sin_asignar'] = { sector: { id: '_sin_asignar', etiqueta: 'Sin Asignar', color: '#9ca3af' }, ordenes: [] };
+    ordenes.forEach(o => {
+      const sid = o.sectorId || '_sin_asignar';
+      if (grupos[sid]) grupos[sid].ordenes.push(o);
+      else grupos['_sin_asignar'].ordenes.push(o);
+    });
+    return Object.values(grupos).filter(g => g.ordenes.length > 0);
+  })();
+
+  // Mini-Ola 2.6: helper para reasignar (admin)
+  const reasignarOrden = async (ordenId, nuevoMensajeroId) => {
+    try {
+      const mens = mensajeros.find(m => m.id === nuevoMensajeroId);
+      if (!mens) return;
+      await axios.post(`${API}/logistica/asignar`, {
+        mensajeroId: nuevoMensajeroId,
+        mensajeroNombre: mens.nombre,
+        mensajeroCelular: mens.celular || '',
+        ordenIds: [ordenId],
+        forzarReasignar: true
+      }, { headers });
+      toast(`✅ Orden reasignada a ${mens.nombre}`);
+      setModalReasignar(null);
+      cargar();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error al reasignar');
+    }
+  };
+
+  // Mini-Ola 2.6: asignar sector a orden desde Logística
+  const asignarSectorOrden = async (ordenId, sectorId) => {
+    try {
+      await axios.put(`${API}/logistica/orden/${ordenId}/asignar-sector`,
+        { sectorId }, { headers });
+      toast(`✅ Sector asignado`);
+      setModalAsignarSector(null);
+      cargar();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error al asignar sector');
+    }
+  };
+
   const toast = (msg) => { setExito(msg); setTimeout(() => setExito(''), 3000); };
 
   const asignarRuta = async (data) => {
-    const res = await axios.post(`${API}/logistica/asignar`, data, { headers });
-    toast(`✅ ${data.ordenIds.length} órdenes asignadas a ${data.mensajeroNombre}`);
-    setModalAsignar(false);
-    await cargar();
-    // Abrir WhatsApp con la ruta
-    if (res.data?.whatsappUrl) window.open(res.data.whatsappUrl, '_blank');
+    try {
+      const res = await axios.post(`${API}/logistica/asignar`, data, { headers });
+      toast(`✅ ${data.ordenIds.length} órdenes asignadas a ${data.mensajeroNombre}`);
+      setModalAsignar(false);
+      await cargar();
+      // Abrir WhatsApp con la ruta
+      if (res.data?.whatsappUrl) window.open(res.data.whatsappUrl, '_blank');
+    } catch (e) {
+      // Mini-Ola 2.6: manejar bloqueo de doble asignación
+      const resp = e.response?.data;
+      if (e.response?.status === 409 && resp?.conflictos) {
+        if (resp.requiereConfirmacion) {
+          // Admin → mostrar lista y pedir confirmación
+          const lista = resp.conflictos.map(c => `• ${c.numeroOrden} (asignada a ${c.mensajeroActual})`).join('\n');
+          if (window.confirm(`Hay ${resp.conflictos.length} orden(es) ya asignada(s):\n\n${lista}\n\n¿Reasignar a ${data.mensajeroNombre}?`)) {
+            return asignarRuta({ ...data, forzarReasignar: true });
+          }
+        } else {
+          // No-admin: rechazo
+          setError(`No puedes reasignar. ${resp.conflictos.length} orden(es) ya asignadas a otros mensajeros. Pide al admin que reasigne.`);
+        }
+      } else {
+        setError(resp?.error || 'Error al asignar');
+      }
+    }
   };
 
   const avanzarEstado = async (ordenId, datos) => {
@@ -1033,52 +1112,98 @@ const GestionLogistica = ({ user }) => {
           {/* ── ÓRDENES (Admin + Mensajero) ── */}
           {(tab === 'ordenes' || isMensajero) && (
             <div style={s.tableWrap}>
-              <table style={s.tabla}>
-                <thead>
-                  <tr style={s.theadRow}>
-                    {['Orden', 'Cliente', 'Dirección', 'Fecha', 'Servicio', 'Total', 'Mensajero', 'Estado', 'Acciones'].map(h => (
-                      <th key={h} style={s.th}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {ordenes.length === 0 && (
-                    <tr><td colSpan={9} style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>
-                      {isMensajero ? 'No tienes órdenes asignadas hoy' : 'No hay órdenes pendientes de logística'}
-                    </td></tr>
-                  )}
-                  {ordenes.map((o, i) => (
-                    <tr key={o.id} style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb', borderBottom: '1px solid #f3f4f6' }}>
-                      <td style={s.td}><code style={{ fontSize: 12 }}>{o.numeroOrden}</code></td>
-                      <td style={s.td}><strong style={{ fontSize: 13 }}>{o.clienteNombre}</strong></td>
-                      <td style={{ ...s.td, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: '#6b7280' }}>
-                        {o.sucursalDireccion || o.clienteDireccion || '—'}
-                      </td>
-                      <td style={s.td}><span style={{ fontSize: 12 }}>{fmtFecha(o.fechaProgramada)}</span></td>
-                      <td style={s.td}><span style={{ fontSize: 12, color: '#6b7280' }}>{o.lugarAtencion || 'servicio'}</span></td>
-                      <td style={{ ...s.td, fontWeight: 700, color: '#16a34a' }}>{fmt(o.total)}</td>
-                      <td style={s.td}><span style={{ fontSize: 12 }}>{o.mensajeroNombre || <span style={{ color: '#9ca3af' }}>Sin asignar</span>}</span></td>
-                      <td style={s.td}><EstadoBadge estado={o.estado} /></td>
-                      <td style={s.td}>
-                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          <button onClick={() => setModalAvanzar(o)}
-                            style={{ padding: '5px 12px', background: '#ede9fe', color: '#7c3aed', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
-                            ▶️ Avanzar
-                          </button>
-                          {(o.fotoRecogida || o.fotoEntrega) && (
-                            <button onClick={() => {
-                              const fotos = [o.fotoRecogida, o.fotoEntrega].filter(Boolean);
-                              fotos.forEach(f => window.open(f, '_blank'));
-                            }} style={{ padding: '5px 10px', background: '#f0fdf4', color: '#16a34a', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
-                              📷 Fotos
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {ordenes.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>
+                  {isMensajero ? 'No tienes órdenes asignadas hoy' : 'No hay órdenes pendientes de logística'}
+                </div>
+              ) : ordenesPorSector.map(({ sector, ordenes: ordsGrupo }) => (
+                <div key={sector.id} style={{ marginBottom: 24 }}>
+                  {/* Cabecera del sector */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '10px 16px',
+                    background: sector.color || '#6b7280',
+                    color: '#fff', borderRadius: '10px 10px 0 0',
+                    fontWeight: 700, fontSize: 14
+                  }}>
+                    📍 {sector.etiqueta}
+                    <span style={{ background: 'rgba(255,255,255,0.25)', padding: '2px 10px', borderRadius: 10, fontSize: 12 }}>
+                      {ordsGrupo.length} {ordsGrupo.length === 1 ? 'orden' : 'órdenes'}
+                    </span>
+                  </div>
+                  <table style={{ ...s.tabla, borderRadius: '0 0 10px 10px', overflow: 'hidden' }}>
+                    <thead>
+                      <tr style={s.theadRow}>
+                        {['Orden', 'Cliente', 'Dirección', 'Fecha', 'Servicio', 'Total', 'Mensajero', 'Estado', 'Acciones'].map(h => (
+                          <th key={h} style={s.th}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ordsGrupo.map((o, i) => {
+                        const tieneAsignado = o.mensajeroId && o.mensajeroId !== '';
+                        return (
+                          <tr key={o.id} style={{
+                            background: i % 2 === 0 ? '#fff' : '#f9fafb',
+                            borderBottom: '1px solid #f3f4f6',
+                            // Mini-Ola 2.6: leve tinte cuando ya tiene mensajero
+                            borderLeft: tieneAsignado ? `3px solid ${sector.color || '#6b7280'}` : 'none'
+                          }}>
+                            <td style={s.td}><code style={{ fontSize: 12 }}>{o.numeroOrden}</code></td>
+                            <td style={s.td}><strong style={{ fontSize: 13 }}>{o.clienteNombre}</strong></td>
+                            <td style={{ ...s.td, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: '#6b7280' }}>
+                              {o.sucursalDireccion || o.clienteDireccion || '—'}
+                            </td>
+                            <td style={s.td}><span style={{ fontSize: 12 }}>{fmtFecha(o.fechaProgramada)}</span></td>
+                            <td style={s.td}><span style={{ fontSize: 12, color: '#6b7280' }}>{o.lugarAtencion || 'servicio'}</span></td>
+                            <td style={{ ...s.td, fontWeight: 700, color: '#16a34a' }}>{fmt(o.total)}</td>
+                            <td style={s.td}>
+                              {tieneAsignado ? (
+                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 10, background: '#dcfce7', color: '#15803d', fontSize: 11, fontWeight: 700 }}>
+                                  🚚 {o.mensajeroNombre}
+                                </span>
+                              ) : (
+                                <span style={{ fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>Sin asignar</span>
+                              )}
+                            </td>
+                            <td style={s.td}><EstadoBadge estado={o.estado} orden={o} /></td>
+                            <td style={s.td}>
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                <button onClick={() => setModalAvanzar(o)}
+                                  style={{ padding: '5px 12px', background: '#ede9fe', color: '#7c3aed', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
+                                  ▶️ Avanzar
+                                </button>
+                                {/* Mini-Ola 2.6: asignar sector si no tiene */}
+                                {!isMensajero && !o.sectorId && (
+                                  <button onClick={() => setModalAsignarSector(o)}
+                                    style={{ padding: '5px 10px', background: '#fef3c7', color: '#92400e', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>
+                                    📍 Sector
+                                  </button>
+                                )}
+                                {/* Mini-Ola 2.6: reasignar (admin) */}
+                                {isAdmin && tieneAsignado && (
+                                  <button onClick={() => setModalReasignar(o)}
+                                    style={{ padding: '5px 10px', background: '#fff7ed', color: '#c2410c', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>
+                                    🔄 Reasignar
+                                  </button>
+                                )}
+                                {(o.fotoRecogida || o.fotoEntrega) && (
+                                  <button onClick={() => {
+                                    const fotos = [o.fotoRecogida, o.fotoEntrega].filter(Boolean);
+                                    fotos.forEach(f => window.open(f, '_blank'));
+                                  }} style={{ padding: '5px 10px', background: '#f0fdf4', color: '#16a34a', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
+                                    📷 Fotos
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
             </div>
           )}
 
@@ -1204,6 +1329,78 @@ const GestionLogistica = ({ user }) => {
           onConfirmar={confirmarCuadre}
           onCerrar={() => setModalCuadre(null)}
         />
+      )}
+
+      {/* Mini-Ola 2.6: Modal Reasignar (solo admin) */}
+      {modalReasignar && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: 20 }}
+             onClick={() => setModalReasignar(null)}>
+          <div style={{ background: '#fff', borderRadius: 14, maxWidth: 440, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 6px', fontSize: 17, fontWeight: 700, color: '#111' }}>🔄 Reasignar orden</h3>
+            <p style={{ margin: '0 0 16px', fontSize: 13, color: '#6b7280' }}>
+              <code style={{ fontSize: 12, color: '#c2410c' }}>{modalReasignar.numeroOrden}</code> · {modalReasignar.clienteNombre}
+              <br />
+              Actualmente asignada a <strong>{modalReasignar.mensajeroNombre}</strong>
+            </p>
+            <label style={{ fontSize: 12, fontWeight: 700, color: '#374151', display: 'block', marginBottom: 6 }}>Nuevo mensajero</label>
+            <select id="reasignarMens" style={{ ...s.select, width: '100%', padding: '10px 12px', borderRadius: 8 }} defaultValue="">
+              <option value="">— Selecciona —</option>
+              {mensajeros.filter(m => m.id !== modalReasignar.mensajeroId).map(m => (
+                <option key={m.id} value={m.id}>{m.nombre}</option>
+              ))}
+            </select>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
+              <button onClick={() => setModalReasignar(null)}
+                style={{ padding: '8px 16px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>
+                Cancelar
+              </button>
+              <button onClick={() => {
+                const v = document.getElementById('reasignarMens').value;
+                if (!v) { setError('Selecciona un mensajero'); return; }
+                reasignarOrden(modalReasignar.id, v);
+              }}
+                style={{ padding: '8px 20px', background: '#c2410c', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700 }}>
+                🔄 Reasignar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mini-Ola 2.6: Modal Asignar Sector */}
+      {modalAsignarSector && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: 20 }}
+             onClick={() => setModalAsignarSector(null)}>
+          <div style={{ background: '#fff', borderRadius: 14, maxWidth: 440, width: '100%', padding: 24 }} onClick={e => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 6px', fontSize: 17, fontWeight: 700, color: '#111' }}>📍 Asignar sector</h3>
+            <p style={{ margin: '0 0 16px', fontSize: 13, color: '#6b7280' }}>
+              <code style={{ fontSize: 12, color: '#c2410c' }}>{modalAsignarSector.numeroOrden}</code> · {modalAsignarSector.clienteNombre}
+              <br />
+              {modalAsignarSector.sucursalNombre && <span style={{ fontStyle: 'italic' }}>Sucursal: {modalAsignarSector.sucursalNombre}</span>}
+            </p>
+            <div style={{ background: '#eff6ff', border: '1px solid #93c5fd', borderRadius: 8, padding: '10px 12px', marginBottom: 14, fontSize: 12, color: '#1e3a8a' }}>
+              💡 El sector se grabará en {modalAsignarSector.sucursalId ? 'esta sucursal' : 'este cliente'} para futuras órdenes.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+              {sectores.map(sec => (
+                <button key={sec.id} onClick={() => asignarSectorOrden(modalAsignarSector.id, sec.id)}
+                  style={{
+                    padding: '12px 14px', background: sec.color || '#6b7280',
+                    color: '#fff', border: 'none', borderRadius: 8,
+                    cursor: 'pointer', fontWeight: 700, fontSize: 13
+                  }}>
+                  📍 {sec.etiqueta}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 18 }}>
+              <button onClick={() => setModalAsignarSector(null)}
+                style={{ padding: '8px 16px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { exportarExcel } from './exportExcel';
 
 const API = 'http://localhost:5000/api';
 
@@ -9,6 +10,191 @@ const mayusculas = (val) => val.toUpperCase();
 
 // Ola 2: helpers para la pestaña Historial
 const fmtCop = (n) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
+const fmtFecha = (raw) => {
+  if (!raw) return '—';
+  try {
+    const d = raw._seconds ? new Date(raw._seconds * 1000) : new Date(raw);
+    return d.toLocaleDateString('es-CO', { timeZone: 'America/Bogota' });
+  } catch { return '—'; }
+};
+
+// ── Mini-Ola 2.6: Imprimir historial del cliente ──────────────────────────
+const imprimirHistorialCliente = (historial) => {
+  if (!historial) return;
+  const cli = historial.cliente || {};
+  const res = historial.resumen || {};
+  const html = `
+    <html>
+      <head>
+        <title>Historial Cliente — ${cli.nombre || ''}</title>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: 'Segoe UI', sans-serif; padding: 24px; color: #111; }
+          h1 { color: #7c3aed; margin-bottom: 4px; }
+          h2 { color: #1a1a2e; margin-top: 24px; margin-bottom: 8px; border-bottom: 2px solid #e5e7eb; padding-bottom: 4px; }
+          .meta { color: #6b7280; font-size: 12px; margin-bottom: 16px; }
+          .kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0; }
+          .kpi { background: #f9fafb; border: 1px solid #e5e7eb; padding: 10px 12px; border-radius: 6px; }
+          .kpi small { color: #6b7280; font-size: 10px; text-transform: uppercase; }
+          .kpi b { display: block; font-size: 15px; margin-top: 4px; color: #111; }
+          table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; }
+          th, td { padding: 6px 8px; border-bottom: 1px solid #e5e7eb; text-align: left; }
+          th { background: #f3f4f6; font-weight: 700; }
+          .footer { margin-top: 32px; color: #9ca3af; font-size: 10px; text-align: center; }
+          @media print { body { padding: 12px; } }
+        </style>
+      </head>
+      <body>
+        <h1>${cli.nombre || 'Cliente'}</h1>
+        <div class="meta">
+          ${cli.nit ? `NIT: ${cli.nit} · ` : ''}
+          ${cli.celular ? `Cel: ${cli.celular} · ` : ''}
+          ${cli.emailLegal ? `Email: ${cli.emailLegal}` : ''}
+          <br>
+          ${cli.direccionPrincipal || ''} ${cli.ciudad ? '· ' + cli.ciudad : ''}
+        </div>
+
+        <h2>Resumen</h2>
+        <div class="kpis">
+          <div class="kpi"><small>Órdenes totales</small><b>${res.totalOrdenes || 0}</b></div>
+          <div class="kpi"><small>Completadas</small><b>${res.ordenesCompletadas || 0}</b></div>
+          <div class="kpi"><small>En curso</small><b>${res.ordenesEnCurso || 0}</b></div>
+          <div class="kpi"><small>Facturado total</small><b>${fmtCop(res.totalFacturado)}</b></div>
+          <div class="kpi"><small>Saldo pendiente</small><b>${fmtCop(res.saldoCxC)}</b></div>
+          <div class="kpi"><small>Equipos QR</small><b>${res.totalQR || 0}</b></div>
+        </div>
+
+        <h2>Órdenes (${(historial.ordenes || []).length})</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Orden</th><th>Fecha</th><th>Tipo</th><th>Estado</th><th>Total</th><th>Saldo</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(historial.ordenes || []).map(o => `
+              <tr>
+                <td>${o.numeroOrden || ''}</td>
+                <td>${fmtFecha(o.createdAt)}</td>
+                <td>${o.tipoOrden || ''}</td>
+                <td>${o.estado || ''}</td>
+                <td style="text-align:right">${fmtCop(o.total)}</td>
+                <td style="text-align:right">${fmtCop(o.cxcSaldo || 0)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+
+        ${(historial.cotizaciones || []).length > 0 ? `
+        <h2>Cotizaciones (${historial.cotizaciones.length})</h2>
+        <table>
+          <thead>
+            <tr><th>Cotización</th><th>Fecha</th><th>Estado</th><th>Total</th></tr>
+          </thead>
+          <tbody>
+            ${historial.cotizaciones.map(c => `
+              <tr>
+                <td>${c.numeroCotizacion || ''}</td>
+                <td>${fmtFecha(c.createdAt)}</td>
+                <td>${c.estado || ''}</td>
+                <td style="text-align:right">${fmtCop(c.total)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>` : ''}
+
+        ${(historial.equiposQR || []).length > 0 ? `
+        <h2>Equipos QR (${historial.equiposQR.length})</h2>
+        <table>
+          <thead>
+            <tr><th>Código</th><th>Tipo</th><th>Capacidad</th><th>Última recarga</th><th>Próxima</th></tr>
+          </thead>
+          <tbody>
+            ${historial.equiposQR.map(q => `
+              <tr>
+                <td>${q.codigoQR || ''}</td>
+                <td>${q.tipo || ''}</td>
+                <td>${q.capacidad || ''}</td>
+                <td>${fmtFecha(q.fechaUltimaRecarga)}</td>
+                <td>${fmtFecha(q.proximaRecarga)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>` : ''}
+
+        <div class="footer">
+          Generado por Control360 — ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}
+        </div>
+      </body>
+    </html>
+  `;
+  const w = window.open('', '_blank');
+  if (!w) { alert('Permite ventanas emergentes para imprimir.'); return; }
+  w.document.write(html);
+  w.document.close();
+  setTimeout(() => { w.focus(); w.print(); }, 250);
+};
+
+// ── Mini-Ola 2.6: Exportar historial a Excel (CSV con formato Excel) ──────
+const exportarHistorialCliente = (historial) => {
+  if (!historial) return;
+  const cli = historial.cliente || {};
+  const nombreArchivo = `historial_${(cli.nombre || 'cliente').replace(/\s+/g, '_').slice(0, 40)}`;
+
+  // Una sola hoja con TODA la info (CSV no soporta múltiples hojas)
+  const filas = [];
+  filas.push({ seccion: 'CLIENTE', dato: 'Nombre', valor: cli.nombre || '' });
+  if (cli.nit) filas.push({ seccion: 'CLIENTE', dato: 'NIT', valor: cli.nit });
+  if (cli.celular) filas.push({ seccion: 'CLIENTE', dato: 'Celular', valor: cli.celular });
+  if (cli.emailLegal) filas.push({ seccion: 'CLIENTE', dato: 'Email', valor: cli.emailLegal });
+  if (cli.direccionPrincipal) filas.push({ seccion: 'CLIENTE', dato: 'Dirección', valor: cli.direccionPrincipal });
+  filas.push({ seccion: '', dato: '', valor: '' });
+
+  // KPIs
+  const res = historial.resumen || {};
+  filas.push({ seccion: 'RESUMEN', dato: 'Órdenes totales', valor: res.totalOrdenes || 0 });
+  filas.push({ seccion: 'RESUMEN', dato: 'Completadas', valor: res.ordenesCompletadas || 0 });
+  filas.push({ seccion: 'RESUMEN', dato: 'En curso', valor: res.ordenesEnCurso || 0 });
+  filas.push({ seccion: 'RESUMEN', dato: 'Facturado total', valor: res.totalFacturado || 0 });
+  filas.push({ seccion: 'RESUMEN', dato: 'Saldo pendiente', valor: res.saldoCxC || 0 });
+  filas.push({ seccion: 'RESUMEN', dato: 'Equipos QR', valor: res.totalQR || 0 });
+  filas.push({ seccion: '', dato: '', valor: '' });
+
+  // Órdenes
+  (historial.ordenes || []).forEach(o => {
+    filas.push({
+      seccion: 'ORDEN',
+      dato: `${o.numeroOrden} · ${fmtFecha(o.createdAt)} · ${o.tipoOrden || ''} · ${o.estado || ''}`,
+      valor: `Total ${fmtCop(o.total)} · Saldo ${fmtCop(o.cxcSaldo || 0)}`
+    });
+  });
+  if ((historial.cotizaciones || []).length > 0) {
+    filas.push({ seccion: '', dato: '', valor: '' });
+    historial.cotizaciones.forEach(c => {
+      filas.push({
+        seccion: 'COTIZACIÓN',
+        dato: `${c.numeroCotizacion} · ${fmtFecha(c.createdAt)} · ${c.estado || ''}`,
+        valor: fmtCop(c.total)
+      });
+    });
+  }
+  if ((historial.equiposQR || []).length > 0) {
+    filas.push({ seccion: '', dato: '', valor: '' });
+    historial.equiposQR.forEach(q => {
+      filas.push({
+        seccion: 'EQUIPO QR',
+        dato: `${q.codigoQR} · ${q.tipo || ''} ${q.capacidad || ''}`,
+        valor: `Última ${fmtFecha(q.fechaUltimaRecarga)} · Próxima ${fmtFecha(q.proximaRecarga)}`
+      });
+    });
+  }
+
+  exportarExcel(filas, [
+    { label: 'Sección', key: 'seccion' },
+    { label: 'Dato', key: 'dato' },
+    { label: 'Valor', key: 'valor' },
+  ], nombreArchivo);
+};
 
 const KpiCardCli = ({ icon, label, value, color }) => (
   <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -23,10 +209,11 @@ const FORM_VACIO = {
   emailLegal: '', emailsAdicionales: [],
   direccionPrincipal: '', ciudad: '', departamento: '',
   empresaId: '', empresaNombre: '',
-  sucursales: [], notas: ''
+  sucursales: [], notas: '',
+  sectorId: ''                          // Mini-Ola 2.6
 };
 
-const SUCURSAL_VACIA = { nombre: '', direccion: '', ciudad: '', telefono: '', encargado: '' };
+const SUCURSAL_VACIA = { nombre: '', direccion: '', ciudad: '', telefono: '', encargado: '', sectorId: '' };
 
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 const GestionClientes = ({ user, empresas = [] }) => {
@@ -61,6 +248,8 @@ const GestionClientes = ({ user, empresas = [] }) => {
 
   // ─── CARGAR EMPRESAS DESDE FIRESTORE SI NO VIENEN POR PROP ───────────────
   const [empresasDisponibles, setEmpresasDisponibles] = useState(empresas);
+  // Mini-Ola 2.6: catálogo de sectores
+  const [sectores, setSectores] = useState([]);
 
   useEffect(() => {
     const t = localStorage.getItem('token');
@@ -68,6 +257,10 @@ const GestionClientes = ({ user, empresas = [] }) => {
     axios.get(`${API}/companies`, { headers: { Authorization: `Bearer ${t}` } })
       .then(r => setEmpresasDisponibles(Array.isArray(r.data) ? r.data : []))
       .catch(() => setEmpresasDisponibles([]));
+    // Mini-Ola 2.6: cargar catálogo de sectores
+    axios.get(`${API}/configuracion`, { headers: { Authorization: `Bearer ${t}` } })
+      .then(r => setSectores((r.data?.sectores || []).filter(s => s.activo)))
+      .catch(() => setSectores([]));
   }, [token]);
 
   // Ola 2: cargar historial cuando se cambia a la pestaña "historial"
@@ -167,7 +360,8 @@ const GestionClientes = ({ user, empresas = [] }) => {
       empresaId: cliente.empresaId || '',
       empresaNombre: cliente.empresaNombre || '',
       sucursales: cliente.sucursales || [],
-      notas: cliente.notas || ''
+      notas: cliente.notas || '',
+      sectorId: cliente.sectorId || ''  // Mini-Ola 2.6
     });
     setTabForm('datos');
     setAlerta(null);
@@ -582,6 +776,26 @@ const GestionClientes = ({ user, empresas = [] }) => {
                   )}
                   {historial && !historial.error && (
                     <>
+                      {/* Mini-Ola 2.6: Botones Imprimir + Exportar Excel */}
+                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 16 }}>
+                        <button
+                          onClick={() => imprimirHistorialCliente(historial)}
+                          style={{
+                            padding: '8px 14px', background: '#0284c7', color: '#fff',
+                            border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600
+                          }}>
+                          🖨 Imprimir
+                        </button>
+                        <button
+                          onClick={() => exportarHistorialCliente(historial)}
+                          style={{
+                            padding: '8px 14px', background: '#16a34a', color: '#fff',
+                            border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600
+                          }}>
+                          📊 Exportar Excel
+                        </button>
+                      </div>
+
                       {/* Resumen ejecutivo */}
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 24 }}>
                         <KpiCardCli icon="📦" label="Órdenes totales" value={historial.resumen.totalOrdenes} color="#7c3aed" />
@@ -846,6 +1060,26 @@ const GestionClientes = ({ user, empresas = [] }) => {
                       onChange={e => setForm(p => ({ ...p, departamento: e.target.value }))}
                     />
                   </div>
+
+                  {/* Mini-Ola 2.6: Sector general (si el cliente no tiene sucursales) */}
+                  {form.sucursales.length === 0 && (
+                    <div style={s.campo}>
+                      <label style={s.label}>
+                        📍 Sector geográfico
+                        <span style={{ fontWeight: 400, color: '#9ca3af', marginLeft: 6, fontSize: 11 }}>
+                          (para organizar rutas)
+                        </span>
+                      </label>
+                      <select style={s.input}
+                        value={form.sectorId || ''}
+                        onChange={e => setForm(p => ({ ...p, sectorId: e.target.value }))}>
+                        <option value="">— Sin asignar —</option>
+                        {sectores.map(sec => (
+                          <option key={sec.id} value={sec.id}>{sec.etiqueta}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -906,6 +1140,23 @@ const GestionClientes = ({ user, empresas = [] }) => {
                               value={suc.encargado}
                               onChange={e => editarSucursal(idx, 'encargado', e.target.value)}
                             />
+                          </div>
+                          {/* Mini-Ola 2.6: sector de la sucursal */}
+                          <div style={{ ...s.campo, gridColumn: '1 / -1' }}>
+                            <label style={s.label}>
+                              📍 Sector geográfico
+                              <span style={{ fontWeight: 400, color: '#9ca3af', marginLeft: 6, fontSize: 11 }}>
+                                (organiza la ruta del mensajero)
+                              </span>
+                            </label>
+                            <select style={s.input}
+                              value={suc.sectorId || ''}
+                              onChange={e => editarSucursal(idx, 'sectorId', e.target.value)}>
+                              <option value="">— Sin asignar —</option>
+                              {sectores.map(sec => (
+                                <option key={sec.id} value={sec.id}>{sec.etiqueta}</option>
+                              ))}
+                            </select>
                           </div>
                         </div>
                       </div>

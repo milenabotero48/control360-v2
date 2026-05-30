@@ -39,6 +39,24 @@ const RETENCIONES_DEFAULT = [
   { id: 'rte_personalizado', etiqueta: 'Personalizado (digitar %)',  porcentaje: null, tipo: 'custom', activo: true,  orden: 99 },
 ];
 
+// ─── SECTORES — Mini-Ola 2.6 ────────────────────────────────────────────────
+// Los sectores agrupan clientes/sucursales geográficamente para que logística
+// organice las rutas. Son configurables por admin: en Cali pueden ser Norte/
+// Sur/Centro/Oriente; en Medellín podrían ser Poblado/Laureles/etc.
+//
+// Sandra puede asignar el sector al crear el cliente, al crear/editar la
+// sucursal o desde Logística cuando el mensajero llegue a una orden sin
+// sector. Si una orden tiene sucursal → toma sucursal.sectorId. Si no tiene
+// sucursal → toma cliente.sectorId. Si ninguno tiene → "Sin Asignar".
+const SECTORES_DEFAULT = [
+  { id: 'sec_norte',       etiqueta: 'Norte',        color: '#0284c7', activo: true, orden: 1 },
+  { id: 'sec_sur',         etiqueta: 'Sur',          color: '#dc2626', activo: true, orden: 2 },
+  { id: 'sec_oriente',     etiqueta: 'Oriente',      color: '#16a34a', activo: true, orden: 3 },
+  { id: 'sec_occidente',   etiqueta: 'Occidente',    color: '#7c3aed', activo: true, orden: 4 },
+  { id: 'sec_centro',      etiqueta: 'Centro',       color: '#f59e0b', activo: true, orden: 5 },
+  { id: 'sec_periferia',   etiqueta: 'Periferia',    color: '#6b7280', activo: true, orden: 6 },
+];
+
 // Helper: obtener o crear doc de configuración del usuario
 const getConfigRef = (userId) => db.collection('configuracion').doc(userId);
 
@@ -51,21 +69,27 @@ const inicializarConfigSiNoExiste = async (userId) => {
       formasPago: FORMAS_PAGO_DEFAULT,
       categoriasEgresos: CATEGORIAS_DEFAULT,
       retenciones: RETENCIONES_DEFAULT,
+      sectores: SECTORES_DEFAULT,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
     return {
       formasPago: FORMAS_PAGO_DEFAULT,
       categoriasEgresos: CATEGORIAS_DEFAULT,
-      retenciones: RETENCIONES_DEFAULT
+      retenciones: RETENCIONES_DEFAULT,
+      sectores: SECTORES_DEFAULT
     };
   }
   const data = doc.data();
-  // Auto-seed de retenciones si el config ya existía pero sin retenciones
-  // (caso: suscriptor anterior a Ola 2.5). NO sobrescribe si ya las tenía.
+  // Auto-seed de retenciones (suscriptores anteriores a Ola 2.5)
   if (!Array.isArray(data.retenciones) || data.retenciones.length === 0) {
     await ref.set({ retenciones: RETENCIONES_DEFAULT }, { merge: true });
     data.retenciones = RETENCIONES_DEFAULT;
+  }
+  // Auto-seed de sectores (suscriptores anteriores a Mini-Ola 2.6)
+  if (!Array.isArray(data.sectores) || data.sectores.length === 0) {
+    await ref.set({ sectores: SECTORES_DEFAULT }, { merge: true });
+    data.sectores = SECTORES_DEFAULT;
   }
   return data;
 };
@@ -218,6 +242,55 @@ router.put('/retenciones', async (req, res) => {
   } catch (e) {
     console.error('PUT retenciones:', e);
     res.status(500).json({ error: 'Error al guardar retenciones' });
+  }
+});
+
+// ─── PUT /api/configuracion/sectores — Mini-Ola 2.6 ────────────────────────
+// Permite al admin gestionar el catálogo de sectores geográficos. Cada
+// suscriptor define los suyos (Cali, Medellín, etc tendrán nombres distintos).
+router.put('/sectores', async (req, res) => {
+  try {
+    const { sectores } = req.body;
+    if (!Array.isArray(sectores)) {
+      return res.status(400).json({ error: 'sectores debe ser un array' });
+    }
+
+    // Validar cada sector
+    for (const s of sectores) {
+      if (!s.etiqueta || !s.etiqueta.trim()) {
+        return res.status(400).json({ error: 'Cada sector debe tener etiqueta' });
+      }
+      if (!s.id || !s.id.trim()) {
+        return res.status(400).json({ error: 'Cada sector debe tener un id único' });
+      }
+    }
+
+    // No duplicar IDs
+    const ids = sectores.map(s => s.id);
+    if (new Set(ids).size !== ids.length) {
+      return res.status(400).json({ error: 'Hay sectores con el mismo id' });
+    }
+
+    const userId = req.adminId || req.user.uid;
+    const ref = getConfigRef(userId);
+    await ref.set({
+      userId,
+      sectores,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    await db.collection('audit_logs').add({
+      accion: 'SECTORES_ACTUALIZADOS', modulo: 'configuracion',
+      descripcion: `Catálogo de sectores actualizado (${sectores.length} registros)`,
+      usuarioId: userId, usuarioNombre: req.user.email,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      fecha: new Date().toISOString()
+    });
+
+    res.json({ ok: true, sectores });
+  } catch (e) {
+    console.error('PUT sectores:', e);
+    res.status(500).json({ error: 'Error al guardar sectores' });
   }
 });
 
