@@ -74,6 +74,221 @@ const FORMAS_PAGO_DEFAULT = ['Efectivo', 'Transferencia', 'Nequi', 'Datafono'];
 const PORCENTAJES_IVA = [{ label: '19%', val: 19 }, { label: '8%', val: 8 }, { label: '0%', val: 0 }];
 const PORCENTAJES_RETEN = [{ label: '2.5% Compras', val: 2.5 }, { label: '4% Servicios', val: 4 }, { label: 'Otro %', val: null }];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MODAL CUADRAR DEFINITIVO (Ola 2)
+// ─────────────────────────────────────────────────────────────────────────────
+// Cuando Maykol vuelve de hacer un mandado de Orden Interna, trae:
+//   - La factura del proveedor (puede subir foto/PDF)
+//   - El vuelto en efectivo
+//   - El gasto real (puede ser distinto del provisional)
+//
+// Tesorería o Admin abren este modal, registran el valor real, suben la
+// factura, escriben su PIN y el sistema:
+//   - Crea el egreso definitivo
+//   - Ajusta caja (suma vuelto o resta diferencia)
+//   - Marca el provisional como cuadrado
+//   - Libera la Orden Interna para que pueda cerrarse
+//
+// Backend: POST /api/egresos/:provisionalId/cuadrar-definitivo (ya en Ola 1).
+// ─────────────────────────────────────────────────────────────────────────────
+const ModalCuadrarDefinitivo = ({ provisional, cajas, onCuadrado, onCerrar }) => {
+  const [valorReal, setValorReal] = useState(String(provisional.monto || ''));
+  const [proveedor, setProveedor] = useState(provisional.proveedor || '');
+  const [notas, setNotas]         = useState('');
+  const [cajaId, setCajaId]       = useState(provisional.cajaId || (cajas[0]?.id || ''));
+  const [formaPago, setFormaPago] = useState(provisional.formaPago || 'Efectivo');
+  const [pin, setPin]             = useState('');
+  const [verPin, setVerPin]       = useState(false);
+  const [facturaAdjunta, setFacturaAdjunta] = useState('');
+  const [subiendo, setSubiendo]   = useState(false);
+  const [guardando, setGuardando] = useState(false);
+  const [error, setError]         = useState('');
+
+  const base = Number(provisional.monto) || 0;
+  const real = Number(valorReal) || 0;
+  const diferencia = base - real; // positiva = vuelto / negativa = falta
+
+  const subirFactura = async (file) => {
+    if (!file) return;
+    setSubiendo(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('upload_preset', 'control360');
+      const r = await fetch('https://api.cloudinary.com/v1_1/dk8hposft/image/upload', { method: 'POST', body: fd });
+      const data = await r.json();
+      if (data.secure_url) setFacturaAdjunta(data.secure_url);
+      else setError('No se pudo subir la factura');
+    } catch { setError('Error al subir factura'); }
+    setSubiendo(false);
+  };
+
+  const confirmar = async () => {
+    setError('');
+    if (!real || real < 0) return setError('Valor real inválido');
+    if (!cajaId) return setError('Selecciona una caja');
+    if (!/^\d{4}$/.test(pin)) return setError('PIN debe ser de 4 dígitos');
+    try {
+      setGuardando(true);
+      await axios.post(`${API}/egresos/${provisional.id}/cuadrar-definitivo`, {
+        valorReal: real, proveedor, notas, cajaId, formaPago,
+        facturaAdjunta, pin
+      }, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+      onCuadrado();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error al cuadrar');
+    } finally { setGuardando(false); }
+  };
+
+  const sty = {
+    overlay:    { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: 20 },
+    modal:      { background: '#fff', borderRadius: 16, width: '100%', maxWidth: 560, maxHeight: '90vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.35)', fontFamily: "'Segoe UI', sans-serif" },
+    header:     { display: 'flex', gap: 14, alignItems: 'flex-start', padding: '22px 24px 14px', borderBottom: '1px solid #f3f4f6', background: 'linear-gradient(135deg, #fef3c7 0%, #fff 100%)' },
+    iconCircle: { width: 44, height: 44, borderRadius: '50%', background: '#fef3c7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0 },
+    title:      { margin: 0, fontSize: 17, fontWeight: 700, color: '#111' },
+    subtitle:   { margin: '4px 0 0', fontSize: 13, color: '#6b7280', lineHeight: 1.4 },
+    body:       { padding: '18px 24px', display: 'flex', flexDirection: 'column', gap: 16 },
+    campo:      { display: 'flex', flexDirection: 'column', gap: 6 },
+    label:      { fontSize: 13, fontWeight: 700, color: '#374151', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' },
+    sub:        { fontSize: 11, fontWeight: 400, color: '#9ca3af' },
+    input:      { padding: '10px 14px', border: '2px solid #e5e7eb', borderRadius: 8, fontSize: 14, outline: 'none', fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' },
+    fila2:      { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 },
+    resumen:    { padding: 14, borderRadius: 8, background: '#f9fafb', display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 },
+    resumRow:   { display: 'flex', justifyContent: 'space-between' },
+    resumTotal: { display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: 15, paddingTop: 8, borderTop: '1px dashed #d1d5db' },
+    pinWrap:    { position: 'relative', width: 180 },
+    eyeBtn:     { position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', fontSize: 16 },
+    footer:     { padding: '14px 24px', borderTop: '1px solid #f3f4f6', display: 'flex', justifyContent: 'flex-end', gap: 10, background: '#fafafa' },
+    btnCancel:  { padding: '10px 20px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 },
+    btnOk:      { padding: '10px 22px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: 14, cursor: 'pointer' },
+    alert:      { padding: '10px 14px', background: '#fef2f2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: 8, fontSize: 13, fontWeight: 500, margin: '12px 24px 0' },
+    fotoBox:    { border: '2px dashed #d1d5db', borderRadius: 8, padding: 16, textAlign: 'center', cursor: 'pointer', background: '#fafafa' }
+  };
+
+  return (
+    <div style={sty.overlay} onClick={() => !guardando && onCerrar()}>
+      <div style={sty.modal} onClick={e => e.stopPropagation()}>
+        <div style={sty.header}>
+          <div style={sty.iconCircle}>💵</div>
+          <div style={{ flex: 1 }}>
+            <h3 style={sty.title}>Cuadrar egreso provisional</h3>
+            <p style={sty.subtitle}>
+              {provisional.numero} · OI {provisional.numeroOrdenInterna} · Mensajero: {provisional.mensajeroNombre || '—'}
+            </p>
+          </div>
+        </div>
+
+        {error && <div style={sty.alert}>⚠ {error}</div>}
+
+        <div style={sty.body}>
+          <div style={sty.fila2}>
+            <div style={sty.campo}>
+              <label style={sty.label}>Valor entregado al mensajero</label>
+              <input style={{ ...sty.input, background: '#f3f4f6', fontWeight: 700 }} value={fmt(base)} disabled />
+            </div>
+            <div style={sty.campo}>
+              <label style={sty.label}>Valor real gastado <span style={{ color: '#dc2626' }}>*</span></label>
+              <input
+                style={sty.input}
+                type="number"
+                value={valorReal}
+                onChange={e => setValorReal(e.target.value)}
+                disabled={guardando}
+                placeholder="0"
+              />
+            </div>
+          </div>
+
+          <div style={sty.resumen}>
+            <div style={sty.resumRow}><span>Entregado</span><span>{fmt(base)}</span></div>
+            <div style={sty.resumRow}><span>Gastó realmente</span><span>{fmt(real)}</span></div>
+            <div style={sty.resumTotal}>
+              {diferencia > 0
+                ? <><span style={{ color: '#16a34a' }}>↩ Vuelto a caja</span><span style={{ color: '#16a34a' }}>{fmt(diferencia)}</span></>
+                : diferencia < 0
+                  ? <><span style={{ color: '#dc2626' }}>↑ Gasto adicional (sale de caja)</span><span style={{ color: '#dc2626' }}>{fmt(Math.abs(diferencia))}</span></>
+                  : <><span style={{ color: '#6b7280' }}>= Cuadre exacto</span><span style={{ color: '#6b7280' }}>$0</span></>
+              }
+            </div>
+          </div>
+
+          <div style={sty.fila2}>
+            <div style={sty.campo}>
+              <label style={sty.label}>Proveedor</label>
+              <input style={sty.input} value={proveedor} onChange={e => setProveedor(e.target.value)} placeholder="Nombre del proveedor" disabled={guardando} />
+            </div>
+            <div style={sty.campo}>
+              <label style={sty.label}>Caja afectada <span style={{ color: '#dc2626' }}>*</span></label>
+              <select style={sty.input} value={cajaId} onChange={e => setCajaId(e.target.value)} disabled={guardando}>
+                <option value="">— Seleccionar —</option>
+                {cajas.map(c => <option key={c.id} value={c.id}>{c.nombre} ({fmt(c.saldo)})</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div style={sty.campo}>
+            <label style={sty.label}>
+              Factura del proveedor
+              <span style={sty.sub}>Opcional pero recomendado</span>
+            </label>
+            {facturaAdjunta ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: 10, background: '#f0fdf4', borderRadius: 8 }}>
+                <img src={facturaAdjunta} alt="factura" style={{ height: 50, borderRadius: 4 }} />
+                <span style={{ fontSize: 13, color: '#16a34a', flex: 1 }}>✓ Factura adjuntada</span>
+                <button onClick={() => setFacturaAdjunta('')} style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontSize: 13 }}>Quitar</button>
+              </div>
+            ) : (
+              <label style={sty.fotoBox}>
+                <input type="file" accept="image/*,.pdf" style={{ display: 'none' }} onChange={e => subirFactura(e.target.files[0])} disabled={subiendo || guardando} />
+                <div style={{ fontSize: 13, color: '#6b7280' }}>
+                  {subiendo ? '⏳ Subiendo...' : '📎 Adjuntar foto o PDF de la factura'}
+                </div>
+              </label>
+            )}
+          </div>
+
+          <div style={sty.campo}>
+            <label style={sty.label}>Notas</label>
+            <input style={sty.input} value={notas} onChange={e => setNotas(e.target.value)} placeholder="Ej: Compra de soldadura para taller" disabled={guardando} />
+          </div>
+
+          <div style={sty.campo}>
+            <label style={sty.label}>
+              PIN de autorización <span style={{ color: '#dc2626' }}>*</span>
+              <span style={sty.sub}>Solo Admin o Tesorería</span>
+            </label>
+            <div style={sty.pinWrap}>
+              <input
+                type={verPin ? 'text' : 'password'}
+                style={{ ...sty.input, paddingRight: 44, fontSize: 22, textAlign: 'center', letterSpacing: 10, fontFamily: 'monospace' }}
+                inputMode="numeric" maxLength={4}
+                placeholder="0000"
+                value={pin}
+                onChange={e => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                disabled={guardando}
+              />
+              <button type="button" onClick={() => setVerPin(!verPin)} style={sty.eyeBtn} disabled={guardando}>
+                {verPin ? '🙈' : '👁️'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div style={sty.footer}>
+          <button onClick={onCerrar} style={sty.btnCancel} disabled={guardando}>Cancelar</button>
+          <button
+            onClick={confirmar}
+            style={{ ...sty.btnOk, opacity: guardando || !real || pin.length !== 4 ? 0.5 : 1, cursor: guardando ? 'not-allowed' : 'pointer' }}
+            disabled={guardando || !real || pin.length !== 4}
+          >
+            {guardando ? 'Cuadrando...' : '✓ Confirmar cuadre'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── Calcular totales ─────────────────────────────────────────────────────────
 const calcularTotales = (monto, ivaPct, retenPct) => {
   const base = Number(monto) || 0;
@@ -642,6 +857,9 @@ export default function GestionEgresos({ user }) {
   const [modalProvisional, setModalProvisional] = useState(false);
   const [mensajeros, setMensajeros] = useState([]);
   const [filtros, setFiltros]     = useState({ estado: 'todos', categoria: 'todos', busca: '', desde: '', hasta: '' });
+  // Ola 2: pestañas + cuadre definitivo
+  const [tab, setTab]                             = useState('todos');
+  const [provisionalACuadrar, setProvisionalACuadrar] = useState(null);
 
   useEffect(() => { cargarDatos(); }, []);
 
@@ -773,6 +991,92 @@ export default function GestionEgresos({ user }) {
         </div>
       </div>
 
+      {/* ── Pestañas (Ola 2) ──────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: '2px solid #e5e7eb' }}>
+        <button onClick={() => setTab('todos')}
+          style={{
+            padding: '10px 24px', background: 'none', border: 'none', cursor: 'pointer',
+            fontSize: 14, fontWeight: 600,
+            color: tab === 'todos' ? '#7c3aed' : '#6b7280',
+            borderBottom: tab === 'todos' ? '2px solid #7c3aed' : '2px solid transparent',
+            marginBottom: -2
+          }}>
+          📤 Todos los egresos
+        </button>
+        <button onClick={() => setTab('provisionales')}
+          style={{
+            padding: '10px 24px', background: 'none', border: 'none', cursor: 'pointer',
+            fontSize: 14, fontWeight: 600,
+            color: tab === 'provisionales' ? '#d97706' : '#6b7280',
+            borderBottom: tab === 'provisionales' ? '2px solid #d97706' : '2px solid transparent',
+            marginBottom: -2,
+            display: 'flex', alignItems: 'center', gap: 6
+          }}>
+          💵 Provisionales pendientes
+          {(() => {
+            const pend = egresos.filter(e => e.tipo === 'provisional' && e.cuadrado === false).length;
+            return pend > 0 ? <span style={{ background: '#d97706', color: '#fff', borderRadius: 10, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>{pend}</span> : null;
+          })()}
+        </button>
+      </div>
+
+      {/* ── VISTA PROVISIONALES (Ola 2) ──────────────────────────────────────── */}
+      {tab === 'provisionales' && (() => {
+        const provisionales = egresos
+          .filter(e => e.tipo === 'provisional' && e.cuadrado === false)
+          .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+        return (
+          <div>
+            <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', padding: '14px 18px', borderRadius: 10, marginBottom: 16, fontSize: 13, color: '#92400e' }}>
+              <strong>¿Qué son los egresos provisionales?</strong> Cuando un mensajero sale a hacer un mandado de Orden Interna (compra de insumos, gastos varios) le entregas un valor estimado. Al regresar con la factura real y el vuelto, cuadras aquí el egreso definitivo. La Orden Interna no se puede cerrar sin el cuadre completo.
+            </div>
+
+            {provisionales.length === 0 ? (
+              <div style={{ background: '#fff', borderRadius: 12, padding: 60, textAlign: 'center', color: '#9ca3af' }}>
+                <div style={{ fontSize: 48, marginBottom: 10 }}>✅</div>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>No hay egresos provisionales pendientes</div>
+                <div style={{ fontSize: 13, marginTop: 6 }}>Todos los mandados han sido cuadrados.</div>
+              </div>
+            ) : (
+              <div style={{ background: '#fff', borderRadius: 12, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#f9fafb' }}>
+                      {['Fecha', 'N° Egreso', 'OI', 'Mensajero', 'Concepto', 'Entregado', 'Caja', 'Acción'].map(h =>
+                        <th key={h} style={{ padding: '12px 16px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{h}</th>
+                      )}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {provisionales.map((eg, i) => (
+                      <tr key={eg.id} style={{ background: i % 2 === 0 ? '#fff' : '#fafafa', borderTop: '1px solid #f3f4f6' }}>
+                        <td style={{ padding: '12px 16px', fontSize: 13 }}>{fmtDate(eg.createdAt?.seconds ? new Date(eg.createdAt.seconds * 1000).toISOString() : eg.fecha)}</td>
+                        <td style={{ padding: '12px 16px', fontSize: 13, fontWeight: 700, color: '#d97706' }}>{eg.numero}</td>
+                        <td style={{ padding: '12px 16px', fontSize: 13, fontFamily: 'monospace' }}>{eg.numeroOrdenInterna || '—'}</td>
+                        <td style={{ padding: '12px 16px', fontSize: 13 }}>{eg.mensajeroNombre || '—'}</td>
+                        <td style={{ padding: '12px 16px', fontSize: 13 }}>{eg.concepto}</td>
+                        <td style={{ padding: '12px 16px', fontSize: 13, fontWeight: 700 }}>{fmt(eg.monto)}</td>
+                        <td style={{ padding: '12px 16px', fontSize: 12, color: '#6b7280' }}>
+                          {cajas.find(c => c.id === eg.cajaId)?.nombre || '—'}
+                        </td>
+                        <td style={{ padding: '12px 16px' }}>
+                          <button onClick={() => setProvisionalACuadrar(eg)}
+                            style={{ padding: '6px 14px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
+                            ✓ Cuadrar definitivo
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* ── VISTA NORMAL: TODOS LOS EGRESOS ──────────────────────────────────── */}
+      {tab === 'todos' && <>
       {/* KPIs */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14, marginBottom: 20 }}>
         <div style={{ ...S.kpiCard, borderLeft: '4px solid #f59e0b' }}>
@@ -862,12 +1166,24 @@ export default function GestionEgresos({ user }) {
           </tbody>
         </table>
       </div>
+      </>}
+      {/* ── Fin vista normal ─────────────────────────────────────────────── */}
 
       {modal === 'nuevo' && <ModalEgreso empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias} onSave={crearEgreso} onClose={() => setModal(null)} />}
       {modal === 'editar' && selected && <ModalEgreso egreso={{ ...selected, _categorias: categorias }} empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias} onSave={editarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'pagar' && selected && <ModalPagar egreso={selected} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} onPagar={pagarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'editarPagado' && selected && <ModalEditarPagado egreso={selected} onSave={editarPagado} onClose={() => { setModal(null); setSelected(null); }} />}
       {modalProvisional && <EgresoProvisional mensajeros={mensajeros} cajas={cajas} formasPagoConfig={formasPagoConfig} onCrear={async (data) => { await crearEgreso(data); setModalProvisional(false); }} onCerrar={() => setModalProvisional(false)} />}
+
+      {/* Ola 2: modal de cuadre provisional → definitivo */}
+      {provisionalACuadrar && (
+        <ModalCuadrarDefinitivo
+          provisional={provisionalACuadrar}
+          cajas={cajas}
+          onCuadrado={async () => { setProvisionalACuadrar(null); await cargarDatos(); }}
+          onCerrar={() => setProvisionalACuadrar(null)}
+        />
+      )}
     </div>
   );
 }

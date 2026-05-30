@@ -4,6 +4,7 @@ import Dashboard from './Dashboard';
 import DashboardComercial from './DashboardComercial';
 import DashboardMensajero from './DashboardMensajero';
 import DashboardTesoreria from './DashboardTesoreria';
+import DashboardTaller from './DashboardTaller';
 import GestionLogistica from './GestionLogistica';
 import GestionTaller from './GestionTaller';
 import ConfigEmpresas from './ConfigEmpresas';
@@ -60,6 +61,7 @@ const NAV_GRUPOS = {
     { grupo: 'Mi Trabajo', modulos: ['logistica', 'ordenes', 'clientes', 'productos'] },
   ],
   taller: [
+    { grupo: 'Principal',      modulos: ['admin'] },
     { grupo: 'Mi Trabajo',     modulos: ['taller', 'productos'] },
   ],
   tesoreria: [
@@ -399,6 +401,7 @@ export default function AppRoot() {
           {currentPage === 'admin' && user?.role === 'comercial'  && <DashboardComercial user={user} />}
           {currentPage === 'admin' && user?.role === 'mensajero'  && <DashboardMensajero user={user} />}
           {currentPage === 'admin' && user?.role === 'tesoreria'  && <DashboardTesoreria user={user} />}
+          {currentPage === 'admin' && user?.role === 'taller'     && <DashboardTaller user={user} />}
           {currentPage === 'admin' && user?.role === 'visor'      && <Dashboard user={user} />}
           {currentPage === 'logistica'       && <GestionLogistica user={user} />}
                             {currentPage === 'taller'       && <GestionTaller user={user} />}

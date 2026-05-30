@@ -1,20 +1,88 @@
 const express = require('express');
 const router = express.Router();
-const { db, admin } = require('../config/firebase');
+const { db } = require('../config/firebase');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/auth/login
+// ─────────────────────────────────────────────────────────────────────────────
+// Cambios Ola 1:
+//   1) Verificación con bcrypt.compare (antes: comparación de texto plano).
+//   2) Mensajes de error genéricos: "Credenciales inválidas" para no revelar
+//      si el email existe o no (defensa básica contra enumeración).
+//   3) Bloquea login de usuarios desactivados (activo === false).
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const userQuery = await db.collection('users').where('email', '==', email).get();
-    if (userQuery.empty) return res.status(401).json({ error: 'Usuario no encontrado' });
-    const user = userQuery.docs[0].data();
-    const passwordMatch = password === user.password_hash; // En producción usar bcrypt
-    if (!passwordMatch) return res.status(401).json({ error: 'Contraseña incorrecta' });
-    const token = jwt.sign({ uid: userQuery.docs[0].id, email: user.email, role: user.role, adminId: user.creadoPor || userQuery.docs[0].id }, process.env.JWT_SECRET || 'control360secret', { expiresIn: '24h' });
-    res.json({ token, user: { id: userQuery.docs[0].id, email: user.email, nombre: user.nombre, role: user.role } });
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email y contraseña son obligatorios' });
+    }
+
+    const userQuery = await db.collection('users')
+      .where('email', '==', String(email).trim().toLowerCase())
+      .limit(1)
+      .get();
+
+    if (userQuery.empty) {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    const userDoc  = userQuery.docs[0];
+    const user     = userDoc.data();
+    const passHash = user.password_hash;
+
+    if (!passHash) {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    if (user.activo === false) {
+      return res.status(403).json({ error: 'Usuario desactivado. Contacta al administrador.' });
+    }
+
+    // bcrypt.compare maneja correctamente hashes válidos.
+    // Si por alguna razón llegara un valor sin hashear, compare retorna false
+    // y el script migrar-passwords.js debe correrse antes del primer login.
+    let ok = false;
+    try {
+      ok = await bcrypt.compare(String(password), String(passHash));
+    } catch {
+      ok = false;
+    }
+
+    if (!ok) {
+      return res.status(401).json({ error: 'Credenciales inválidas' });
+    }
+
+    const token = jwt.sign(
+      {
+        uid: userDoc.id,
+        email: user.email,
+        role: user.role,
+        nombre: user.nombre || user.email,
+        adminId: user.creadoPor || userDoc.id
+      },
+      process.env.JWT_SECRET || 'control360secret',
+      { expiresIn: '24h' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: userDoc.id,
+        email: user.email,
+        nombre: user.nombre,
+        role: user.role,
+        modulos: user.modulos || [],
+        codigo: user.codigo || '',
+        adminId: user.creadoPor || userDoc.id
+      }
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error en login:', error);
+    res.status(500).json({ error: 'Error al iniciar sesión' });
   }
 });
 

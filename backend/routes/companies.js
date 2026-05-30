@@ -3,6 +3,18 @@ const router = express.Router();
 const { db } = require('../config/firebase');
 const cloudinary = require('../config/cloudinary');
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cambios Ola 1 sobre el original:
+//   1) Se elimina el guardado de `pinAutorizacion` en la empresa
+//      (el PIN ahora vive en el usuario — ver users.js).
+//   2) El endpoint POST /verificar-pin se conserva por compatibilidad pero
+//      redirige al verificador centralizado de users.js: si tu frontend
+//      todavía pega aquí, sigue funcionando. Lo ideal es migrar a
+//      POST /api/users/verificar-pin (ver users.js).
+//   3) El campo `pinAutorizacion` ya no se escribe ni se devuelve al frontend.
+//      Si existe en docs antiguos, queda en la BD pero no se usa.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const validarNIT      = (v) => /^\d{8,}$/.test(v);
 const validarTelefono = (v) => /^\d{7,}$/.test(v);
 const validarCelular  = (v) => /^\d{10}$/.test(v);
@@ -10,7 +22,6 @@ const validarEmail    = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 const validarIVA      = (v) => { const n = parseInt(v); return !isNaN(n) && n >= 0 && n <= 100; };
 
 const subirLogo = async (base64) => {
-  console.log('Logo recibido:', base64 ? base64.substring(0, 50) : 'VACÍO');
   if (!base64 || !base64.startsWith('data:image')) return null;
   const result = await cloudinary.uploader.upload(base64, {
     folder: 'control360/logos',
@@ -19,26 +30,24 @@ const subirLogo = async (base64) => {
   return result.secure_url;
 };
 
+// ─── Helper: nunca exponer pinAutorizacion al frontend ───────────────────────
+const limpiarEmpresa = (data) => {
+  if (!data) return data;
+  const { pinAutorizacion, ...resto } = data;
+  return resto;
+};
+
 router.get('/', async (req, res) => {
   try {
-    // Si es admin busca sus propias empresas
-    // Si es otro rol, busca las empresas del admin (user_id del token puede ser el uid del admin)
     let userId = req.user.uid || req.user.id;
 
-    // Para roles no admin, buscar el adminId guardado en su perfil de usuario
     if (req.user.role !== 'admin') {
       try {
         const userDoc = await db.collection('users').doc(userId).get();
         if (userDoc.exists && userDoc.data().adminId) {
           userId = userDoc.data().adminId;
-        } else if (userDoc.exists && userDoc.data().uid) {
-          // Intentar con el uid guardado en el usuario admin
-          const adminSnap = await db.collection('users')
-            .where('role', '==', 'admin')
-            .limit(1).get();
-          if (!adminSnap.empty) {
-            userId = adminSnap.docs[0].data().uid || adminSnap.docs[0].id;
-          }
+        } else if (userDoc.exists && userDoc.data().creadoPor) {
+          userId = userDoc.data().creadoPor;
         }
       } catch (e) { console.error('Error buscando adminId:', e.message); }
     }
@@ -47,14 +56,13 @@ router.get('/', async (req, res) => {
       .where('user_id', '==', userId)
       .get();
 
-    // Si no encontró con ese userId, buscar todas las empresas activas
     if (snapshot.empty && req.user.role !== 'admin') {
       const allSnap = await db.collection('companies').get();
-      const companies = allSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const companies = allSnap.docs.map(doc => ({ id: doc.id, ...limpiarEmpresa(doc.data()) }));
       return res.json(companies);
     }
 
-    const companies = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const companies = snapshot.docs.map(doc => ({ id: doc.id, ...limpiarEmpresa(doc.data()) }));
     res.json(companies);
   } catch (error) {
     console.error('GET /companies error:', error);
@@ -66,7 +74,7 @@ router.get('/:id', async (req, res) => {
   try {
     const doc = await db.collection('companies').doc(req.params.id).get();
     if (!doc.exists) return res.status(404).json({ error: 'Empresa no encontrada' });
-    res.json({ id: doc.id, ...doc.data() });
+    res.json({ id: doc.id, ...limpiarEmpresa(doc.data()) });
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener empresa' });
   }
@@ -112,7 +120,8 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const { name, nit, address, phone, cellphone, email, iva, logo, pinAutorizacion, configCertificado } = req.body;
+    // Aceptamos configCertificado pero IGNORAMOS pinAutorizacion (deprecado).
+    const { name, nit, address, phone, cellphone, email, iva, logo, configCertificado } = req.body;
 
     if (nit       && !validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido' });
     if (phone     && !validarTelefono(phone))     return res.status(400).json({ error: 'Teléfono inválido' });
@@ -129,7 +138,6 @@ router.put('/:id', async (req, res) => {
     if (cellphone) updateData.cellphone = cellphone;
     if (email)     updateData.email     = email;
     if (iva)       updateData.iva       = parseInt(iva);
-    if (pinAutorizacion !== undefined) updateData.pinAutorizacion = pinAutorizacion;
     if (configCertificado !== undefined) updateData.configCertificado = configCertificado;
 
     if (logo && logo.startsWith('data:image')) {
@@ -140,7 +148,7 @@ router.put('/:id', async (req, res) => {
 
     await db.collection('companies').doc(req.params.id).update(updateData);
     const updated = await db.collection('companies').doc(req.params.id).get();
-    res.json({ id: updated.id, ...updated.data() });
+    res.json({ id: updated.id, ...limpiarEmpresa(updated.data()) });
   } catch (error) {
     console.error('PUT /companies error:', error);
     res.status(500).json({ error: 'Error al actualizar empresa' });
@@ -156,26 +164,41 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// ─── Verificar PIN de autorización ───────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /verificar-pin — DEPRECADO (compat con frontend viejo)
+// ─────────────────────────────────────────────────────────────────────────────
+// Reenvía la validación al PIN del USUARIO logueado (no al de empresa).
+// El flujo correcto es POST /api/users/verificar-pin — ver users.js.
 router.post('/verificar-pin', async (req, res) => {
   try {
     const { pin } = req.body;
-    if (!pin || pin.length !== 4) return res.status(400).json({ autorizado: false, error: 'PIN inválido' });
-    const snap = await db.collection('companies').where('user_id', '==', req.user.uid).get();
-    if (snap.empty) return res.status(404).json({ autorizado: false, error: 'Sin empresas configuradas' });
-    // Verificar contra cualquiera de las empresas del usuario
-    const autorizado = snap.docs.some(doc => doc.data().pinAutorizacion === pin);
+    if (!pin) return res.status(400).json({ autorizado: false, error: 'PIN requerido' });
+
+    const yo = req.user.uid || req.user.id;
+    const doc = await db.collection('users').doc(yo).get();
+    if (!doc.exists) return res.status(404).json({ autorizado: false, error: 'Usuario no encontrado' });
+
+    const u = doc.data();
+    if (u.role !== 'admin' && u.role !== 'tesoreria') {
+      return res.status(403).json({ autorizado: false, error: 'Tu rol no puede autorizar esta acción' });
+    }
+    if (!u.pin) {
+      return res.status(400).json({ autorizado: false, error: 'No tienes PIN configurado' });
+    }
+
+    const autorizado = String(u.pin) === String(pin);
+
     if (autorizado) {
-      // Registrar en auditoría
       await db.collection('audit_logs').add({
         accion: 'DESBLOQUEO_CLIENTE_CARTERA',
-        modulo: 'ordenes',
-        descripcion: 'Admin autorizó orden para cliente bloqueado por cartera',
-        usuarioId: req.user.uid,
-        usuarioEmail: req.user.email,
-        fecha: new Date().toISOString(),
+        modulo: 'cxc',
+        descripcion: `${u.nombre || u.email} autorizó orden para cliente bloqueado por cartera`,
+        usuarioId: yo,
+        usuarioNombre: u.nombre || u.email,
+        fecha: new Date().toISOString()
       });
     }
+
     res.json({ autorizado });
   } catch (error) {
     res.status(500).json({ autorizado: false, error: error.message });
@@ -224,4 +247,5 @@ router.put('/certificados/config', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 module.exports = router;

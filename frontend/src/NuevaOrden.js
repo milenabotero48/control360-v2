@@ -62,6 +62,11 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [empresaSel, setEmpresaSel]       = useState(null);
   const [tipoServicio, setTipoServicio]   = useState('oficina');
   const [formaPago, setFormaPago]         = useState('');
+  // Ola 2.5: Comprobante de pago adelantado (cliente ya pagó antes del servicio)
+  const [pagoAdelantado, setPagoAdelantado] = useState(false);
+  const [fotoComprobante, setFotoComprobante] = useState('');
+  const [subiendoComprobante, setSubiendoComprobante] = useState(false);
+  const fotoComprobanteRef = useRef(null);
   const [items, setItems]                 = useState([]);
   const [buscarCliente, setBuscarCliente] = useState('');
   const [buscarProd, setBuscarProd]       = useState('');
@@ -80,6 +85,30 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [mostrarModalBloqueo, setMostrarModalBloqueo] = useState(false);
   const [pinDesbloqueado, setPinDesbloqueado] = useState(false);
   const prodRef = useRef(null);
+
+  // Ola 2.5: subir comprobante de pago adelantado a Cloudinary
+  const CLOUDINARY_URL = 'https://api.cloudinary.com/v1_1/dk8hposft/image/upload';
+  const CLOUDINARY_PRESET = 'control360';
+  const subirComprobante = async (file) => {
+    setSubiendoComprobante(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('upload_preset', CLOUDINARY_PRESET);
+    formData.append('folder', 'control360/comprobantes');
+    try {
+      const res = await fetch(CLOUDINARY_URL, { method: 'POST', body: formData });
+      const data = await res.json();
+      setFotoComprobante(data.secure_url);
+    } catch {
+      setError('Error al subir comprobante');
+    }
+    setSubiendoComprobante(false);
+  };
+
+  // Helper: detecta si una forma de pago es virtual (todo lo que no sea Efectivo ni CxC)
+  const esFormaPagoVirtual = (fp) => fp && fp !== 'Efectivo' &&
+    fp !== 'A crédito (CxC)' && fp !== 'A crédito' && fp !== 'CXC' && fp !== 'Cuenta por Pagar';
+  const esFormaPagoCxC = (fp) => fp === 'A crédito (CxC)' || fp === 'A crédito' || fp === 'CXC' || fp === 'Cuenta por Pagar';
 
   useEffect(() => {
     cargarClientes(); cargarProductos(); cargarEmpresas(); cargarMensajeros(); cargarFormasPago();
@@ -180,6 +209,10 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
     if (tipoServicio !== 'interna' && tipoServicio !== 'cobranza' && items.length === 0) return setError('Agrega al menos un producto');
     if (esInternaOProd && items.length === 0) return setError('Agrega al menos una tarea o ítem');
     if (!esInternaOProd && tipoServicio !== 'cobranza' && !formaPago) return setError('Selecciona la forma de pago');
+    // Ola 2.5: si marcó "cliente ya pagó" exige el comprobante
+    if (pagoAdelantado && !fotoComprobante) {
+      return setError('Marcaste que el cliente ya pagó. Sube la foto del comprobante o desmarca la casilla.');
+    }
     setGuardando(true); setError('');
     try {
       const res = await axios.post(API + '/orders', {
@@ -205,6 +238,11 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
         requiereFactura: esInternaOProd ? false : ((empresaSel?.iva > 0) || clientePideFactura),
         clienteDireccionPrincipal: esInternaOProd ? '' : (clienteSel?.direccionPrincipal || ''),
         clienteTelefono: esInternaOProd ? '' : (clienteSel?.celular || ''),
+        // Ola 2.5: comprobante de pago adelantado
+        fotoTransferenciaUrl: pagoAdelantado ? fotoComprobante : undefined,
+        pagoAdelantado: pagoAdelantado,
+        pagado: pagoAdelantado ? true : undefined,
+        pagoVirtualPendienteValidar: pagoAdelantado ? true : undefined,
       }, { headers });
       setOrdenCreada({ ...res.data, items, clienteNombre: esInternaOProd ? 'TAREA INTERNA' : clienteSel.nombre, clienteNit: esInternaOProd ? '' : clienteSel.nit, clienteCelular: esInternaOProd ? '' : clienteSel.celular, sucursalNombre: sucursalSel ? sucursalSel.nombre : '', formaPago, notasOrden: notas, extintorPrestamo, numeroFactura, fechaProgramada, total, ordenesACobrar: tipoServicio === 'cobranza' ? cxcCliente.map(o => ({ ordenId: o.id, numeroOrden: o.numeroOrden, saldo: o.saldoPendiente })) : [], montoCobrar: tipoServicio === 'cobranza' ? cxcCliente.reduce((s, o) => s + o.saldoPendiente, 0) : 0 });
     } catch (err) { setError((err.response && err.response.data && err.response.data.error) ? err.response.data.error : 'Error al crear la orden'); }
@@ -330,8 +368,8 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                     </select>
                     <div style={{ fontSize: 12, color: '#6b7280', marginTop: 6 }}>
                       {tipoServicio === 'produccion'
-                        ? 'Ej: Pedro (taller) → recargar 10 extintores de cambio. Quedan en bodega como stock.'
-                        : 'Ej: Maykol (mensajero) → comprar resma de papel. Es una diligencia, sin inventario.'}
+                        ? 'Ej: Técnico de taller → recargar 10 extintores de cambio. Quedan en bodega como stock.'
+                        : 'Ej: Mensajero → comprar resma de papel. Es una diligencia, sin inventario.'}
                     </div>
                   </div>
                 </div>
@@ -524,9 +562,73 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                   <label style={s.label}>Forma de pago *</label>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
                     {formasPagoConfig.map(f => (
-                      <button key={f.nombre} type="button" onClick={() => setFormaPago(f.nombre)} style={{ padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: formaPago === f.nombre ? '#0284c7' : '#f3f4f6', color: formaPago === f.nombre ? '#fff' : '#374151', border: formaPago === f.nombre ? '2px solid #0284c7' : '2px solid transparent' }}>{f.nombre}</button>
+                      <button key={f.nombre} type="button" onClick={() => {
+                        setFormaPago(f.nombre);
+                        // Reset comprobante al cambiar forma de pago
+                        setPagoAdelantado(false);
+                        setFotoComprobante('');
+                      }} style={{ padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: formaPago === f.nombre ? '#0284c7' : '#f3f4f6', color: formaPago === f.nombre ? '#fff' : '#374151', border: formaPago === f.nombre ? '2px solid #0284c7' : '2px solid transparent' }}>{f.nombre}</button>
                     ))}
                   </div>
+
+                  {/* Ola 2.5: Aviso CxC */}
+                  {esFormaPagoCxC(formaPago) && (
+                    <div style={{
+                      marginTop: 10, padding: '10px 14px',
+                      background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8,
+                      fontSize: 12, color: '#78350f', display: 'flex', gap: 10, alignItems: 'flex-start'
+                    }}>
+                      <span style={{ fontSize: 18 }}>💳</span>
+                      <div>
+                        <strong>Esta orden inicia como Cuenta por Cobrar (CxC).</strong>
+                        <br />
+                        Si el cliente decide pagar al recoger o al recibir el servicio, el mensajero puede registrar el pago desde Logística. La orden quedará marcada como pagada y NO se permitirá cobrar de nuevo.
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Ola 2.5: Comprobante de pago adelantado para formas virtuales */}
+                  {esFormaPagoVirtual(formaPago) && (
+                    <div style={{
+                      marginTop: 10, padding: '12px 14px',
+                      background: '#eff6ff', border: '1px solid #93c5fd', borderRadius: 8
+                    }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#1e3a8a' }}>
+                        <input type="checkbox" checked={pagoAdelantado}
+                          onChange={e => {
+                            setPagoAdelantado(e.target.checked);
+                            if (!e.target.checked) setFotoComprobante('');
+                          }}
+                          style={{ width: 16, height: 16, cursor: 'pointer' }} />
+                        El cliente ya pagó por {formaPago} (cargar comprobante)
+                      </label>
+
+                      {pagoAdelantado && (
+                        <div style={{ marginTop: 10 }}>
+                          <div style={{ fontSize: 11, color: '#1e3a8a', marginBottom: 6 }}>
+                            📷 Sube la captura/foto del comprobante. Quedará pendiente de validación por Admin/Tesorería.
+                          </div>
+                          <input ref={fotoComprobanteRef} type="file" accept="image/*"
+                            style={{ display: 'none' }}
+                            onChange={e => e.target.files[0] && subirComprobante(e.target.files[0])} />
+                          {fotoComprobante ? (
+                            <div style={{ position: 'relative' }}>
+                              <img src={fotoComprobante} alt="comprobante"
+                                style={{ width: '100%', maxHeight: 200, objectFit: 'contain', borderRadius: 6, background: '#fff' }} />
+                              <button type="button" onClick={() => setFotoComprobante('')}
+                                style={{ position: 'absolute', top: 6, right: 6, background: '#dc2626', color: '#fff', border: 'none', borderRadius: '50%', width: 26, height: 26, cursor: 'pointer', fontSize: 13 }}>✕</button>
+                            </div>
+                          ) : (
+                            <button type="button" onClick={() => fotoComprobanteRef.current?.click()}
+                              disabled={subiendoComprobante}
+                              style={{ width: '100%', padding: '10px', border: '2px dashed #93c5fd', borderRadius: 8, background: '#fff', cursor: 'pointer', fontSize: 13, color: '#1e3a8a', fontWeight: 600 }}>
+                              {subiendoComprobante ? 'Subiendo...' : '📷 Cargar foto del comprobante'}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 

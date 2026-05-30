@@ -383,39 +383,88 @@ router.put('/config', authenticate, async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 // POST /api/cxc/cobrar — Registrar cobranza parcial (CTRL-003)
 // ══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// POST /api/cxc/cobrar — Cobranza Ola 2.5 Bloque 3 (ampliado)
+// ─────────────────────────────────────────────────────────────────────────────
+// Ahora soporta los 4 escenarios completos de cobranza:
+//   A. Cliente paga TODO (montoAbonado = saldoPendiente)
+//   B. Cliente paga SOLO ALGUNAS (frontend filtra ordenesCobradas)
+//   C. ABONO PARCIAL (montoAbonado < saldoPendiente)
+//   D. Con RETENCIÓN por orden (tipoRetencion + porcentaje + valor calculado)
+//
+// Body esperado:
+// {
+//   clienteId, metodoPago, cambio,
+//   cajaId,                      ← AHORA viene del request (no de orden.cajaId)
+//   ordenesCobradas: [{
+//     ordenId, numeroOrden,
+//     monto,                     ← cuánto efectivo recibió el mensajero
+//     retenciones: [{            ← NUEVO: una o varias retenciones por orden
+//       tipoId, etiqueta, porcentaje, base, valor
+//     }],
+//     retencionTotal             ← suma de las retenciones para esta orden
+//   }]
+// }
+//
+// La regla: el SALDO de la orden baja por (monto + retencionTotal).
+// El efectivo en caja sube solo por `monto`. La retención se registra como
+// egreso categoría "Retefuente" (cuenta por pagar a la DIAN).
+// ═══════════════════════════════════════════════════════════════════════════════
 router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) => {
   try {
     const userId = req.adminId || req.user.uid || req.user.id;
-    const { clienteId, ordenesCobradas = [], dineroTotal, metodoPago, cambio } = req.body;
+    const { clienteId, ordenesCobradas = [], dineroTotal, metodoPago, cambio, cajaId } = req.body;
 
     if (!clienteId) return res.status(400).json({ error: 'clienteId requerido' });
-    if (!ordenesCobradas || ordenesCobradas.length === 0) return res.status(400).json({ error: 'Selecciona al menos una factura' });
-    if (!dineroTotal || dineroTotal <= 0) return res.status(400).json({ error: 'Monto debe ser mayor a 0' });
+    if (!ordenesCobradas || ordenesCobradas.length === 0) {
+      return res.status(400).json({ error: 'Selecciona al menos una factura' });
+    }
+    if (dineroTotal === undefined || dineroTotal === null) {
+      return res.status(400).json({ error: 'dineroTotal requerido' });
+    }
+    if (!cajaId) return res.status(400).json({ error: 'cajaId requerido' });
+    if (!metodoPago) return res.status(400).json({ error: 'metodoPago requerido' });
 
-    // ✅ Validar que cada orden existe y tiene saldo pendiente
+    // Validar existencia de la caja
+    const cajaRef = db.collection('cajas').doc(cajaId);
+    const cajaDoc = await cajaRef.get();
+    if (!cajaDoc.exists) return res.status(404).json({ error: 'Caja no encontrada' });
+
+    // ── Validaciones por orden ────────────────────────────────────────────────
     for (const oc of ordenesCobradas) {
       const ordenDoc = await db.collection('orders').doc(oc.ordenId).get();
       if (!ordenDoc.exists) {
-        return res.status(404).json({ error: `Orden ${oc.ordenId} no encontrada` });
+        return res.status(404).json({ error: `Orden ${oc.numeroOrden || oc.ordenId} no encontrada` });
       }
 
       const orden = ordenDoc.data();
-      if (!orden.cxcSaldo || orden.cxcSaldo <= 0) {
-        return res.status(400).json({ error: `Orden ${oc.numeroOrden} no está en CxC o ya está pagada` });
+      const saldo = (orden.cxcSaldo !== undefined ? orden.cxcSaldo : (orden.total - (orden.montoPagado || 0))) || 0;
+      if (saldo <= 0) {
+        return res.status(400).json({ error: `Orden ${oc.numeroOrden} ya está pagada` });
       }
 
-      if (oc.monto > orden.cxcSaldo) {
-        return res.status(400).json({ error: `Monto para ${oc.numeroOrden} excede saldo pendiente` });
+      const montoEfectivo = Number(oc.monto) || 0;
+      const retencionTotal = Number(oc.retencionTotal) || 0;
+      const aplicadoTotal = montoEfectivo + retencionTotal;
+
+      if (aplicadoTotal <= 0) {
+        return res.status(400).json({ error: `Monto inválido para ${oc.numeroOrden}` });
+      }
+      if (aplicadoTotal > saldo + 1) { // tolerancia $1 por redondeo
+        return res.status(400).json({
+          error: `Para ${oc.numeroOrden}: monto + retención ($${aplicadoTotal.toLocaleString('es-CO')}) excede saldo ($${saldo.toLocaleString('es-CO')})`
+        });
       }
     }
 
-    // ✅ Registrar cobranza
+    // ── Registrar cobranza maestra ────────────────────────────────────────────
     const cobroRef = await db.collection('cxc_cobros').add({
       adminId: userId,
       clienteId,
       dineroTotal,
       metodoPago,
       cambio: cambio || 0,
+      cajaId,
       ordenesCobradas,
       usuarioId: req.user.uid || req.user.id,
       usuarioNombre: req.user.nombre || req.user.email,
@@ -423,98 +472,193 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // ✅ Actualizar CADA orden cobrada
+    // ── Procesar cada orden ──────────────────────────────────────────────────
     let saldoTotalPendiente = 0;
+    let efectivoIngresadoCaja = 0;
+    const retencionesGeneradas = [];
+
     for (const oc of ordenesCobradas) {
       const ordenRef = db.collection('orders').doc(oc.ordenId);
       const ordenDoc = await ordenRef.get();
       const orden = ordenDoc.data();
 
-      const saldoAnterior = orden.cxcSaldo || 0;
-      const nuevoSaldo = Math.max(0, saldoAnterior - oc.monto);
+      const saldoAnterior = (orden.cxcSaldo !== undefined ? orden.cxcSaldo : (orden.total - (orden.montoPagado || 0))) || 0;
+      const montoEfectivo = Number(oc.monto) || 0;
+      const retencionTotal = Number(oc.retencionTotal) || 0;
+      const aplicado = montoEfectivo + retencionTotal;
+      const nuevoSaldo = Math.max(0, saldoAnterior - aplicado);
 
-      await ordenRef.update({
+      // Determinar estado nuevo
+      const yaPagada = nuevoSaldo === 0;
+      const ordenUpdate = {
         cxcSaldo: nuevoSaldo,
-        cxcEstado: nuevoSaldo === 0 ? 'pagada' : 'parcial',
+        cxcEstado: yaPagada ? 'pagada' : 'parcial',
+        montoPagado: admin.firestore.FieldValue.increment(montoEfectivo),
         cxcHistorial: admin.firestore.FieldValue.arrayUnion({
-          tipo: 'pago',
-          monto: oc.monto,
+          tipo: yaPagada ? 'pago_total' : 'abono_parcial',
+          monto: montoEfectivo,
+          retencionTotal,
+          retenciones: oc.retenciones || [],
           metodoPago,
           cobroId: cobroRef.id,
-          fecha: new Date().toISOString()
+          fecha: new Date().toISOString(),
+          saldoAnterior, saldoNuevo: nuevoSaldo
+        }),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+
+      // Si quedó completamente pagada, marcar completada
+      if (yaPagada) {
+        ordenUpdate.estado = 'completada';
+        ordenUpdate.pagado = true;
+        ordenUpdate.fechaPago = new Date().toISOString();
+        ordenUpdate.dineroEnCaja = true;
+        ordenUpdate.dineroEnCajaFecha = new Date().toISOString();
+        ordenUpdate.dineroEnCajaPor = req.user.email;
+        ordenUpdate.retencionPracticada = (orden.retencionPracticada || 0) + retencionTotal;
+        ordenUpdate.historialEstados = admin.firestore.FieldValue.arrayUnion({
+          estado: 'completada',
+          fecha: new Date().toISOString(),
+          usuarioId: req.user.uid || req.user.id,
+          usuarioNombre: req.user.nombre || req.user.email,
+          nota: `Pago CxC final — efectivo $${montoEfectivo.toLocaleString('es-CO')}${retencionTotal > 0 ? ` + retención $${retencionTotal.toLocaleString('es-CO')}` : ''}`
+        });
+      }
+
+      await ordenRef.update(ordenUpdate);
+
+      saldoTotalPendiente += nuevoSaldo;
+      efectivoIngresadoCaja += montoEfectivo;
+
+      // Registrar las retenciones de esta orden como egresos (cuenta por pagar a DIAN)
+      for (const r of (oc.retenciones || [])) {
+        const valor = Number(r.valor) || 0;
+        if (valor <= 0) continue;
+        const egresoRef = await db.collection('egresos').add({
+          userId,
+          numero: 'RET-' + new Date().getTime() + '-' + Math.floor(Math.random() * 100),
+          concepto: `${r.etiqueta || 'Retención'} (${r.porcentaje}%) practicada por ${orden.clienteNombre} — ${orden.numeroOrden}`,
+          categoria: 'Retefuente',
+          tipo: 'retencion',
+          subtipo: r.tipoId || '',
+          monto: valor,
+          base: r.base || 0,
+          porcentaje: r.porcentaje || 0,
+          estado: 'PENDIENTE',
+          clienteId,
+          ordenOrigen: oc.ordenId,
+          numeroOrdenOrigen: orden.numeroOrden,
+          cobroId: cobroRef.id,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        retencionesGeneradas.push({ id: egresoRef.id, ...r, ordenId: oc.ordenId });
+      }
+    }
+
+    // ── Una sola operación de caja por todo el cobro ─────────────────────────
+    if (efectivoIngresadoCaja > 0) {
+      await cajaRef.update({
+        saldo: admin.firestore.FieldValue.increment(efectivoIngresadoCaja),
+        ultimoIngreso: new Date().toISOString(),
+        historialMovimientos: admin.firestore.FieldValue.arrayUnion({
+          tipo: 'ingreso_cobranza',
+          monto: efectivoIngresadoCaja,
+          formaPago: metodoPago,
+          cobroId: cobroRef.id,
+          clienteId,
+          cantidadOrdenes: ordenesCobradas.length,
+          fecha: new Date().toISOString(),
+          usuarioNombre: req.user.nombre || req.user.email
         }),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
 
-      saldoTotalPendiente += nuevoSaldo;
-
-      // ✅ Registrar dinero en caja
-      const cajaRef = db.collection('cajas').doc(orden.cajaId);
-      const cajaDoc = await cajaRef.get();
-      if (cajaDoc.exists) {
-        const caja = cajaDoc.data();
-        const saldoNuevo = (caja.saldo || 0) + oc.monto;
-
-        await cajaRef.update({
-          saldo: saldoNuevo,
-          ultimoIngreso: new Date().toISOString(),
-          historialMovimientos: admin.firestore.FieldValue.arrayUnion({
-            tipo: 'ingreso_cobranza',
-            monto: oc.monto,
-            formaPago: metodoPago,
-            ordenId: oc.ordenId,
-            numeroOrden: oc.numeroOrden,
-            clienteId,
-            fecha: new Date().toISOString(),
-            usuarioNombre: req.user.nombre || req.user.email
-          }),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-      }
+      // Movimiento independiente para reportes
+      await db.collection('movimientos').add({
+        userId, cajaId,
+        tipo: 'ingreso',
+        concepto: `Cobranza CxC — Cliente ${clienteId} — ${ordenesCobradas.length} factura(s)`,
+        monto: efectivoIngresadoCaja,
+        referencia: cobroRef.id,
+        formaPago: metodoPago,
+        creadoPor: req.user.email,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
     }
 
-    // ✅ Actualizar CxC cliente
+    // ── Actualizar CxC cliente ───────────────────────────────────────────────
     const cxcRef = db.collection('cxc_clientes').doc(clienteId);
     const cxcDoc = await cxcRef.get();
-    const cxcAnterior = cxcDoc?.data() || { ordenes: [] };
+    const cxcAnterior = cxcDoc.exists ? cxcDoc.data() : { ordenes: [] };
 
-    const nuevasOrdenes = cxcAnterior.ordenes.map(o => {
+    const nuevasOrdenes = (cxcAnterior.ordenes || []).map(o => {
       const ordenCobrada = ordenesCobradas.find(oc => oc.ordenId === o.ordenId);
       if (!ordenCobrada) return o;
-
-      const nuevoSaldo = Math.max(0, (o.saldoPendiente || 0) - ordenCobrada.monto);
-      return {
-        ...o,
-        saldoPendiente: nuevoSaldo,
-        cxcEstado: nuevoSaldo === 0 ? 'pagada' : 'parcial'
-      };
+      const aplicado = (Number(ordenCobrada.monto) || 0) + (Number(ordenCobrada.retencionTotal) || 0);
+      const nuevoSaldo = Math.max(0, (o.saldoPendiente || 0) - aplicado);
+      return { ...o, saldoPendiente: nuevoSaldo, cxcEstado: nuevoSaldo === 0 ? 'pagada' : 'parcial' };
     });
 
-    await cxcRef.update({
+    await cxcRef.set({
       adminId: userId,
       ordenes: nuevasOrdenes,
       totalPendiente: saldoTotalPendiente,
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+    }, { merge: true });
 
-    // ✅ Auditoría
     await auditar({
-      accion: 'CXC_COBRO_PARCIAL',
-      descripcion: `Cobranza: ${ordenesCobradas.length} facturas, total $${dineroTotal}. Saldo cliente: $${saldoTotalPendiente}. Cambio: $${cambio || 0}`,
+      accion: 'CXC_COBRO',
+      descripcion: `Cobranza: ${ordenesCobradas.length} factura(s), efectivo $${efectivoIngresadoCaja.toLocaleString('es-CO')}, retención $${retencionesGeneradas.reduce((s, r) => s + (Number(r.valor) || 0), 0).toLocaleString('es-CO')}. Saldo restante cliente: $${saldoTotalPendiente.toLocaleString('es-CO')}`,
       usuarioId: req.user.uid || req.user.id,
       usuarioEmail: req.user.email,
-      datos: { clienteId, dineroTotal, ordenesCobradas, saldoNuevo: saldoTotalPendiente }
+      datos: { clienteId, dineroTotal, efectivoIngresadoCaja, ordenesCobradas, retenciones: retencionesGeneradas, saldoNuevo: saldoTotalPendiente }
     });
 
     res.json({
       success: true,
       cobroId: cobroRef.id,
+      efectivoIngresadoCaja,
+      retencionesGeneradas,
       saldoNuevo: saldoTotalPendiente,
       ordenesCobradas: nuevasOrdenes
     });
   } catch (error) {
-    console.error('Error en cobranza parcial:', error);
+    console.error('Error en cobranza:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GET /api/cxc/retenciones-config — Catálogo de tipos de retención del admin
+// ─────────────────────────────────────────────────────────────────────────────
+// Ola 2.5 Bloque 3: devuelve el catálogo de tipos de retención configurado por
+// el admin (4% Renta, 6% Servicios, 15% ReteIVA, etc). Si no hay catálogo,
+// devuelve los defaults estándar Colombia.
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get('/retenciones-config', authenticate, async (req, res) => {
+  try {
+    const userId = req.adminId || req.user.uid || req.user.id;
+    const doc = await db.collection('configuracion').doc(userId).get();
+
+    const DEFAULTS = [
+      { id: 'rte_compras_4',    etiqueta: 'Retención Renta Compras',   porcentaje: 4,    tipo: 'renta',  activo: true },
+      { id: 'rte_servicios_6',  etiqueta: 'Retención Renta Servicios', porcentaje: 6,    tipo: 'renta',  activo: true },
+      { id: 'rte_iva_15',       etiqueta: 'ReteIVA',                    porcentaje: 15,   tipo: 'iva',    activo: true },
+      { id: 'rte_ica_com_07',   etiqueta: 'ReteICA Comercial',          porcentaje: 0.7,  tipo: 'ica',    activo: true },
+      { id: 'rte_ica_srv_10',   etiqueta: 'ReteICA Servicios',          porcentaje: 1.0,  tipo: 'ica',    activo: true },
+      { id: 'rte_personalizado',etiqueta: 'Personalizado (digitar %)',  porcentaje: null, tipo: 'custom', activo: true },
+    ];
+
+    if (!doc.exists) return res.json({ retenciones: DEFAULTS });
+
+    const data = doc.data();
+    const retenciones = Array.isArray(data.retenciones) && data.retenciones.length > 0
+      ? data.retenciones
+      : DEFAULTS;
+
+    res.json({ retenciones });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

@@ -16,8 +16,13 @@ const ESTADO_CONFIG = {
   entrega_cobranza: { label: 'Entrega/Cobranza', color: '#ea580c', bg: '#fff7ed' },
 };
 
-const EstadoBadge = ({ estado }) => {
-  const cfg = ESTADO_CONFIG[estado] || { label: estado, color: '#6b7280', bg: '#f3f4f6' };
+const EstadoBadge = ({ estado, orden }) => {
+  let cfg = ESTADO_CONFIG[estado] || { label: estado, color: '#6b7280', bg: '#f3f4f6' };
+  // Ola 2.5: si la orden ya está pagada, el estado "entrega_cobranza" se muestra
+  // como "Entrega Final" para reflejar que no hay cobro pendiente.
+  if (estado === 'entrega_cobranza' && orden && orden.pagado === true) {
+    cfg = { label: 'Entrega Final', color: '#16a34a', bg: '#f0fdf4' };
+  }
   return <span style={{ padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700, background: cfg.bg, color: cfg.color }}>{cfg.label}</span>;
 };
 
@@ -140,6 +145,11 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
   const [fotoUrl, setFotoUrl]             = useState('');
   const [fotoTransUrl, setFotoTransUrl]   = useState('');
   const [subiendoFoto, setSubiendoFoto]   = useState(false);
+
+  // Ola 2.5: cobranza avanzada por orden (selección, abono parcial, retenciones)
+  const [cobroPorOrden, setCobroPorOrden] = useState({}); // { ordenId: { selected, monto, retenciones[] } }
+  const [retencionesCat, setRetencionesCat] = useState([]); // catálogo del admin
+  const [agregandoRetIdx, setAgregandoRetIdx] = useState(null); // { ordenId, retId | 'custom' }
   const [guardando, setGuardando]         = useState(false);
   const [error, setError]                 = useState('');
   const [items, setItems]                 = useState(orden.items ? [...orden.items] : []);
@@ -148,6 +158,10 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
   const fotoRef = useRef(null);
   const fotoTransRef = useRef(null);
 
+  // Ola 2.5: préstamos pendientes que el cliente debe devolver al recibir
+  const [prestamosCliente, setPrestamosCliente] = useState([]); // [{id, numeroExtintor, fechaSalida, ordenSalidaNumero}]
+  const [prestamosRecogidos, setPrestamosRecogidos] = useState({}); // { prestamoId: bool }
+
   useEffect(() => {
     // Cargar formas de pago desde configuración
     fetch(`${API}/configuracion`, { headers })
@@ -155,13 +169,42 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
       .then(d => {
         const fps = (d?.formasPago || []).filter(f => f.activa && f.nombre !== 'Cuenta por Pagar' && f.nombre !== 'A crédito (CxC)').map(f => f.nombre);
         if (fps.length > 0) setFormasPago(fps);
+        // Ola 2.5: catálogo de retenciones activas
+        const rets = (d?.retenciones || []).filter(r => r.activo);
+        setRetencionesCat(rets);
       }).catch(() => {});
+
+    // Ola 2.5: inicializar el estado de cobro por orden
+    if ((orden.ordenesACobrar || []).length > 0) {
+      const init = {};
+      (orden.ordenesACobrar || []).forEach(o => {
+        init[o.ordenId || o.id] = {
+          selected: true,           // por defecto todas seleccionadas
+          monto: String(o.saldo || 0), // por defecto cobra el total
+          retenciones: []
+        };
+      });
+      setCobroPorOrden(init);
+    }
 
     // Cargar productos disponibles
     fetch(`${API}/products`, { headers })
       .then(r => r.json())
       .then(d => setProductosDisp((Array.isArray(d) ? d : []).filter(p => p.activo !== false && p.tipo !== 'insumo')))
       .catch(() => {});
+
+    // Ola 2.5: cargar préstamos pendientes del cliente cuando estamos en paso de entrega
+    if (orden.clienteId && ['en_ruta_entrega', 'entrega_cobranza'].includes(orden.estado)) {
+      fetch(`${API}/logistica/extintores-prestamo?estado=prestado`, { headers })
+        .then(r => r.json())
+        .then(d => {
+          const lista = Array.isArray(d) ? d : [];
+          // Filtrar solo los del cliente actual
+          const delCliente = lista.filter(p => p.clienteId === orden.clienteId);
+          setPrestamosCliente(delCliente);
+        })
+        .catch(() => {});
+    }
   }, []);
 
   const agregarProducto = (prod) => {
@@ -229,6 +272,7 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
     let deficiencia = null;
     let nuevoAdvertencia = null;
 
+    // ── Foto recolección/entrega — ALERTA (no bloquea, queda como deficiencia)
     if (necesitaFotoRecogida && !fotoUrl) {
       deficiencia = 'foto_recogida_faltante';
       nuevoAdvertencia = '⚠️ Foto de recogida faltante — afectará tu evaluación de performance';
@@ -236,6 +280,20 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
     if (necesitaFotoEntrega && !fotoUrl) {
       deficiencia = 'foto_entrega_faltante';
       nuevoAdvertencia = '⚠️ Foto de entrega faltante — afectará tu evaluación de performance';
+    }
+
+    // ── Foto pago electrónico — BLOQUEA (SaaS-ready: cualquier forma que no sea
+    // Efectivo ni CxC. Si mañana el admin agrega "Bold" o "Daviplata", pedirá foto.)
+    const esPagoVirtual = formaPago &&
+      formaPago !== 'Efectivo' &&
+      formaPago !== 'A crédito (CxC)' &&
+      formaPago !== 'A crédito' &&
+      formaPago !== 'CXC' &&
+      formaPago !== 'Cuenta por Pagar';
+    const hayCobroVirtual = esPagoVirtual && (Number(cobro) > 0 || esCobranza);
+    if (hayCobroVirtual && !fotoTransUrl) {
+      setError(`⛔ Pago por ${formaPago} requiere foto del comprobante (obligatoria).`);
+      return;
     }
 
     // ✅ Si hay deficiencia y NO está desbloqueado, mostrar warning
@@ -249,16 +307,45 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
     setError('');
     setAdvertencia(null);
     try {
+      // Ola 2.5: si es cobranza, construir ordenesCobradas con monto y retenciones por orden
+      let ordenesCobradasPayload;
+      if (esCobranza && Object.keys(cobroPorOrden).length > 0) {
+        ordenesCobradasPayload = (orden.ordenesACobrar || [])
+          .filter(o => {
+            const d = cobroPorOrden[o.ordenId || o.id];
+            return d && d.selected && (Number(d.monto) > 0 || (d.retenciones || []).length > 0);
+          })
+          .map(o => {
+            const key = o.ordenId || o.id;
+            const d = cobroPorOrden[key];
+            const retTotal = (d.retenciones || []).reduce((s, r) => s + (Number(r.valor) || 0), 0);
+            return {
+              ordenId: key,
+              numeroOrden: o.numeroOrden,
+              monto: Number(d.monto) || 0,
+              retenciones: d.retenciones || [],
+              retencionTotal: retTotal
+            };
+          });
+      }
+
+      // Ola 2.5: IDs de préstamos que el mensajero está marcando como recogidos
+      const prestamosDevueltosIds = Object.entries(prestamosRecogidos)
+        .filter(([_, recogido]) => recogido)
+        .map(([id]) => id);
+
       await onAvanzar(orden.id, {
         nuevoEstado: siguienteEstado,
         nota,
         extintorPrestamo: necesitaExtintor ? extintor : undefined,
-        fotoUrl: fotoUrl || null, // ✅ Permitir null
+        fotoUrl: fotoUrl || null,
         cobro: Number(cobro) > 0 ? cobro : undefined,
-        formaPago: Number(cobro) > 0 ? formaPago : undefined,
+        formaPago: (Number(cobro) > 0 || esCobranza) ? formaPago : undefined,
         fotoTransferenciaUrl: fotoTransUrl || undefined,
         items: puedeEditarItems ? items : undefined,
-        deficiencia: deficiencia || null, // ✅ Registrar deficiencia
+        deficiencia: deficiencia || null,
+        ordenesCobradas: ordenesCobradasPayload,
+        prestamosDevueltosIds: prestamosDevueltosIds.length > 0 ? prestamosDevueltosIds : undefined,
       });
       setPinDesbloqueado(false);
     } catch (e) {
@@ -291,7 +378,7 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
           {error && <div style={s.alertError}>{error}</div>}
 
           <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 13 }}>
-            <EstadoBadge estado={orden.estado} /> → <EstadoBadge estado={siguienteEstado} />
+            <EstadoBadge estado={orden.estado} orden={orden} /> → <EstadoBadge estado={siguienteEstado} orden={orden} />
           </div>
 
           {/* Alerta QR sin asignar — solo en despacho */}
@@ -333,6 +420,79 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
               <label style={s.label}>Extintor en préstamo <span style={{ fontWeight: 400, color: '#9ca3af' }}>(que dejas al cliente)</span></label>
               <input style={s.input} placeholder="#001, 1x10LBS, etc." value={extintor}
                 onChange={e => setExtintor(e.target.value)} />
+            </div>
+          )}
+
+          {/* Ola 2.5: Préstamos del cliente a recoger en la entrega */}
+          {['en_ruta_entrega', 'entrega_cobranza'].includes(orden.estado) && prestamosCliente.length > 0 && (
+            <div style={{
+              marginBottom: 14, padding: '12px 14px',
+              background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 20 }}>🔁</span>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#78350f' }}>
+                    Extintores de préstamo a recoger ({prestamosCliente.length})
+                  </div>
+                  <div style={{ fontSize: 11, color: '#92400e' }}>
+                    Marca los que el cliente te devuelve al entregar
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {prestamosCliente.map(p => {
+                  const recogido = prestamosRecogidos[p.id];
+                  return (
+                    <label key={p.id} style={{
+                      display: 'flex', alignItems: 'center', gap: 10,
+                      padding: '8px 10px', borderRadius: 6,
+                      background: recogido ? '#dcfce7' : '#fff',
+                      border: recogido ? '1px solid #86efac' : '1px solid #e5e7eb',
+                      cursor: 'pointer'
+                    }}>
+                      <input type="checkbox" checked={!!recogido}
+                        onChange={e => setPrestamosRecogidos(prev => ({ ...prev, [p.id]: e.target.checked }))}
+                        style={{ width: 18, height: 18, cursor: 'pointer' }} />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: recogido ? '#15803d' : '#78350f' }}>
+                          {p.numeroExtintor}
+                        </div>
+                        <div style={{ fontSize: 10, color: '#6b7280' }}>
+                          {p.numeroOrden ? `De orden ${p.numeroOrden} · ` : ''}
+                          {p.fechaSalida ? `Desde ${new Date(p.fechaSalida).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' })}` : ''}
+                        </div>
+                      </div>
+                      {recogido && <span style={{ fontSize: 16, color: '#16a34a' }}>✓</span>}
+                    </label>
+                  );
+                })}
+              </div>
+              {/* Resumen */}
+              {(() => {
+                const totalRecogidos = Object.values(prestamosRecogidos).filter(Boolean).length;
+                const faltantes = prestamosCliente.length - totalRecogidos;
+                if (faltantes > 0) {
+                  return (
+                    <div style={{
+                      marginTop: 8, padding: '6px 10px',
+                      background: '#fef2f2', borderRadius: 6,
+                      fontSize: 11, color: '#991b1b', fontWeight: 600
+                    }}>
+                      ⚠ Faltan {faltantes} préstamo(s) por recoger. Si no los traes, la orden quedará marcada como PENDIENTE — Recoger préstamos.
+                    </div>
+                  );
+                }
+                return (
+                  <div style={{
+                    marginTop: 8, padding: '6px 10px',
+                    background: '#f0fdf4', borderRadius: 6,
+                    fontSize: 11, color: '#15803d', fontWeight: 600
+                  }}>
+                    ✓ Recogiste todos los préstamos pendientes
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -413,33 +573,177 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
             <>
               {esCobranza && (orden.ordenesACobrar || []).length > 0 && (
                 <div style={{ marginBottom: 14 }}>
-                  <label style={s.label}>Órdenes a cobrar</label>
-                  <div style={{ border: '1px solid #fca5a5', borderRadius: 8, overflow: 'hidden' }}>
-                    {(orden.ordenesACobrar || []).map((o, i) => (
-                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid #fee2e2', background: '#fff' }}>
-                        <code style={{ fontSize: 12 }}>{o.numeroOrden}</code>
-                        <span style={{ fontWeight: 700, color: '#dc2626' }}>{fmt(o.saldo)}</span>
-                      </div>
-                    ))}
-                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 12px', background: '#fef2f2', fontWeight: 800 }}>
-                      <span>Total a cobrar:</span>
-                      <span style={{ color: '#dc2626' }}>{fmt(orden.montoCobrar || 0)}</span>
+                  <label style={s.label}>📋 Órdenes a cobrar</label>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 8 }}>
+                    Marca cuáles paga el cliente y cuánto. Puedes registrar abonos parciales y retenciones por orden.
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {(orden.ordenesACobrar || []).map((o, i) => {
+                      const key = o.ordenId || o.id;
+                      const data = cobroPorOrden[key] || { selected: true, monto: String(o.saldo || 0), retenciones: [] };
+                      const montoNum = Number(data.monto) || 0;
+                      const retTotal = (data.retenciones || []).reduce((s, r) => s + (Number(r.valor) || 0), 0);
+                      const aplicado = montoNum + retTotal;
+                      const excede = aplicado > (o.saldo || 0) + 1;
+
+                      return (
+                        <div key={key} style={{
+                          border: data.selected ? '2px solid #0284c7' : '1px solid #e5e7eb',
+                          borderRadius: 10, padding: '10px 12px',
+                          background: data.selected ? '#f0f9ff' : '#fafafa',
+                          opacity: data.selected ? 1 : 0.6
+                        }}>
+                          {/* Cabecera fila */}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <input type="checkbox" checked={!!data.selected}
+                              onChange={e => setCobroPorOrden(p => ({ ...p, [key]: { ...data, selected: e.target.checked } }))}
+                              style={{ width: 18, height: 18, cursor: 'pointer' }} />
+                            <div style={{ flex: 1 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <code style={{ fontSize: 12, color: '#0284c7', fontWeight: 700 }}>{o.numeroOrden}</code>
+                                <span style={{ fontSize: 12, color: '#6b7280' }}>Saldo: <strong style={{ color: '#dc2626' }}>{fmt(o.saldo)}</strong></span>
+                              </div>
+                              {o.numeroFactura && <div style={{ fontSize: 11, color: '#9ca3af' }}>Factura {o.numeroFactura}</div>}
+                            </div>
+                          </div>
+
+                          {data.selected && (
+                            <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px dashed #cbd5e1' }}>
+                              {/* Monto a cobrar */}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                                <label style={{ fontSize: 12, fontWeight: 600, color: '#374151', minWidth: 120 }}>💵 Efectivo recibido</label>
+                                <input type="number" min={0} max={o.saldo}
+                                  style={{ ...s.input, flex: 1, fontSize: 13, padding: '6px 10px' }}
+                                  value={data.monto}
+                                  onChange={e => setCobroPorOrden(p => ({ ...p, [key]: { ...data, monto: e.target.value } }))} />
+                                <button type="button" onClick={() => setCobroPorOrden(p => ({ ...p, [key]: { ...data, monto: String(o.saldo) } }))}
+                                  style={{ padding: '6px 10px', fontSize: 11, background: '#e0f2fe', color: '#0284c7', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>
+                                  Todo
+                                </button>
+                              </div>
+
+                              {/* Retenciones */}
+                              {(data.retenciones || []).map((r, ri) => (
+                                <div key={ri} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, padding: '6px 10px', background: '#fef3c7', borderRadius: 6, fontSize: 12 }}>
+                                  <span style={{ flex: 1 }}>🧾 {r.etiqueta} {r.porcentaje !== null ? `(${r.porcentaje}%)` : ''}</span>
+                                  <span style={{ fontWeight: 700, color: '#92400e' }}>{fmt(r.valor)}</span>
+                                  <button type="button"
+                                    onClick={() => setCobroPorOrden(p => ({ ...p, [key]: { ...data, retenciones: data.retenciones.filter((_, ii) => ii !== ri) } }))}
+                                    style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer', fontSize: 14 }}>✕</button>
+                                </div>
+                              ))}
+
+                              {/* Agregar retención */}
+                              {retencionesCat.length > 0 && (
+                                <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                                  {retencionesCat.map(ret => (
+                                    <button key={ret.id} type="button"
+                                      onClick={() => {
+                                        if (ret.tipo === 'custom') {
+                                          const pct = window.prompt('Porcentaje de retención (%):');
+                                          if (!pct || isNaN(Number(pct))) return;
+                                          const valor = Math.round((o.saldo || 0) * Number(pct) / 100);
+                                          setCobroPorOrden(p => ({ ...p, [key]: { ...data, retenciones: [...data.retenciones, { tipoId: ret.id, etiqueta: ret.etiqueta + ` ${pct}%`, porcentaje: Number(pct), base: o.saldo, valor }] } }));
+                                        } else {
+                                          const valor = Math.round((o.saldo || 0) * (ret.porcentaje || 0) / 100);
+                                          setCobroPorOrden(p => ({ ...p, [key]: { ...data, retenciones: [...data.retenciones, { tipoId: ret.id, etiqueta: ret.etiqueta, porcentaje: ret.porcentaje, base: o.saldo, valor }] } }));
+                                        }
+                                      }}
+                                      style={{ padding: '4px 10px', fontSize: 11, background: '#fff', border: '1px solid #fcd34d', borderRadius: 6, cursor: 'pointer', color: '#92400e', fontWeight: 600 }}>
+                                      + {ret.etiqueta}{ret.porcentaje !== null ? ` ${ret.porcentaje}%` : ''}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+
+                              {/* Resumen aplicación */}
+                              <div style={{ marginTop: 10, padding: '8px 10px', background: '#fff', borderRadius: 6, fontSize: 12 }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#6b7280' }}>
+                                  <span>Aplicado al saldo:</span>
+                                  <strong style={{ color: excede ? '#dc2626' : '#16a34a' }}>{fmt(aplicado)}</strong>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', color: '#6b7280', marginTop: 2 }}>
+                                  <span>Saldo restante:</span>
+                                  <strong style={{ color: (o.saldo - aplicado) > 0 ? '#b45309' : '#16a34a' }}>{fmt(Math.max(0, o.saldo - aplicado))}</strong>
+                                </div>
+                                {excede && <div style={{ color: '#dc2626', marginTop: 4, fontSize: 11 }}>⚠ Excede el saldo de la orden</div>}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {/* Total general */}
+                    {(() => {
+                      const totalEfectivo = Object.values(cobroPorOrden).filter(d => d.selected).reduce((s, d) => s + (Number(d.monto) || 0), 0);
+                      const totalRetencion = Object.values(cobroPorOrden).filter(d => d.selected).reduce((s, d) => s + (d.retenciones || []).reduce((ss, r) => ss + (Number(r.valor) || 0), 0), 0);
+                      return (
+                        <div style={{ background: '#0284c7', color: '#fff', borderRadius: 10, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                            <span>Efectivo a recibir</span>
+                            <strong>{fmt(totalEfectivo)}</strong>
+                          </div>
+                          {totalRetencion > 0 && (
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: 0.85 }}>
+                              <span>Retención total</span>
+                              <span>{fmt(totalRetencion)}</span>
+                            </div>
+                          )}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 15, fontWeight: 800, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.3)' }}>
+                            <span>TOTAL APLICADO</span>
+                            <span>{fmt(totalEfectivo + totalRetencion)}</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )}
+
+              {/* Ola 2.5: si la orden ya está pagada, mostrar banner y omitir campos de cobro */}
+              {!esCobranza && orden.pagado && (
+                <div style={{
+                  marginBottom: 14, padding: '12px 14px',
+                  background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 8,
+                  display: 'flex', alignItems: 'center', gap: 10
+                }}>
+                  <span style={{ fontSize: 22 }}>✅</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: '#166534' }}>
+                      Orden PAGADA — Solo entregar
+                    </div>
+                    <div style={{ fontSize: 11, color: '#15803d', marginTop: 2 }}>
+                      Forma: {orden.formaPago || '—'} · Monto: ${(orden.total || 0).toLocaleString('es-CO')}
+                      {orden.pagoVirtualPendienteValidar && ' · ⏳ Pendiente validar por Admin/Tesorería'}
                     </div>
                   </div>
                 </div>
               )}
-              <div style={{ marginBottom: 14 }}>
+
+              {/* Monto cobrado general (NO cobranza — sigue funcionando igual) */}
+              {!esCobranza && !orden.pagado && (
+                <div style={{ marginBottom: 14 }}>
                 <label style={s.label}>
-                  {esCobranza ? 'Monto cobrado' : orden.estado === 'en_ruta_recogida' ? 'Cobro en recogida' : 'Monto cobrado'}
-                  <span style={{ fontWeight: 400, color: '#9ca3af' }}>{esCobranza ? ' (lo que le pagaron)' : ' (opcional en recogida)'}</span>
+                    {orden.estado === 'en_ruta_recogida' ? 'Cobro en recogida' : 'Monto cobrado'}
+                    <span style={{ fontWeight: 400, color: '#9ca3af' }}> (opcional en recogida)</span>
                 </label>
-                <input type="number" style={s.input} value={cobro} onChange={e => setCobro(e.target.value)} placeholder={esCobranza ? String(orden.montoCobrar || 0) : '0'} />
+                <input type="number" style={s.input} value={cobro} onChange={e => setCobro(e.target.value)} placeholder="0" />
+                {/* Ola 2.5: si la orden NO está pagada todavía y NO es CxC, ofrecer marcar pago en este paso */}
+                {!esCobranza && Number(cobro) === 0 && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: '#6b7280' }}>
+                    💡 Si el cliente ya pagó (electrónico o efectivo), digita el monto aquí y selecciona la forma de pago. La orden quedará marcada como pagada.
+                  </div>
+                )}
               </div>
-              {Number(cobro) > 0 && (
+              )}
+
+              {/* Forma de pago — visible siempre que haya cobro o sea cobranza */}
+              {(Number(cobro) > 0 || esCobranza) && (
                 <div style={{ marginBottom: 14 }}>
                   <label style={s.label}>Forma de pago</label>
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {['Efectivo', 'Transferencia', 'Nequi', 'Datafono'].map(f => (
+                    {formasPago.map(f => (
                       <button key={f} type="button" onClick={() => setFormaPago(f)} style={{
                         padding: '6px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600, border: 'none',
                         background: formaPago === f ? '#0284c7' : '#f3f4f6',
@@ -447,8 +751,12 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
                       }}>{f}</button>
                     ))}
                   </div>
-                  {(formaPago === 'Transferencia' || formaPago === 'Nequi') && (
+                  {/* Foto comprobante: cualquier pago que no sea Efectivo ni CxC */}
+                  {formaPago && formaPago !== 'Efectivo' && formaPago !== 'A crédito (CxC)' && formaPago !== 'A crédito' && formaPago !== 'CXC' && formaPago !== 'Cuenta por Pagar' && (
                     <div style={{ marginTop: 10 }}>
+                      <div style={{ fontSize: 11, color: '#dc2626', fontWeight: 700, marginBottom: 6 }}>
+                        * Foto del comprobante obligatoria para {formaPago}
+                      </div>
                       <input ref={fotoTransRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }}
                         onChange={e => e.target.files[0] && subirFoto(e.target.files[0], setFotoTransUrl)} />
                       {fotoTransUrl ? (
@@ -458,8 +766,8 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
                         </div>
                       ) : (
                         <button onClick={() => fotoTransRef.current?.click()} disabled={subiendoFoto}
-                          style={{ width: '100%', padding: '10px', border: '2px dashed #e5e7eb', borderRadius: 8, background: '#f9fafb', cursor: 'pointer', fontSize: 13, color: '#6b7280' }}>
-                          📷 Foto comprobante
+                          style={{ width: '100%', padding: '10px', border: '2px dashed #dc2626', borderRadius: 8, background: '#fef2f2', cursor: 'pointer', fontSize: 13, color: '#991b1b', fontWeight: 600 }}>
+                          📷 Tomar foto del comprobante
                         </button>
                       )}
                     </div>
@@ -874,7 +1182,7 @@ const GestionLogistica = ({ user }) => {
       {/* MODALES */}
       {modalAsignar && (
         <ModalAsignar
-          ordenes={ordenes.filter(o => ['programada', 'despacho'].includes(o.estado))}
+          ordenes={ordenes.filter(o => ['programada', 'despacho', 'en_ruta_entrega', 'entrega_cobranza'].includes(o.estado))}
           mensajeros={mensajeros}
           onAsignar={asignarRuta}
           onCerrar={() => setModalAsignar(false)}
