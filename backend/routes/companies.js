@@ -82,7 +82,7 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { name, nit, address, phone, cellphone, email, iva, logo } = req.body;
+    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo } = req.body;
 
     if (!name)                      return res.status(400).json({ error: 'Nombre requerido' });
     if (!validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido: mínimo 8 dígitos' });
@@ -90,6 +90,8 @@ router.post('/', async (req, res) => {
     if (!validarCelular(cellphone)) return res.status(400).json({ error: 'Celular inválido: 10 dígitos' });
     if (!validarEmail(email))       return res.status(400).json({ error: 'Email inválido' });
     if (!validarIVA(iva))           return res.status(400).json({ error: 'IVA inválido: entre 0 y 100' });
+    // Mini-Ola 2.6: ciudad obligatoria — el link de Maps depende de esto
+    if (!ciudad || !ciudad.trim())  return res.status(400).json({ error: 'Ciudad requerida (necesaria para Google Maps)' });
 
     let logoUrl = '';
     if (logo && logo.startsWith('data:image')) {
@@ -101,6 +103,7 @@ router.post('/', async (req, res) => {
       name,
       nit,
       address:    address || '',
+      ciudad:     ciudad.trim(),         // Mini-Ola 2.6
       phone,
       cellphone,
       email,
@@ -121,19 +124,22 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     // Aceptamos configCertificado pero IGNORAMOS pinAutorizacion (deprecado).
-    const { name, nit, address, phone, cellphone, email, iva, logo, configCertificado } = req.body;
+    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, configCertificado } = req.body;
 
     if (nit       && !validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido' });
     if (phone     && !validarTelefono(phone))     return res.status(400).json({ error: 'Teléfono inválido' });
     if (cellphone && !validarCelular(cellphone))  return res.status(400).json({ error: 'Celular inválido' });
     if (email     && !validarEmail(email))        return res.status(400).json({ error: 'Email inválido' });
     if (iva       && !validarIVA(iva))            return res.status(400).json({ error: 'IVA inválido' });
+    // Mini-Ola 2.6: si llega ciudad, validar que no esté vacía
+    if (ciudad !== undefined && !ciudad.trim())   return res.status(400).json({ error: 'Ciudad no puede quedar vacía' });
 
     const updateData = { updated_at: new Date().toISOString() };
 
     if (name)      updateData.name      = name;
     if (nit)       updateData.nit       = nit;
     if (address)   updateData.address   = address;
+    if (ciudad !== undefined) updateData.ciudad = ciudad.trim();   // Mini-Ola 2.6
     if (phone)     updateData.phone     = phone;
     if (cellphone) updateData.cellphone = cellphone;
     if (email)     updateData.email     = email;

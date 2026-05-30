@@ -124,6 +124,7 @@ router.post('/', authenticate, async (req, res) => {
       direccionPrincipal, ciudad, departamento,
       empresaId, empresaNombre,
       sucursales = [], notas = '',
+      sectorId = '',           // Mini-Ola 2.6: sector del cliente sin sucursales
       confirmarDuplicado = false
     } = req.body;
 
@@ -174,6 +175,7 @@ router.post('/', authenticate, async (req, res) => {
       departamento: departamento || '',
       empresaId,
       empresaNombre: empresaNombre || '',
+      sectorId: sectorId || '',     // Mini-Ola 2.6: sector general (si no tiene sucursales)
       sucursales: sucursales.map((s, i) => ({
         id: `suc-${Date.now()}-${i}`,
         nombre: s.nombre?.toUpperCase().trim() || '',
@@ -181,6 +183,7 @@ router.post('/', authenticate, async (req, res) => {
         ciudad: s.ciudad || '',
         telefono: s.telefono?.replace(/\D/g, '') || '',
         encargado: s.encargado || '',
+        sectorId: s.sectorId || '', // Mini-Ola 2.6: sector por sucursal
         activo: true
       })),
       notas,
@@ -232,7 +235,8 @@ router.put('/:id', authenticate, async (req, res) => {
       telefono, celular, emailLegal, emailsAdicionales,
       direccionPrincipal, ciudad, departamento,
       sucursales, notas, activo,
-      empresaId, empresaNombre
+      empresaId, empresaNombre,
+      sectorId           // Mini-Ola 2.6
     } = req.body;
 
     const clienteRef = db.collection('clients').doc(id);
@@ -269,10 +273,12 @@ router.put('/:id', authenticate, async (req, res) => {
       ciudad: s.ciudad || '',
       telefono: s.telefono?.replace(/\D/g, '') || '',
       encargado: s.encargado || '',
+      sectorId: s.sectorId || '',          // Mini-Ola 2.6
       activo: s.activo !== false
     }));
     if (notas !== undefined) cambios.notas = notas;
     if (activo !== undefined) cambios.activo = activo;
+    if (sectorId !== undefined) cambios.sectorId = sectorId; // Mini-Ola 2.6: sector general del cliente
     if (empresaId) { cambios.empresaId = empresaId; cambios.empresaNombre = empresaNombre || ''; }
 
     await clienteRef.update(cambios);
@@ -436,6 +442,59 @@ router.get('/:id/historial', authenticate, async (req, res) => {
     });
   } catch (e) {
     console.error('GET /clients/:id/historial:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/clients/:id/asignar-sector — Mini-Ola 2.6
+// Permite asignar/cambiar el sector de un cliente o de una sucursal desde
+// Logística. Sandra (o el comercial) puede usar esto cuando el mensajero
+// llega a una orden sin sector y necesita organizarlo en el flujo.
+// Body: { sectorId: 'sec_norte', sucursalId: 'suc-...' (opcional) }
+// Si llega sucursalId → asigna al sector de esa sucursal.
+// Si no llega sucursalId → asigna al sector general del cliente.
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/:id/asignar-sector', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { sectorId, sucursalId } = req.body;
+
+    if (!sectorId) return res.status(400).json({ error: 'sectorId requerido' });
+
+    const clienteRef = db.collection('clients').doc(id);
+    const doc = await clienteRef.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Cliente no encontrado' });
+
+    const cliente = doc.data();
+    const cambios = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+    if (sucursalId) {
+      // Asignar al sector de UNA sucursal específica
+      const sucursales = (cliente.sucursales || []).map(s =>
+        s.id === sucursalId ? { ...s, sectorId } : s
+      );
+      const existe = sucursales.find(s => s.id === sucursalId);
+      if (!existe) return res.status(404).json({ error: 'Sucursal no encontrada' });
+      cambios.sucursales = sucursales;
+    } else {
+      // Asignar al sector general del cliente
+      cambios.sectorId = sectorId;
+    }
+
+    await clienteRef.update(cambios);
+
+    await auditar({
+      accion: 'ASIGNAR_SECTOR',
+      descripcion: `${req.user.nombre || req.user.email} asignó sector ${sectorId} a ${cliente.nombre}${sucursalId ? ` (sucursal ${sucursalId})` : ''}`,
+      usuarioId: req.adminId || req.user.uid || req.user.id,
+      usuarioNombre: req.user.nombre || req.user.email,
+      datos: { clienteId: id, sectorId, sucursalId }
+    });
+
+    res.json({ ok: true, sectorId, sucursalId: sucursalId || null });
+  } catch (e) {
+    console.error('PUT asignar-sector:', e);
     res.status(500).json({ error: e.message });
   }
 });
