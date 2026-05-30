@@ -43,6 +43,21 @@ const [configCerts, setConfigCerts]   = useState([]);
   const [registrandoPago, setRegPago]   = useState(false);
   const [formasPago, setFormasPago]     = useState(FORMAS_DEFAULT);
 
+  // Modal de anular (Ola 1: ahora exige PIN además del motivo)
+  const [mostrarAnular, setMostrarAnular] = useState(false);
+  const [motivoAnular, setMotivoAnular]   = useState('');
+  const [pinAnular, setPinAnular]         = useState('');
+  const [verPinAnular, setVerPinAnular]   = useState(false);
+  const [anulando, setAnulando]           = useState(false);
+
+  // Ola 2.5: Modal de validar pago electrónico (Admin/Tesorería)
+  const [mostrarValidarPago, setMostrarValidarPago] = useState(false);
+  const [accionPago, setAccionPago]                 = useState(''); // 'aprobar' | 'rechazar'
+  const [motivoValidacion, setMotivoValidacion]     = useState('');
+  const [pinValidacion, setPinValidacion]           = useState('');
+  const [verPinValidacion, setVerPinValidacion]     = useState(false);
+  const [validandoPago, setValidandoPago]           = useState(false);
+
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
   const isAdmin = user?.role === 'admin';
@@ -139,16 +154,95 @@ const cargarConfigCerts = async () => {
     } finally { setRegPago(false); }
   };
 
-  const anularOrden = async () => {
-    const motivo = window.prompt('Motivo de anulación (obligatorio):');
-    if (!motivo?.trim()) return;
-    if (!window.confirm('¿Confirma anular esta orden?')) return;
+  // Click en el botón rojo "Anular" → abrir el modal con motivo + PIN
+  const abrirAnular = () => {
+    setMotivoAnular('');
+    setPinAnular('');
+    setVerPinAnular(false);
+    setError('');
+    setMostrarAnular(true);
+  };
+
+  const confirmarAnular = async () => {
+    setError('');
+    if (!motivoAnular.trim()) {
+      setError('El motivo de anulación es obligatorio');
+      return;
+    }
+    if (!/^\d{4}$/.test(pinAnular)) {
+      setError('El PIN debe ser de 4 dígitos numéricos');
+      return;
+    }
     try {
-      await axios.put(`${API}/orders/${ordenId}/estado`, { nuevoEstado: 'anulada', notas: 'ANULADA: ' + motivo }, { headers });
-      setExito('Orden anulada');
+      setAnulando(true);
+      await axios.put(
+        `${API}/orders/${ordenId}/estado`,
+        {
+          nuevoEstado: 'anulada',
+          notas: motivoAnular.trim(),
+          pin: pinAnular
+        },
+        { headers }
+      );
+      setExito('Orden anulada correctamente');
+      setMostrarAnular(false);
+      setMotivoAnular('');
+      setPinAnular('');
       await cargarOrden();
     } catch (err) {
       setError(err.response?.data?.error || 'Error al anular');
+    } finally {
+      setAnulando(false);
+    }
+  };
+
+  // ── Ola 2.5: Validar Pago Electrónico ────────────────────────────────────
+  // Cuando el mensajero registra un pago por transferencia/Nequi/datafono,
+  // queda pendiente de validación. Admin/Tesorería verifica en el banco y
+  // aprueba (suma a caja) o rechaza (la orden pasa a CxC).
+  const abrirValidarPago = (accion) => {
+    setAccionPago(accion); // 'aprobar' | 'rechazar'
+    setMotivoValidacion('');
+    setPinValidacion('');
+    setVerPinValidacion(false);
+    setError('');
+    setMostrarValidarPago(true);
+  };
+
+  const confirmarValidarPago = async () => {
+    setError('');
+    if (accionPago === 'rechazar' && motivoValidacion.trim().length < 5) {
+      setError('El motivo de rechazo es obligatorio (mínimo 5 caracteres)');
+      return;
+    }
+    if (!/^\d{4}$/.test(pinValidacion)) {
+      setError('El PIN debe ser de 4 dígitos numéricos');
+      return;
+    }
+    try {
+      setValidandoPago(true);
+      const r = await axios.post(
+        `${API}/orders/${ordenId}/validar-pago`,
+        {
+          aprobado: accionPago === 'aprobar',
+          motivo: motivoValidacion.trim(),
+          pin: pinValidacion
+        },
+        { headers }
+      );
+      if (r.data.aprobado) {
+        setExito('✅ Pago aprobado — Dinero registrado en caja, orden completada');
+      } else {
+        setExito('🔄 Pago rechazado — Orden movida a CxC');
+      }
+      setMostrarValidarPago(false);
+      setMotivoValidacion('');
+      setPinValidacion('');
+      await cargarOrden();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Error al validar el pago');
+    } finally {
+      setValidandoPago(false);
     }
   };
 
@@ -168,14 +262,39 @@ const cargarConfigCerts = async () => {
     setTimeout(() => { ventana.print(); }, 500);
   };
 
- const imprimirCertificado = (configCat = null) => {
-    const contenido = generarHTMLCertificadoDinamico(orden, empresa, configCat);
-    const ventana = window.open('', '_blank');
-    ventana.document.write(contenido);
-    ventana.document.close();
-    ventana.focus();
-    setTimeout(() => { ventana.print(); }, 500);
-  };
+ // ─── IMPRIMIR CERTIFICADO ───────────────────────────────────────────────────
+ // Ola 2: ahora llama al endpoint GET /api/orders/:id/certificado/html del
+ // backend (fuente única de verdad del HTML). Antes se generaba en frontend
+ // con generarHTMLCertificadoDinamico, lo cual duplicaba lógica.
+ //
+ // Como el endpoint requiere autenticación (header Authorization), no podemos
+ // hacer window.open directo a la URL. Estrategia: fetch con Bearer token →
+ // obtener HTML → abrir ventana en blanco → escribir el HTML.
+ const imprimirCertificado = async (configCat = null) => {
+   try {
+     const resp = await fetch(`${API}/orders/${ordenId}/certificado/html`, {
+       headers: { Authorization: `Bearer ${token}` }
+     });
+     if (!resp.ok) {
+       const errText = await resp.text();
+       setError('No se pudo generar el certificado. ' + errText.replace(/<[^>]+>/g, '').slice(0, 200));
+       return;
+     }
+     const html = await resp.text();
+     const ventana = window.open('', '_blank');
+     if (!ventana) {
+       setError('El navegador bloqueó la ventana emergente. Habilítala para imprimir.');
+       return;
+     }
+     ventana.document.write(html);
+     ventana.document.close();
+     ventana.focus();
+     // Recargar datos por si el endpoint marcó certificadoGenerado: true.
+     await cargarOrden();
+   } catch (e) {
+     setError('Error al generar certificado: ' + e.message);
+   }
+ };
 
   // Obtener certificados disponibles para esta orden
   const certsDisponibles = () => {
@@ -276,7 +395,7 @@ const cargarConfigCerts = async () => {
 
         <div style={s.acciones}>
           {isAdmin && orden.estado !== 'cuadre_dinero' && orden.estado !== 'anulada' && (
-            <button onClick={anularOrden} style={{ ...s.btnImprimir, background: '#dc2626' }}>🚫 Anular</button>
+            <button onClick={abrirAnular} style={{ ...s.btnImprimir, background: '#dc2626' }}>🚫 Anular</button>
           )}
           <button onClick={enviarWhatsApp} style={s.btnWa}>📱 WhatsApp</button>
           <button onClick={() => imprimirOrden('carta')} style={s.btnImprimir}>🖨️ Imprimir</button>
@@ -316,6 +435,120 @@ const cargarConfigCerts = async () => {
 
       {error && <div style={s.alertError}>{error} <button onClick={() => setError('')} style={{ float: 'right', background: 'none', border: 'none', cursor: 'pointer', color: '#dc2626' }}>✕</button></div>}
       {exito && <div style={s.alertExito}>{exito}</div>}
+
+      {/* ── Ola 2.5: BANNER Pago Electrónico Pendiente de Validación ────────── */}
+      {(() => {
+        const tienePagoElectronico = orden.formaPago &&
+          orden.formaPago !== 'Efectivo' &&
+          orden.formaPago !== 'A crédito (CxC)' &&
+          orden.formaPago !== 'A crédito' &&
+          orden.formaPago !== 'CXC';
+        const pendienteValidar = tienePagoElectronico &&
+          orden.pagoValidado !== true &&
+          !orden.pagoRechazado &&
+          (orden.estado === 'cuadre_dinero' || orden.estado === 'entrega_cobranza' || orden.estado === 'completada' || orden.pagado === true);
+        const puedeValidar = isAdmin || (user?.role === 'tesoreria');
+
+        if (!pendienteValidar) {
+          // Si ya fue validado, mostrar nota informativa
+          if (tienePagoElectronico && orden.pagoValidado === true) {
+            return (
+              <div style={{
+                background: '#f0fdf4', border: '1px solid #86efac',
+                color: '#166534', padding: '10px 16px', borderRadius: 10,
+                marginBottom: 16, fontSize: 13, display: 'flex', alignItems: 'center', gap: 10
+              }}>
+                <span style={{ fontSize: 18 }}>✅</span>
+                <div style={{ flex: 1 }}>
+                  <strong>Pago electrónico validado</strong>
+                  {orden.pagoValidadoPorNombre && (
+                    <span style={{ color: '#15803d', marginLeft: 8 }}>
+                      por {orden.pagoValidadoPorNombre}
+                      {orden.pagoValidadoEn && ` — ${new Date(orden.pagoValidadoEn).toLocaleString('es-CO', { timeZone: 'America/Bogota' })}`}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          }
+          if (tienePagoElectronico && orden.pagoRechazado) {
+            return (
+              <div style={{
+                background: '#fef2f2', border: '1px solid #fca5a5',
+                color: '#991b1b', padding: '12px 16px', borderRadius: 10,
+                marginBottom: 16, fontSize: 13
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                  <span style={{ fontSize: 18 }}>❌</span>
+                  <strong>Pago electrónico rechazado</strong>
+                </div>
+                {orden.pagoValidacionMotivo && (
+                  <div style={{ paddingLeft: 28, color: '#7f1d1d', fontStyle: 'italic' }}>
+                    Motivo: {orden.pagoValidacionMotivo}
+                  </div>
+                )}
+                <div style={{ paddingLeft: 28, color: '#991b1b', marginTop: 4, fontSize: 12 }}>
+                  La orden pasó a CxC. El cliente debe este dinero.
+                </div>
+              </div>
+            );
+          }
+          return null;
+        }
+
+        // Banner activo: pendiente de validación
+        return (
+          <div style={{
+            background: 'linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%)',
+            border: '2px solid #f59e0b',
+            borderRadius: 12, padding: '16px 20px',
+            marginBottom: 16, display: 'flex', alignItems: 'center', gap: 16,
+            boxShadow: '0 4px 12px rgba(245, 158, 11, 0.15)'
+          }}>
+            <div style={{
+              width: 48, height: 48, borderRadius: '50%', background: '#fef3c7',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 24, flexShrink: 0, border: '2px solid #f59e0b'
+            }}>
+              ⏳
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 800, color: '#92400e', marginBottom: 2 }}>
+                Pago electrónico pendiente de validación
+              </div>
+              <div style={{ fontSize: 13, color: '#78350f' }}>
+                El mensajero registró un pago por <strong>{orden.formaPago}</strong> por <strong>{formatCOP(orden.total)}</strong>.
+                {puedeValidar
+                  ? ' Verifica el ingreso en el banco antes de aprobar.'
+                  : ' Admin o Tesorería deben verificarlo en el banco.'
+                }
+              </div>
+            </div>
+            {puedeValidar && (
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <button
+                  onClick={() => abrirValidarPago('rechazar')}
+                  style={{
+                    padding: '10px 18px', background: '#fff',
+                    color: '#dc2626', border: '2px solid #dc2626',
+                    borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 13
+                  }}>
+                  ❌ Rechazar
+                </button>
+                <button
+                  onClick={() => abrirValidarPago('aprobar')}
+                  style={{
+                    padding: '10px 18px', background: '#16a34a',
+                    color: '#fff', border: 'none',
+                    borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 13
+                  }}>
+                  ✅ Aprobar
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <div style={s.grid2}>
         {/* COLUMNA IZQUIERDA */}
@@ -636,8 +869,309 @@ const cargarConfigCerts = async () => {
           </div>
         </div>
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          MODAL: ANULAR ORDEN  (Ola 1: motivo + PIN del admin/tesorería)
+      ══════════════════════════════════════════════════════════════════════ */}
+      {mostrarAnular && (
+        <div style={sAnular.overlay} onClick={() => !anulando && setMostrarAnular(false)}>
+          <div style={sAnular.modal} onClick={e => e.stopPropagation()}>
+            <div style={sAnular.header}>
+              <div style={sAnular.iconCircle}>🚫</div>
+              <div>
+                <h3 style={sAnular.titulo}>Anular orden {orden?.numeroOrden}</h3>
+                <p style={sAnular.subtitulo}>Esta acción no se puede deshacer. Devuelve el stock y registra la anulación en auditoría.</p>
+              </div>
+            </div>
+
+            {error && <div style={sAnular.alertError}>⚠ {error}</div>}
+
+            <div style={sAnular.body}>
+              <div style={sAnular.campo}>
+                <label style={sAnular.label}>
+                  Motivo de la anulación <span style={{ color: '#dc2626' }}>*</span>
+                </label>
+                <textarea
+                  style={sAnular.textarea}
+                  rows={3}
+                  placeholder="Ej: Cliente canceló el pedido por cambio de presupuesto"
+                  value={motivoAnular}
+                  onChange={e => setMotivoAnular(e.target.value)}
+                  disabled={anulando}
+                />
+              </div>
+
+              <div style={sAnular.campo}>
+                <label style={sAnular.label}>
+                  PIN de autorización <span style={{ color: '#dc2626' }}>*</span>
+                  <small style={sAnular.hint}>Solo administradores con PIN configurado pueden anular.</small>
+                </label>
+                <div style={sAnular.pinWrap}>
+                  <input
+                    type={verPinAnular ? 'text' : 'password'}
+                    style={sAnular.pinInput}
+                    inputMode="numeric"
+                    maxLength={4}
+                    placeholder="0000"
+                    value={pinAnular}
+                    onChange={e => setPinAnular(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    disabled={anulando}
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setVerPinAnular(!verPinAnular)}
+                    style={sAnular.eyeBtn}
+                    disabled={anulando}
+                  >
+                    {verPinAnular ? '🙈' : '👁️'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div style={sAnular.footer}>
+              <button
+                onClick={() => setMostrarAnular(false)}
+                style={sAnular.btnCancelar}
+                disabled={anulando}
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmarAnular}
+                style={{
+                  ...sAnular.btnAnular,
+                  opacity: anulando || !motivoAnular.trim() || pinAnular.length !== 4 ? 0.5 : 1,
+                  cursor: anulando || !motivoAnular.trim() || pinAnular.length !== 4 ? 'not-allowed' : 'pointer'
+                }}
+                disabled={anulando || !motivoAnular.trim() || pinAnular.length !== 4}
+              >
+                {anulando ? 'Anulando...' : '🚫 Confirmar anulación'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          MODAL: VALIDAR PAGO ELECTRÓNICO (Ola 2.5 — Admin/Tesorería)
+          Aprueba o rechaza el comprobante de pago que subió el mensajero.
+      ══════════════════════════════════════════════════════════════════════ */}
+      {mostrarValidarPago && (
+        <div style={sValidPago.overlay} onClick={() => !validandoPago && setMostrarValidarPago(false)}>
+          <div style={sValidPago.modal} onClick={e => e.stopPropagation()}>
+            <div style={{
+              ...sValidPago.header,
+              background: accionPago === 'aprobar'
+                ? 'linear-gradient(135deg, #f0fdf4 0%, #fff 100%)'
+                : 'linear-gradient(135deg, #fef2f2 0%, #fff 100%)'
+            }}>
+              <div style={{
+                ...sValidPago.iconCircle,
+                background: accionPago === 'aprobar' ? '#dcfce7' : '#fee2e2'
+              }}>
+                {accionPago === 'aprobar' ? '✅' : '❌'}
+              </div>
+              <div style={{ flex: 1 }}>
+                <h3 style={sValidPago.titulo}>
+                  {accionPago === 'aprobar' ? 'Aprobar pago electrónico' : 'Rechazar pago electrónico'}
+                </h3>
+                <p style={sValidPago.subtitulo}>
+                  Orden {orden?.numeroOrden} · {orden?.formaPago} · {formatCOP(orden?.total)}
+                </p>
+              </div>
+            </div>
+
+            {error && <div style={sValidPago.alertError}>⚠ {error}</div>}
+
+            <div style={sValidPago.body}>
+              {/* Información del pago */}
+              <div style={sValidPago.infoBox}>
+                <div style={sValidPago.infoRow}>
+                  <span style={sValidPago.infoLabel}>Cliente</span>
+                  <span style={sValidPago.infoValor}>{orden?.clienteNombre}</span>
+                </div>
+                <div style={sValidPago.infoRow}>
+                  <span style={sValidPago.infoLabel}>Forma de pago</span>
+                  <span style={sValidPago.infoValor}>{orden?.formaPago}</span>
+                </div>
+                <div style={sValidPago.infoRow}>
+                  <span style={sValidPago.infoLabel}>Monto</span>
+                  <span style={{ ...sValidPago.infoValor, fontWeight: 800, color: '#16a34a', fontSize: 16 }}>
+                    {formatCOP(orden?.total || 0)}
+                  </span>
+                </div>
+                {orden?.fotoTransferenciaUrl && (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ ...sValidPago.infoLabel, marginBottom: 8 }}>📸 Comprobante</div>
+                    <a href={orden.fotoTransferenciaUrl} target="_blank" rel="noreferrer">
+                      <img
+                        src={orden.fotoTransferenciaUrl}
+                        alt="Comprobante de pago"
+                        style={{ maxWidth: '100%', maxHeight: 200, borderRadius: 8, border: '1px solid #e5e7eb', cursor: 'pointer' }}
+                      />
+                    </a>
+                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
+                      Click en la imagen para verla en tamaño completo
+                    </div>
+                  </div>
+                )}
+                {!orden?.fotoTransferenciaUrl && (
+                  <div style={{
+                    marginTop: 8, padding: '10px 12px',
+                    background: '#fffbeb', border: '1px solid #fcd34d',
+                    borderRadius: 8, fontSize: 12, color: '#92400e'
+                  }}>
+                    ⚠ El mensajero no subió foto del comprobante. Verifica en el banco antes de aprobar.
+                  </div>
+                )}
+              </div>
+
+              {/* Motivo */}
+              <div style={sValidPago.campo}>
+                <label style={sValidPago.label}>
+                  {accionPago === 'aprobar'
+                    ? 'Notas (opcional)'
+                    : <>Motivo del rechazo <span style={{ color: '#dc2626' }}>*</span></>
+                  }
+                </label>
+                <textarea
+                  style={sValidPago.textarea}
+                  rows={2}
+                  placeholder={accionPago === 'aprobar'
+                    ? 'Ej: Confirmé el ingreso en el banco a las 3pm'
+                    : 'Ej: La transferencia nunca llegó al banco / Comprobante alterado'
+                  }
+                  value={motivoValidacion}
+                  onChange={e => setMotivoValidacion(e.target.value)}
+                  disabled={validandoPago}
+                />
+              </div>
+
+              {/* PIN */}
+              <div style={sValidPago.campo}>
+                <label style={sValidPago.label}>
+                  PIN de autorización <span style={{ color: '#dc2626' }}>*</span>
+                  <small style={sValidPago.hint}>Tu PIN de Admin o Tesorería</small>
+                </label>
+                <div style={sValidPago.pinWrap}>
+                  <input
+                    type={verPinValidacion ? 'text' : 'password'}
+                    style={sValidPago.pinInput}
+                    inputMode="numeric"
+                    maxLength={4}
+                    placeholder="0000"
+                    value={pinValidacion}
+                    onChange={e => setPinValidacion(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                    disabled={validandoPago}
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setVerPinValidacion(!verPinValidacion)}
+                    style={sValidPago.eyeBtn}
+                    disabled={validandoPago}
+                  >
+                    {verPinValidacion ? '🙈' : '👁️'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Aviso explicativo */}
+              <div style={{
+                padding: '10px 12px',
+                background: accionPago === 'aprobar' ? '#f0fdf4' : '#fef2f2',
+                border: `1px solid ${accionPago === 'aprobar' ? '#86efac' : '#fca5a5'}`,
+                borderRadius: 8, fontSize: 12,
+                color: accionPago === 'aprobar' ? '#166534' : '#991b1b'
+              }}>
+                {accionPago === 'aprobar'
+                  ? '✅ Al aprobar: el dinero se suma a la caja, la orden queda COMPLETADA y queda registrado en auditoría que tú validaste el ingreso.'
+                  : '❌ Al rechazar: la orden pasa a CxC (el cliente queda debiendo). El motivo se registra en auditoría.'
+                }
+              </div>
+            </div>
+
+            <div style={sValidPago.footer}>
+              <button
+                onClick={() => setMostrarValidarPago(false)}
+                style={sValidPago.btnCancelar}
+                disabled={validandoPago}
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={confirmarValidarPago}
+                style={{
+                  ...(accionPago === 'aprobar' ? sValidPago.btnAprobar : sValidPago.btnRechazar),
+                  opacity: validandoPago || pinValidacion.length !== 4 ||
+                          (accionPago === 'rechazar' && motivoValidacion.trim().length < 5) ? 0.5 : 1,
+                  cursor: validandoPago ? 'not-allowed' : 'pointer'
+                }}
+                disabled={validandoPago || pinValidacion.length !== 4 ||
+                         (accionPago === 'rechazar' && motivoValidacion.trim().length < 5)}
+              >
+                {validandoPago
+                  ? 'Procesando...'
+                  : accionPago === 'aprobar' ? '✅ Aprobar pago' : '❌ Rechazar pago'
+                }
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
+};
+
+// ─── ESTILOS DEL MODAL DE ANULAR ──────────────────────────────────────────────
+const sAnular = {
+  overlay:     { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: '20px' },
+  modal:       { background: '#fff', borderRadius: '16px', width: '100%', maxWidth: '480px', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.35)', fontFamily: "'Segoe UI', sans-serif" },
+  header:      { display: 'flex', gap: '14px', alignItems: 'flex-start', padding: '24px 24px 12px', borderBottom: '1px solid #fef2f2', background: 'linear-gradient(135deg, #fef2f2 0%, #fff 100%)' },
+  iconCircle:  { width: '44px', height: '44px', borderRadius: '50%', background: '#fee2e2', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '22px', flexShrink: 0 },
+  titulo:      { margin: 0, fontSize: '17px', fontWeight: 700, color: '#111' },
+  subtitulo:   { margin: '4px 0 0', fontSize: '13px', color: '#6b7280', lineHeight: 1.4 },
+  alertError:  { margin: '12px 24px 0', padding: '10px 14px', background: '#fef2f2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: '8px', fontSize: '13px', fontWeight: 500 },
+  body:        { padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: '18px' },
+  campo:       { display: 'flex', flexDirection: 'column', gap: '6px' },
+  label:       { fontSize: '13px', fontWeight: 700, color: '#374151', display: 'flex', flexDirection: 'column', gap: '2px' },
+  hint:        { fontWeight: 400, fontSize: '11px', color: '#9ca3af', marginTop: '2px' },
+  textarea:    { padding: '10px 14px', border: '2px solid #e5e7eb', borderRadius: '8px', fontSize: '14px', outline: 'none', fontFamily: "'Segoe UI', sans-serif", resize: 'vertical', minHeight: '70px', boxSizing: 'border-box' },
+  pinWrap:     { position: 'relative', width: '160px' },
+  pinInput:    { padding: '12px 44px 12px 14px', border: '2px solid #e5e7eb', borderRadius: '8px', fontSize: '22px', outline: 'none', textAlign: 'center', letterSpacing: '10px', fontFamily: 'monospace', width: '100%', boxSizing: 'border-box' },
+  eyeBtn:      { position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', padding: '4px' },
+  footer:      { padding: '16px 24px', borderTop: '1px solid #f3f4f6', display: 'flex', justifyContent: 'flex-end', gap: '10px', background: '#fafafa' },
+  btnCancelar: { padding: '10px 20px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '14px' },
+  btnAnular:   { padding: '10px 22px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '14px' },
+};
+
+// ─── ESTILOS DEL MODAL VALIDAR PAGO (Ola 2.5) ──────────────────────────────
+const sValidPago = {
+  overlay:     { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: '20px' },
+  modal:       { background: '#fff', borderRadius: '16px', width: '100%', maxWidth: '520px', maxHeight: '90vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.35)', fontFamily: "'Segoe UI', sans-serif" },
+  header:      { display: 'flex', gap: '14px', alignItems: 'flex-start', padding: '24px 24px 14px', borderBottom: '1px solid #f3f4f6' },
+  iconCircle:  { width: '44px', height: '44px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '22px', flexShrink: 0 },
+  titulo:      { margin: 0, fontSize: '17px', fontWeight: 700, color: '#111' },
+  subtitulo:   { margin: '4px 0 0', fontSize: '13px', color: '#6b7280' },
+  alertError:  { margin: '12px 24px 0', padding: '10px 14px', background: '#fef2f2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: '8px', fontSize: '13px', fontWeight: 500 },
+  body:        { padding: '18px 24px', display: 'flex', flexDirection: 'column', gap: '16px' },
+  infoBox:     { background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '10px', padding: '14px 16px' },
+  infoRow:     { display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '13px' },
+  infoLabel:   { color: '#6b7280', fontWeight: 600 },
+  infoValor:   { color: '#111', fontWeight: 600 },
+  campo:       { display: 'flex', flexDirection: 'column', gap: '6px' },
+  label:       { fontSize: '13px', fontWeight: 700, color: '#374151', display: 'flex', flexDirection: 'column', gap: '2px' },
+  hint:        { fontWeight: 400, fontSize: '11px', color: '#9ca3af', marginTop: '2px' },
+  textarea:    { padding: '10px 14px', border: '2px solid #e5e7eb', borderRadius: '8px', fontSize: '14px', outline: 'none', fontFamily: "'Segoe UI', sans-serif", resize: 'vertical', minHeight: '60px', boxSizing: 'border-box' },
+  pinWrap:     { position: 'relative', width: '160px' },
+  pinInput:    { padding: '12px 44px 12px 14px', border: '2px solid #e5e7eb', borderRadius: '8px', fontSize: '22px', outline: 'none', textAlign: 'center', letterSpacing: '10px', fontFamily: 'monospace', width: '100%', boxSizing: 'border-box' },
+  eyeBtn:      { position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', fontSize: '16px', padding: '4px' },
+  footer:      { padding: '16px 24px', borderTop: '1px solid #f3f4f6', display: 'flex', justifyContent: 'flex-end', gap: '10px', background: '#fafafa' },
+  btnCancelar: { padding: '10px 20px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, fontSize: '14px' },
+  btnAprobar:  { padding: '10px 22px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '14px' },
+  btnRechazar: { padding: '10px 22px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '14px' },
 };
 
 // ─── GENERADOR HTML IMPRESIÓN ORDEN ──────────────────────────────────────────

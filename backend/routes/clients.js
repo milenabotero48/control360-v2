@@ -337,4 +337,107 @@ router.delete('/:id', authenticate, async (req, res) => {
   }
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// GET /api/clients/:id/historial — Historial completo del cliente
+// ─────────────────────────────────────────────────────────────────────────────
+// Ola 2: en una sola llamada devuelve TODO lo que necesita la pestaña
+// "Historial" del módulo Clientes:
+//   - Órdenes (todas, ordenadas más recientes primero)
+//   - Cotizaciones del cliente
+//   - QR / equipos asignados (hojas de vida)
+//   - Resumen: total facturado, último servicio, # de servicios, saldo CxC
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/:id/historial', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1) Validar que el cliente exista y obtener datos básicos
+    const cliDoc = await db.collection('clients').doc(id).get();
+    if (!cliDoc.exists) return res.status(404).json({ error: 'Cliente no encontrado' });
+    const cliente = { id: cliDoc.id, ...cliDoc.data() };
+
+    // 2) Buscar todas las órdenes del cliente (por clienteId, NO por nombre —
+    //    el nombre se edita; el id no).
+    const ordersSnap = await db.collection('orders')
+      .where('clienteId', '==', id)
+      .get();
+    const ordenes = ordersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    // 3) Cotizaciones — algunos sistemas viejos pueden tenerlas en otra colección
+    let cotizaciones = [];
+    try {
+      const cotSnap = await db.collection('cotizaciones')
+        .where('clienteId', '==', id)
+        .get();
+      cotizaciones = cotSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch { /* la colección puede no existir todavía */ }
+
+    // 4) QR / equipos asignados al cliente
+    let equiposQR = [];
+    try {
+      const qrSnap = await db.collection('qr_equipos')
+        .where('propietario.clienteId', '==', id)
+        .get();
+      equiposQR = qrSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch {
+      // fallback por si el campo se guarda en otro path
+      try {
+        const qrSnap2 = await db.collection('qr_equipos')
+          .where('clienteId', '==', id)
+          .get();
+        equiposQR = qrSnap2.docs.map(d => ({ id: d.id, ...d.data() }));
+      } catch { equiposQR = []; }
+    }
+
+    // 5) Resumen ejecutivo
+    const ordenesCompletadas = ordenes.filter(o =>
+      o.estado === 'completada' || o.estado === 'cuadre_dinero' || o.estado === 'cxc'
+    );
+    const totalFacturado = ordenesCompletadas.reduce((s, o) => s + (Number(o.total) || 0), 0);
+    const totalPagado    = ordenesCompletadas.reduce((s, o) => s + (Number(o.montoPagado) || 0), 0);
+    const saldoCxC       = totalFacturado - totalPagado;
+
+    const fechasCompletadas = ordenesCompletadas
+      .map(o => o.fechaCompletada || o.completadaEn || o.updatedAt?._seconds * 1000 || 0)
+      .filter(f => f)
+      .map(f => typeof f === 'string' ? new Date(f).getTime() : Number(f))
+      .filter(f => !isNaN(f));
+    const ultimoServicio = fechasCompletadas.length > 0
+      ? new Date(Math.max(...fechasCompletadas)).toISOString()
+      : null;
+
+    // Ordenar de más reciente a más viejo
+    const sortDesc = (a, b) => {
+      const aT = a.createdAt?._seconds || (a.createdAt ? new Date(a.createdAt).getTime() / 1000 : 0);
+      const bT = b.createdAt?._seconds || (b.createdAt ? new Date(b.createdAt).getTime() / 1000 : 0);
+      return bT - aT;
+    };
+    ordenes.sort(sortDesc);
+    cotizaciones.sort(sortDesc);
+
+    res.json({
+      cliente,
+      ordenes,
+      cotizaciones,
+      equiposQR,
+      resumen: {
+        totalOrdenes: ordenes.length,
+        ordenesCompletadas: ordenesCompletadas.length,
+        ordenesAnuladas: ordenes.filter(o => o.estado === 'anulada').length,
+        ordenesEnCurso: ordenes.filter(o => !['completada', 'cuadre_dinero', 'cxc', 'anulada'].includes(o.estado)).length,
+        totalFacturado,
+        totalPagado,
+        saldoCxC,
+        ultimoServicio,
+        totalCotizaciones: cotizaciones.length,
+        cotizacionesAprobadas: cotizaciones.filter(c => c.estado === 'aprobada' || c.estado === 'convertida').length,
+        totalQR: equiposQR.length
+      }
+    });
+  } catch (e) {
+    console.error('GET /clients/:id/historial:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;

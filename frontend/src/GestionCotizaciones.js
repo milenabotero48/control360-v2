@@ -194,13 +194,10 @@ const GestionCotizaciones = ({ user }) => {
   const totales = calcTotales(form.items, form.descuentoGlobal, form.empresaIva);
 
   // ─── GUARDAR ───────────────────────────────────────────────────────────────
-  const generarNumero = () => {
-    const max = cotizaciones.reduce((acc, c) => {
-      const n = parseInt((c.numero || '').replace('COT-', '')) || 0;
-      return n > acc ? n : acc;
-    }, 0);
-    return `COT-${String(max + 1).padStart(4, '0')}`;
-  };
+  // Ola 2: el número de la cotización lo asigna el BACKEND con transacción
+  // atómica. No se genera ni se envía desde el frontend para evitar duplicados
+  // cuando varios comerciales crean cotizaciones simultáneamente.
+  // (Función generarNumero() local eliminada.)
 
   const guardarCotizacion = async () => {
     if (!form.clienteId) return setError('Selecciona un cliente');
@@ -224,7 +221,8 @@ const GestionCotizaciones = ({ user }) => {
       const payload = {
         ...form,
         items: itemsSanitizados,
-        numero: cotActual?.numero || generarNumero(),
+        // numero: el backend lo asigna en POST. En PUT (edición), lo conservamos.
+        ...(cotActual?.numero ? { numero: cotActual.numero } : {}),
         estado: cotActual?.estado || 'pendiente',
         fechaVencimiento: vencimiento.toISOString().split('T')[0],
         totales,
@@ -235,8 +233,9 @@ const GestionCotizaciones = ({ user }) => {
         await axios.put(`${API}/cotizaciones/${cotActual.id}`, payload, { headers });
         setExito('Cotización actualizada');
       } else {
+        // Crear: la respuesta del backend trae el número real asignado.
         const r = await axios.post(`${API}/cotizaciones`, payload, { headers });
-        setCotActual({ ...payload, id: r.data.id });
+        setCotActual({ ...payload, id: r.data.id, numero: r.data.numero });
       }
       await cargarTodo();
       setVista('detalle');

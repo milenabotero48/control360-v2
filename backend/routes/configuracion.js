@@ -26,6 +26,19 @@ const CATEGORIAS_DEFAULT = [
   { nombre: 'Otros',                    tipoERI: 'gasto_operativo',  activa: true, orden: 10 },
 ];
 
+// ─── RETENCIONES — Ola 2.5 Bloque 3 ─────────────────────────────────────────
+// Catálogo de tipos de retención que el mensajero puede elegir al cobrar una
+// CxC. Estándares de Colombia. El admin los puede activar/desactivar o crear
+// adicionales desde la UI.
+const RETENCIONES_DEFAULT = [
+  { id: 'rte_compras_4',     etiqueta: 'Retención Renta Compras',   porcentaje: 4,    tipo: 'renta',  activo: true,  orden: 1 },
+  { id: 'rte_servicios_6',   etiqueta: 'Retención Renta Servicios', porcentaje: 6,    tipo: 'renta',  activo: true,  orden: 2 },
+  { id: 'rte_iva_15',        etiqueta: 'ReteIVA',                    porcentaje: 15,   tipo: 'iva',    activo: true,  orden: 3 },
+  { id: 'rte_ica_com_07',    etiqueta: 'ReteICA Comercial',          porcentaje: 0.7,  tipo: 'ica',    activo: true,  orden: 4 },
+  { id: 'rte_ica_srv_10',    etiqueta: 'ReteICA Servicios',          porcentaje: 1.0,  tipo: 'ica',    activo: true,  orden: 5 },
+  { id: 'rte_personalizado', etiqueta: 'Personalizado (digitar %)',  porcentaje: null, tipo: 'custom', activo: true,  orden: 99 },
+];
+
 // Helper: obtener o crear doc de configuración del usuario
 const getConfigRef = (userId) => db.collection('configuracion').doc(userId);
 
@@ -37,12 +50,24 @@ const inicializarConfigSiNoExiste = async (userId) => {
       userId,
       formasPago: FORMAS_PAGO_DEFAULT,
       categoriasEgresos: CATEGORIAS_DEFAULT,
+      retenciones: RETENCIONES_DEFAULT,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
-    return { formasPago: FORMAS_PAGO_DEFAULT, categoriasEgresos: CATEGORIAS_DEFAULT };
+    return {
+      formasPago: FORMAS_PAGO_DEFAULT,
+      categoriasEgresos: CATEGORIAS_DEFAULT,
+      retenciones: RETENCIONES_DEFAULT
+    };
   }
-  return doc.data();
+  const data = doc.data();
+  // Auto-seed de retenciones si el config ya existía pero sin retenciones
+  // (caso: suscriptor anterior a Ola 2.5). NO sobrescribe si ya las tenía.
+  if (!Array.isArray(data.retenciones) || data.retenciones.length === 0) {
+    await ref.set({ retenciones: RETENCIONES_DEFAULT }, { merge: true });
+    data.retenciones = RETENCIONES_DEFAULT;
+  }
+  return data;
 };
 
 // ─── GET /api/configuracion ───────────────────────────────────────────────────
@@ -140,6 +165,59 @@ router.put('/mapeo-cajas', async (req, res) => {
   } catch (e) {
     console.error('PUT mapeo-cajas:', e);
     res.status(500).json({ error: 'Error al guardar mapeo de cajas' });
+  }
+});
+
+// ─── PUT /api/configuracion/retenciones — Ola 2.5 Bloque 3 ─────────────────
+// Permite al admin gestionar el catálogo de retenciones que verá el mensajero
+// al cobrar. Valida estructura mínima de cada retención.
+router.put('/retenciones', async (req, res) => {
+  try {
+    const { retenciones } = req.body;
+    if (!Array.isArray(retenciones)) {
+      return res.status(400).json({ error: 'retenciones debe ser un array' });
+    }
+
+    // Validar cada retención
+    for (const r of retenciones) {
+      if (!r.etiqueta || !r.etiqueta.trim()) {
+        return res.status(400).json({ error: 'Cada retención debe tener etiqueta' });
+      }
+      if (!r.id || !r.id.trim()) {
+        return res.status(400).json({ error: 'Cada retención debe tener un id único' });
+      }
+      // porcentaje puede ser null (custom) o número >= 0
+      if (r.porcentaje !== null && (isNaN(Number(r.porcentaje)) || Number(r.porcentaje) < 0)) {
+        return res.status(400).json({ error: `Porcentaje inválido en "${r.etiqueta}"` });
+      }
+    }
+
+    // Validar que no haya IDs duplicados
+    const ids = retenciones.map(r => r.id);
+    if (new Set(ids).size !== ids.length) {
+      return res.status(400).json({ error: 'Hay retenciones con el mismo id' });
+    }
+
+    const userId = req.adminId || req.user.uid;
+    const ref = getConfigRef(userId);
+    await ref.set({
+      userId,
+      retenciones,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    await db.collection('audit_logs').add({
+      accion: 'RETENCIONES_ACTUALIZADAS', modulo: 'configuracion',
+      descripcion: `Catálogo de retenciones actualizado (${retenciones.length} registros)`,
+      usuarioId: userId, usuarioNombre: req.user.email,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      fecha: new Date().toISOString()
+    });
+
+    res.json({ ok: true, retenciones });
+  } catch (e) {
+    console.error('PUT retenciones:', e);
+    res.status(500).json({ error: 'Error al guardar retenciones' });
   }
 });
 

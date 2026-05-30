@@ -28,7 +28,7 @@ const TabEmpresas = ({ token }) => {
   const [logoFile, setLogoFile] = useState(null);
   const [mensaje, setMensaje] = useState(null);
   const fileInputRef = useRef();
-  const [formData, setFormData] = useState({ name: '', nit: '', address: '', phone: '', cellphone: '', email: '', iva: '', pinAutorizacion: '' });
+  const [formData, setFormData] = useState({ name: '', nit: '', address: '', phone: '', cellphone: '', email: '', iva: '' });
   const [errores, setErrores] = useState({});
 
   useEffect(() => { cargarEmpresas(); }, []);
@@ -106,7 +106,7 @@ const TabEmpresas = ({ token }) => {
 
   const handleEditar = (emp) => {
     setEditando(emp.id);
-    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', pinAutorizacion: emp.pinAutorizacion || '' });
+    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '' });
     setLogoPreview(emp.logo || null); setLogoFile(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -119,7 +119,7 @@ const TabEmpresas = ({ token }) => {
     } catch { mostrarMensaje('Error al eliminar', 'error'); }
   };
 
-  const resetForm = () => { setFormData({ name: '', nit: '', address: '', phone: '', cellphone: '', email: '', iva: '', pinAutorizacion: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
+  const resetForm = () => { setFormData({ name: '', nit: '', address: '', phone: '', cellphone: '', email: '', iva: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
 
   const campo = (label, key, tipo = 'text', placeholder = '') => (
     <div style={S.campo}>
@@ -150,23 +150,6 @@ const TabEmpresas = ({ token }) => {
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 18 }}>
               {campo('Nombre Empresa', 'name')}{campo('NIT', 'nit', 'text', '88273572')}{campo('Dirección', 'address')}{campo('Teléfono', 'phone', 'text', '6022226686')}{campo('Celular', 'cellphone', 'text', '3148361622')}{campo('Email', 'email', 'email', 'empresa@correo.com')}{campo('IVA (%)', 'iva', 'text', '19')}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <label style={{ fontSize: 13, fontWeight: 700, color: '#374151' }}>PIN de autorización <span style={{ fontWeight: 400, color: '#9ca3af' }}>(4 dígitos)</span></label>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <input id="pinInput" type="password" maxLength={4} inputMode="numeric"
-                    style={{ padding: '9px 12px', border: '2px solid #e5e7eb', borderRadius: 8, fontSize: 18, outline: 'none', letterSpacing: 8, textAlign: 'center', width: 120 }}
-                    placeholder="••••"
-                    value={formData.pinAutorizacion || ''}
-                    onChange={e => { const v = e.target.value.replace(/\D/g, '').slice(0, 4); setFormData(f => ({ ...f, pinAutorizacion: v })); }} />
-                  <button type="button" onClick={() => {
-                    const input = document.getElementById('pinInput');
-                    input.type = input.type === 'password' ? 'text' : 'password';
-                  }} style={{ padding: '8px 14px', background: '#f3f4f6', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, color: '#374151', fontWeight: 600 }}>
-                    👁️ Ver PIN
-                  </button>
-                </div>
-                <span style={{ fontSize: 11, color: '#9ca3af' }}>Usado para autorizar órdenes a clientes bloqueados por cartera</span>
-              </div>
             </div>
             <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
               <button type="submit" disabled={guardando} style={{ ...S.btnPrimario, opacity: guardando ? 0.7 : 1 }}>{guardando ? 'Guardando...' : editando ? '💾 Actualizar' : '✅ Crear Empresa'}</button>
@@ -782,21 +765,257 @@ const TabCertificados = ({ token }) => {
   );
 };
 
+// ════════════════════════════════════════════════════════════════════════════════
+// PESTAÑA 6: RETENCIONES (Ola 2.5 Bloque 3)
+// ─────────────────────────────────────────────────────────────────────────────
+// Catálogo de tipos de retención que el mensajero puede elegir al cobrar una
+// CxC. Estándares de Colombia precargados. El admin puede activar/desactivar
+// o agregar adicionales (ej: ReteCREE, Bomberos, etc).
+//
+// Cada retención tiene:
+//   - id: identificador único (ej: 'rte_compras_4')
+//   - etiqueta: nombre visible
+//   - porcentaje: número o null (custom = mensajero digita al cobrar)
+//   - tipo: renta | iva | ica | custom
+//   - activo: bool
+// ════════════════════════════════════════════════════════════════════════════════
+const TIPOS_RETENCION = [
+  { value: 'renta',  label: 'Renta'   },
+  { value: 'iva',    label: 'IVA'     },
+  { value: 'ica',    label: 'ICA'     },
+  { value: 'custom', label: 'Custom' },
+];
+
+const TabRetenciones = ({ token }) => {
+  const [retenciones, setRetenciones] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [guardando, setGuardando] = useState(false);
+  const [mensaje, setMensaje] = useState(null);
+  const [nueva, setNueva] = useState({ etiqueta: '', porcentaje: '', tipo: 'renta', activo: true });
+  const [agregando, setAgregando] = useState(false);
+
+  useEffect(() => { cargar(); /* eslint-disable-next-line */ }, []);
+
+  const cargar = async () => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`${API}/configuracion`, { headers: { Authorization: `Bearer ${token}` } });
+      setRetenciones(r.data.retenciones || []);
+    } catch { }
+    setLoading(false);
+  };
+
+  const mostrarMsg = (texto, tipo = 'success') => {
+    setMensaje({ texto, tipo });
+    setTimeout(() => setMensaje(null), 3000);
+  };
+
+  const guardar = async (lista) => {
+    setGuardando(true);
+    try {
+      await axios.put(`${API}/configuracion/retenciones`, { retenciones: lista }, { headers: { Authorization: `Bearer ${token}` } });
+      setRetenciones(lista);
+      mostrarMsg('✅ Retenciones guardadas');
+    } catch (e) {
+      mostrarMsg('❌ ' + (e.response?.data?.error || 'Error al guardar'), 'error');
+    }
+    setGuardando(false);
+  };
+
+  // Genera un id único basado en la etiqueta
+  const generarId = (etiqueta) => {
+    const base = 'rte_' + etiqueta.toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/_+|_+$/g, '')
+      .slice(0, 30);
+    let id = base;
+    let n = 1;
+    while (retenciones.some(r => r.id === id)) {
+      id = base + '_' + (++n);
+    }
+    return id;
+  };
+
+  const agregar = () => {
+    if (!nueva.etiqueta.trim()) return mostrarMsg('Etiqueta requerida', 'error');
+    const pct = nueva.tipo === 'custom' ? null : Number(nueva.porcentaje);
+    if (nueva.tipo !== 'custom' && (isNaN(pct) || pct < 0 || pct > 100)) {
+      return mostrarMsg('Porcentaje inválido (0–100)', 'error');
+    }
+    const lista = [...retenciones, {
+      id: generarId(nueva.etiqueta),
+      etiqueta: nueva.etiqueta.trim(),
+      porcentaje: pct,
+      tipo: nueva.tipo,
+      activo: true,
+      orden: retenciones.length + 1
+    }];
+    guardar(lista);
+    setNueva({ etiqueta: '', porcentaje: '', tipo: 'renta', activo: true });
+    setAgregando(false);
+  };
+
+  const editarCampo = (idx, campo, valor) => {
+    const lista = retenciones.map((r, i) => i === idx ? { ...r, [campo]: valor } : r);
+    setRetenciones(lista); // edit local inmediato — se guarda en blur
+  };
+
+  const toggleActivo = (idx) => guardar(retenciones.map((r, i) => i === idx ? { ...r, activo: !r.activo } : r));
+
+  const eliminar = (idx) => {
+    const r = retenciones[idx];
+    if (!window.confirm(`¿Eliminar "${r.etiqueta}"? No afecta cobranzas pasadas, solo no estará disponible para nuevas.`)) return;
+    guardar(retenciones.filter((_, i) => i !== idx));
+  };
+
+  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#667eea' }}>Cargando retenciones...</div>;
+
+  return (
+    <div>
+      {mensaje && (
+        <div style={{ ...S.msg, background: mensaje.tipo === 'error' ? '#fff0f0' : '#f0fff4', borderColor: mensaje.tipo === 'error' ? '#dc3545' : '#28a745', color: mensaje.tipo === 'error' ? '#dc3545' : '#28a745' }}>
+          {mensaje.texto}
+        </div>
+      )}
+
+      <div style={S.card}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: '#1a1a2e' }}>🧾 Tipos de retención</h3>
+            <p style={{ margin: '4px 0 0', fontSize: 13, color: '#888' }}>
+              El mensajero los verá al cobrar una CxC. Cada retención se contabiliza como egreso categoría "Retefuente".
+            </p>
+          </div>
+          <button onClick={() => setAgregando(true)} style={S.btnPrimario} disabled={guardando}>
+            + Agregar
+          </button>
+        </div>
+
+        <div style={{ background: '#eff6ff', border: '1px solid #93c5fd', borderRadius: 8, padding: '10px 14px', margin: '12px 0 16px', fontSize: 12, color: '#1e3a8a' }}>
+          💡 <strong>Tip contable:</strong> deja activas solo las que aplican a tu régimen (Común / Simple).
+          Si un cliente practica un porcentaje no estándar, usa "Personalizado".
+        </div>
+
+        {agregando && (
+          <div style={{ background: '#f8f9ff', border: '1px solid #e8ecff', borderRadius: 10, padding: 16, marginBottom: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 12, marginBottom: 12 }}>
+              <div style={S.campo}>
+                <label style={S.label}>Etiqueta visible *</label>
+                <input style={S.input}
+                  value={nueva.etiqueta}
+                  onChange={e => setNueva(p => ({ ...p, etiqueta: e.target.value }))}
+                  placeholder="Ej: Retención Bomberos" />
+              </div>
+              <div style={S.campo}>
+                <label style={S.label}>Tipo *</label>
+                <select style={S.input} value={nueva.tipo} onChange={e => setNueva(p => ({ ...p, tipo: e.target.value }))}>
+                  {TIPOS_RETENCION.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+              </div>
+              <div style={S.campo}>
+                <label style={S.label}>
+                  Porcentaje {nueva.tipo === 'custom' ? '(N/A)' : '*'}
+                </label>
+                <input style={{ ...S.input, opacity: nueva.tipo === 'custom' ? 0.5 : 1 }}
+                  type="number" step="0.1" min="0" max="100"
+                  disabled={nueva.tipo === 'custom'}
+                  value={nueva.porcentaje}
+                  onChange={e => setNueva(p => ({ ...p, porcentaje: e.target.value }))}
+                  placeholder={nueva.tipo === 'custom' ? '—' : 'Ej: 4'} />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={agregar} style={S.btnPrimario} disabled={guardando}>Agregar</button>
+              <button onClick={() => setAgregando(false)} style={S.btnSecundario}>Cancelar</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {retenciones.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+              No hay retenciones configuradas todavía. Agrega los tipos que practican tus clientes.
+            </div>
+          )}
+
+          {retenciones.map((r, idx) => (
+            <div key={r.id || idx} style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 16px',
+              background: r.activo ? '#fff' : '#f8f8f8',
+              border: '1px solid #e2e8f0', borderRadius: 8,
+              opacity: r.activo ? 1 : 0.6
+            }}>
+              {/* Etiqueta */}
+              <input style={{ ...S.input, flex: 1, fontSize: 13, padding: '6px 10px' }}
+                value={r.etiqueta}
+                onChange={e => editarCampo(idx, 'etiqueta', e.target.value)}
+                onBlur={() => guardar(retenciones)} />
+
+              {/* Tipo */}
+              <select style={{ ...S.input, fontSize: 12, padding: '6px 10px', minWidth: 100 }}
+                value={r.tipo}
+                onChange={e => { editarCampo(idx, 'tipo', e.target.value); }}
+                onBlur={() => guardar(retenciones)}>
+                {TIPOS_RETENCION.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+              </select>
+
+              {/* Porcentaje */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 90 }}>
+                <input style={{ ...S.input, fontSize: 12, padding: '6px 8px', width: 60, textAlign: 'right' }}
+                  type="number" step="0.1" min="0" max="100"
+                  disabled={r.tipo === 'custom'}
+                  value={r.porcentaje === null || r.porcentaje === undefined ? '' : r.porcentaje}
+                  onChange={e => editarCampo(idx, 'porcentaje', e.target.value === '' ? null : Number(e.target.value))}
+                  onBlur={() => guardar(retenciones)}
+                  placeholder={r.tipo === 'custom' ? '—' : '0'} />
+                <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600 }}>%</span>
+              </div>
+
+              {/* Acciones */}
+              <div style={{ display: 'flex', gap: 6, marginLeft: 8 }}>
+                <button onClick={() => toggleActivo(idx)} style={{
+                  padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  fontSize: 11, fontWeight: 600,
+                  background: r.activo ? '#fef3c7' : '#dcfce7',
+                  color: r.activo ? '#92400e' : '#166534'
+                }}>
+                  {r.activo ? 'Desactivar' : 'Activar'}
+                </button>
+                <button onClick={() => eliminar(idx)} style={{
+                  padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  fontSize: 12, background: '#fee2e2', color: '#991b1b'
+                }}>🗑️</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ConfigEmpresas = ({ user }) => {
   const [tab, setTab] = useState('empresas');
   const [cajas, setCajas] = useState([]);
   const [empresas, setEmpresas] = useState([]);
   const token = localStorage.getItem('token');
 
+  // Ola 2.5 FIX: cargar cajas siempre al montar (no solo cuando entra en pestaña Cajas)
+  // Antes el dropdown de Formas de pago aparecía vacío si entrabas directo sin pasar por Cajas.
   useEffect(() => {
     axios.get(`${API}/companies`, { headers: { Authorization: `Bearer ${token}` } })
       .then(r => setEmpresas(r.data || [])).catch(() => {});
+    axios.get(`${API}/cajas`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => setCajas(Array.isArray(r.data) ? r.data : [])).catch(() => {});
   }, [token]);
 
   const TABS = [
     { key: 'empresas',      label: '🏢 Empresas' },
     { key: 'formasPago',    label: '💳 Formas de pago' },
     { key: 'categorias',    label: '📂 Categorías de egresos' },
+    { key: 'retenciones',   label: '🧾 Retenciones' },
     { key: 'cajas',         label: '🏦 Cajas' },
     { key: 'certificados',  label: '📜 Certificados' },
   ];
@@ -825,6 +1044,7 @@ const ConfigEmpresas = ({ user }) => {
       {tab === 'empresas'   && <TabEmpresas token={token} />}
       {tab === 'formasPago' && <TabFormasPago token={token} cajas={cajas} />}
       {tab === 'categorias' && <TabCategorias token={token} />}
+      {tab === 'retenciones'   && <TabRetenciones token={token} />}
     {tab === 'cajas'         && <TabCajas token={token} onCajasChange={setCajas} empresas={empresas} />}
       {tab === 'certificados'  && <TabCertificados token={token} empresas={empresas} />}
     </div>

@@ -7,6 +7,16 @@ const API = 'http://localhost:5000/api';
 const soloNumeros = (val) => val.replace(/\D/g, '');
 const mayusculas = (val) => val.toUpperCase();
 
+// Ola 2: helpers para la pestaña Historial
+const fmtCop = (n) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
+
+const KpiCardCli = ({ icon, label, value, color }) => (
+  <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+    <div style={{ fontSize: 11, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{icon} {label}</div>
+    <div style={{ fontSize: 16, fontWeight: 800, color: color || '#111' }}>{value}</div>
+  </div>
+);
+
 const FORM_VACIO = {
   nombre: '', nit: '', tipoDocumento: 'NIT',
   telefono: '', celular: '',
@@ -36,6 +46,11 @@ const GestionClientes = ({ user, empresas = [] }) => {
   const [verDetalle, setVerDetalle]       = useState(null);
   const [verInactivos, setVerInactivos]   = useState(false);
 
+  // Ola 2: pestañas en el modal de detalle (datos | historial)
+  const [tabDetalle, setTabDetalle]       = useState('datos');
+  const [historial, setHistorial]         = useState(null);
+  const [cargandoHistorial, setCargandoHistorial] = useState(false);
+
   const isAdmin = user?.role === 'admin';
   const [mostrarImportCli, setMostrarImportCli] = useState(false);
   const [previstaImportCli, setPrevistaImportCli] = useState([]);
@@ -54,6 +69,27 @@ const GestionClientes = ({ user, empresas = [] }) => {
       .then(r => setEmpresasDisponibles(Array.isArray(r.data) ? r.data : []))
       .catch(() => setEmpresasDisponibles([]));
   }, [token]);
+
+  // Ola 2: cargar historial cuando se cambia a la pestaña "historial"
+  useEffect(() => {
+    if (!verDetalle || tabDetalle !== 'historial') return;
+    if (historial && historial.cliente?.id === verDetalle.id) return; // ya cargado
+    setCargandoHistorial(true);
+    setHistorial(null);
+    axios.get(`${API}/clients/${verDetalle.id}/historial`, { headers })
+      .then(r => setHistorial(r.data))
+      .catch(() => setHistorial({ error: 'Error al cargar historial' }))
+      .finally(() => setCargandoHistorial(false));
+    // eslint-disable-next-line
+  }, [verDetalle, tabDetalle]);
+
+  // Reset del tab al abrir / cerrar el modal de detalle
+  useEffect(() => {
+    if (verDetalle) {
+      setTabDetalle('datos');
+      setHistorial(null);
+    }
+  }, [verDetalle]);
 
   // ─── CARGAR CLIENTES ──────────────────────────────────────────────────────
   const cargarClientes = useCallback(async () => {
@@ -457,52 +493,192 @@ const GestionClientes = ({ user, empresas = [] }) => {
       ══════════════════════════════════════════════════════════════════════ */}
       {verDetalle && (
         <div style={s.overlay}>
-          <div style={s.modal}>
+          <div style={{ ...s.modal, maxWidth: 900 }}>
             <div style={s.modalHeader}>
               <h3 style={s.modalTitulo}>👥 {verDetalle.nombre}</h3>
               <button onClick={() => setVerDetalle(null)} style={s.btnCerrar}>✕</button>
             </div>
+
+            {/* Ola 2: pestañas Datos | Historial */}
+            <div style={{ display: 'flex', gap: 4, padding: '0 24px', borderBottom: '2px solid #e5e7eb' }}>
+              <button onClick={() => setTabDetalle('datos')}
+                style={{
+                  padding: '10px 20px', background: 'none', border: 'none', cursor: 'pointer',
+                  fontSize: 14, fontWeight: 600,
+                  color: tabDetalle === 'datos' ? '#7c3aed' : '#6b7280',
+                  borderBottom: tabDetalle === 'datos' ? '2px solid #7c3aed' : '2px solid transparent',
+                  marginBottom: -2
+                }}>
+                📇 Datos
+              </button>
+              <button onClick={() => setTabDetalle('historial')}
+                style={{
+                  padding: '10px 20px', background: 'none', border: 'none', cursor: 'pointer',
+                  fontSize: 14, fontWeight: 600,
+                  color: tabDetalle === 'historial' ? '#7c3aed' : '#6b7280',
+                  borderBottom: tabDetalle === 'historial' ? '2px solid #7c3aed' : '2px solid transparent',
+                  marginBottom: -2
+                }}>
+                📜 Historial
+              </button>
+            </div>
+
             <div style={s.modalBody}>
-              <div style={s.detalleGrid}>
-                <div style={s.detalleItem}><span style={s.detalleLabel}>NIT</span><span>{verDetalle.nit || '—'}</span></div>
-                <div style={s.detalleItem}><span style={s.detalleLabel}>Empresa</span><span>{empresaLabel(verDetalle.empresaId, verDetalle)}</span></div>
-                <div style={s.detalleItem}><span style={s.detalleLabel}>Celular</span><span>{verDetalle.celular || '—'}</span></div>
-                <div style={s.detalleItem}><span style={s.detalleLabel}>Teléfono</span><span>{verDetalle.telefono || '—'}</span></div>
-                <div style={s.detalleItem}><span style={s.detalleLabel}>Email facturación</span><span>{verDetalle.emailLegal || '—'}</span></div>
-                <div style={s.detalleItem}><span style={s.detalleLabel}>Ciudad</span><span>{verDetalle.ciudad || '—'}</span></div>
-                <div style={s.detalleItem}><span style={s.detalleLabel}>Dirección principal</span><span>{verDetalle.direccionPrincipal || '—'}</span></div>
-              </div>
+              {/* ── TAB: DATOS ─────────────────────────────────────────────── */}
+              {tabDetalle === 'datos' && (
+                <>
+                  <div style={s.detalleGrid}>
+                    <div style={s.detalleItem}><span style={s.detalleLabel}>NIT</span><span>{verDetalle.nit || '—'}</span></div>
+                    <div style={s.detalleItem}><span style={s.detalleLabel}>Empresa</span><span>{empresaLabel(verDetalle.empresaId, verDetalle)}</span></div>
+                    <div style={s.detalleItem}><span style={s.detalleLabel}>Celular</span><span>{verDetalle.celular || '—'}</span></div>
+                    <div style={s.detalleItem}><span style={s.detalleLabel}>Teléfono</span><span>{verDetalle.telefono || '—'}</span></div>
+                    <div style={s.detalleItem}><span style={s.detalleLabel}>Email facturación</span><span>{verDetalle.emailLegal || '—'}</span></div>
+                    <div style={s.detalleItem}><span style={s.detalleLabel}>Ciudad</span><span>{verDetalle.ciudad || '—'}</span></div>
+                    <div style={s.detalleItem}><span style={s.detalleLabel}>Dirección principal</span><span>{verDetalle.direccionPrincipal || '—'}</span></div>
+                  </div>
 
-              {verDetalle.emailsAdicionales?.length > 0 && (
-                <div style={s.seccion}>
-                  <p style={s.seccionTitulo}>📨 Emails para copias</p>
-                  {verDetalle.emailsAdicionales.map((e, i) => (
-                    <span key={i} style={s.emailChip}>{e}</span>
-                  ))}
-                </div>
-              )}
-
-              {verDetalle.sucursales?.length > 0 && (
-                <div style={s.seccion}>
-                  <p style={s.seccionTitulo}>🏢 Sucursales</p>
-                  {verDetalle.sucursales.map((suc, i) => (
-                    <div key={i} style={s.sucursalCard}>
-                      <strong>{suc.nombre}</strong>
-                      <span style={s.sucursalDato}>📍 {suc.direccion} {suc.ciudad && `— ${suc.ciudad}`}</span>
-                      {suc.telefono && <span style={s.sucursalDato}>📞 {suc.telefono}</span>}
-                      {suc.encargado && <span style={s.sucursalDato}>👤 {suc.encargado}</span>}
+                  {verDetalle.emailsAdicionales?.length > 0 && (
+                    <div style={s.seccion}>
+                      <p style={s.seccionTitulo}>📨 Emails para copias</p>
+                      {verDetalle.emailsAdicionales.map((e, i) => (
+                        <span key={i} style={s.emailChip}>{e}</span>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  )}
+
+                  {verDetalle.sucursales?.length > 0 && (
+                    <div style={s.seccion}>
+                      <p style={s.seccionTitulo}>🏢 Sucursales</p>
+                      {verDetalle.sucursales.map((suc, i) => (
+                        <div key={i} style={s.sucursalCard}>
+                          <strong>{suc.nombre}</strong>
+                          <span style={s.sucursalDato}>📍 {suc.direccion} {suc.ciudad && `— ${suc.ciudad}`}</span>
+                          {suc.telefono && <span style={s.sucursalDato}>📞 {suc.telefono}</span>}
+                          {suc.encargado && <span style={s.sucursalDato}>👤 {suc.encargado}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {verDetalle.notas && (
+                    <div style={s.seccion}>
+                      <p style={s.seccionTitulo}>📝 Notas</p>
+                      <p style={s.notasTexto}>{verDetalle.notas}</p>
+                    </div>
+                  )}
+                </>
               )}
 
-              {verDetalle.notas && (
-                <div style={s.seccion}>
-                  <p style={s.seccionTitulo}>📝 Notas</p>
-                  <p style={s.notasTexto}>{verDetalle.notas}</p>
-                </div>
+              {/* ── TAB: HISTORIAL (Ola 2) ─────────────────────────────────── */}
+              {tabDetalle === 'historial' && (
+                <>
+                  {cargandoHistorial && (
+                    <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Cargando historial...</div>
+                  )}
+                  {historial?.error && (
+                    <div style={{ padding: 20, background: '#fef2f2', color: '#dc2626', borderRadius: 8 }}>
+                      {historial.error}
+                    </div>
+                  )}
+                  {historial && !historial.error && (
+                    <>
+                      {/* Resumen ejecutivo */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginBottom: 24 }}>
+                        <KpiCardCli icon="📦" label="Órdenes totales" value={historial.resumen.totalOrdenes} color="#7c3aed" />
+                        <KpiCardCli icon="✅" label="Completadas" value={historial.resumen.ordenesCompletadas} color="#16a34a" />
+                        <KpiCardCli icon="⚙️" label="En curso" value={historial.resumen.ordenesEnCurso} color="#0891b2" />
+                        <KpiCardCli icon="💰" label="Facturado total" value={fmtCop(historial.resumen.totalFacturado)} color="#16a34a" />
+                        <KpiCardCli icon="⏳" label="Saldo pendiente" value={fmtCop(historial.resumen.saldoCxC)} color={historial.resumen.saldoCxC > 0 ? '#dc2626' : '#9ca3af'} />
+                        <KpiCardCli icon="🔲" label="Equipos QR" value={historial.resumen.totalQR} color="#b45309" />
+                      </div>
+
+                      {/* Equipos QR */}
+                      {historial.equiposQR.length > 0 && (
+                        <div style={s.seccion}>
+                          <p style={s.seccionTitulo}>🔲 Equipos asignados ({historial.equiposQR.length})</p>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
+                            {historial.equiposQR.slice(0, 12).map(eq => (
+                              <div key={eq.id} style={{ background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 8, padding: '10px 12px', fontSize: 12 }}>
+                                <div style={{ fontWeight: 700, color: '#92400e' }}>{eq.codigoQR}</div>
+                                <div style={{ color: '#78350f', marginTop: 2 }}>{eq.tipo || 'Equipo'}</div>
+                                {eq.ubicacion && <div style={{ color: '#a16207', fontSize: 11, marginTop: 2 }}>📍 {eq.ubicacion}</div>}
+                              </div>
+                            ))}
+                          </div>
+                          {historial.equiposQR.length > 12 && (
+                            <p style={{ marginTop: 8, fontSize: 12, color: '#9ca3af' }}>+ {historial.equiposQR.length - 12} más</p>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Órdenes recientes */}
+                      <div style={s.seccion}>
+                        <p style={s.seccionTitulo}>📋 Órdenes ({historial.ordenes.length})</p>
+                        {historial.ordenes.length === 0 ? (
+                          <p style={{ color: '#9ca3af', fontSize: 13 }}>Sin órdenes registradas.</p>
+                        ) : (
+                          <div style={{ maxHeight: 280, overflow: 'auto', border: '1px solid #e5e7eb', borderRadius: 8 }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                              <thead style={{ background: '#f9fafb', position: 'sticky', top: 0 }}>
+                                <tr>
+                                  {['N°', 'Fecha', 'Estado', 'Total', 'Pagado'].map(h => (
+                                    <th key={h} style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, color: '#6b7280', fontWeight: 700, textTransform: 'uppercase' }}>{h}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {historial.ordenes.slice(0, 50).map(o => (
+                                  <tr key={o.id} style={{ borderTop: '1px solid #f3f4f6' }}>
+                                    <td style={{ padding: '8px 12px', fontWeight: 700, color: '#7c3aed' }}>{o.numeroOrden}</td>
+                                    <td style={{ padding: '8px 12px', color: '#6b7280' }}>{o.createdAt?._seconds ? new Date(o.createdAt._seconds * 1000).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' }) : '—'}</td>
+                                    <td style={{ padding: '8px 12px' }}>
+                                      <span style={{ padding: '2px 8px', borderRadius: 10, fontSize: 10, fontWeight: 700, background: o.estado === 'anulada' ? '#fee2e2' : o.estado === 'completada' || o.estado === 'cuadre_dinero' ? '#dcfce7' : '#fef3c7', color: o.estado === 'anulada' ? '#dc2626' : o.estado === 'completada' || o.estado === 'cuadre_dinero' ? '#16a34a' : '#92400e' }}>
+                                        {o.estado}
+                                      </span>
+                                    </td>
+                                    <td style={{ padding: '8px 12px', fontWeight: 600 }}>{fmtCop(o.total || 0)}</td>
+                                    <td style={{ padding: '8px 12px', color: '#16a34a' }}>{fmtCop(o.montoPagado || 0)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Cotizaciones recientes */}
+                      {historial.cotizaciones.length > 0 && (
+                        <div style={s.seccion}>
+                          <p style={s.seccionTitulo}>📄 Cotizaciones ({historial.cotizaciones.length})</p>
+                          <div style={{ maxHeight: 200, overflow: 'auto', border: '1px solid #e5e7eb', borderRadius: 8 }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                              <thead style={{ background: '#f9fafb', position: 'sticky', top: 0 }}>
+                                <tr>
+                                  {['N°', 'Fecha', 'Estado', 'Total'].map(h => (
+                                    <th key={h} style={{ padding: '8px 12px', textAlign: 'left', fontSize: 10, color: '#6b7280', fontWeight: 700, textTransform: 'uppercase' }}>{h}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {historial.cotizaciones.slice(0, 30).map(c => (
+                                  <tr key={c.id} style={{ borderTop: '1px solid #f3f4f6' }}>
+                                    <td style={{ padding: '8px 12px', fontWeight: 700, color: '#0891b2' }}>{c.numero}</td>
+                                    <td style={{ padding: '8px 12px', color: '#6b7280' }}>{c.fecha || '—'}</td>
+                                    <td style={{ padding: '8px 12px' }}>{c.estado || '—'}</td>
+                                    <td style={{ padding: '8px 12px', fontWeight: 600 }}>{fmtCop(c.totales?.total || 0)}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
               )}
             </div>
+
             <div style={s.modalFooter}>
               <button onClick={() => { setVerDetalle(null); abrirEditar(verDetalle); }} style={s.btnPrimario}>✏️ Editar</button>
               <button onClick={() => setVerDetalle(null)} style={s.btnCancelar}>Cerrar</button>

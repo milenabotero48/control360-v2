@@ -47,6 +47,8 @@ app.use('/api/cxc',           authenticate, require('./routes/cxc'));
 app.use('/api/cxp',           authenticate, require('./routes/cxp'));
 app.use('/api/proveedores',   authenticate, require('./routes/proveedores'));
 app.use('/api/logistica',     authenticate, require('./routes/logistics'));
+// Ola 2: dashboards agregados por rol
+app.use('/api/dashboards',    authenticate, require('./routes/dashboards'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

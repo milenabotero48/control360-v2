@@ -7,6 +7,8 @@ const { db, admin } = require('../config/firebase');
 const ordersRouter = require('./orders');
 const construirFlujo = ordersRouter.construirFlujo;
 const registrarIngresoEnCaja = ordersRouter.registrarIngresoEnCaja;
+// Verificador de PIN por usuario (Ola 1 — sustituye al PIN de empresa).
+const verificarPinUsuario = ordersRouter.verificarPinUsuario;
 const { authenticate, validarTenant } = require('../middleware/auth');
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -68,6 +70,8 @@ router.post('/asignar', async (req, res) => {
       return res.status(400).json({ error: 'mensajeroId y ordenIds requeridos' });
     }
 
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+
     const batch = db.batch();
     const hoy = new Date().toISOString().split('T')[0];
 
@@ -89,7 +93,13 @@ router.post('/asignar', async (req, res) => {
           || cat.includes('hidrostatica') || cat.includes('hidrostática');
       };
       // ¿Hay al menos un equipo de recarga/mant que NO sea de cambio?
-      const tieneRecogerReal = (ordData.items || []).some(
+      // FIX (Ola 2.5): si la orden YA viene de taller (estado en_ruta_entrega o
+      // entrega_cobranza), el ciclo de recogida ya pasó. Hay que asignar siempre
+      // como entrega, sin importar los items. ANTES: el código evaluaba items y
+      // como una Domicilio que pasó por taller TODAVÍA tiene items de recarga,
+      // la mandaba de nuevo a en_ruta_recogida (bug que rompía el flujo).
+      const yaSalioDeTaller = ['en_ruta_entrega', 'entrega_cobranza'].includes(ordData.estado);
+      const tieneRecogerReal = !yaSalioDeTaller && (ordData.items || []).some(
         it => esRecargaMant(it) && !it.esCambio
       );
 
@@ -128,9 +138,40 @@ const valorMostrar = esCobranzaMsg ? (o.montoCobrar || 0) : (o.total || 0);
 return `📋 *${o.numeroOrden}* — ${o.clienteNombre}${esCobranzaMsg ? ' 💳 *COBRANZA*' : ''}${telefono ? `\n   📞 ${telefono}` : ''}\n   📍 ${direccion}${!esCobranzaMsg && productos ? `\n   📦 Productos:\n${productos}` : ''}\n   💰 ${fmtCOP(valorMostrar)}`;
     }).join('\n\n');
 
+    // ── Maps SaaS-ready (Ola 2.5 Bloque 1): adjuntar ciudad de la empresa ──
+    // Google Maps recibe el texto plano de la dirección. Si solo va "Calle 5
+    // #45-67" Maps lo resuelve por la ubicación actual del usuario, lo cual
+    // hace que para un suscriptor de Medellín se abra en Cali (porque su
+    // celular está en otra zona). Solución: añadir la ciudad/región de la
+    // empresa al final de cada dirección.
+    let ciudadEmpresa = '';
+    try {
+      const snapEmpresa = await db.collection('companies')
+        .where('adminId', '==', adminId)
+        .limit(1)
+        .get();
+      if (!snapEmpresa.empty) {
+        const empresa = snapEmpresa.docs[0].data();
+        // Toma ciudad explícita o, si no existe, la última parte del address
+        ciudadEmpresa = empresa.ciudad || empresa.city || '';
+        if (!ciudadEmpresa && empresa.address) {
+          // Si address tiene formato "Cra X #Y, Cali" toma "Cali"
+          const partes = String(empresa.address).split(',').map(s => s.trim()).filter(Boolean);
+          ciudadEmpresa = partes[partes.length - 1] || '';
+        }
+      }
+    } catch {}
+    const sufijoCiudad = ciudadEmpresa ? `, ${ciudadEmpresa}, Colombia` : '';
+
     // Construir link Google Maps con todas las paradas en orden
     const direcciones = snapOrdenes
-      .map(d => d.data()?.sucursalDireccion || d.data()?.clienteDireccion || d.data()?.clienteDireccionPrincipal || '')
+      .map(d => {
+        const dir = d.data()?.sucursalDireccion || d.data()?.clienteDireccion || d.data()?.clienteDireccionPrincipal || '';
+        if (!dir) return '';
+        // Si la dirección ya menciona la ciudad, no duplicar
+        const yaTieneCiudad = ciudadEmpresa && dir.toLowerCase().includes(ciudadEmpresa.toLowerCase());
+        return yaTieneCiudad ? dir : (dir + sufijoCiudad);
+      })
       .filter(Boolean)
       .map(d => encodeURIComponent(d));
 
@@ -260,7 +301,7 @@ const actualizarScoreMensajero = async ({ adminId, mensajeroId, restarPuntos, ti
 // ═══════════════════════════════════════════════════════════════════════════════
 router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (req, res) => {
   try {
-    const { nuevoEstado, nota, extintorPrestamo, fotoUrl, cobro, formaPago, fotoTransferenciaUrl, items, gps, prestamoDevueltoId, deficiencia } = req.body;
+    const { nuevoEstado, nota, extintorPrestamo, fotoUrl, cobro, formaPago, fotoTransferenciaUrl, items, gps, prestamoDevueltoId, prestamosDevueltosIds, deficiencia } = req.body;
     if (!nuevoEstado) return res.status(400).json({ error: 'nuevoEstado requerido' });
 
     const ordenRef = db.collection('orders').doc(req.params.id);
@@ -371,9 +412,56 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
     const montoCobro = Number(cobro) || 0;
 
     if (nuevoEstado === 'entrega_cobranza') {
-      // Anti-recobro: si ya está pagada, no se vuelve a registrar cobro
-      if (orden.pagado === true || orden.dineroEnCaja === true) {
+      // Ola 2.5: si la orden YA está pagada (admin la marcó pagada antes, o ya
+      // pasó por validación), NO bloqueamos el avance: simplemente saltamos la
+      // sección de "registrar cobro" porque ya no hay nada que cobrar.
+      // El mensajero solo entrega y se cierra como completada.
+      const ordenYaPagada = (orden.pagado === true || orden.dineroEnCaja === true)
+        && !esCredito;
+      const intentaCobrarDeNuevo = montoCobro > 0 || (formaPago && !esCredito);
+
+      if (ordenYaPagada && intentaCobrarDeNuevo) {
+        // Caso real recobro: rechazar
         return res.status(409).json({ error: 'Esta orden ya está pagada.', yaPagada: true });
+      }
+
+      if (ordenYaPagada) {
+        // Caso entrega de orden ya pagada: solo cerrar.
+        update.estado = 'completada';
+        update.historialEstados = admin.firestore.FieldValue.arrayUnion(
+          { estado: 'entrega_cobranza', fecha: timestampFoto,
+            usuarioId: req.user.uid || req.user.id,
+            usuarioNombre: req.user.nombre || req.user.email,
+            nota: nota || '', gps: gps || null },
+          { estado: 'completada', fecha: timestampFoto,
+            usuarioId: req.user.uid || req.user.id,
+            usuarioNombre: req.user.nombre || req.user.email,
+            nota: 'Orden entregada — ya estaba pagada' }
+        );
+        await ordenRef.update(update);
+
+        // Préstamo devuelto si aplica
+        if (prestamoDevueltoId) {
+          try {
+            await db.collection('extintores_prestamo').doc(prestamoDevueltoId).update({
+              estado: 'devuelto',
+              fechaDevolucion: new Date().toISOString(),
+              recibidoPor: req.user.email
+            });
+          } catch (ePrest) {
+            console.warn('No se pudo marcar préstamo devuelto:', ePrest.message);
+          }
+        }
+
+        await auditar({
+          accion: 'ENTREGAR_ORDEN_PAGADA',
+          descripcion: `${req.user.email} entregó ${orden.numeroOrden} (ya estaba pagada)`,
+          usuarioId: req.user.uid || req.user.id,
+          usuarioEmail: req.user.email,
+          documento: orden.numeroOrden,
+        });
+
+        return res.json({ ok: true, estado: 'completada', yaPagada: true });
       }
 
       // ¿Hay un mensajero de por medio? Si NO hay mensajero asignado, la
@@ -412,38 +500,73 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
       }
       if (formaPago) update.formaPago = formaPago;
 
-      // ── SIN MENSAJERO: cerrar la orden y meter el dinero a caja YA ─────────
+      // ── SIN MENSAJERO: registrar el pago según la regla Ola 2.5 ────────────
+      // REGLA RAÍZ: pago y estado son DOS dimensiones separadas.
+      //   - Pago entra a caja (efectivo) o queda pendiente validar (virtual).
+      //   - El estado SOLO se completa si la orden YA estaba en entrega_cobranza.
+      //   - Si está en recogida/taller/entrega, el flujo sigue su curso normal.
+      const esPagoVirtual = formaPago && formaPago !== 'Efectivo' &&
+        formaPago !== 'A crédito (CxC)' && formaPago !== 'A crédito' &&
+        formaPago !== 'CXC' && formaPago !== 'Cuenta por Pagar';
+
       if (!hayMensajero) {
+        const yaEnCobranza = orden.estado === 'entrega_cobranza';
+
         if (esCredito) {
-          // No pagó → queda en cartera (CxC), sin sumar a caja.
-          update.estado = 'cxc';
-          update.historialEstados = admin.firestore.FieldValue.arrayUnion(
-            { estado: 'entrega_cobranza', fecha: timestampFoto,
-              usuarioId: req.user.uid || req.user.id,
-              usuarioNombre: req.user.nombre || req.user.email,
-              nota: nota || '', gps: gps || null },
-            { estado: 'cxc', fecha: timestampFoto,
-              usuarioId: req.user.uid || req.user.id,
-              usuarioNombre: req.user.nombre || req.user.email,
-              nota: 'Sin pago: queda en cartera (CxC)' }
-          );
+          // No pagó → queda en cartera (CxC). Solo cambia estado si ya estaba en cobranza.
+          if (yaEnCobranza) {
+            update.estado = 'cxc';
+            update.historialEstados = admin.firestore.FieldValue.arrayUnion(
+              { estado: 'cxc', fecha: timestampFoto,
+                usuarioId: req.user.uid || req.user.id,
+                usuarioNombre: req.user.nombre || req.user.email,
+                nota: 'Sin pago: queda en cartera (CxC)' }
+            );
+          }
+        } else if (esPagoVirtual) {
+          // Pago virtual: marca pagado pero el dinero NO entra a caja hasta validar.
+          update.pagoVirtualPendienteValidar = true;
+          update.pagoValidado = false;
+          if (yaEnCobranza) {
+            update.estado = 'completada';
+            update.historialEstados = admin.firestore.FieldValue.arrayUnion(
+              { estado: 'completada', fecha: timestampFoto,
+                usuarioId: req.user.uid || req.user.id,
+                usuarioNombre: req.user.nombre || req.user.email,
+                nota: `Pago ${formaPago} en cobranza — pendiente de validar` }
+            );
+          } else {
+            // Solo registra el pago, sin cambiar estado.
+            update.historialEstados = admin.firestore.FieldValue.arrayUnion(
+              { estado: orden.estado, fecha: timestampFoto,
+                usuarioId: req.user.uid || req.user.id,
+                usuarioNombre: req.user.nombre || req.user.email,
+                accion: 'PAGO_REGISTRADO',
+                nota: `Pago ${formaPago} registrado — pendiente de validar. El servicio sigue su flujo.` }
+            );
+          }
         } else {
-          // Pagó → el dinero entra a caja AHORA (candado anti-doble-suma
-          // dentro de registrarIngresoEnCaja) y la orden queda completada.
-          update.estado = 'completada';
+          // Pago en EFECTIVO: dinero entra a caja YA. Estado solo cierra si estaba en cobranza.
           update.dineroEnCaja = true;
           update.dineroEnCajaFecha = timestampFoto;
           update.dineroEnCajaPor = req.user.email;
-          update.historialEstados = admin.firestore.FieldValue.arrayUnion(
-            { estado: 'entrega_cobranza', fecha: timestampFoto,
-              usuarioId: req.user.uid || req.user.id,
-              usuarioNombre: req.user.nombre || req.user.email,
-              nota: nota || '', gps: gps || null },
-            { estado: 'completada', fecha: timestampFoto,
-              usuarioId: req.user.uid || req.user.id,
-              usuarioNombre: req.user.nombre || req.user.email,
-              nota: 'Cobro directo (sin mensajero): dinero en caja' }
-          );
+          if (yaEnCobranza) {
+            update.estado = 'completada';
+            update.historialEstados = admin.firestore.FieldValue.arrayUnion(
+              { estado: 'completada', fecha: timestampFoto,
+                usuarioId: req.user.uid || req.user.id,
+                usuarioNombre: req.user.nombre || req.user.email,
+                nota: 'Cobro en cobranza: dinero en caja' }
+            );
+          } else {
+            update.historialEstados = admin.firestore.FieldValue.arrayUnion(
+              { estado: orden.estado, fecha: timestampFoto,
+                usuarioId: req.user.uid || req.user.id,
+                usuarioNombre: req.user.nombre || req.user.email,
+                accion: 'PAGO_REGISTRADO',
+                nota: 'Cobro en efectivo registrado. El servicio sigue su flujo.' }
+            );
+          }
         }
 
         await ordenRef.update(update);
@@ -465,8 +588,10 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
 
         // Registrar el dinero en caja usando la función de orders.js
         // (tiene el candado que impide doble suma).
+        // FIX Ola 2.5: solo efectivo entra a caja directo. Virtual espera
+        // validación de Admin/Tesorería.
         let resultadoCaja = null;
-        if (!esCredito && typeof registrarIngresoEnCaja === 'function') {
+        if (!esCredito && !esPagoVirtual && typeof registrarIngresoEnCaja === 'function') {
           resultadoCaja = await registrarIngresoEnCaja({
             userId: req.adminId || req.user.uid || req.user.id,
             ordenId: req.params.id,
@@ -570,6 +695,25 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
     }
 
     await ordenRef.update(update);
+
+    // ── Ola 2.5: marcar préstamos devueltos en bulk ───────────────────────────
+    // El mensajero marcó qué préstamos recogió en la entrega. Cambiamos cada
+    // uno a estado "devuelto". Los que NO marcó quedan pendientes.
+    if (Array.isArray(prestamosDevueltosIds) && prestamosDevueltosIds.length > 0) {
+      for (const prestId of prestamosDevueltosIds) {
+        try {
+          await db.collection('extintores_prestamo').doc(prestId).update({
+            estado: 'devuelto',
+            fechaDevolucion: new Date().toISOString(),
+            recibidoPor: req.user.email,
+            ordenDevolucionId: req.params.id,
+            ordenDevolucionNumero: orden.numeroOrden
+          });
+        } catch (eP) {
+          console.warn(`No se pudo marcar préstamo ${prestId}:`, eP.message);
+        }
+      }
+    }
 
     // ── ALERTA A TESORERÍA: mensajero con dinero por cuadrar ─────────────────
     // Se dispara apenas el mensajero registra un cobro real — sin importar si
@@ -766,21 +910,29 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONFIRMAR CUADRE (Admin/Tesorería con PIN)
 // POST /api/logistica/cuadre/:mensajeroId/confirmar
+// ─────────────────────────────────────────────────────────────────────────────
+// Ola 1: el PIN se valida contra el usuario LOGUEADO (Admin o Tesorería)
+//        — antes se validaba contra el pinAutorizacion de la empresa.
 // ═══════════════════════════════════════════════════════════════════════════════
 router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
   try {
     const { pin, montoRecibido, extintoresDevueltos } = req.body;
-    if (!pin) return res.status(400).json({ error: 'PIN requerido' });
 
-    // Verificar PIN — buscar empresas del admin
-    const adminId = req.adminId || req.user.uid || req.user.id;
-    const [snap1, snap2] = await Promise.all([
-      db.collection('companies').where('adminId', '==', adminId).get(),
-      db.collection('companies').where('user_id', '==', adminId).get()
-    ]);
-    const todasEmpresas = [...snap1.docs, ...snap2.docs];
-    const autorizado = todasEmpresas.some(d => d.data().pinAutorizacion === pin);
-    if (!autorizado) return res.status(403).json({ error: 'PIN incorrecto' });
+    const verificacion = await verificarPinUsuario(req.user.uid || req.user.id, pin);
+    if (!verificacion.ok) {
+      // Auditar intento fallido (sin tumbar el flujo).
+      try {
+        await db.collection('audit_logs').add({
+          accion: 'CUADRE_PIN_FALLIDO',
+          modulo: 'logistica',
+          descripcion: `${req.user.email} falló PIN al cuadrar mensajero ${req.params.mensajeroId}`,
+          usuarioId: req.user.uid || req.user.id,
+          usuarioEmail: req.user.email,
+          fecha: new Date().toISOString()
+        });
+      } catch {}
+      return res.status(403).json({ error: verificacion.error });
+    }
 
     const { mensajeroId } = req.params;
     const batch = db.batch();
@@ -838,8 +990,10 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       const estadoFinal = (esCredito || monto <= 0) ? 'cxc' : 'completada';
 
       // CANDADO ANTI-DOBLE-SUMA: solo suma a caja si NO entró ya
+      // FIX Ola 2.5: dinero virtual NO entra en el cuadre, espera validación
+      // de Admin/Tesorería. Solo efectivo cuadra a caja inmediatamente.
       const yaEnCaja = o.dineroEnCaja === true;
-      const sumaCaja = !esCredito && monto > 0 && !yaEnCaja;
+      const sumaCaja = !esCredito && monto > 0 && !yaEnCaja && tipo !== 'virtual';
 
       batch.update(doc.ref, {
         cuadrado: true,
@@ -851,20 +1005,25 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
           dineroEnCajaFecha: new Date().toISOString(),
           dineroEnCajaPor: req.user.email
         } : {}),
-        ...(tipo === 'virtual' ? { pagoVirtualPendienteValidar: false } : {}),
+        // FIX Ola 2.5: si fue virtual, marcar pendiente de validar (NO falsear).
+        ...(tipo === 'virtual' && !esCredito ? {
+          pagoVirtualPendienteValidar: true,
+          pagoValidado: false
+        } : {}),
         historialEstados: admin.firestore.FieldValue.arrayUnion({
           estado: estadoFinal,
           fecha: new Date().toISOString(),
           usuarioId: req.user.uid || req.user.id,
           usuarioNombre: req.user.email,
-          nota: esCredito ? 'Cuadre: queda en cartera (CxC)' : 'Cuadre: dinero confirmado en caja'
+          nota: esCredito ? 'Cuadre: queda en cartera (CxC)'
+              : tipo === 'virtual' ? 'Cuadre: pago virtual pendiente de validar'
+              : 'Cuadre: dinero confirmado en caja'
         }),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
 
       if (sumaCaja) {
-        if (tipo === 'virtual') sumaVirtual += monto;
-        else sumaEfectivo += monto;
+        sumaEfectivo += monto;
         ordenesParaCaja.push({ numeroOrden: o.numeroOrden, monto, tipo });
       }
     });

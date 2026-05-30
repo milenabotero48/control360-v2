@@ -611,7 +611,7 @@ const ConfigTaller = () => {
             <input type="number" min={1} max={500} style={s.input}
               value={metaDiaria} onChange={e => setMetaDiaria(parseInt(e.target.value) || 1)} />
             <p style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
-              Ej: 60 extintores por día. Se muestra en el dashboard de Pedro.
+              Ej: 60 equipos por día. Se muestra en el dashboard del taller.
             </p>
           </div>
           <div>
@@ -720,50 +720,98 @@ export default function GestionTaller({ user }) {
   };
 
   const cargarEquiposDeOrden = async (ordenId, numeroOrden) => {
-    if (equiposOrden[ordenId]) return; // ya cargado
+    // Ola 2.5 FIX: SIEMPRE recargar (no return si ya está cargado), porque al
+    // procesar un equipo se crean QRs nuevos y debemos verlos reflejados.
     try {
-      let equipos = [];
-      // 1. ¿Hay QR ya ligados a esta orden? (compatibilidad con datos viejos)
+      // 1. Cargar QRs ya creados para esta orden (los procesados)
+      let qrsExistentes = [];
       try {
         const { data } = await axios.get(`${API}/qr`, auth());
-        equipos = (Array.isArray(data) ? data : []).filter(e => e.ordenId === ordenId);
+        qrsExistentes = (Array.isArray(data) ? data : []).filter(e => e.ordenId === ordenId);
       } catch (e) { /* sin QR previos, seguimos */ }
 
-      // 2. Si no hay QR, expandir desde los items de taller de la orden.
-      if (equipos.length === 0) {
-        const ord = ordenes.find(o => o.id === ordenId);
-        const items = (ord?.items || []).filter(esItemTallerFront);
-        equipos = [];
-       const separarTipoCap = (nombre) => {
-          const nom = (nombre || '').trim();
-          const up = nom.toUpperCase();
-          const tipos = ['ABC','BC','CO2','AGUA','ACETATO','SOLKAFLAM','HALOTRON','PQS'];
-          for (const t of tipos) {
-            if (up.startsWith(t + ' ') || up === t) {
-              return { tipo: t, capacidad: nom.substring(t.length).trim() };
-            }
+      // 2. SIEMPRE expandir desde los items de taller de la orden (no solo si
+      //    no hay QRs). Antes el código se saltaba esto cuando había al menos
+      //    1 QR creado, lo cual hacía que la orden con 10 equipos pareciera
+      //    tener solo 1 después de procesar el primero. BUG CRÍTICO: con la
+      //    lógica anterior, procesar 1 → "todos listos" → orden completada
+      //    sin haber recargado los otros 9.
+      const ord = ordenes.find(o => o.id === ordenId);
+      const items = (ord?.items || []).filter(esItemTallerFront);
+      const equiposExpandidos = [];
+      const separarTipoCap = (nombre) => {
+        const nom = (nombre || '').trim();
+        const up = nom.toUpperCase();
+        const tipos = ['ABC','BC','CO2','AGUA','ACETATO','SOLKAFLAM','HALOTRON','PQS'];
+        for (const t of tipos) {
+          if (up.startsWith(t + ' ') || up === t) {
+            return { tipo: t, capacidad: nom.substring(t.length).trim() };
           }
-          return { tipo: 'ABC', capacidad: nom };
-        };
-        items.forEach((it, idx) => {
-          const cant = it.cantidad || 1;
-          const { tipo: tipoEq, capacidad: capEq } = separarTipoCap(it.nombre);
-          for (let n = 0; n < cant; n++) {
-            equipos.push({
-              codigoQR: null,                  // aún sin QR — el taller decide
-              qrPendiente: true,
-              nombre: it.nombre || '',
-              tipo: tipoEq,
-              capacidad: capEq,
-              categoria: it.categoria || '',
-              esCambio: !!it.esCambio,
-              codigoQRsugerido: it.codigoQR || '',  // si vino de un cambio
-              procesado: false,
-              _itemIdx: idx, _unidad: n + 1, _totalUnidad: cant
-            });
-          }
+        }
+        return { tipo: 'ABC', capacidad: nom };
+      };
+      items.forEach((it, idx) => {
+        const cant = it.cantidad || 1;
+        const { tipo: tipoEq, capacidad: capEq } = separarTipoCap(it.nombre);
+        for (let n = 0; n < cant; n++) {
+          equiposExpandidos.push({
+            codigoQR: null,
+            qrPendiente: true,
+            nombre: it.nombre || '',
+            tipo: tipoEq,
+            capacidad: capEq,
+            categoria: it.categoria || '',
+            esCambio: !!it.esCambio,
+            codigoQRsugerido: it.codigoQR || '',
+            procesado: false,
+            _itemIdx: idx, _unidad: n + 1, _totalUnidad: cant
+          });
+        }
+      });
+
+      // 3. Mergear: para cada QR existente, marcar UN slot del item compatible
+      //    como procesado (con el código y los datos del QR). Slots restantes
+      //    quedan como "pendientes de procesar".
+      const qrsRestantes = [...qrsExistentes];
+      const equipos = equiposExpandidos.map(slot => {
+        // Buscar un QR del mismo tipo/capacidad que aún no se haya asignado a otro slot
+        const idxQR = qrsRestantes.findIndex(qr => {
+          const tipoQR = (qr.tipo || '').toUpperCase();
+          const capQR = (qr.capacidad || '').toLowerCase().trim();
+          const tipoSlot = (slot.tipo || '').toUpperCase();
+          const capSlot = (slot.capacidad || '').toLowerCase().trim();
+          return tipoQR === tipoSlot && capQR === capSlot;
         });
-      }
+        if (idxQR >= 0) {
+          const qr = qrsRestantes.splice(idxQR, 1)[0];
+          return {
+            ...slot,
+            codigoQR: qr.codigoQR,
+            qrPendiente: false,
+            procesado: !!qr.fechaUltimaRecarga,
+            qrId: qr.id
+          };
+        }
+        return slot;
+      });
+
+      // 4. Si quedaron QRs sin match (por tipos distintos a los items), agregarlos al final
+      qrsRestantes.forEach(qr => {
+        equipos.push({
+          codigoQR: qr.codigoQR,
+          qrPendiente: false,
+          nombre: qr.nombre || `${qr.tipo} ${qr.capacidad}`,
+          tipo: qr.tipo || 'ABC',
+          capacidad: qr.capacidad || '',
+          categoria: 'Recarga',
+          esCambio: false,
+          codigoQRsugerido: '',
+          procesado: !!qr.fechaUltimaRecarga,
+          qrId: qr.id,
+          _fueraDeItems: true
+        });
+      });
+
       setEquiposOrden(prev => ({ ...prev, [ordenId]: equipos }));
     } catch (e) { console.error('Error cargando equipos orden:', e); }
   };
@@ -787,6 +835,11 @@ export default function GestionTaller({ user }) {
   // ─── RESOLVER QR (generar nuevo o escanear existente) ────────────────────────
   // El taller decide: equipo nuevo → genera QR; equipo que ya tiene QR →
   // escanea y se agrega el servicio a su historial (mismo QR de por vida).
+  //
+  // Ola 2.5: flujo automático QR → Proceso. Cuando se asigna el QR, abrimos
+  // inmediatamente el modal de Proceso para ESE equipo. Pedro no tiene que ir
+  // a otra pestaña. Si cierra sin guardar el proceso, el QR queda creado y el
+  // equipo se procesa después manualmente (sin rollback).
   const handleResolverQR = async ({ orden, equipo, modo, codigoQR }) => {
     const body = {
       modo,                       // 'generar' | 'escanear'
@@ -805,23 +858,54 @@ export default function GestionTaller({ user }) {
     const { data } = await axios.post(`${API}/qr/resolver`, body, auth());
     notif(modo === 'escanear'
       ? `Servicio agregado al equipo ${data.codigoQR}`
-      : `QR ${data.codigoQR} generado`);
+      : `QR ${data.codigoQR} generado · Continúa con el proceso`);
     setModalQR(null);
-    // Recargar la lista de equipos de esta orden para que aparezca con su QR
-    setEquiposOrden(prev => { const c = { ...prev }; delete c[orden.id]; return c; });
     cargarOrdenes(); cargarDashboard();
+
+    // Recargar lista de equipos y luego abrir el modal de proceso para ESTE equipo.
+    await cargarEquiposDeOrden(orden.id, orden.numeroOrden);
+
+    // Construir el equipo "con QR ya asignado" para pasarlo directo al modal
+    // de Proceso. No esperamos a que se re-renderice la lista — vamos directo.
+    const equipoConQR = {
+      ...equipo,
+      codigoQR: data.codigoQR,
+      qrId: data.id,
+      qrPendiente: false,
+      procesado: false
+    };
+    setModalProcesoEquipo({ orden, equipo: equipoConQR });
+
     return data;
   };
 
   // ─── COMPLETAR EQUIPO INDIVIDUAL ─────────────────────────────────────────────
   const handleCompletarEquipo = async ({ ordenId, orden, equipoId, codigoQR, procesoNombre, procesosCompletados, observaciones, insumosUsados, modoRapido }) => {
-    // 1. Registrar paso en la orden
-    await axios.post(`${API}/workshop/ordenes/${ordenId}/paso`, {
-      pasoId: `equipo_${codigoQR || equipoId}`,
-      pasoNombre: `${codigoQR} — ${procesoNombre}`,
-      insumosUsados,
-      observaciones
-    }, auth());
+    // Ola 2.5 FIX: si la orden es "manual" (proceso ad-hoc de un equipo que
+    // está en bodega o de un cambio), NO llamamos a workshop/ordenes/manual/paso
+    // porque "manual" no es una orden real → backend devuelve "Recurso no encontrado".
+    // En este caso solo actualizamos el QR y descontamos insumos.
+    const esOrdenManual = !ordenId || ordenId === 'manual';
+
+    if (!esOrdenManual) {
+      // 1. Registrar paso en la orden
+      await axios.post(`${API}/workshop/ordenes/${ordenId}/paso`, {
+        pasoId: `equipo_${codigoQR || equipoId}`,
+        pasoNombre: `${codigoQR} — ${procesoNombre}`,
+        insumosUsados,
+        observaciones
+      }, auth());
+    } else {
+      // Para procesos manuales, descontar insumos directamente
+      for (const insumo of (insumosUsados || [])) {
+        if (insumo.insumoId && insumo.cantidad > 0) {
+          try {
+            await axios.post(`${API}/workshop/insumos/${insumo.insumoId}/descontar`,
+              { cantidad: insumo.cantidad, motivo: `Proceso manual ${codigoQR}` }, auth());
+          } catch (e) { /* no rompe el flujo */ }
+        }
+      }
+    }
 
     // 2. Actualizar QR del equipo si tiene código
     if (codigoQR) {
@@ -831,31 +915,35 @@ export default function GestionTaller({ user }) {
         pasos: procesosCompletados,
         fechaUltimaRecarga: new Date().toISOString(),
         proximaRecarga: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString(),
-        ordenId,
-        numeroOrden: orden.numeroOrden
+        ...(esOrdenManual ? {} : { ordenId, numeroOrden: orden.numeroOrden })
       }, auth());
     }
 
-    // 3. Verificar si todos los equipos de la orden están listos
-    const equipos = equiposOrden[ordenId] || [];
-    const updatedEquipos = equipos.map(e => e.codigoQR === codigoQR ? { ...e, procesado: true } : e);
-    setEquiposOrden(prev => ({ ...prev, [ordenId]: updatedEquipos }));
+    // 3. Si NO es manual: verificar si todos los equipos de la orden están listos
+    if (!esOrdenManual) {
+      const equipos = equiposOrden[ordenId] || [];
+      const updatedEquipos = equipos.map(e => e.codigoQR === codigoQR ? { ...e, procesado: true } : e);
+      setEquiposOrden(prev => ({ ...prev, [ordenId]: updatedEquipos }));
 
-    const todosListos = updatedEquipos.length > 0 && updatedEquipos.every(e => e.procesado);
+      const todosListos = updatedEquipos.length > 0 && updatedEquipos.every(e => e.procesado);
 
-    if (todosListos) {
-      // Completar toda la orden → pasa a Facturación
-      await axios.post(`${API}/workshop/ordenes/${ordenId}/completar`, {
-        observacionesFinal: `Todos los equipos procesados. Último: ${codigoQR}`,
-        procesosCompletados
-      }, auth());
-      notif(`✅ Todos los equipos listos — Orden ${orden.numeroOrden} pasa a Facturación`);
+      if (todosListos) {
+        // Completar toda la orden → pasa a Facturación
+        await axios.post(`${API}/workshop/ordenes/${ordenId}/completar`, {
+          observacionesFinal: `Todos los equipos procesados. Último: ${codigoQR}`,
+          procesosCompletados
+        }, auth());
+        notif(`✅ Todos los equipos listos — Orden ${orden.numeroOrden} pasa a Facturación`);
+      } else {
+        notif(`✅ Equipo ${codigoQR} listo`);
+      }
     } else {
-      notif(`✅ Equipo ${codigoQR} listo`);
+      notif(`✅ Proceso manual registrado en ${codigoQR}`);
     }
 
     setModalProcesoEquipo(null);
-    cargarOrdenes(); cargarDashboard(); cargarEquiposDeOrden(ordenId, orden.numeroOrden);
+    cargarOrdenes(); cargarDashboard();
+    if (!esOrdenManual) cargarEquiposDeOrden(ordenId, orden.numeroOrden);
   };
 
   // ─── ACCIONES PROCESOS ───────────────────────────────────────────────────────
@@ -908,7 +996,7 @@ export default function GestionTaller({ user }) {
       <div style={s.header}>
         <div>
           <h1 style={s.titulo}>🔧 Taller</h1>
-          <p style={s.subtitulo}>{user?.role === 'taller' ? `Hola ${user?.nombre || 'Pedro'} — ` : ''}Control de procesos y equipos</p>
+          <p style={s.subtitulo}>{user?.role === 'taller' ? `Hola ${user?.nombre || 'Técnico'} — ` : ''}Control de procesos y equipos</p>
         </div>
         {alertas.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 14px', background: '#fef2f2', borderRadius: 10, border: '1px solid #fecaca' }}>

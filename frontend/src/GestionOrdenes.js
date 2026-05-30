@@ -34,6 +34,7 @@ const GestionOrdenes = ({ user }) => {
   const [filtroTipo, setFiltroTipo]     = useState('');
   const [filtroDesde, setFiltroDesde]   = useState('');
   const [filtroHasta, setFiltroHasta]   = useState('');
+  const [filtroPendientesPago, setFiltroPendientesPago] = useState(false);  // Ola 2.5
   const [vistaActual, setVistaActual]   = useState('lista'); // lista | nueva | detalle | editar
   const [ordenSeleccionada, setOrdenSeleccionada] = useState(null);
   const [ordenEditar, setOrdenEditar]   = useState(null);
@@ -89,7 +90,22 @@ const GestionOrdenes = ({ user }) => {
   }
 
   // ─── VISTA LISTA ────────────────────────────────────────────────────────────
+  const esPagoVirtualFn = (fp) => fp && fp !== 'Efectivo' && fp !== 'A crédito (CxC)' &&
+    fp !== 'A crédito' && fp !== 'CXC' && fp !== 'Cuenta por Pagar';
+
+  // Contador global de pendientes (para el badge del botón)
+  const totalPendientesPago = ordenes.filter(o =>
+    esPagoVirtualFn(o.formaPago) && o.pagado === true &&
+    o.pagoValidado !== true && !o.pagoRechazado
+  ).length;
+
   const ordenesFiltradas = ordenes.filter(o => {
+    // Filtro de pendientes de validar pago (Ola 2.5)
+    if (filtroPendientesPago) {
+      const esVirtual = esPagoVirtualFn(o.formaPago);
+      const pend = esVirtual && o.pagado === true && o.pagoValidado !== true && !o.pagoRechazado;
+      if (!pend) return false;
+    }
     if (!filtroDesde && !filtroHasta) return true;
     const raw = o.createdAt?._seconds ? new Date(o.createdAt._seconds * 1000) : o.createdAt ? new Date(o.createdAt) : null;
     if (!raw) return true;
@@ -150,6 +166,33 @@ const GestionOrdenes = ({ user }) => {
             value={buscar} onChange={e => setBuscar(e.target.value)} />
           {buscar && <button onClick={() => setBuscar('')} style={s.clearBtn}>✕</button>}
         </div>
+
+        {/* Ola 2.5: filtro rápido de pagos pendientes de validar (admin/tesorería) */}
+        {(user?.role === 'admin' || user?.role === 'tesoreria') && totalPendientesPago > 0 && (
+          <button
+            onClick={() => setFiltroPendientesPago(!filtroPendientesPago)}
+            style={{
+              padding: '8px 14px', borderRadius: 8, cursor: 'pointer',
+              fontSize: 13, fontWeight: 700,
+              border: filtroPendientesPago ? '2px solid #f59e0b' : '2px solid #fcd34d',
+              background: filtroPendientesPago ? '#f59e0b' : '#fffbeb',
+              color: filtroPendientesPago ? '#fff' : '#92400e',
+              display: 'flex', alignItems: 'center', gap: 8,
+              animation: !filtroPendientesPago ? 'pulse 2s infinite' : 'none'
+            }}
+            title="Pagos electrónicos pendientes de validación"
+          >
+            ⏳ Validar pagos
+            <span style={{
+              background: filtroPendientesPago ? '#fff' : '#f59e0b',
+              color: filtroPendientesPago ? '#f59e0b' : '#fff',
+              borderRadius: 12, padding: '1px 8px', fontSize: 12, fontWeight: 800
+            }}>
+              {totalPendientesPago}
+            </span>
+          </button>
+        )}
+
         <select style={s.select} value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)}>
           <option value="">Todos los estados</option>
           {Object.entries(ESTADOS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
@@ -217,9 +260,41 @@ const GestionOrdenes = ({ user }) => {
                       </span>
                     </td>
                     <td style={s.td}>
-                      <span style={{ ...s.estadoBadge, background: est.bg, color: est.color }}>
-                        {est.label}
-                      </span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                        <span style={{ ...s.estadoBadge, background: est.bg, color: est.color }}>
+                          {est.label}
+                        </span>
+                        {/* Ola 2.5: badge visible cuando hay pago electrónico pendiente de validar */}
+                        {(() => {
+                          const esVirtual = o.formaPago && o.formaPago !== 'Efectivo' &&
+                            o.formaPago !== 'A crédito (CxC)' && o.formaPago !== 'A crédito' &&
+                            o.formaPago !== 'CXC' && o.formaPago !== 'Cuenta por Pagar';
+                          const pendienteValidar = esVirtual && o.pagado === true &&
+                            o.pagoValidado !== true && !o.pagoRechazado;
+                          if (!pendienteValidar) return null;
+                          return (
+                            <span style={{
+                              padding: '3px 10px', borderRadius: 12,
+                              background: '#fef3c7', color: '#92400e',
+                              fontSize: 11, fontWeight: 700,
+                              border: '1px solid #fcd34d',
+                              animation: 'pulse 2s infinite'
+                            }} title="Pago electrónico pendiente de validación por Admin/Tesorería">
+                              ⏳ Validar pago
+                            </span>
+                          );
+                        })()}
+                        {/* Si ya fue rechazado */}
+                        {o.pagoRechazado && (
+                          <span style={{
+                            padding: '3px 10px', borderRadius: 12,
+                            background: '#fee2e2', color: '#991b1b',
+                            fontSize: 11, fontWeight: 700, border: '1px solid #fca5a5'
+                          }} title={o.pagoValidacionMotivo || 'Pago rechazado'}>
+                            ❌ Pago rechazado
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td style={{ ...s.td, fontWeight: 700, color: '#16a34a' }}>{formatCOP(o.total)}</td>
                     <td style={s.td}>{formatFecha(o.fechaProgramada)}</td>

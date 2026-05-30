@@ -4,12 +4,21 @@ const { db, admin } = require('../config/firebase');
 
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cambios Ola 1 sobre el original:
+//   1) Aislamiento multi-tenant estricto: TODAS las queries de egresos y
+//      órdenes filtran por adminId (antes leían toda la colección 'orders'
+//      sin filtro, lo que era una fuga entre suscriptores cuando lleguemos
+//      al SaaS).
+//   2) Auditoría con `documento` cuando se paga una CxP.
+// ─────────────────────────────────────────────────────────────────────────────
+
 // GET /api/cxp — Listar todas las CxP agrupadas
 router.get('/', async (req, res) => {
   try {
     const userId = req.adminId || req.user.uid || req.user.id;
 
-    // 1. Egresos pendientes con "Cuenta por Pagar"
+    // 1. Egresos pendientes con "Cuenta por Pagar" (filtrados por userId)
     const snapEgresos = await db.collection('egresos')
       .where('userId', '==', userId)
       .where('estado', '==', 'PENDIENTE')
@@ -22,7 +31,6 @@ router.get('/', async (req, res) => {
     snapEgresos.forEach(doc => {
       const e = { id: doc.id, ...doc.data() };
 
-      // CxP Proveedor
       if (e.formaPago === 'Cuenta por Pagar' || e.formaPago === 'CxP') {
         const key = e.proveedorId || e.proveedor || 'Sin proveedor';
         if (!proveedores[key]) {
@@ -42,15 +50,13 @@ router.get('/', async (req, res) => {
         });
       }
 
-      // IVA descontable
       if (e.ivaVal > 0) totalIvaDescontable += e.ivaVal;
-
-      // Retefuente pendiente
       if (e.retenVal > 0 && e.categoria !== 'PAGADO') totalRetefuente += e.retenVal;
     });
 
-    // 2. IVA generado en órdenes
+    // 2. IVA generado en órdenes — FILTRADO por adminId (corrección Ola 1)
     const snapOrdenes = await db.collection('orders')
+      .where('adminId', '==', userId)
       .where('estado', '==', 'completada')
       .get();
     let ivaGenerado = 0;
@@ -58,16 +64,18 @@ router.get('/', async (req, res) => {
       ivaGenerado += doc.data().ivaValor || 0;
     });
 
-    // 3. Retenciones de clientes (desde CxC pagadas con retención)
+    // 3. Retenciones de clientes — también con filtro adminId
+    // Nota: Firestore no permite combinar where '==' con where '>' sin un
+    // índice compuesto. Filtramos retencionPracticada en memoria.
     const snapCxc = await db.collection('orders')
+      .where('adminId', '==', userId)
       .where('estado', '==', 'completada')
-      .where('retencionPracticada', '>', 0)
       .get();
     let totalRenta = 0;
     const retencionesClientes = [];
     snapCxc.forEach(doc => {
       const o = doc.data();
-      if (o.retencionPracticada > 0) {
+      if ((o.retencionPracticada || 0) > 0) {
         totalRenta += o.retencionPracticada;
         retencionesClientes.push({
           ordenId: doc.id, numeroOrden: o.numeroOrden,
@@ -110,6 +118,13 @@ router.post('/:egresoId/pagar', async (req, res) => {
     if (!egresoDoc.exists) return res.status(404).json({ error: 'Egreso no encontrado' });
 
     const egreso = egresoDoc.data();
+
+    // Aislamiento: solo el dueño (adminId) puede pagar el egreso
+    const userId = req.adminId || req.user.uid || req.user.id;
+    if (egreso.userId && egreso.userId !== userId) {
+      return res.status(403).json({ error: 'No tienes acceso a este egreso' });
+    }
+
     const totalPagar = egreso.totalPagar || egreso.monto || 0;
 
     const batch = db.batch();
@@ -128,12 +143,29 @@ router.post('/:egresoId/pagar', async (req, res) => {
     await batch.commit();
 
     await db.collection('movimientos').add({
-      userId: req.adminId || req.user.uid, cajaId, tipo: 'egreso',
+      userId, cajaId, tipo: 'egreso',
       concepto: `Pago CxP ${egreso.numero} — ${egreso.proveedor || ''}`,
-      monto: totalPagar, formaPago,
+      monto: totalPagar,
+      referencia: egreso.numero,
+      formaPago,
+      egresoId: req.params.egresoId,
       creadoPor: req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
+
+    // Auditoría con documento (egreso.numero)
+    try {
+      await db.collection('audit_logs').add({
+        accion: 'CXP_PAGADA',
+        modulo: 'cxp',
+        descripcion: `Pago CxP ${egreso.numero} — ${egreso.proveedor || ''} — ${fmt(totalPagar)}`,
+        usuarioId: userId,
+        usuarioNombre: req.user.email,
+        documento: egreso.numero,
+        fecha: new Date().toISOString(),
+        timestamp: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch {}
 
     res.json({ ok: true });
   } catch (e) {
