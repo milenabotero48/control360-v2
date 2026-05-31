@@ -470,6 +470,10 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
             usuarioNombre: req.user.nombre || req.user.email,
             nota: 'Orden entregada — ya estaba pagada' }
         );
+        // Ola 3 Bloque 2: registrar fechaCompletada para dashboards y reportes
+        if (update.estado === 'completada' && !orden.fechaCompletada) {
+          update.fechaCompletada = new Date().toISOString();
+        }
         await ordenRef.update(update);
 
         // Préstamo devuelto si aplica
@@ -601,6 +605,10 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
           }
         }
 
+        // Ola 3 Bloque 2: fechaCompletada para dashboards y reportes
+        if (update.estado === 'completada' && !orden.fechaCompletada) {
+          update.fechaCompletada = new Date().toISOString();
+        }
         await ordenRef.update(update);
 
         // ── PRÉSTAMO: si el cliente devolvió el extintor de préstamo, se
@@ -724,6 +732,11 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
           ...extra
         );
       }
+    }
+
+    // ── Ola 3 Bloque 2: si la orden quedó completada, registrar fechaCompletada ──
+    if (update.estado === 'completada' && !orden.fechaCompletada) {
+      update.fechaCompletada = new Date().toISOString();
     }
 
     await ordenRef.update(update);
