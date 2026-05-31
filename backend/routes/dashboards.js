@@ -390,16 +390,29 @@ router.get('/mensajero/:mensajeroId', async (req, res) => {
     ['programada', 'en_ruta_recogida', 'despacho', 'en_ruta_entrega', 'entrega_cobranza'].includes(o.estado)
   );
 
+  // Ola 3 Bloque 2: helper para "fecha efectiva de cierre" de una orden.
+  // Para órdenes nuevas usa fechaCompletada (que ahora sí se escribe). Para
+  // órdenes viejas en estado 'completada' usa updatedAt como fallback.
+  const fechaCierre = (o) => {
+    if (o.fechaCompletada) return o.fechaCompletada;
+    if (o.completadaEn) return o.completadaEn;
+    // Fallback para órdenes viejas que se cerraron sin escribir el campo
+    if (o.estado === 'completada' || o.estado === 'cuadre_dinero') {
+      return o.updatedAt;
+    }
+    return null;
+  };
+
   // Entregadas hoy
   const entregadasHoy = ordenes.filter(o => {
-    const t = aTime(o.fechaCompletada || o.completadaEn);
-    return t && dentroDeRango(o.fechaCompletada || o.completadaEn, hoy.inicioISO, hoy.finISO);
+    const f = fechaCierre(o);
+    return f && dentroDeRango(f, hoy.inicioISO, hoy.finISO);
   });
 
   // Histórico del mes
   const entregadasMes = ordenes.filter(o => {
-    const t = aTime(o.fechaCompletada || o.completadaEn);
-    return t && dentroDeRango(o.fechaCompletada || o.completadaEn, mes.inicioISO, mes.finISO);
+    const f = fechaCierre(o);
+    return f && dentroDeRango(f, mes.inicioISO, mes.finISO);
   });
 
   // Cobro pendiente del día (órdenes con saldo y asignadas)
@@ -461,8 +474,10 @@ router.get('/taller', async (req, res) => {
 
   const enTaller = ordenes.filter(o => o.estado === 'en_taller');
   const completadasHoy = ordenes.filter(o => {
-    const t = aTime(o.fechaCompletada || o.completadaEn);
-    return t && o.estado !== 'anulada' && dentroDeRango(o.fechaCompletada || o.completadaEn, hoy.inicioISO, hoy.finISO);
+    // Ola 3 Bloque 2: fallback a updatedAt para órdenes viejas sin fechaCompletada
+    const fechaC = o.fechaCompletada || o.completadaEn
+      || ((o.estado === 'completada' || o.estado === 'cuadre_dinero') ? o.updatedAt : null);
+    return fechaC && o.estado !== 'anulada' && dentroDeRango(fechaC, hoy.inicioISO, hoy.finISO);
   });
 
   // Equipos atendidos hoy (suma de cantidades de items de taller en completadas)
@@ -497,9 +512,11 @@ router.get('/taller', async (req, res) => {
   } catch (e) { warnings.push('insumos: ' + e.message); }
 
   // Configuración de meta diaria
+  // Ola 3 Bloque 2: el módulo workshop guarda en `taller_config` (no `workshop_config`).
+  // Por eso siempre decía "no configurada" en el dashboard del taller.
   let metaDiaria = 0;
   try {
-    const cfg = await db.collection('workshop_config').doc(adminId).get();
+    const cfg = await db.collection('taller_config').doc(adminId).get();
     if (cfg.exists) metaDiaria = Number(cfg.data().metaDiaria) || 0;
   } catch {}
 

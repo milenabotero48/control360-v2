@@ -56,9 +56,13 @@ const cargarOrdenes = async (adminId, desde, hasta, filtros = {}) => {
   const ordenes = [];
   snap.forEach(d => {
     const o = { id: d.id, ...d.data() };
-    // Excluir órdenes anuladas para casi todos los reportes
-    // (excepción: el reporte general SÍ las cuenta para mostrar "anuladas")
-    const fechaRef = parseFecha(o.fechaPago || o.fechaFactura || o.createdAt);
+    // Ola 3 Bloque 2: cascada de fechas para considerar la orden en el rango.
+    // - fechaCompletada: campo nuevo escrito al cerrar la orden (preferido)
+    // - fechaPago: cuando se marcó pagada
+    // - fechaFactura: cuando se facturó
+    // - updatedAt: última modificación (fallback más robusto)
+    // - createdAt: cuando se creó (último fallback)
+    const fechaRef = parseFecha(o.fechaCompletada || o.fechaPago || o.fechaFactura || o.updatedAt || o.createdAt);
     if (!fechaRef) return;
     if (desdeDate && fechaRef < desdeDate) return;
     if (hastaDate && fechaRef > hastaDate) return;
@@ -79,11 +83,17 @@ router.get('/mensajero', async (req, res) => {
     const { desde, hasta, usuarioId = '', empresaId = '' } = req.query;
 
     // 1. Cargar mensajeros del admin
-    const usersSnap = await db.collection('users')
-      .where('adminId', '==', adminId)
+    // Ola 3 Bloque 2: los users se guardan con `creadoPor` (uid del admin), no `adminId`.
+    let usersSnap = await db.collection('users')
+      .where('creadoPor', '==', adminId)
       .where('role', '==', 'mensajero')
       .get();
-    const mensajeros = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    let mensajeros = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // Fallback: si no hay con creadoPor (suscriptores legacy), buscar por role solo
+    if (mensajeros.length === 0) {
+      const all = await db.collection('users').where('role', '==', 'mensajero').get();
+      mensajeros = all.docs.map(d => ({ id: d.id, ...d.data() }));
+    }
 
     // 2. Cargar órdenes en rango (excluir anuladas e internas)
     const ordenes = (await cargarOrdenes(adminId, desde, hasta, { empresaId }))
@@ -126,7 +136,7 @@ const calcularKPIsMensajero = (mensajero, ordenes, prestamos, alertas) => {
   let totalHoras = 0; let cntTiempo = 0;
   completadas.forEach(o => {
     const ini = parseFecha(o.createdAt);
-    const fin = parseFecha(o.fechaPago) || parseFecha(o.completedAt) || o._fechaRef;
+    const fin = parseFecha(o.fechaCompletada) || parseFecha(o.fechaPago) || parseFecha(o.completedAt) || parseFecha(o.updatedAt) || o._fechaRef;
     if (ini && fin) { totalHoras += horas(ini, fin); cntTiempo++; }
   });
   const tiempoPromedioHoras = cntTiempo > 0 ? totalHoras / cntTiempo : 0;
@@ -240,12 +250,16 @@ router.get('/comercial', async (req, res) => {
     if (!adminId) return res.status(401).json({ error: 'Sin autenticación' });
     const { desde, hasta, usuarioId = '', empresaId = '' } = req.query;
 
-    // 1. Comerciales del admin
-    const usersSnap = await db.collection('users')
-      .where('adminId', '==', adminId)
+    // 1. Comerciales del admin (creadoPor con fallback)
+    let usersSnap = await db.collection('users')
+      .where('creadoPor', '==', adminId)
       .where('role', '==', 'comercial')
       .get();
-    const comerciales = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    let comerciales = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (comerciales.length === 0) {
+      const all = await db.collection('users').where('role', '==', 'comercial').get();
+      comerciales = all.docs.map(d => ({ id: d.id, ...d.data() }));
+    }
 
     // 2. Órdenes del rango
     const ordenes = (await cargarOrdenes(adminId, desde, hasta, { empresaId }))
@@ -335,7 +349,8 @@ router.get('/taller', async (req, res) => {
     );
 
     // 2. QRs procesados (cuenta de equipos)
-    const qrsSnap = await db.collection('qr_codes')
+    // Ola 3 Bloque 2: la colección correcta es `qr_equipos` (no qr_codes).
+    const qrsSnap = await db.collection('qr_equipos')
       .where('adminId', '==', adminId).get().catch(() => ({ docs: [] }));
     const qrs = qrsSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter(q => {
       const f = parseFecha(q.fechaUltimaRecarga || q.createdAt);
