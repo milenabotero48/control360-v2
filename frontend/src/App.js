@@ -14,6 +14,7 @@ import GestionProductos from './GestionProductos';
 import GestionOrdenes from './GestionOrdenes';
 import GestionCotizaciones from './GestionCotizaciones';
 import ModuloERI from './ModuloERI';   // Ola 3
+import ModuloReportes from './ModuloReportes'; // Ola 3 Bloque 2
 import GestionCaja from './GestionCaja';
 import GestionEgresos from './GestionEgresos';
 import GestionCxC from './GestionCxC';
@@ -39,7 +40,7 @@ const TODOS_LOS_MODULOS = [
   { key: 'cxc',         label: 'CxC',           icon: '💳', modulo: 'cxc' },
   { key: 'cxp',         label: 'CxP',           icon: '📋', modulo: 'cxp' },
   { key: 'eri',         label: 'ERI',           icon: '📈', modulo: 'eri' },
-  { key: 'reportes',    label: 'Reportes',      icon: '📉', modulo: 'reportes', pronto: true },
+  { key: 'reportes',    label: 'Reportes',      icon: '📉', modulo: 'reportes' },
   { key: 'config',      label: 'Mi Empresa',    icon: '🏢', modulo: 'mi_empresa' },
   { key: 'usuarios',    label: 'Usuarios',      icon: '👤', modulo: 'usuarios' },
 ];
@@ -110,7 +111,7 @@ const DASHBOARD_INICIAL = {
   taller: 'taller', tesoreria: 'admin', visor: 'admin',
 };
 
-const PAGINAS_PRONTO = ['reportes'];
+const PAGINAS_PRONTO = [];
 
 // ─── LOGO SVG ────────────────────────────────────────────────────────────────
 const LogoControl360 = ({ width = 160, height = 48 }) => (
@@ -419,6 +420,7 @@ export default function AppRoot() {
           {currentPage === 'proveedores'  && <GestionProveedores user={user} />}
           {currentPage === 'qr'           && <GestionQR user={user} />}
           {currentPage === 'eri'          && user.role === 'admin' && <ModuloERI user={user} />}
+          {currentPage === 'reportes'     && user.role === 'admin' && <ModuloReportes user={user} />}
         </main>
 
         {/* Bottom nav móvil (oculto en desktop por CSS) */}
