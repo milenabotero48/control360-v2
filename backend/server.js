@@ -49,6 +49,8 @@ app.use('/api/proveedores',   authenticate, require('./routes/proveedores'));
 app.use('/api/logistica',     authenticate, require('./routes/logistics'));
 // Ola 2: dashboards agregados por rol
 app.use('/api/dashboards',    authenticate, require('./routes/dashboards'));
+// Ola 3: ERI — Estado de Resultados Integral
+app.use('/api/eri',           authenticate, require('./routes/eri'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

@@ -6,12 +6,15 @@ const CLOUDINARY_CLOUD = 'dk8hposft';
 const CLOUDINARY_PRESET = 'control360';
 
 // ─── TIPOS ERI para categorías ────────────────────────────────────────────────
+// Ola 3: tipos contables del ERI (clasificación profesional)
 const TIPOS_ERI = [
-  { value: 'costo_operativo', label: 'Costo operativo' },
-  { value: 'gasto_operativo', label: 'Gasto operativo' },
-  { value: 'gasto_fijo',      label: 'Gasto fijo' },
-  { value: 'gasto_personal',  label: 'Gasto personal' },
-  { value: 'gasto_fiscal',    label: 'Gasto fiscal' },
+  { value: 'costo_servicio',        label: '💰 Costo de servicio (afecta línea)', desc: 'Insumos/materiales para una línea de servicio. Requiere línea.' },
+  { value: 'gasto_personal',        label: '👥 Gasto de personal',                desc: 'Nómina, prestaciones, capacitaciones' },
+  { value: 'gasto_operativo',       label: '⚙️ Gasto operativo',                   desc: 'Transporte, mantenimiento equipos, papelería' },
+  { value: 'gasto_fijo',            label: '🏠 Gasto fijo',                        desc: 'Arriendo, servicios públicos, internet' },
+  { value: 'gasto_administrativo',  label: '📋 Gasto administrativo',              desc: 'Marketing, publicidad, contabilidad externa' },
+  { value: 'gasto_financiero',      label: '🏦 Gasto financiero',                  desc: 'Intereses, comisiones bancarias' },
+  { value: 'gasto_fiscal',          label: '📑 Gasto fiscal',                      desc: 'Impuestos (Retefuente se descuenta automáticamente)' },
 ];
 
 const TIPOS_CAJA = ['Efectivo', 'Banco', 'Nequi/Daviplata', 'Datafono', 'Mensajero', 'Otro'];
@@ -330,19 +333,21 @@ const TabFormasPago = ({ token, cajas }) => {
 // ════════════════════════════════════════════════════════════════════════════════
 const TabCategorias = ({ token }) => {
   const [categorias, setCategorias] = useState([]);
+  const [lineasServicio, setLineasServicio] = useState([]);  // Ola 3
   const [loading, setLoading] = useState(true);
   const [guardando, setGuardando] = useState(false);
   const [mensaje, setMensaje] = useState(null);
-  const [nueva, setNueva] = useState({ nombre: '', tipoERI: 'gasto_operativo', activa: true });
+  const [nueva, setNueva] = useState({ nombre: '', tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true });
   const [agregando, setAgregando] = useState(false);
 
-  useEffect(() => { cargar(); }, []);
+  useEffect(() => { cargar(); /* eslint-disable-next-line */ }, []);
 
   const cargar = async () => {
     setLoading(true);
     try {
       const r = await axios.get(`${API}/configuracion`, { headers: { Authorization: `Bearer ${token}` } });
       setCategorias(r.data.categoriasEgresos || []);
+      setLineasServicio((r.data.lineasServicio || []).filter(l => l.activa !== false));
     } catch { }
     setLoading(false);
   };
@@ -355,36 +360,60 @@ const TabCategorias = ({ token }) => {
       await axios.put(`${API}/configuracion/categorias`, { categoriasEgresos: lista }, { headers: { Authorization: `Bearer ${token}` } });
       setCategorias(lista);
       mostrarMsg('✅ Categorías guardadas');
-    } catch { mostrarMsg('❌ Error al guardar', 'error'); }
+    } catch (e) { mostrarMsg('❌ ' + (e.response?.data?.error || 'Error al guardar'), 'error'); }
     setGuardando(false);
   };
 
   const agregar = () => {
     if (!nueva.nombre.trim()) return mostrarMsg('Nombre requerido', 'error');
-    const lista = [...categorias, { ...nueva, nombre: nueva.nombre.trim(), orden: categorias.length + 1 }];
+    if (nueva.tipoERI === 'costo_servicio' && !nueva.lineaServicioId) {
+      return mostrarMsg('Costo de servicio requiere línea', 'error');
+    }
+    const lista = [...categorias, {
+      ...nueva,
+      nombre: nueva.nombre.trim(),
+      lineaServicioId: nueva.tipoERI === 'costo_servicio' ? nueva.lineaServicioId : null,
+      orden: categorias.length + 1
+    }];
     guardar(lista);
-    setNueva({ nombre: '', tipoERI: 'gasto_operativo', activa: true });
+    setNueva({ nombre: '', tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true });
     setAgregando(false);
   };
 
   const toggleActiva = (idx) => guardar(categorias.map((c, i) => i === idx ? { ...c, activa: !c.activa } : c));
-  const editarNombre = (idx, nombre) => guardar(categorias.map((c, i) => i === idx ? { ...c, nombre } : c));
-  const editarTipo = (idx, tipoERI) => guardar(categorias.map((c, i) => i === idx ? { ...c, tipoERI } : c));
+  const editarCampo = (idx, campo, valor) => {
+    const lista = categorias.map((c, i) => {
+      if (i !== idx) return c;
+      const nueva = { ...c, [campo]: valor };
+      // Si cambia tipoERI fuera de costo_servicio, limpiar lineaServicioId
+      if (campo === 'tipoERI' && valor !== 'costo_servicio') nueva.lineaServicioId = null;
+      return nueva;
+    });
+    setCategorias(lista); // edit local
+  };
   const eliminar = (idx) => { if (!window.confirm('¿Eliminar categoría?')) return; guardar(categorias.filter((_, i) => i !== idx)); };
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#667eea' }}>Cargando...</div>;
+
+  const tipoActualLabel = (tipoVal) => (TIPOS_ERI.find(t => t.value === tipoVal) || {}).label || tipoVal;
+  const lineaActualNombre = (lineaId) => (lineasServicio.find(l => l.id === lineaId) || {}).nombre || '—';
 
   return (
     <div>
       {mensaje && <div style={{ ...S.msg, background: mensaje.tipo === 'error' ? '#fff0f0' : '#f0fff4', borderColor: mensaje.tipo === 'error' ? '#dc3545' : '#28a745', color: mensaje.tipo === 'error' ? '#dc3545' : '#28a745' }}>{mensaje.texto}</div>}
 
       <div style={S.card}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
           <div>
             <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: '#1a1a2e' }}>📂 Categorías de Egresos</h3>
-            <p style={{ margin: '4px 0 0', fontSize: 13, color: '#888' }}>Se usan en Egresos y en el ERI futuro para agrupar gastos</p>
+            <p style={{ margin: '4px 0 0', fontSize: 13, color: '#888' }}>Cada categoría tiene una clasificación contable para el ERI</p>
           </div>
           <button onClick={() => setAgregando(true)} style={S.btnPrimario}>+ Agregar</button>
+        </div>
+
+        <div style={{ background: '#eff6ff', border: '1px solid #93c5fd', borderRadius: 8, padding: '10px 14px', margin: '12px 0 16px', fontSize: 12, color: '#1e3a8a' }}>
+          💡 <strong>Tip contable:</strong> los <em>Costos de servicio</em> (insumos taller, compra señales) afectan el margen de cada línea.
+          Los <em>Gastos</em> (nómina, arriendo, etc.) salen debajo de la utilidad bruta sin asignarse a línea.
         </div>
 
         {agregando && (
@@ -395,12 +424,32 @@ const TabCategorias = ({ token }) => {
                 <input style={S.input} value={nueva.nombre} onChange={e => setNueva(p => ({ ...p, nombre: e.target.value }))} placeholder="Ej: Empaques, Uniformes..." />
               </div>
               <div style={S.campo}>
-                <label style={S.label}>Tipo ERI</label>
-                <select style={S.input} value={nueva.tipoERI} onChange={e => setNueva(p => ({ ...p, tipoERI: e.target.value }))}>
+                <label style={S.label}>Tipo contable *</label>
+                <select style={S.input} value={nueva.tipoERI}
+                  onChange={e => setNueva(p => ({ ...p, tipoERI: e.target.value, lineaServicioId: e.target.value === 'costo_servicio' ? p.lineaServicioId : null }))}>
                   {TIPOS_ERI.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
                 </select>
+                <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
+                  {(TIPOS_ERI.find(t => t.value === nueva.tipoERI) || {}).desc}
+                </div>
               </div>
             </div>
+            {/* Selector de línea solo si es costo_servicio */}
+            {nueva.tipoERI === 'costo_servicio' && (
+              <div style={{ ...S.campo, marginBottom: 12 }}>
+                <label style={S.label}>Línea de servicio *</label>
+                <select style={S.input} value={nueva.lineaServicioId || ''}
+                  onChange={e => setNueva(p => ({ ...p, lineaServicioId: e.target.value || null }))}>
+                  <option value="">— Selecciona línea —</option>
+                  {lineasServicio.map(l => (
+                    <option key={l.id} value={l.id}>{l.nombre}</option>
+                  ))}
+                </select>
+                <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>
+                  Este costo afectará el margen de la línea seleccionada en el ERI
+                </div>
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 10 }}>
               <button onClick={agregar} style={S.btnPrimario}>Agregar</button>
               <button onClick={() => setAgregando(false)} style={S.btnSecundario}>Cancelar</button>
@@ -410,14 +459,41 @@ const TabCategorias = ({ token }) => {
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {categorias.map((cat, idx) => (
-            <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', background: cat.activa ? '#fff' : '#f8f8f8', border: '1px solid #e2e8f0', borderRadius: 8, opacity: cat.activa ? 1 : 0.6 }}>
-              <input style={{ ...S.input, flex: 1, fontSize: 13, padding: '6px 10px' }} value={cat.nombre}
-                onChange={e => editarNombre(idx, e.target.value)}
+            <div key={idx} style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 14px',
+              background: cat.activa ? '#fff' : '#f8f8f8',
+              border: cat.tipoERI === 'costo_servicio' ? '2px solid #fcd34d' : '1px solid #e2e8f0',
+              borderRadius: 8, opacity: cat.activa ? 1 : 0.6
+            }}>
+              {/* Indicador visual del tipo */}
+              <div style={{
+                width: 6, alignSelf: 'stretch',
+                background: cat.tipoERI === 'costo_servicio' ? '#f59e0b' : '#cbd5e1',
+                borderRadius: 3, flexShrink: 0
+              }} />
+              <input style={{ ...S.input, flex: 2, fontSize: 13, padding: '6px 10px' }} value={cat.nombre}
+                onChange={e => editarCampo(idx, 'nombre', e.target.value)}
                 onBlur={() => guardar(categorias)} />
-              <select style={{ ...S.input, fontSize: 12, padding: '6px 10px', minWidth: 160 }} value={cat.tipoERI || 'gasto_operativo'} onChange={e => editarTipo(idx, e.target.value)}>
+              <select style={{ ...S.input, fontSize: 12, padding: '6px 10px', minWidth: 200, flex: 1.5 }}
+                value={cat.tipoERI || 'gasto_operativo'}
+                onChange={e => { editarCampo(idx, 'tipoERI', e.target.value); }}
+                onBlur={() => guardar(categorias)}>
                 {TIPOS_ERI.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
-              <div style={{ display: 'flex', gap: 8 }}>
+              {/* Selector de línea inline si es costo_servicio */}
+              {cat.tipoERI === 'costo_servicio' && (
+                <select style={{ ...S.input, fontSize: 12, padding: '6px 10px', minWidth: 160, background: '#fef3c7', flex: 1 }}
+                  value={cat.lineaServicioId || ''}
+                  onChange={e => { editarCampo(idx, 'lineaServicioId', e.target.value || null); }}
+                  onBlur={() => guardar(categorias)}>
+                  <option value="">— Línea —</option>
+                  {lineasServicio.map(l => (
+                    <option key={l.id} value={l.id}>{l.nombre}</option>
+                  ))}
+                </select>
+              )}
+              <div style={{ display: 'flex', gap: 6 }}>
                 <button onClick={() => toggleActiva(idx)} style={{ padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 600, background: cat.activa ? '#fef3c7' : '#dcfce7', color: cat.activa ? '#92400e' : '#166534' }}>
                   {cat.activa ? 'Desactivar' : 'Activar'}
                 </button>
@@ -1218,6 +1294,214 @@ const TabSectores = ({ token }) => {
   );
 };
 
+// ════════════════════════════════════════════════════════════════════════════════
+// PESTAÑA 8: LÍNEAS DE SERVICIO (Ola 3)
+// ─────────────────────────────────────────────────────────────────────────────
+// Agrupan los servicios (mano de obra) que vende la empresa. Cada línea suma
+// los ingresos por servicios de esa categoría y los costos (egresos categoría
+// "costo_servicio" asignados a esa línea). Sale la utilidad y margen por línea
+// en el ERI.
+//
+// Para Sandra: Recargas y Mantenimiento, Señalización, Otros servicios.
+// Para una empresa de mantenimiento eléctrico: Instalaciones, Reparaciones, etc.
+// ════════════════════════════════════════════════════════════════════════════════
+const TabLineasServicio = ({ token }) => {
+  const [lineas, setLineas] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [guardando, setGuardando] = useState(false);
+  const [mensaje, setMensaje] = useState(null);
+  const [nueva, setNueva] = useState({ nombre: '', color: COLORES_SECTOR[0] });
+  const [agregando, setAgregando] = useState(false);
+
+  useEffect(() => { cargar(); /* eslint-disable-next-line */ }, []);
+
+  const cargar = async () => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`${API}/configuracion`, { headers: { Authorization: `Bearer ${token}` } });
+      setLineas(r.data.lineasServicio || []);
+    } catch { }
+    setLoading(false);
+  };
+
+  const mostrarMsg = (texto, tipo = 'success') => {
+    setMensaje({ texto, tipo });
+    setTimeout(() => setMensaje(null), 3000);
+  };
+
+  const guardar = async (lista) => {
+    setGuardando(true);
+    try {
+      await axios.put(`${API}/configuracion/lineas-servicio`, { lineasServicio: lista }, { headers: { Authorization: `Bearer ${token}` } });
+      setLineas(lista);
+      mostrarMsg('✅ Líneas de servicio guardadas');
+    } catch (e) {
+      mostrarMsg('❌ ' + (e.response?.data?.error || 'Error al guardar'), 'error');
+    }
+    setGuardando(false);
+  };
+
+  const generarId = (nombre) => {
+    const base = 'lin_' + nombre.toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/_+|_+$/g, '')
+      .slice(0, 30);
+    let id = base;
+    let n = 1;
+    while (lineas.some(l => l.id === id)) {
+      id = base + '_' + (++n);
+    }
+    return id;
+  };
+
+  const agregar = () => {
+    if (!nueva.nombre.trim()) return mostrarMsg('Nombre requerido', 'error');
+    const lista = [...lineas, {
+      id: generarId(nueva.nombre),
+      nombre: nueva.nombre.trim(),
+      color: nueva.color,
+      activa: true,
+      orden: lineas.length + 1
+    }];
+    guardar(lista);
+    setNueva({ nombre: '', color: COLORES_SECTOR[0] });
+    setAgregando(false);
+  };
+
+  const editarCampo = (idx, campo, valor) => {
+    const lista = lineas.map((l, i) => i === idx ? { ...l, [campo]: valor } : l);
+    setLineas(lista);
+  };
+
+  const toggleActiva = (idx) => guardar(lineas.map((l, i) => i === idx ? { ...l, activa: !l.activa } : l));
+
+  const eliminar = (idx) => {
+    const l = lineas[idx];
+    if (!window.confirm(`¿Eliminar "${l.nombre}"? Las categorías de egreso que apunten a esta línea quedarán como costo sin línea.`)) return;
+    guardar(lineas.filter((_, i) => i !== idx));
+  };
+
+  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#667eea' }}>Cargando líneas de servicio...</div>;
+
+  return (
+    <div>
+      {mensaje && (
+        <div style={{ ...S.msg, background: mensaje.tipo === 'error' ? '#fff0f0' : '#f0fff4', borderColor: mensaje.tipo === 'error' ? '#dc3545' : '#28a745', color: mensaje.tipo === 'error' ? '#dc3545' : '#28a745' }}>
+          {mensaje.texto}
+        </div>
+      )}
+
+      <div style={S.card}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700, color: '#1a1a2e' }}>🎯 Líneas de Servicio</h3>
+            <p style={{ margin: '4px 0 0', fontSize: 13, color: '#888' }}>
+              Agrupan los servicios (mano de obra) que vende tu empresa. Se usan en el ERI para calcular utilidad por línea.
+            </p>
+          </div>
+          <button onClick={() => setAgregando(true)} style={S.btnPrimario} disabled={guardando}>
+            + Agregar
+          </button>
+        </div>
+
+        <div style={{ background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 8, padding: '10px 14px', margin: '12px 0 16px', fontSize: 12, color: '#78350f' }}>
+          💡 <strong>Tip contable:</strong> el sistema conecta automáticamente las líneas con tus servicios.
+          Los productos físicos (lámparas, botiquines, etc.) NO usan línea — su costo viene del producto.
+          Solo los <strong>servicios de mano de obra</strong> (recargas, mantenimientos, etc.) se agrupan por línea.
+        </div>
+
+        {agregando && (
+          <div style={{ background: '#f8f9ff', border: '1px solid #e8ecff', borderRadius: 10, padding: 16, marginBottom: 16 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12, marginBottom: 12 }}>
+              <div style={S.campo}>
+                <label style={S.label}>Nombre de la línea *</label>
+                <input style={S.input}
+                  value={nueva.nombre}
+                  onChange={e => setNueva(p => ({ ...p, nombre: e.target.value }))}
+                  placeholder="Ej: Recargas, Señalización, Instalaciones..." />
+              </div>
+              <div style={S.campo}>
+                <label style={S.label}>Color</label>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                  {COLORES_SECTOR.map(c => (
+                    <button key={c} type="button"
+                      onClick={() => setNueva(p => ({ ...p, color: c }))}
+                      style={{
+                        width: 28, height: 28, borderRadius: '50%',
+                        background: c, cursor: 'pointer',
+                        border: nueva.color === c ? '3px solid #1a1a2e' : '2px solid #fff',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.15)'
+                      }} />
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={agregar} style={S.btnPrimario} disabled={guardando}>Agregar</button>
+              <button onClick={() => setAgregando(false)} style={S.btnSecundario}>Cancelar</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {lineas.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>
+              No hay líneas de servicio configuradas.
+            </div>
+          )}
+
+          {lineas.map((l, idx) => (
+            <div key={l.id || idx} style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 16px',
+              background: l.activa ? '#fff' : '#f8f8f8',
+              border: '1px solid #e2e8f0', borderRadius: 8,
+              opacity: l.activa ? 1 : 0.6
+            }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: '50%',
+                background: l.color || '#6b7280',
+                flexShrink: 0,
+                boxShadow: '0 1px 3px rgba(0,0,0,0.15)'
+              }} />
+              <input style={{ ...S.input, flex: 1, fontSize: 13, padding: '6px 10px' }}
+                value={l.nombre}
+                onChange={e => editarCampo(idx, 'nombre', e.target.value)}
+                onBlur={() => guardar(lineas)} />
+              <div style={{ display: 'flex', gap: 4 }}>
+                {COLORES_SECTOR.slice(0, 6).map(c => (
+                  <button key={c} type="button"
+                    onClick={() => { editarCampo(idx, 'color', c); guardar(lineas.map((ll, i) => i === idx ? { ...ll, color: c } : ll)); }}
+                    style={{
+                      width: 18, height: 18, borderRadius: '50%',
+                      background: c, cursor: 'pointer',
+                      border: l.color === c ? '2px solid #1a1a2e' : '2px solid #e5e7eb'
+                    }} />
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 6, marginLeft: 8 }}>
+                <button onClick={() => toggleActiva(idx)} style={{
+                  padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  fontSize: 11, fontWeight: 600,
+                  background: l.activa ? '#fef3c7' : '#dcfce7',
+                  color: l.activa ? '#92400e' : '#166534'
+                }}>
+                  {l.activa ? 'Desactivar' : 'Activar'}
+                </button>
+                <button onClick={() => eliminar(idx)} style={{
+                  padding: '5px 10px', borderRadius: 6, border: 'none', cursor: 'pointer',
+                  fontSize: 12, background: '#fee2e2', color: '#991b1b'
+                }}>🗑️</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ConfigEmpresas = ({ user }) => {
   const [tab, setTab] = useState('empresas');
   const [cajas, setCajas] = useState([]);
@@ -1238,6 +1522,7 @@ const ConfigEmpresas = ({ user }) => {
     { key: 'empresas',      label: '🏢 Empresas' },
     { key: 'formasPago',    label: '💳 Formas de pago' },
     { key: 'categorias',    label: '📂 Categorías de egresos' },
+    { key: 'lineas',        label: '🎯 Líneas de servicio' },
     { key: 'retenciones',   label: '🧾 Retenciones' },
     { key: 'sectores',      label: '📍 Sectores' },
     { key: 'cajas',         label: '🏦 Cajas' },
@@ -1268,6 +1553,7 @@ const ConfigEmpresas = ({ user }) => {
       {tab === 'empresas'   && <TabEmpresas token={token} />}
       {tab === 'formasPago' && <TabFormasPago token={token} cajas={cajas} />}
       {tab === 'categorias' && <TabCategorias token={token} />}
+      {tab === 'lineas'     && <TabLineasServicio token={token} />}
       {tab === 'retenciones'   && <TabRetenciones token={token} />}
       {tab === 'sectores'      && <TabSectores token={token} />}
     {tab === 'cajas'         && <TabCajas token={token} onCajasChange={setCajas} empresas={empresas} />}

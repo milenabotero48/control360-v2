@@ -849,6 +849,7 @@ export default function GestionEgresos({ user }) {
   const [cajas, setCajas]         = useState([]);
   const [empresas, setEmpresas]   = useState([]);
   const [categorias, setCategorias] = useState(CATEGORIAS_DEFAULT);
+  const [categoriasMeta, setCategoriasMeta] = useState([]);  // Ola 3: array de { nombre, tipoERI, lineaServicioId }
   const [formasPago, setFormasPago] = useState(FORMAS_PAGO_DEFAULT);
   const [formasPagoConfig, setFormasPagoConfig] = useState([]);
   const [loading, setLoading]     = useState(true);
@@ -880,8 +881,11 @@ export default function GestionEgresos({ user }) {
       setCajas(Array.isArray(cRes.data) ? cRes.data : []);
       setEmpresas(Array.isArray(empRes.data) ? empRes.data : []);
       setMensajeros((Array.isArray(usersRes.data) ? usersRes.data : []).filter(u => u.role === 'mensajero' && u.activo !== false));
-      const cats = (configRes.data?.categoriasEgresos || []).filter(c => c.activa).map(c => c.nombre);
+      const catsActivas = (configRes.data?.categoriasEgresos || []).filter(c => c.activa);
+      const cats = catsActivas.map(c => c.nombre);
       if (cats.length > 0) setCategorias(cats);
+      // Ola 3: mapa categoría → tipoERI (para mostrar y guardar)
+      setCategoriasMeta(catsActivas);
       const fps = (configRes.data?.formasPago || []).filter(f => f.activa).map(f => f.nombre);
       if (fps.length > 0) setFormasPago(fps);
       setFormasPagoConfig(configRes.data?.formasPago || []);
@@ -1140,7 +1144,36 @@ export default function GestionEgresos({ user }) {
                 <td style={S.td}><span style={S.badge}>{eg.numero || 'EGR-?'}</span></td>
                 <td style={S.td}><div style={{ fontWeight: 600, fontSize: 13, color: '#1e293b' }}>{eg.concepto}</div></td>
                 <td style={S.td}><span style={{ fontSize: 13, color: '#475569' }}>{eg.proveedor || '—'}</span></td>
-                <td style={S.td}><span style={S.tag}>{eg.categoria}</span></td>
+                <td style={S.td}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                    <span style={S.tag}>{eg.categoria}</span>
+                    {(() => {
+                      // Ola 3: badge del tipo contable
+                      const meta = categoriasMeta.find(c => c.nombre === eg.categoria);
+                      if (!meta) return null;
+                      const tipo = meta.tipoERI || 'gasto_operativo';
+                      const labels = {
+                        'costo_servicio':       { l: '💰 Costo servicio', bg: '#fef3c7', c: '#92400e' },
+                        'gasto_personal':       { l: '👥 Personal',        bg: '#fce7f3', c: '#9f1239' },
+                        'gasto_operativo':      { l: '⚙️ Operativo',       bg: '#e0e7ff', c: '#3730a3' },
+                        'gasto_fijo':           { l: '🏠 Fijo',            bg: '#dbeafe', c: '#1e40af' },
+                        'gasto_administrativo': { l: '📋 Administrativo',  bg: '#f3e8ff', c: '#6b21a8' },
+                        'gasto_financiero':     { l: '🏦 Financiero',      bg: '#fee2e2', c: '#991b1b' },
+                        'gasto_fiscal':         { l: '📑 Fiscal',          bg: '#fef2f2', c: '#dc2626' },
+                      };
+                      const cfg = labels[tipo] || labels['gasto_operativo'];
+                      return (
+                        <span style={{
+                          fontSize: 10, fontWeight: 600,
+                          padding: '2px 6px', borderRadius: 6,
+                          background: cfg.bg, color: cfg.c
+                        }}>
+                          {cfg.l}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                </td>
                 <td style={S.td}><span style={{ fontSize: 12, color: '#64748b' }}>{fmtDate(eg.fecha || eg.createdAt)}</span></td>
                 <td style={S.td}><span style={{ fontSize: 13 }}>{fmt(eg.monto)}</span></td>
                 <td style={S.td}>{eg.ivaVal > 0 ? <span style={{ fontSize: 12, color: '#0284c7', fontWeight: 600 }}>{fmt(eg.ivaVal)}</span> : <span style={{ color: '#d1d5db' }}>—</span>}</td>
