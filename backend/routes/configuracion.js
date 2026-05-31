@@ -13,17 +13,61 @@ const FORMAS_PAGO_DEFAULT = [
   { nombre: 'A crédito (CxC)',  tipo: 'credito',      activa: true, orden: 7 },
 ];
 
+// ─── LÍNEAS DE SERVICIO — Ola 3 ─────────────────────────────────────────────
+// Las "líneas de servicio" agrupan los SERVICIOS (mano de obra) que vende la
+// empresa. Cada línea tiene un INGRESO (lo cobrado por servicios de esa línea)
+// y un COSTO (insumos asociados a esa línea). La utilidad por línea sale de:
+//
+//    Ingreso de servicios de la línea − Costo de insumos de la línea
+//
+// Importante: los PRODUCTOS (lámparas, botiquines, extintores nuevos, etc.)
+// NO usan línea de servicio. Su costo va directo del precioCosto del producto.
+//
+// Cómo se determina la línea de un servicio: la categoría del producto
+// (Recarga, Mantenimiento, Hidrostática, Señalización, etc.) se asocia con
+// una línea desde el módulo de productos.
+const LINEAS_SERVICIO_DEFAULT = [
+  { id: 'lin_recargas',     nombre: 'Recargas y Mantenimiento', color: '#dc2626', activa: true, orden: 1 },
+  { id: 'lin_senalizacion', nombre: 'Señalización',             color: '#f59e0b', activa: true, orden: 2 },
+  { id: 'lin_otros',        nombre: 'Otros servicios',          color: '#6b7280', activa: true, orden: 99 },
+];
+
+// ─── CATEGORÍAS DE EGRESOS — actualizada Ola 3 ──────────────────────────────
+// Cada categoría tiene 2 niveles de clasificación contable:
+//
+//   tipoERI:
+//     'costo_servicio'      — Costo directo de una línea de servicio (insumos
+//                              taller, compra de señales). Afecta utilidad bruta
+//                              de servicios. Requiere lineaServicioId.
+//     'costo_producto'      — Costo de compra de productos para vender (NO se
+//                              usa en categorías porque el costo está en el
+//                              producto). Solo para reservado.
+//     'gasto_personal'      — Nómina, prestaciones, capacitaciones, etc.
+//     'gasto_operativo'     — Transporte, mantenimiento de equipos, papelería
+//     'gasto_fijo'          — Arriendo, servicios públicos, internet
+//     'gasto_administrativo'— Marketing, publicidad, contabilidad externa
+//     'gasto_financiero'    — Intereses, comisiones bancarias
+//     'gasto_fiscal'        — Impuestos, retenciones (la Retefuente la práctica
+//                              el sistema automáticamente desde CxC)
+//
+//   lineaServicioId:
+//     Solo aplica para tipoERI = 'costo_servicio'. En las demás es null.
+//
+// Sandra puede crear más categorías y asignar lineas en la UI.
 const CATEGORIAS_DEFAULT = [
-  { nombre: 'Insumos taller',           tipoERI: 'costo_operativo',  activa: true, orden: 1 },
-  { nombre: 'Transporte / Combustible', tipoERI: 'gasto_operativo',  activa: true, orden: 2 },
-  { nombre: 'Arriendo',                 tipoERI: 'gasto_fijo',       activa: true, orden: 3 },
-  { nombre: 'Servicios públicos',       tipoERI: 'gasto_fijo',       activa: true, orden: 4 },
-  { nombre: 'Papelería',                tipoERI: 'gasto_operativo',  activa: true, orden: 5 },
-  { nombre: 'Mantenimiento',            tipoERI: 'gasto_operativo',  activa: true, orden: 6 },
-  { nombre: 'Nómina',                   tipoERI: 'gasto_personal',   activa: true, orden: 7 },
-  { nombre: 'Marketing',                tipoERI: 'gasto_operativo',  activa: false, orden: 8 },
-  { nombre: 'Impuestos',                tipoERI: 'gasto_fiscal',     activa: true, orden: 9 },
-  { nombre: 'Otros',                    tipoERI: 'gasto_operativo',  activa: true, orden: 10 },
+  { nombre: 'Insumos taller (recargas)',  tipoERI: 'costo_servicio',  lineaServicioId: 'lin_recargas',     activa: true, orden: 1 },
+  { nombre: 'Compra de señales',          tipoERI: 'costo_servicio',  lineaServicioId: 'lin_senalizacion', activa: true, orden: 2 },
+  { nombre: 'Insumos otros servicios',    tipoERI: 'costo_servicio',  lineaServicioId: 'lin_otros',        activa: false, orden: 3 },
+  { nombre: 'Transporte / Combustible',   tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true, orden: 4 },
+  { nombre: 'Arriendo',                   tipoERI: 'gasto_fijo',      lineaServicioId: null, activa: true, orden: 5 },
+  { nombre: 'Servicios públicos',         tipoERI: 'gasto_fijo',      lineaServicioId: null, activa: true, orden: 6 },
+  { nombre: 'Papelería',                  tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true, orden: 7 },
+  { nombre: 'Mantenimiento equipos',      tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true, orden: 8 },
+  { nombre: 'Nómina',                     tipoERI: 'gasto_personal',  lineaServicioId: null, activa: true, orden: 9 },
+  { nombre: 'Marketing',                  tipoERI: 'gasto_administrativo', lineaServicioId: null, activa: false, orden: 10 },
+  { nombre: 'Comisiones bancarias',       tipoERI: 'gasto_financiero', lineaServicioId: null, activa: true, orden: 11 },
+  { nombre: 'Impuestos',                  tipoERI: 'gasto_fiscal',    lineaServicioId: null, activa: true, orden: 12 },
+  { nombre: 'Otros',                      tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true, orden: 13 },
 ];
 
 // ─── RETENCIONES — Ola 2.5 Bloque 3 ─────────────────────────────────────────
@@ -70,6 +114,7 @@ const inicializarConfigSiNoExiste = async (userId) => {
       categoriasEgresos: CATEGORIAS_DEFAULT,
       retenciones: RETENCIONES_DEFAULT,
       sectores: SECTORES_DEFAULT,
+      lineasServicio: LINEAS_SERVICIO_DEFAULT,  // Ola 3
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
@@ -77,7 +122,8 @@ const inicializarConfigSiNoExiste = async (userId) => {
       formasPago: FORMAS_PAGO_DEFAULT,
       categoriasEgresos: CATEGORIAS_DEFAULT,
       retenciones: RETENCIONES_DEFAULT,
-      sectores: SECTORES_DEFAULT
+      sectores: SECTORES_DEFAULT,
+      lineasServicio: LINEAS_SERVICIO_DEFAULT
     };
   }
   const data = doc.data();
@@ -90,6 +136,35 @@ const inicializarConfigSiNoExiste = async (userId) => {
   if (!Array.isArray(data.sectores) || data.sectores.length === 0) {
     await ref.set({ sectores: SECTORES_DEFAULT }, { merge: true });
     data.sectores = SECTORES_DEFAULT;
+  }
+  // Auto-seed de líneas de servicio (suscriptores anteriores a Ola 3)
+  if (!Array.isArray(data.lineasServicio) || data.lineasServicio.length === 0) {
+    await ref.set({ lineasServicio: LINEAS_SERVICIO_DEFAULT }, { merge: true });
+    data.lineasServicio = LINEAS_SERVICIO_DEFAULT;
+  }
+  // Ola 3: migrar categorías viejas que solo tienen tipoERI sin lineaServicioId.
+  // Las categorías "costo_operativo" del modelo viejo se reclasifican a
+  // "gasto_operativo" (más conservador). El admin puede luego marcarlas como
+  // "costo_servicio" si aplica.
+  if (Array.isArray(data.categoriasEgresos) && data.categoriasEgresos.length > 0) {
+    let necesitaMigrar = false;
+    const migradas = data.categoriasEgresos.map(c => {
+      const tieneLinea = c.lineaServicioId !== undefined;
+      const tipoViejo = c.tipoERI === 'costo_operativo';
+      if (!tieneLinea || tipoViejo) {
+        necesitaMigrar = true;
+        return {
+          ...c,
+          tipoERI: tipoViejo ? 'gasto_operativo' : (c.tipoERI || 'gasto_operativo'),
+          lineaServicioId: c.lineaServicioId !== undefined ? c.lineaServicioId : null
+        };
+      }
+      return c;
+    });
+    if (necesitaMigrar) {
+      await ref.set({ categoriasEgresos: migradas }, { merge: true });
+      data.categoriasEgresos = migradas;
+    }
   }
   return data;
 };
@@ -144,8 +219,27 @@ router.put('/categorias', async (req, res) => {
     const { categoriasEgresos } = req.body;
     if (!Array.isArray(categoriasEgresos)) return res.status(400).json({ error: 'categoriasEgresos debe ser un array' });
 
+    // Tipos válidos contables (Ola 3)
+    const TIPOS_ERI_VALIDOS = [
+      'costo_servicio', 'gasto_personal', 'gasto_operativo',
+      'gasto_fijo', 'gasto_administrativo', 'gasto_financiero', 'gasto_fiscal'
+    ];
+
     for (const c of categoriasEgresos) {
       if (!c.nombre?.trim()) return res.status(400).json({ error: 'Cada categoría debe tener nombre' });
+      if (c.tipoERI && !TIPOS_ERI_VALIDOS.includes(c.tipoERI)) {
+        return res.status(400).json({ error: `tipoERI inválido en "${c.nombre}": ${c.tipoERI}` });
+      }
+      // Si es costo_servicio, debe tener lineaServicioId
+      if (c.tipoERI === 'costo_servicio' && !c.lineaServicioId) {
+        return res.status(400).json({
+          error: `La categoría "${c.nombre}" es Costo de Servicio. Debes asignarle una línea de servicio.`
+        });
+      }
+      // Si NO es costo_servicio, forzar lineaServicioId a null
+      if (c.tipoERI !== 'costo_servicio') {
+        c.lineaServicioId = null;
+      }
     }
 
     const ref = getConfigRef(req.adminId || req.user.uid);
@@ -291,6 +385,53 @@ router.put('/sectores', async (req, res) => {
   } catch (e) {
     console.error('PUT sectores:', e);
     res.status(500).json({ error: 'Error al guardar sectores' });
+  }
+});
+
+// ─── PUT /api/configuracion/lineas-servicio — Ola 3 ────────────────────────
+// Permite al admin gestionar las líneas de servicio que componen su negocio.
+// Las líneas se usan en el ERI para calcular utilidad por línea.
+router.put('/lineas-servicio', async (req, res) => {
+  try {
+    const { lineasServicio } = req.body;
+    if (!Array.isArray(lineasServicio)) {
+      return res.status(400).json({ error: 'lineasServicio debe ser un array' });
+    }
+
+    for (const l of lineasServicio) {
+      if (!l.nombre || !l.nombre.trim()) {
+        return res.status(400).json({ error: 'Cada línea debe tener nombre' });
+      }
+      if (!l.id || !l.id.trim()) {
+        return res.status(400).json({ error: 'Cada línea debe tener un id único' });
+      }
+    }
+
+    const ids = lineasServicio.map(l => l.id);
+    if (new Set(ids).size !== ids.length) {
+      return res.status(400).json({ error: 'Hay líneas con el mismo id' });
+    }
+
+    const userId = req.adminId || req.user.uid;
+    const ref = getConfigRef(userId);
+    await ref.set({
+      userId,
+      lineasServicio,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    await db.collection('audit_logs').add({
+      accion: 'LINEAS_SERVICIO_ACTUALIZADAS', modulo: 'configuracion',
+      descripcion: `Líneas de servicio actualizadas (${lineasServicio.length} registros)`,
+      usuarioId: userId, usuarioNombre: req.user.email,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      fecha: new Date().toISOString()
+    });
+
+    res.json({ ok: true, lineasServicio });
+  } catch (e) {
+    console.error('PUT lineas-servicio:', e);
+    res.status(500).json({ error: 'Error al guardar líneas de servicio' });
   }
 });
 
