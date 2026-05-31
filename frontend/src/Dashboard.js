@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloque 3
 
 const API = 'http://localhost:5000/api';
 
@@ -188,7 +189,10 @@ const Dashboard = ({ user }) => {
         )}
       </div>
 
-      {/* ── PANEL DE ALERTAS ──────────────────────────────────────────────── */}
+      {/* Ola 3 Bloque 3: Panel de Alertas Inteligentes */}
+      <PanelAlertasInteligentes />
+
+      {/* ── PANEL DE ALERTAS (legacy del backend) ─────────────────────────── */}
       {data.alertas?.length > 0 && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10, marginBottom: 24 }}>
           {data.alertas.map((a, i) => {

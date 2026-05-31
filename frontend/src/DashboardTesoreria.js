@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloque 3
 
 const API = 'http://localhost:5000/api';
 
@@ -93,6 +94,9 @@ const DashboardTesoreria = ({ user }) => {
           Hola {saludo} — {new Date().toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Bogota' })}
         </p>
       </div>
+
+      {/* Ola 3 Bloque 3: Panel de alertas inteligentes (solo PAGO y CXC para Tesorería) */}
+      <PanelAlertasInteligentes filtroTipo={['PAGO_PENDIENTE', 'CXC_VENCIDO']} />
 
       {/* Alertas (provisionales sin cuadrar + pagos sin validar) */}
       {(k.provisionalesPendientes > 0 || k.pagosElectronicosSinValidar > 0) && (

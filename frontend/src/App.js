@@ -15,6 +15,7 @@ import GestionOrdenes from './GestionOrdenes';
 import GestionCotizaciones from './GestionCotizaciones';
 import ModuloERI from './ModuloERI';   // Ola 3
 import ModuloReportes from './ModuloReportes'; // Ola 3 Bloque 2
+import CampanaAlertas from './CampanaAlertas'; // Ola 3 Bloque 3
 import GestionCaja from './GestionCaja';
 import GestionEgresos from './GestionEgresos';
 import GestionCxC from './GestionCxC';
@@ -161,8 +162,11 @@ const GLOBAL_CSS = `
 
   .c360-mob-topbar { display: none !important; }
   .c360-bottomnav  { display: none !important; }
+  /* Ola 3 Bloque 3: header desktop visible en >768px */
+  .c360-desk-topbar { display: flex !important; }
 
   @media (max-width: 768px) {
+    .c360-desk-topbar { display: none !important; }
     .c360-sidebar {
       position: fixed !important;
       top: 0; left: 0;
@@ -392,8 +396,51 @@ export default function AppRoot() {
           <div style={{ flex: 1 }}>
             <LogoControl360 width={130} height={38} />
           </div>
+          {/* Ola 3 Bloque 3: campana de alertas en móvil */}
+          {['admin', 'taller', 'tesoreria', 'comercial'].includes(user.role) && <CampanaAlertas />}
           <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(167,139,250,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: '#c4b5fd' }}>
             {iniciales}
+          </div>
+        </header>
+
+        {/* Header desktop — Ola 3 Bloque 3 (mejora UX) */}
+        <header className="c360-desk-topbar" style={{
+          display: 'none',  // Por defecto oculto; CSS lo muestra en desktop (ver más abajo)
+          padding: '10px 24px',
+          background: '#fff',
+          borderBottom: '1px solid #e5e7eb',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 16,
+          flexShrink: 0
+        }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: '#1a1a2e' }}>
+              {(() => {
+                const h = new Date().getHours();
+                const saludo = h < 12 ? 'Buenos días' : h < 19 ? 'Buenas tardes' : 'Buenas noches';
+                return `${saludo}, ${user.nombre || user.email}`;
+              })()}
+            </div>
+            <div style={{ fontSize: 11, color: '#6b7280' }}>
+              {new Date().toLocaleDateString('es-CO', {
+                weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+                timeZone: 'America/Bogota'
+              })}
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {/* Campana de alertas — solo admin, taller, tesoreria, comercial */}
+            {['admin', 'taller', 'tesoreria', 'comercial'].includes(user.role) && <CampanaAlertas />}
+            <button onClick={handleLogout} title="Cerrar sesión" style={{
+              background: '#f3f4f6', color: '#374151',
+              border: '1px solid #e5e7eb', borderRadius: 8,
+              padding: '8px 14px', cursor: 'pointer',
+              fontSize: 12, fontWeight: 600,
+              display: 'flex', alignItems: 'center', gap: 6
+            }}>
+              ⏏ Salir
+            </button>
           </div>
         </header>
 

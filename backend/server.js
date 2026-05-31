@@ -53,6 +53,8 @@ app.use('/api/dashboards',    authenticate, require('./routes/dashboards'));
 app.use('/api/eri',           authenticate, require('./routes/eri'));
 // Ola 3 Bloque 2: Reportes operativos
 app.use('/api/reportes',      authenticate, require('./routes/reportes'));
+// Ola 3 Bloque 3: Alertas Inteligentes
+app.use('/api/alertas',       authenticate, require('./routes/alertas'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
