@@ -124,19 +124,43 @@ const GestionOrdenes = ({ user }) => {
           <p style={s.pageSubtitle}>Gestión completa del flujo operativo</p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button onClick={() => exportarExcel(ordenes, [
-            { key: 'numeroOrden',   label: 'N° Orden' },
-            { key: 'createdAt',     label: 'Fecha', getValue: o => o.createdAt ? new Date(o.createdAt).toLocaleDateString('es-CO') : '' },
-            { key: 'clienteNombre', label: 'Cliente' },
-            { key: 'empresaNombre', label: 'Empresa' },
-            { key: 'estado',        label: 'Estado' },
-            { key: 'lugarAtencion', label: 'Tipo Atención' },
-            { key: 'formaPago',     label: 'Forma Pago' },
-            { key: 'total',         label: 'Total' },
-            { key: 'pagado',        label: 'Pagado', getValue: o => o.pagado ? 'Sí' : 'No' },
-          ], 'ordenes')} style={{ padding: '10px 16px', background: '#f1f5f9', color: '#475569', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
-            📥 Exportar Excel
-          </button>
+          {/* PAQUETE B: Exportar solo si admin + registra auditoría antes */}
+          {user?.role === 'admin' && (
+            <button onClick={async () => {
+              try {
+                // 1. Registrar auditoría primero (si falla, NO exporta)
+                await axios.post(`${API}/auditoria/exportacion`, {
+                  modulo: 'ordenes',
+                  formato: 'excel',
+                  cantidad: ordenes.length,
+                  filtros: {
+                    estado: filtroEstado || null,
+                    tipo: filtroTipo || null,
+                    desde: filtroDesde || null,
+                    hasta: filtroHasta || null,
+                    pendientesPago: filtroPendientesPago || null
+                  },
+                  descripcion: `Exportación de ${ordenes.length} órdenes`
+                }, { headers: { Authorization: `Bearer ${token}` } });
+                // 2. Si la auditoría aprobó, exportar
+                exportarExcel(ordenes, [
+                  { key: 'numeroOrden',   label: 'N° Orden' },
+                  { key: 'createdAt',     label: 'Fecha', getValue: o => o.createdAt ? new Date(o.createdAt).toLocaleDateString('es-CO') : '' },
+                  { key: 'clienteNombre', label: 'Cliente' },
+                  { key: 'empresaNombre', label: 'Empresa' },
+                  { key: 'estado',        label: 'Estado' },
+                  { key: 'lugarAtencion', label: 'Tipo Atención' },
+                  { key: 'formaPago',     label: 'Forma Pago' },
+                  { key: 'total',         label: 'Total' },
+                  { key: 'pagado',        label: 'Pagado', getValue: o => o.pagado ? 'Sí' : 'No' },
+                ], 'ordenes');
+              } catch (e) {
+                alert('No se pudo exportar: ' + (e.response?.data?.error || e.message));
+              }
+            }} style={{ padding: '10px 16px', background: '#f1f5f9', color: '#475569', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+              📥 Exportar Excel
+            </button>
+          )}
           <button onClick={() => setVistaActual('nueva')} style={s.btnPrimario}>+ Nueva Orden</button>
         </div>
       </div>

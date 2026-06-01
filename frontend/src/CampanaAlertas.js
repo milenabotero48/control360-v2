@@ -46,10 +46,12 @@ const CampanaAlertas = ({ inSidebar = false }) => {
     setLoading(false);
   };
 
-  // Cargar inicial + auto-refresh cada 60s
+  // ── OPTIMIZACIÓN OLA 3.5: refresh cada 5 minutos (antes era 60s) ──
+  // Esto reduce las lecturas a Firestore 5x. Si necesitas refrescar antes,
+  // está el botón "🔄 Refrescar" manual al pie del panel.
   useEffect(() => {
     cargar();
-    const t = setInterval(cargar, 60000);
+    const t = setInterval(cargar, 5 * 60 * 1000); // 5 minutos
     return () => clearInterval(t);
     // eslint-disable-next-line
   }, []);
@@ -230,7 +232,7 @@ const CampanaAlertas = ({ inSidebar = false }) => {
             fontSize: 11, color: '#6b7280',
             display: 'flex', justifyContent: 'space-between'
           }}>
-            <span>Actualización automática cada 60s</span>
+            <span>Actualización automática cada 5 minutos</span>
             <button onClick={cargar} style={{
               background: 'transparent', border: 'none', color: '#7c3aed',
               cursor: 'pointer', fontSize: 11, fontWeight: 600

@@ -207,30 +207,74 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
   };
 
   const imprimirHoja = (items) => {
-    const filas = items.map(eq => `
+    // ── PAQUETE C: agrupar por número de orden para indicador "1 de N" ──
+    // Cuando una orden tiene varios extintores, ej. OS-0030 con 3 equipos,
+    // el sistema muestra "1 de 3", "2 de 3", "3 de 3" en cada etiqueta.
+    const conteoPorOrden = {};
+    items.forEach(eq => {
+      const ord = eq.numeroOrden || '_SIN_ORDEN_';
+      conteoPorOrden[ord] = (conteoPorOrden[ord] || 0) + 1;
+    });
+    // Asignar posición (1 de N) ordenando por codigoQR dentro de cada orden
+    const indicePorEquipo = {};
+    Object.keys(conteoPorOrden).forEach(ord => {
+      const equiposDeOrden = items
+        .filter(eq => (eq.numeroOrden || '_SIN_ORDEN_') === ord)
+        .sort((a, b) => (a.codigoQR || '').localeCompare(b.codigoQR || ''));
+      equiposDeOrden.forEach((eq, idx) => {
+        indicePorEquipo[eq.codigoQR] = idx + 1;
+      });
+    });
+
+    const filas = items.map(eq => {
+      const totalOrden = conteoPorOrden[eq.numeroOrden || '_SIN_ORDEN_'];
+      const indice = indicePorEquipo[eq.codigoQR] || 1;
+      // Solo mostrar "X de N" si hay más de 1 equipo en la orden
+      const indicador = totalOrden > 1 ? `${indice}/${totalOrden}` : '';
+      // Nombre completo (no truncar) — el CSS permite 2 líneas con wrap
+      const propietario = (eq.propietario || 'SIN DUEÑO').toUpperCase();
+      // Línea de orden + indicador
+      const lineaOrden = eq.numeroOrden
+        ? (indicador ? `${eq.numeroOrden} • ${indicador}` : eq.numeroOrden)
+        : eq.codigoQR;
+
+      return `
       <div class="etiqueta">
         <div class="qr-wrap">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=72x72&data=${encodeURIComponent(QR_PUBLIC_URL + eq.codigoQR)}&bgcolor=ffffff&color=1a1a2e&margin=1" width="72" height="72" />
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=60x60&data=${encodeURIComponent(QR_PUBLIC_URL + eq.codigoQR)}&bgcolor=ffffff&color=1a1a2e&margin=1" width="60" height="60" />
         </div>
         <div class="info">
-          <div class="propietario">${(eq.propietario || 'SIN DUEÑO').substring(0, 18)}</div>
-          <div class="tipo">${eq.tipo || ''} — ${eq.capacidad || ''}</div>
-          <div class="orden">${eq.numeroOrden || eq.codigoQR}</div>
+          <div class="propietario">${propietario}</div>
+          <div class="id-equipo">ID: ${eq.codigoQR}</div>
+          <div class="tipo">${eq.tipo || ''} ${eq.capacidad || ''}</div>
+          <div class="orden">${lineaOrden}</div>
         </div>
       </div>
-    `).join('');
+    `;
+    }).join('');
 
     const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body { font-family: Arial, sans-serif; background: #fff; }
       .hoja { display: grid; grid-template-columns: repeat(3, 32mm); grid-template-rows: repeat(3, 25mm); gap: 2mm; padding: 10mm; }
-      .etiqueta { width: 32mm; height: 25mm; border: 0.5px solid #ccc; border-radius: 3mm; display: flex; align-items: center; gap: 1mm; padding: 1mm; overflow: hidden; }
+      .etiqueta { width: 32mm; height: 25mm; border: 0.5px solid #ccc; border-radius: 2mm; display: flex; align-items: center; gap: 1mm; padding: 1mm; overflow: hidden; }
       .qr-wrap { flex-shrink: 0; }
-      .info { flex: 1; overflow: hidden; }
-      .propietario { font-size: 6.5px; font-weight: 800; color: #1a1a2e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .tipo { font-size: 6px; color: #374151; margin-top: 1px; }
-      .orden { font-size: 5.5px; color: #9ca3af; margin-top: 1px; font-family: monospace; }
+      .info { flex: 1; overflow: hidden; line-height: 1.15; }
+      /* PAQUETE C: nombre completo en hasta 2 líneas */
+      .propietario {
+        font-size: 5.5px;
+        font-weight: 800;
+        color: #1a1a2e;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        word-break: break-word;
+      }
+      .id-equipo { font-size: 5px; color: #1a1a2e; font-weight: 700; font-family: monospace; margin-top: 1px; }
+      .tipo { font-size: 5px; color: #374151; margin-top: 1px; }
+      .orden { font-size: 5px; color: #6b7280; margin-top: 1px; font-family: monospace; font-weight: 600; }
       @media print { body { padding: 0; } }
     </style></head><body>
     <div class="hoja">${filas}</div>

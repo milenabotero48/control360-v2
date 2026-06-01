@@ -928,25 +928,44 @@ export default function GestionEgresos({ user }) {
   };
 
   const editarEgreso = async (form) => {
-    try { await axios.put(`${API}/egresos/${selected.id}`, { ...form, monto: Number(form.monto) }, { headers: getHeaders() }); } catch { }
-    setEgresos(p => p.map(e => e.id === selected.id ? { ...e, ...form, monto: Number(form.monto) } : e));
-    setModal(null); setSelected(null);
+    try {
+      await axios.put(`${API}/egresos/${selected.id}`, { ...form, monto: Number(form.monto) }, { headers: getHeaders() });
+      setEgresos(p => p.map(e => e.id === selected.id ? { ...e, ...form, monto: Number(form.monto) } : e));
+      setModal(null); setSelected(null);
+    } catch (e) {
+      alert('No se pudo editar: ' + (e.response?.data?.error || e.message));
+    }
   };
 
   const pagarEgreso = async ({ cajaId, formaPago }) => {
     const eg = selected;
     const totalPagar = eg.totalPagar || Number(eg.monto) || 0;
-    try { await axios.put(`${API}/egresos/${eg.id}/pagar`, { cajaId, formaPago, totalPagar }, { headers: getHeaders() }); } catch { }
-    setEgresos(p => p.map(e => e.id === eg.id ? { ...e, estado: 'PAGADO', cajaId, formaPago } : e));
-    setCajas(p => p.map(c => c.id === cajaId ? { ...c, saldo: (c.saldo || 0) - totalPagar } : c));
-    setModal(null); setSelected(null);
+    // FIX BUG C: el backend define POST (no PUT) para /pagar. El PUT daba 404
+    // silencioso (catch vacío) y el UI mostraba PAGADO falsamente. Ahora:
+    // 1) Usamos POST (coincide con backend)
+    // 2) Esperamos respuesta antes de actualizar UI
+    // 3) Si falla, mostramos el error real
+    try {
+      await axios.post(`${API}/egresos/${eg.id}/pagar`, { cajaId, formaPago, totalPagar }, { headers: getHeaders() });
+      setEgresos(p => p.map(e => e.id === eg.id ? { ...e, estado: 'PAGADO', cajaId, formaPago, pagadoEn: new Date().toISOString() } : e));
+      setCajas(p => p.map(c => c.id === cajaId ? { ...c, saldo: (c.saldo || 0) - totalPagar } : c));
+      setModal(null); setSelected(null);
+    } catch (e) {
+      alert('No se pudo pagar el egreso: ' + (e.response?.data?.error || e.message));
+    }
   };
 
   const editarPagado = async (form, motivo) => {
     const update = { ...form, monto: Number(form.monto), motivoEdicion: motivo, editadoPor: user?.email };
-    try { await axios.put(`${API}/egresos/${selected.id}/editar-pagado`, update, { headers: getHeaders() }); } catch { }
-    setEgresos(p => p.map(e => e.id === selected.id ? { ...e, ...update } : e));
-    setModal(null); setSelected(null);
+    // FIX: el backend define POST (no PUT) para /editar-pagado. Mismo bug
+    // que pagarEgreso. Ahora espera respuesta, si falla muestra error.
+    try {
+      await axios.post(`${API}/egresos/${selected.id}/editar-pagado`, update, { headers: getHeaders() });
+      setEgresos(p => p.map(e => e.id === selected.id ? { ...e, ...update } : e));
+      setModal(null); setSelected(null);
+    } catch (e) {
+      alert('No se pudo editar el egreso: ' + (e.response?.data?.error || e.message));
+    }
   };
 
   const egresosFiltered = egresos.filter(e => {

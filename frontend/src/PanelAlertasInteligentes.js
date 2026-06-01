@@ -42,9 +42,10 @@ const PanelAlertasInteligentes = ({ filtroTipo = null }) => {
     setLoading(false);
   };
 
+  // ── OPTIMIZACIÓN OLA 3.5: refresh cada 5 minutos (antes era 60s) ──
   useEffect(() => {
     cargar();
-    const t = setInterval(cargar, 60000);
+    const t = setInterval(cargar, 5 * 60 * 1000); // 5 minutos
     return () => clearInterval(t);
     // eslint-disable-next-line
   }, []);

@@ -468,6 +468,13 @@ const GestionClientes = ({ user, empresas = [] }) => {
       const res = await axios.get(API + '/clients', { headers });
       const clis = Array.isArray(res.data) ? res.data : [];
       if (!clis.length) { setError('No hay clientes para exportar'); return; }
+      // PAQUETE B: Registrar auditoría ANTES de exportar (si falla, NO exporta)
+      await axios.post(`${API}/auditoria/exportacion`, {
+        modulo: 'clientes',
+        formato: 'csv',
+        cantidad: clis.length,
+        descripcion: `Exportación de ${clis.length} clientes`
+      }, { headers });
       const cols = ['nombre','nit','tipoDocumento','celular','telefono','emailLegal','direccionPrincipal','ciudad','departamento','empresaNombre','notas'];
       const nl = String.fromCharCode(10);
       const filas = clis.map(function(c) {
@@ -483,7 +490,9 @@ const GestionClientes = ({ user, empresas = [] }) => {
       URL.revokeObjectURL(url);
       setExito(clis.length + ' clientes exportados');
       setTimeout(function() { setExito(''); }, 3000);
-    } catch (err) { setError('Error al exportar clientes'); }
+    } catch (err) {
+      setError('Error al exportar clientes: ' + (err.response?.data?.error || err.message));
+    }
   };
 
   const leerCSVClientes = (file) => {
@@ -786,14 +795,30 @@ const GestionClientes = ({ user, empresas = [] }) => {
                           }}>
                           🖨 Imprimir
                         </button>
-                        <button
-                          onClick={() => exportarHistorialCliente(historial)}
-                          style={{
-                            padding: '8px 14px', background: '#16a34a', color: '#fff',
-                            border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600
-                          }}>
-                          📊 Exportar Excel
-                        </button>
+                        {/* PAQUETE B: Exportar historial solo si admin + auditoría */}
+                        {isAdmin && (
+                          <button
+                            onClick={async () => {
+                              try {
+                                await axios.post(`${API}/auditoria/exportacion`, {
+                                  modulo: 'historial_cliente',
+                                  formato: 'excel',
+                                  cantidad: historial?.ordenes?.length || 0,
+                                  filtros: { clienteId: verDetalle?.id, clienteNombre: verDetalle?.nombre },
+                                  descripcion: `Historial del cliente ${verDetalle?.nombre || ''}`
+                                }, { headers: { Authorization: `Bearer ${token}` } });
+                                exportarHistorialCliente(historial);
+                              } catch (e) {
+                                alert('No se pudo exportar: ' + (e.response?.data?.error || e.message));
+                              }
+                            }}
+                            style={{
+                              padding: '8px 14px', background: '#16a34a', color: '#fff',
+                              border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600
+                            }}>
+                            📊 Exportar Excel
+                          </button>
+                        )}
                       </div>
 
                       {/* Resumen ejecutivo */}

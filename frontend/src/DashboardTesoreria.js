@@ -126,12 +126,11 @@ const DashboardTesoreria = ({ user }) => {
         </div>
       )}
 
-      {/* 6 KPIs principales */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 14, marginBottom: 24 }}>
+      {/* 4 KPIs principales — FIX: Tesorería no ve utilidad ni egresos (son del admin).
+          Tesorería ve: saldo en cajas, ingresos del mes, CxC pendiente y egresos POR PAGAR. */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, marginBottom: 24 }}>
         <KpiCard icon="🏦" label="Total en cajas"      value={fmtCop(k.totalEnCajas)}     sub="Saldo disponible"   color="#16a34a" />
         <KpiCard icon="📈" label="Ingresos mes"        value={fmtCop(k.ingresosMes)}      sub={mesLabel}           color="#0284c7" />
-        <KpiCard icon="📉" label="Egresos mes"         value={fmtCop(k.egresosMes)}       sub={mesLabel}           color="#dc2626" />
-        <KpiCard icon="💹" label="Utilidad mes"        value={fmtCop(k.utilidadMes)}      sub="Ingresos − Egresos" color={k.utilidadMes >= 0 ? '#16a34a' : '#dc2626'} />
         <KpiCard icon="💳" label="CxC pendiente"       value={fmtCop(k.cxcPendiente)}     sub={`${k.clientesConDeuda} cliente(s)`} color="#b45309" alerta={k.clientesConDeuda > 0} />
         <KpiCard icon="⏳" label="Egresos por pagar"   value={fmtCop(k.egresosPorPagar)}  sub={`${k.countEgresosPendientes} pendiente(s)`} color="#f59e0b" alerta={k.countEgresosPendientes > 0} />
       </div>
