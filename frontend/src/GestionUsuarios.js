@@ -80,6 +80,7 @@ const GestionUsuarios = ({ user }) => {
   const [verPassword, setVerPassword]   = useState(false);
   const [verPin, setVerPin]             = useState(false);
   const [tabActiva, setTabActiva]       = useState('usuarios'); // 'usuarios' | 'auditoria'
+  const [mostrarInactivos, setMostrarInactivos] = useState(false); // PAQUETE B: ocultar inactivos por defecto
 
   // Auditoría
   const [auditoria, setAuditoria]       = useState([]);
@@ -283,19 +284,54 @@ const GestionUsuarios = ({ user }) => {
         <>
           {loading ? (
             <div style={s.loadingBox}>Cargando usuarios...</div>
-          ) : (
-            <div style={s.grid}>
-              {usuarios.length === 0 && (
-                <div style={s.emptyBox}>
-                  <p>No hay usuarios creados aún.</p>
-                  <button onClick={abrirNuevo} style={s.btnPrimario}>+ Crear primer usuario</button>
-                </div>
-              )}
-              {usuarios.map(u => {
-                const rol = getRol(u.role);
-                const usaPin = ROLES_CON_PIN.includes(u.role);
-                return (
-                  <div key={u.id} style={{ ...s.card, opacity: u.activo === false ? 0.5 : 1 }}>
+          ) : (() => {
+            // PAQUETE B: filtrar usuarios desactivados (excepto si toggle está activo)
+            const usuariosVisibles = mostrarInactivos
+              ? usuarios
+              : usuarios.filter(u => u.activo !== false);
+            const inactivosCount = usuarios.filter(u => u.activo === false).length;
+
+            return (
+              <>
+                {/* Toggle para mostrar inactivos */}
+                {inactivosCount > 0 && (
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    background: '#f9fafb', border: '1px solid #e5e7eb',
+                    borderRadius: 10, padding: '10px 14px', marginBottom: 14
+                  }}>
+                    <span style={{ fontSize: 13, color: '#6b7280' }}>
+                      Mostrando <strong>{usuariosVisibles.length}</strong> usuarios activos
+                      {inactivosCount > 0 && !mostrarInactivos && (
+                        <span style={{ color: '#9ca3af', marginLeft: 8 }}>
+                          · {inactivosCount} inactivo(s) oculto(s)
+                        </span>
+                      )}
+                    </span>
+                    <button onClick={() => setMostrarInactivos(!mostrarInactivos)} style={{
+                      background: mostrarInactivos ? '#7c3aed' : '#fff',
+                      color: mostrarInactivos ? '#fff' : '#7c3aed',
+                      border: '1px solid #7c3aed',
+                      borderRadius: 8, padding: '6px 14px',
+                      cursor: 'pointer', fontSize: 12, fontWeight: 700
+                    }}>
+                      {mostrarInactivos ? '✓ Mostrando inactivos' : 'Mostrar inactivos'}
+                    </button>
+                  </div>
+                )}
+
+                <div style={s.grid}>
+                  {usuariosVisibles.length === 0 && (
+                    <div style={s.emptyBox}>
+                      <p>{mostrarInactivos ? 'No hay usuarios creados aún.' : 'No hay usuarios activos.'}</p>
+                      <button onClick={abrirNuevo} style={s.btnPrimario}>+ Crear primer usuario</button>
+                    </div>
+                  )}
+                  {usuariosVisibles.map(u => {
+                    const rol = getRol(u.role);
+                    const usaPin = ROLES_CON_PIN.includes(u.role);
+                    return (
+                      <div key={u.id} style={{ ...s.card, opacity: u.activo === false ? 0.5 : 1 }}>
                     <div style={s.cardHeader}>
                       <div style={{ ...s.avatar, background: rol.color }}>{rol.emoji}</div>
                       <div style={s.cardInfo}>
@@ -337,7 +373,9 @@ const GestionUsuarios = ({ user }) => {
                 );
               })}
             </div>
-          )}
+              </>
+            );
+          })()}
         </>
       )}
 

@@ -55,6 +55,8 @@ app.use('/api/eri',           authenticate, require('./routes/eri'));
 app.use('/api/reportes',      authenticate, require('./routes/reportes'));
 // Ola 3 Bloque 3: Alertas Inteligentes
 app.use('/api/alertas',       authenticate, require('./routes/alertas'));
+// Paquete B Seguridad: Auditoría de exportaciones
+app.use('/api/auditoria',     authenticate, require('./routes/auditoria'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

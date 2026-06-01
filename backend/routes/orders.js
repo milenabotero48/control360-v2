@@ -1083,6 +1083,79 @@ router.put('/:id/estado', authenticate, async (req, res) => {
     cambios.estado = estadoCursor;
     cambios.historialEstados = historial;
 
+    // ── FIX Bug 3+4: ADMIN SIN MENSAJERO ──────────────────────────────────────
+    // Si el flujo terminó en 'cuadre_dinero' pero NO hay mensajero asignado,
+    // significa que admin/tesorería avanzó la orden directamente sin que un
+    // mensajero la operara. En ese caso no hay a quién cuadrar con PIN, así que:
+    //   - Saltamos a 'completada' directamente
+    //   - Si era efectivo y está pagada, registramos el movimiento en caja
+    //     'Efectivo' (no requiere PIN porque no hay mensajero)
+    //   - Si era virtual, simplemente cerramos (la validación quedó pendiente
+    //     por separado o ya se hizo en /api/orders/:id/pago)
+    if (estadoCursor === 'cuadre_dinero' && !actual.mensajeroId && !actual.trabajadorAsignadoId) {
+      // Saltar a completada
+      estadoCursor = 'completada';
+      cambios.estado = 'completada';
+      historial.push({
+        estado: 'completada', fecha: ahora(), usuarioId, usuarioNombre,
+        notas: 'Cierre automático (sin mensajero — no requiere cuadre)'
+      });
+      cambios.historialEstados = historial;
+      cambios.fechaCompletada = ahora();
+
+      // Si fue pagada en efectivo, registrar movimiento en caja "Efectivo"
+      const esEfectivoPagado = actual.pagado === true
+        && /efectivo/i.test(actual.formaPago || '');
+
+      if (esEfectivoPagado) {
+        try {
+          // Buscar caja "Efectivo" del admin (case insensitive)
+          const cajasSnap = await db.collection('cajas')
+            .where('userId', '==', usuarioId).get();
+          const cajaEfectivo = cajasSnap.docs.find(d => {
+            const c = d.data();
+            return /efectivo/i.test(c.nombre || '') && c.activa !== false;
+          });
+
+          if (cajaEfectivo) {
+            const cajaId = cajaEfectivo.id;
+            const cajaData = cajaEfectivo.data();
+            const monto = Number(actual.total) || 0;
+
+            // Registrar movimiento de ingreso
+            await db.collection('movimientos').add({
+              userId: usuarioId,
+              cajaId,
+              cajaNombre: cajaData.nombre,
+              tipo: 'ingreso',
+              monto,
+              concepto: `Pago ${actual.numeroOrden} — ${actual.clienteNombre || ''}`,
+              referencia: actual.numeroOrden,
+              ordenId: id,
+              fecha: ahora(),
+              registradoPor: usuarioNombre,
+              registradoPorId: usuarioId,
+              tipoMovimiento: 'pago_orden_sin_mensajero',
+              timestamp: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            // Actualizar saldo de la caja
+            await db.collection('cajas').doc(cajaId).update({
+              saldo: admin.firestore.FieldValue.increment(monto),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            console.log(`[orders] Cierre admin sin mensajero: $${monto} a caja "${cajaData.nombre}" para ${actual.numeroOrden}`);
+          } else {
+            console.warn(`[orders] No se encontró caja "Efectivo" activa para registrar pago de ${actual.numeroOrden}. El admin debe registrarlo manualmente.`);
+          }
+        } catch (errCaja) {
+          console.error(`[orders] Error registrando movimiento en caja para ${actual.numeroOrden}:`, errCaja.message);
+          // No bloqueamos la finalización por esto. Solo logueamos.
+        }
+      }
+    }
+
     if ((estadoCursor === 'cuadre_dinero' || estadoCursor === 'completada')
         && actual.generaCertificado && !actual.certificadoGenerado) {
       cambios.certificadoGenerado = true;

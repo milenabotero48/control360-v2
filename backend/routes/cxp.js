@@ -18,40 +18,63 @@ router.get('/', async (req, res) => {
   try {
     const userId = req.adminId || req.user.uid || req.user.id;
 
-    // 1. Egresos pendientes con "Cuenta por Pagar" (filtrados por userId)
-    const snapEgresos = await db.collection('egresos')
-      .where('userId', '==', userId)
-      .where('estado', '==', 'PENDIENTE')
-      .get();
+    // FIX BUG A: el IVA descontable debe sumar TODOS los egresos del período
+    // (PAGADOS Y PENDIENTES), no solo PENDIENTES. Antes el filtro de PENDIENTE
+    // hacía que cuando pagabas un egreso desapareciera del cálculo.
+    //
+    // FIX BUG B: cualquier egreso PENDIENTE con proveedor cuenta como deuda
+    // en CxP (antes solo si formaPago === 'Cuenta por Pagar' literal).
+    //
+    // Hacemos 2 queries:
+    //   - snapTodos:    todos los egresos del admin → para IVA descontable total
+    //   - snapPendiente: solo PENDIENTES → para mostrar como deuda con proveedor
+    const [snapTodos, snapPendiente] = await Promise.all([
+      db.collection('egresos').where('userId', '==', userId).get(),
+      db.collection('egresos').where('userId', '==', userId).where('estado', '==', 'PENDIENTE').get()
+    ]);
 
     const proveedores = {};
     let totalIvaDescontable = 0;
     let totalRetefuente = 0;
 
-    snapEgresos.forEach(doc => {
+    // ── 1. Sumar IVA y retención de TODOS los egresos del admin ─────────
+    // (excluir provisionales no cuadrados y retenciones puras)
+    snapTodos.forEach(doc => {
       const e = { id: doc.id, ...doc.data() };
+      // Excluir provisionales no cuadrados (no son egresos reales aún)
+      if (e.esProvisional && !e.cuadrado) return;
+      // Excluir entradas que son solo "retención practicada" (no compras)
+      if (e.tipo === 'retencion') return;
 
-      if (e.formaPago === 'Cuenta por Pagar' || e.formaPago === 'CxP') {
-        const key = e.proveedorId || e.proveedor || 'Sin proveedor';
-        if (!proveedores[key]) {
-          proveedores[key] = {
-            proveedorId: e.proveedorId || '',
-            proveedorNombre: e.proveedor || 'Sin proveedor',
-            totalPendiente: 0,
-            egresos: []
-          };
-        }
-        const saldo = (e.totalPagar || e.monto || 0) - (e.montoPagado || 0);
-        proveedores[key].totalPendiente += saldo;
-        proveedores[key].egresos.push({
-          id: e.id, numero: e.numero, concepto: e.concepto,
-          fecha: e.fecha, total: e.totalPagar || e.monto || 0,
-          saldo, formaPago: e.formaPago
-        });
+      if (e.ivaVal > 0) totalIvaDescontable += Number(e.ivaVal) || 0;
+      if (e.retenVal > 0 && e.estado !== 'PAGADO') totalRetefuente += Number(e.retenVal) || 0;
+    });
+
+    // ── 2. Listar PENDIENTES como deuda con proveedor ──────────────────
+    snapPendiente.forEach(doc => {
+      const e = { id: doc.id, ...doc.data() };
+      // Excluir provisionales no cuadrados
+      if (e.esProvisional && !e.cuadrado) return;
+      if (e.tipo === 'retencion') return;
+
+      // FIX BUG B: TODO egreso PENDIENTE cuenta como deuda, no solo si
+      // formaPago === 'Cuenta por Pagar'. Si está pendiente, debes plata.
+      const key = e.proveedorId || e.proveedor || 'Sin proveedor';
+      if (!proveedores[key]) {
+        proveedores[key] = {
+          proveedorId: e.proveedorId || '',
+          proveedorNombre: e.proveedor || 'Sin proveedor',
+          totalPendiente: 0,
+          egresos: []
+        };
       }
-
-      if (e.ivaVal > 0) totalIvaDescontable += e.ivaVal;
-      if (e.retenVal > 0 && e.categoria !== 'PAGADO') totalRetefuente += e.retenVal;
+      const saldo = (e.totalPagar || e.monto || 0) - (e.montoPagado || 0);
+      proveedores[key].totalPendiente += saldo;
+      proveedores[key].egresos.push({
+        id: e.id, numero: e.numero, concepto: e.concepto,
+        fecha: e.fecha, total: e.totalPagar || e.monto || 0,
+        saldo, formaPago: e.formaPago || 'Pendiente'
+      });
     });
 
     // 2. IVA generado en órdenes — FILTRADO por adminId (corrección Ola 1)

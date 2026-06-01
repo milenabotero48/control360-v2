@@ -677,7 +677,11 @@ const cargarConfigCerts = async () => {
   ...(orden.tallerPasos || []).filter(p => p.foto).map(p => ({ url: p.foto, tipo: `🔧 Taller — ${p.pasoNombre || ''}` })),
   ...(orden.tallerDefectos || []).filter(d => d.foto).map(d => ({ url: d.foto, tipo: `⚠️ Defecto — ${d.descripcion?.substring(0, 30) || ''}` })),
   ...(orden.fotoEntrega ? [{ url: orden.fotoEntrega, tipo: '✅ Entrega' }] : []),
-  ...(orden.fotoTransferencia ? [{ url: orden.fotoTransferencia, tipo: '📄 Comprobante pago' }] : []),
+  // FIX Bug 1: aceptar tanto fotoTransferenciaUrl (cuando carga comercial al crear)
+  // como fotoTransferencia (cuando carga mensajero al cobrar). Antes solo veía la 2da.
+  ...((orden.fotoTransferenciaUrl || orden.fotoTransferencia)
+    ? [{ url: orden.fotoTransferenciaUrl || orden.fotoTransferencia, tipo: '📄 Comprobante pago' }]
+    : []),
 ];
             if (todasFotos.length === 0) return null;
             return (
@@ -773,11 +777,17 @@ const cargarConfigCerts = async () => {
             <div style={{ marginBottom: '20px' }}>
               {(orden.historialEstados || []).map((h, i) => {
                 const estInfo = ESTADOS[h.estado] || { label: h.estado, color: '#666' };
+                // FIX Bug 2: si la orden está pagada, mostrar "Entrega" en lugar
+                // de "Entrega Cobranza" (porque ya no hay cobranza pendiente).
+                let labelMostrar = estInfo.label;
+                if (h.estado === 'entrega_cobranza' && orden.pagado === true) {
+                  labelMostrar = 'Entrega';
+                }
                 return (
                   <div key={i} style={s.historialItem}>
                     <div style={{ ...s.historialDot, background: estInfo.color }} />
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 700, color: estInfo.color, fontSize: '13px' }}>{estInfo.label}</div>
+                      <div style={{ fontWeight: 700, color: estInfo.color, fontSize: '13px' }}>{labelMostrar}</div>
                       <div style={{ fontSize: '11px', color: '#9ca3af' }}>{h.usuarioNombre} — {formatFechaCorta(h.fecha)}</div>
                       {h.notas && <div style={{ fontSize: '12px', color: '#6b7280', fontStyle: 'italic' }}>{h.notas}</div>}
                     </div>
@@ -817,9 +827,14 @@ const cargarConfigCerts = async () => {
        || siguienteEstado === 'listo_entregar')
       && !numeroFactura && !orden.numeroFactura;
     // Etiqueta especial: cuando el equipo de taller espera que el cliente venga
+    // FIX Bug 2: si va a "entrega_cobranza" y ya está pagada, decir "Entrega" sin "Cobranza"
+    let labelEstadoSiguiente = ESTADOS[siguienteEstado]?.label || siguienteEstado;
+    if (siguienteEstado === 'entrega_cobranza' && orden.pagado === true) {
+      labelEstadoSiguiente = 'Entrega';
+    }
     const labelBoton = orden.estado === 'listo_entregar'
       ? '✓ Cliente recogió el equipo'
-      : `→ Pasar a ${ESTADOS[siguienteEstado]?.label || siguienteEstado}`;
+      : `→ Pasar a ${labelEstadoSiguiente}`;
     return (
       <>
         {cruzaFactura && (

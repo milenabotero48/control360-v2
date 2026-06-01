@@ -292,6 +292,32 @@ const detectarClientesFugandose = async (adminId) => {
   return alertas;
 };
 
+// ════════════════════════════════════════════════════════════════════════════
+// ── OPTIMIZACIÓN OLA 3.5: Cache en memoria ──
+// Reduce dramáticamente las lecturas a Firestore. En vez de leer 6 colecciones
+// en cada GET, leemos UNA vez cada 5 minutos y guardamos el resultado en RAM.
+// Cache por adminId para que cada cuenta tenga su propia copia.
+// El cache se invalida automáticamente cuando se resuelve/reabre una alerta.
+// ════════════════════════════════════════════════════════════════════════════
+const cache = new Map(); // adminId → { data: alertas[], expiraEn: timestamp }
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+
+const obtenerCache = (adminId) => {
+  const entrada = cache.get(adminId);
+  if (!entrada) return null;
+  if (Date.now() > entrada.expiraEn) {
+    cache.delete(adminId);
+    return null;
+  }
+  return entrada.data;
+};
+
+const guardarCache = (adminId, data) => {
+  cache.set(adminId, { data, expiraEn: Date.now() + CACHE_TTL_MS });
+};
+
+const invalidarCache = (adminId) => cache.delete(adminId);
+
 // ────────────────────────────────────────────────────────────────────────────
 // GET /api/alertas — devuelve todas las alertas activas filtradas por rol
 // ────────────────────────────────────────────────────────────────────────────
@@ -301,17 +327,25 @@ router.get('/', async (req, res) => {
     if (!adminId) return res.status(401).json({ error: 'Sin autenticación' });
     const rol = req.user?.role || 'admin';
 
-    // Detectar todas en paralelo (rápido)
-    const [a1, a2, a3, a4, a5, a6] = await Promise.all([
-      detectarFotosFaltantes(adminId),
-      detectarTallerAtorado(adminId),
-      detectarPagoPendiente(adminId),
-      detectarPrestamosViejos(adminId),
-      detectarCxCVencido(adminId),
-      detectarClientesFugandose(adminId),
-    ]);
+    // ── OPTIMIZACIÓN OLA 3.5: revisar cache primero ──
+    let todasSinFiltro = obtenerCache(adminId);
 
-    let todas = [...a1, ...a2, ...a3, ...a4, ...a5, ...a6];
+    if (!todasSinFiltro) {
+      // Cache vacío o expirado → leer de Firestore (las 6 colecciones)
+      const [a1, a2, a3, a4, a5, a6] = await Promise.all([
+        detectarFotosFaltantes(adminId),
+        detectarTallerAtorado(adminId),
+        detectarPagoPendiente(adminId),
+        detectarPrestamosViejos(adminId),
+        detectarCxCVencido(adminId),
+        detectarClientesFugandose(adminId),
+      ]);
+      todasSinFiltro = [...a1, ...a2, ...a3, ...a4, ...a5, ...a6];
+      guardarCache(adminId, todasSinFiltro);
+      log.info('alertas', `cache regenerado para admin ${adminId} (${todasSinFiltro.length} alertas)`);
+    }
+
+    let todas = [...todasSinFiltro]; // copia para no mutar el cache
 
     // Filtrar por rol del usuario
     if (rol !== 'admin') {
@@ -367,6 +401,7 @@ router.post('/resolver', async (req, res) => {
       timestamp: admin.firestore.FieldValue.serverTimestamp()
     });
 
+    invalidarCache(adminId); // ── OPTIMIZACIÓN OLA 3.5: refrescar cache al resolver ──
     log.info('alertas', `${tipo}/${referenciaId} resuelta por ${req.user?.email}`);
     res.json({ ok: true });
   } catch (e) {
@@ -392,6 +427,7 @@ router.post('/reabrir', async (req, res) => {
     snap.docs.forEach(d => batch.delete(d.ref));
     await batch.commit();
 
+    invalidarCache(adminId); // ── OPTIMIZACIÓN OLA 3.5: refrescar cache al reabrir ──
     res.json({ ok: true });
   } catch (e) {
     log.error('alertas.reabrir', 'falló', e);
