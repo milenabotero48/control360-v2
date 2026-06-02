@@ -42,10 +42,10 @@ router.get('/', authenticate, async (req, res) => {
     console.log('CXC - configExists:', configDoc.exists, 'diasBloqueo:', diasBloqueo);
 
     // Traer órdenes en estado CXC o con forma de pago CxC no pagadas
-    // AISLAMIENTO SAAS: filtrar por adminId
+    // AISLAMIENTO SAAS: filtrar por adminId (sin orderBy para evitar índice compuesto)
 const [snapEstado, snapFormaPago] = await Promise.all([
-  db.collection('orders').where('adminId', '==', userId).where('estado', '==', 'cxc').orderBy('createdAt', 'asc').get(),
-  db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'CXC').where('pagado', '==', false).orderBy('createdAt', 'asc').get(),
+  db.collection('orders').where('adminId', '==', userId).where('estado', '==', 'cxc').get(),
+  db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'CXC').where('pagado', '==', false).get(),
 ]);
 
 // Combinar sin duplicados

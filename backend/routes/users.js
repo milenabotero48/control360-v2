@@ -93,7 +93,6 @@ router.get('/', authenticate, soloAdmin, async (req, res) => {
     // AISLAMIENTO SAAS: cada admin ve solo sus propios usuarios
     const snapshot = await db.collection('users')
       .where('creadoPor', '==', adminId)
-      .orderBy('createdAt', 'desc')
       .get();
     const usuarios = [];
     snapshot.forEach(doc => {
