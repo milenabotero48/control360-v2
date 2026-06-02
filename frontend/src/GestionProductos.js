@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
-const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+const API = 'http://localhost:5000/api';
 
 const TIPOS = [
   { value: 'simple',    label: 'Producto Simple',  emoji: '📦', desc: 'Lo compras y revendes tal cual' },
@@ -810,15 +810,26 @@ const GestionProductos = ({ user }) => {
                 const reader = new FileReader();
                 reader.onload = ev => {
                   const text = ev.target.result;
-                  const lineas = text.split(String.fromCharCode(10)).filter(l => l.trim());
+                  const lineas = text.split(/\r?\n/).filter(l => l.trim());
                   if (lineas.length < 2) return;
-                  const hdrs = lineas[0].split(',').map(h => h.replace(/"/g, '').trim());
+
+                  // Detectar separador automáticamente (coma o punto y coma)
+                  const separador = lineas[0].includes(';') ? ';' : ',';
+
+                  // Limpiar encabezados: quitar BOM, *, espacios extras y comillas
+                  const hdrs = lineas[0].split(separador).map(h =>
+                    h.replace(/^\uFEFF/, '') // quitar BOM
+                     .replace(/"/g, '')
+                     .replace(/\*/g, '')     // quitar asteriscos
+                     .trim()
+                  );
+
                   const datos = lineas.slice(1).map(linea => {
                     const vals = [];
                     let inside = false, cur = '';
-                    for (let ch of linea + ',') {
+                    for (let ch of linea + separador) {
                       if (ch === '"') { inside = !inside; }
-                      else if (ch === ',' && !inside) { vals.push(cur.trim()); cur = ''; }
+                      else if (ch === separador && !inside) { vals.push(cur.trim()); cur = ''; }
                       else { cur += ch; }
                     }
                     const obj = {};
@@ -1075,4 +1086,3 @@ const s = {
 };
 
 export default GestionProductos;
-
