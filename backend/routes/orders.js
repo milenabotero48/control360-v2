@@ -491,30 +491,32 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
 router.get('/', authenticate, async (req, res) => {
   try {
     const { estado, clienteId, mensajeroId, tipoOrden, empresaId, buscar, limite = 50 } = req.query;
-    // AISLAMIENTO SAAS: filtrar siempre por adminId
     const adminId = req.adminId || req.user?.uid || req.user?.id;
 
-    let query = db.collection('orders')
-      .where('adminId', '==', adminId)
-      .orderBy('createdAt', 'desc')
-      .limit(parseInt(limite));
+    let query = db.collection('orders').where('adminId', '==', adminId);
 
     if (req.user.role === 'mensajero') {
       query = db.collection('orders')
         .where('adminId', '==', adminId)
-        .where('mensajeroId', '==', req.adminId || req.user.uid)
-        .orderBy('createdAt', 'desc');
+        .where('mensajeroId', '==', req.adminId || req.user.uid);
     }
     if (req.user.role === 'taller') {
       query = db.collection('orders')
         .where('adminId', '==', adminId)
-        .where('estado', 'in', ['en_taller'])
-        .orderBy('createdAt', 'desc');
+        .where('estado', 'in', ['en_taller']);
     }
 
     const snap = await query.get();
     let ordenes = [];
     snap.forEach(doc => ordenes.push({ id: doc.id, ...doc.data() }));
+
+    // Ordenar en memoria (evita índices compuestos de Firestore)
+    ordenes.sort((a, b) => {
+      const fa = a.createdAt?._seconds || new Date(a.createdAt || 0).getTime() / 1000;
+      const fb = b.createdAt?._seconds || new Date(b.createdAt || 0).getTime() / 1000;
+      return fb - fa;
+    });
+    ordenes = ordenes.slice(0, parseInt(limite));
 
     if (buscar) {
       const term = buscar.toUpperCase();
