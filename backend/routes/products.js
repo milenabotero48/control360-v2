@@ -100,9 +100,15 @@ const recalcularCompuestosAfectados = async (productoId, nuevoCosto) => {
 // GET /api/products/categorias
 router.get('/categorias/lista', authenticate, async (req, res) => {
   try {
-    const snap = await db.collection('product_categories').orderBy('nombre', 'asc').get();
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    // AISLAMIENTO SAAS: filtrar por adminId
+    const snap = await db.collection('product_categories')
+      .where('adminId', '==', adminId)
+      .get();
     const categorias = [];
     snap.forEach(doc => categorias.push({ id: doc.id, ...doc.data() }));
+    // Ordenar en memoria para evitar índice compuesto
+    categorias.sort((a, b) => (a.nombre || '').localeCompare(b.nombre || ''));
     res.json(categorias);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -113,11 +119,14 @@ router.get('/categorias/lista', authenticate, async (req, res) => {
 router.post('/categorias', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Solo admin' });
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
     const { nombre, prefijo, descripcion } = req.body;
     if (!nombre || !prefijo) return res.status(400).json({ error: 'Nombre y prefijo requeridos' });
 
-    // Verificar prefijo duplicado
-    const existe = await db.collection('product_categories').where('prefijo', '==', prefijo.toUpperCase()).get();
+    // Verificar prefijo duplicado SOLO en el mismo tenant
+    const existe = await db.collection('product_categories')
+      .where('adminId', '==', adminId)
+      .where('prefijo', '==', prefijo.toUpperCase()).get();
     if (!existe.empty) return res.status(400).json({ error: 'Ya existe una categoría con ese prefijo' });
 
     const nueva = {
@@ -125,6 +134,8 @@ router.post('/categorias', authenticate, async (req, res) => {
       prefijo: prefijo.toUpperCase().trim(),
       descripcion: descripcion || '',
       activo: true,
+      adminId, // AISLAMIENTO SAAS
+      creadoPor: adminId,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     };
     const ref = await db.collection('product_categories').add(nueva);
@@ -507,10 +518,15 @@ router.post('/importar', authenticate, async (req, res) => {
     for (const p of productos) {
       if (!p.Nombre || !p.Categoria) { errores.push(`Fila sin nombre o categoría`); continue; }
 
-      // Buscar categoría DENTRO DEL MISMO TENANT
-      const catSnap = await db.collection('product_categories')
+      // Buscar categoría del tenant (con fallback sin adminId para compatibilidad)
+      let catSnap = await db.collection('product_categories')
         .where('adminId', '==', adminId)
         .where('nombre', '==', p.Categoria.toUpperCase().trim()).get();
+      // Fallback: buscar sin adminId (categorías creadas antes del fix)
+      if (catSnap.empty) {
+        catSnap = await db.collection('product_categories')
+          .where('nombre', '==', p.Categoria.toUpperCase().trim()).get();
+      }
 
       let categoriaId = '', categoriaNombre = p.Categoria.toUpperCase(), prefijo = 'PRD';
       if (!catSnap.empty) {
