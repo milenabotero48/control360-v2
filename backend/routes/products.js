@@ -42,7 +42,6 @@ const redondearPrecio = (precio) => {
 // ─── HELPER: recalcular compuestos afectados por cambio de componente ────────
 const recalcularCompuestosAfectados = async (productoId, nuevoCosto) => {
   try {
-    // Buscar todos los compuestos que usan este producto como componente
     const snap = await db.collection('products')
       .where('tipo', '==', 'compuesto')
       .where('activo', '==', true)
@@ -54,7 +53,6 @@ const recalcularCompuestosAfectados = async (productoId, nuevoCosto) => {
       const componentes = data.componentes || [];
       const usaProducto = componentes.find(c => c.productoId === productoId);
       if (usaProducto) {
-        // Recalcular costo con nuevo precio del componente
         const componentesActualizados = componentes.map(c =>
           c.productoId === productoId ? { ...c, costo: nuevoCosto } : c
         );
@@ -76,7 +74,6 @@ const recalcularCompuestosAfectados = async (productoId, nuevoCosto) => {
           componentesActualizados
         });
 
-        // Actualizar costo en Firestore automáticamente
         db.collection('products').doc(doc.id).update({
           precioCosto: nuevoCostoTotal,
           margen: margenActual,
@@ -97,17 +94,15 @@ const recalcularCompuestosAfectados = async (productoId, nuevoCosto) => {
 // CATEGORÍAS
 // ══════════════════════════════════════════════════════════════════════════════
 
-// GET /api/products/categorias
+// GET /api/products/categorias/lista
 router.get('/categorias/lista', authenticate, async (req, res) => {
   try {
     const adminId = req.adminId || req.user?.uid || req.user?.id;
-    // AISLAMIENTO SAAS: filtrar por adminId
     const snap = await db.collection('product_categories')
       .where('adminId', '==', adminId)
       .get();
     const categorias = [];
     snap.forEach(doc => categorias.push({ id: doc.id, ...doc.data() }));
-    // Ordenar en memoria para evitar índice compuesto
     categorias.sort((a, b) => (a.nombre || '').localeCompare(b.nombre || ''));
     res.json(categorias);
   } catch (error) {
@@ -123,7 +118,6 @@ router.post('/categorias', authenticate, async (req, res) => {
     const { nombre, prefijo, descripcion } = req.body;
     if (!nombre || !prefijo) return res.status(400).json({ error: 'Nombre y prefijo requeridos' });
 
-    // Verificar prefijo duplicado SOLO en el mismo tenant
     const existe = await db.collection('product_categories')
       .where('adminId', '==', adminId)
       .where('prefijo', '==', prefijo.toUpperCase()).get();
@@ -134,7 +128,7 @@ router.post('/categorias', authenticate, async (req, res) => {
       prefijo: prefijo.toUpperCase().trim(),
       descripcion: descripcion || '',
       activo: true,
-      adminId, // AISLAMIENTO SAAS
+      adminId,
       creadoPor: adminId,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     };
@@ -146,7 +140,7 @@ router.post('/categorias', authenticate, async (req, res) => {
 });
 
 // PUT /api/products/categorias/:id
-router.put('/categorias/:id', authenticate, validarTenant('products'), async (req, res) => {
+router.put('/categorias/:id', authenticate, validarTenant('product_categories'), async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Solo admin' });
     const { nombre, descripcion, activo } = req.body;
@@ -165,7 +159,6 @@ router.put('/categorias/:id', authenticate, validarTenant('products'), async (re
 router.delete('/categorias/:id', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Solo admin' });
-    // Verificar que no tenga productos
     const productos = await db.collection('products').where('categoriaId', '==', req.params.id).get();
     if (!productos.empty) return res.status(400).json({ error: `No se puede eliminar — tiene ${productos.size} productos asociados` });
     await db.collection('product_categories').doc(req.params.id).delete();
@@ -183,7 +176,6 @@ router.delete('/categorias/:id', authenticate, async (req, res) => {
 router.get('/', authenticate, async (req, res) => {
   try {
     const { categoriaId, tipo, buscar, activo, soloStock } = req.query;
-    // AISLAMIENTO SAAS: cada admin solo ve sus propios productos
     const adminId = req.adminId || req.user?.uid || req.user?.id;
     let query = db.collection('products').where('creadoPor', '==', adminId);
 
@@ -196,7 +188,6 @@ router.get('/', authenticate, async (req, res) => {
     let productos = [];
     snap.forEach(doc => {
       const data = doc.data();
-      // Si no es admin, ocultar precio costo
       const producto = { id: doc.id, ...data };
       if (req.user.role !== 'admin') {
         delete producto.precioCosto;
@@ -205,7 +196,6 @@ router.get('/', authenticate, async (req, res) => {
       productos.push(producto);
     });
 
-    // Filtros adicionales
     if (buscar) {
       const term = buscar.toUpperCase();
       productos = productos.filter(p =>
@@ -246,10 +236,10 @@ router.post('/', authenticate, async (req, res) => {
 
     const {
       nombre, categoriaId, categoriaNombre, categoriaPrefijo,
-      tipo, // simple | compuesto | servicio | combo
+      tipo,
       precioCosto, precioVenta,
       tieneStock, stock, stockMinimo,
-      componentes, // [{productoId, nombre, cantidad, costo}]
+      componentes,
       descripcion, codigo, activo = true
     } = req.body;
 
@@ -257,16 +247,18 @@ router.post('/', authenticate, async (req, res) => {
     if (!categoriaId) return res.status(400).json({ error: 'La categoría es obligatoria' });
     if (!tipo) return res.status(400).json({ error: 'El tipo es obligatorio' });
 
-    // Generar código automático si no viene
+    const adminId = req.adminId || req.user.uid || req.user.id;
+
     const codigoFinal = (codigo || await generarCodigo(categoriaPrefijo || 'PRD')).toUpperCase().trim();
 
-    // Verificar que el código no exista ya
-    const codigoExiste = await db.collection('products').where('codigo', '==', codigoFinal).get();
+    // Verificar código único dentro del mismo tenant
+    const codigoExiste = await db.collection('products')
+      .where('creadoPor', '==', adminId)
+      .where('codigo', '==', codigoFinal).get();
     if (!codigoExiste.empty) {
       return res.status(400).json({ error: `El código ${codigoFinal} ya existe. Usa uno diferente.` });
     }
 
-    // Calcular costo de compuesto
     let costoFinal = precioCosto || 0;
     if (tipo === 'compuesto' && componentes?.length > 0) {
       costoFinal = componentes.reduce((sum, c) => sum + (c.costo * c.cantidad), 0);
@@ -291,7 +283,8 @@ router.post('/', authenticate, async (req, res) => {
       requiereQR: false,
       requiereCertificado: false,
       activo,
-      creadoPor: req.user.uid || req.user.id,
+      adminId,                                          // ✅ FIX: campo requerido por validarTenant
+      creadoPor: adminId,
       creadoPorNombre: req.user.nombre || req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -348,7 +341,6 @@ router.put('/:id', authenticate, validarTenant('products'), async (req, res) => 
     if (requiereQR !== undefined) cambios.requiereQR = requiereQR;
     if (requiereCertificado !== undefined) cambios.requiereCertificado = requiereCertificado;
 
-    // Validar código único si viene en el body
     const { codigo } = req.body;
     if (codigo && codigo.toUpperCase().trim() !== actual.codigo) {
       const codigoExiste = await db.collection('products').where('codigo', '==', codigo.toUpperCase().trim()).get();
@@ -358,12 +350,10 @@ router.put('/:id', authenticate, validarTenant('products'), async (req, res) => 
       cambios.codigo = codigo.toUpperCase().trim();
     }
 
-    // Solo admin puede editar precio costo
     if (precioCosto !== undefined && req.user.role === 'admin') {
       cambios.precioCosto = precioCosto;
     }
 
-    // Recalcular costo si es compuesto
     if (componentes !== undefined) {
       cambios.componentes = componentes;
       if (actual.tipo === 'compuesto' || tipo === 'compuesto') {
@@ -371,14 +361,12 @@ router.put('/:id', authenticate, validarTenant('products'), async (req, res) => 
       }
     }
 
-    // Recalcular margen
     const costoActual = cambios.precioCosto ?? actual.precioCosto ?? 0;
     const ventaActual = cambios.precioVenta ?? actual.precioVenta ?? 0;
     cambios.margen = ventaActual > 0 ? parseFloat(((ventaActual - costoActual) / ventaActual * 100).toFixed(1)) : 0;
 
     await productoRef.update(cambios);
 
-    // Recalcular compuestos afectados si cambió el precio costo
     let compuestosAfectados = [];
     const costoParaCascada = cambios.precioCosto ?? actual.precioCosto ?? 0;
     if (precioCosto !== undefined && req.user.role === 'admin' && costoParaCascada >= 0) {
@@ -393,8 +381,8 @@ router.put('/:id', authenticate, validarTenant('products'), async (req, res) => 
       datos: { id, cambios: Object.keys(cambios) }
     });
 
-    res.json({ 
-      id, 
+    res.json({
+      id,
       ...cambios,
       compuestosAfectados: compuestosAfectados.length > 0 ? compuestosAfectados : undefined
     });
@@ -407,7 +395,7 @@ router.put('/:id', authenticate, validarTenant('products'), async (req, res) => 
 // AJUSTE MASIVO DE PRECIOS
 // ══════════════════════════════════════════════════════════════════════════════
 
-// POST /api/products/ajuste-masivo/preview — Ver preview antes de aplicar
+// POST /api/products/ajuste-masivo/preview
 router.post('/ajuste-masivo/preview', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Solo admin' });
@@ -423,7 +411,7 @@ router.post('/ajuste-masivo/preview', authenticate, async (req, res) => {
 
     snap.forEach(doc => {
       const data = doc.data();
-      if (data.tipo === 'compuesto') return; // compuestos se recalculan solos
+      if (data.tipo === 'compuesto') return;
       const precioActual = data.precioVenta || 0;
       const precioNuevo = redondearPrecio(precioActual * (1 + porcentaje / 100));
       preview.push({
@@ -442,11 +430,11 @@ router.post('/ajuste-masivo/preview', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/products/ajuste-masivo/aplicar — Aplicar ajuste
+// POST /api/products/ajuste-masivo/aplicar
 router.post('/ajuste-masivo/aplicar', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Solo admin' });
-    const { productos, porcentaje } = req.body; // productos = [{id, precioNuevo}]
+    const { productos, porcentaje } = req.body;
     if (!productos?.length) return res.status(400).json({ error: 'Sin productos para ajustar' });
 
     const batch = db.batch();
@@ -477,10 +465,11 @@ router.post('/ajuste-masivo/aplicar', authenticate, async (req, res) => {
 // IMPORTAR / EXPORTAR
 // ══════════════════════════════════════════════════════════════════════════════
 
-// GET /api/products/exportar/excel — Exportar lista
+// GET /api/products/exportar/excel
 router.get('/exportar/excel', authenticate, async (req, res) => {
   try {
-    const snap = await db.collection('products').where('activo', '==', true).get();
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const snap = await db.collection('products').where('creadoPor', '==', adminId).where('activo', '==', true).get();
     const productos = [];
     snap.forEach(doc => {
       const d = doc.data();
@@ -502,41 +491,53 @@ router.get('/exportar/excel', authenticate, async (req, res) => {
   }
 });
 
-// POST /api/products/importar — Importar desde Excel
+// POST /api/products/importar — Importar desde CSV
 router.post('/importar', authenticate, async (req, res) => {
   try {
     if (req.user.role !== 'admin') return res.status(403).json({ error: 'Solo admin' });
     const { productos } = req.body;
     if (!productos?.length) return res.status(400).json({ error: 'Sin productos para importar' });
 
-    // AISLAMIENTO SAAS: usar adminId del token
     const adminId = req.adminId || req.user.uid || req.user.id;
 
     let creados = 0, errores = [];
     const batch = db.batch();
 
     for (const p of productos) {
-      if (!p.Nombre || !p.Categoria) { errores.push(`Fila sin nombre o categoría`); continue; }
+      // ✅ FIX: limpiar espacios de los encabezados del CSV (ej: "Categoria ")
+      const nombreProducto = (p.Nombre || p['Nombre '] || '').trim();
+      const categoriaCSV = (p.Categoria || p['Categoria '] || '').toUpperCase().trim();
+      const tipoCSV = (p.Tipo || p['Tipo '] || 'simple').trim().toLowerCase();
 
-      // Buscar categoría del tenant (con fallback sin adminId para compatibilidad)
-      let catSnap = await db.collection('product_categories')
-        .where('adminId', '==', adminId)
-        .where('nombre', '==', p.Categoria.toUpperCase().trim()).get();
-      // Fallback: buscar sin adminId (categorías creadas antes del fix)
-      if (catSnap.empty) {
-        catSnap = await db.collection('product_categories')
-          .where('nombre', '==', p.Categoria.toUpperCase().trim()).get();
+      if (!nombreProducto || !categoriaCSV) {
+        errores.push(`Fila sin nombre o categoría`);
+        continue;
       }
 
-      let categoriaId = '', categoriaNombre = p.Categoria.toUpperCase(), prefijo = 'PRD';
+      // Buscar categoría del tenant
+      let catSnap = await db.collection('product_categories')
+        .where('adminId', '==', adminId)
+        .where('nombre', '==', categoriaCSV).get();
+
+      // Fallback: buscar sin adminId (categorías antiguas)
+      if (catSnap.empty) {
+        catSnap = await db.collection('product_categories')
+          .where('nombre', '==', categoriaCSV).get();
+      }
+
+      let categoriaId = '', categoriaNombre = categoriaCSV, prefijo = 'PRD';
       if (!catSnap.empty) {
         categoriaId = catSnap.docs[0].id;
         prefijo = catSnap.docs[0].data().prefijo || 'PRD';
+        categoriaNombre = catSnap.docs[0].data().nombre || categoriaCSV;
+      } else {
+        errores.push(`Categoría "${categoriaCSV}" no encontrada — producto "${nombreProducto}" asignado a PRD`);
       }
 
-      const codigoFinal = (p.Codigo || await generarCodigo(prefijo)).toUpperCase().trim();
+      const codigoFinal = ((p.Codigo || p['Codigo '] || '')).trim().toUpperCase() ||
+        await generarCodigo(prefijo);
 
-      // Verificar código duplicado SOLO EN EL MISMO TENANT
+      // Verificar código duplicado en el mismo tenant
       const codigoExiste = await db.collection('products')
         .where('creadoPor', '==', adminId)
         .where('codigo', '==', codigoFinal).get();
@@ -545,23 +546,24 @@ router.post('/importar', authenticate, async (req, res) => {
         continue;
       }
 
-     const ref = db.collection('products').doc();
+      const ref = db.collection('products').doc();
       batch.set(ref, {
-        nombre: p.Nombre.toUpperCase().trim(),
+        nombre: nombreProducto.toUpperCase(),
         codigo: codigoFinal,
         categoriaId,
         categoria: categoriaNombre,
-        tipo: p.Tipo || 'simple',
-        precioCosto: parseFloat(p.PrecioCosto) || 0,
-        precioVenta: parseFloat(p.PrecioVenta) || 0,
-        stock: parseInt(p.Stock) || 0,
-        stockMinimo: parseInt(p.StockMinimo) || 0,
-        tieneStock: p.Tipo !== 'servicio',
+        tipo: tipoCSV,
+        precioCosto: parseFloat(p.PrecioCosto || p['PrecioCosto '] || 0) || 0,
+        precioVenta: parseFloat(p.PrecioVenta || p['PrecioVenta '] || 0) || 0,
+        stock: parseInt(p.Stock || p['Stock '] || 0) || 0,
+        stockMinimo: parseInt(p.StockMinimo || p['StockMinimo '] || 0) || 0,
+        tieneStock: tipoCSV !== 'servicio',
         componentes: [],
         requiereQR: false,
         requiereCertificado: false,
         activo: true,
-        creadoPor: adminId, // AISLAMIENTO SAAS
+        adminId,           // ✅ FIX: campo requerido por validarTenant
+        creadoPor: adminId,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
@@ -597,12 +599,6 @@ router.delete('/:id', authenticate, async (req, res) => {
 
     const prod = prodDoc.data();
 
-    // Verificar si tiene órdenes asociadas
-    const ordenesSnap = await db.collection('orders')
-      .where('items', 'array-contains-any', [{ productoId: req.params.id }])
-      .limit(1).get();
-
-    // Buscar también en items de órdenes de otra forma
     const todasOrdenes = await db.collection('orders').limit(100).get();
     let tieneOrdenes = false;
     todasOrdenes.forEach(doc => {
@@ -611,7 +607,6 @@ router.delete('/:id', authenticate, async (req, res) => {
     });
 
     if (tieneOrdenes) {
-      // Desactivar — tiene historial
       await prodRef.update({
         activo: false,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -625,7 +620,6 @@ router.delete('/:id', authenticate, async (req, res) => {
       });
       res.json({ accion: 'desactivado', mensaje: `"${prod.nombre}" fue desactivado. Permanece en el historial de órdenes.` });
     } else {
-      // Eliminar físico — sin historial
       await prodRef.delete();
       await auditar({
         accion: 'ELIMINAR_PRODUCTO',
