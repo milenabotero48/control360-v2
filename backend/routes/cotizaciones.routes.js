@@ -93,7 +93,12 @@ const peekSiguienteNumero = async (adminId) => {
 // ─── GET /api/cotizaciones ────────────────────────────────────────────────────
 router.get('/', authenticate, async (req, res) => {
   try {
-    const snap = await db.collection(COL).orderBy('createdAt', 'desc').get();
+    // AISLAMIENTO SAAS: cada admin solo ve sus propias cotizaciones
+    const adminId = req.user.adminId || req.user.uid || req.user.id;
+    const snap = await db.collection(COL)
+      .where('adminId', '==', adminId)
+      .orderBy('createdAt', 'desc')
+      .get();
     const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     res.json(data);
   } catch (e) {

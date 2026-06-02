@@ -39,7 +39,9 @@ const nombreSimilar = (n1, n2) => {
 router.get('/', authenticate, async (req, res) => {
   try {
     const { empresaId, buscar, activo } = req.query;
-    let query = db.collection('clients');
+    // AISLAMIENTO SAAS: cada admin solo ve sus propios clientes
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    let query = db.collection('clients').where('adminId', '==', adminId);
 
     if (empresaId) query = query.where('empresaId', '==', empresaId);
 
@@ -50,7 +52,6 @@ router.get('/', authenticate, async (req, res) => {
       query = query.where('activo', '==', true);
     }
 
-    query = query.orderBy('nombre', 'asc');
     const snapshot = await query.get();
 
     let clientes = [];
@@ -188,6 +189,7 @@ router.post('/', authenticate, async (req, res) => {
       })),
       notas,
       activo: true,
+      adminId: req.adminId || req.user.uid || req.user.id, // AISLAMIENTO SAAS
       creadoPor: req.adminId || req.user.uid || req.user.id,
       creadoPorNombre: req.user.nombre || req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
