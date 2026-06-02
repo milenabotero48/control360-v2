@@ -4,7 +4,7 @@ import NuevaOrden from './NuevaOrden';
 import DetalleOrden from './DetalleOrden';
 import { exportarExcel } from './exportExcel';
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const ESTADOS = {
   completada:       { label: 'Completada',        color: '#16a34a', bg: '#f0fdf4' },
@@ -382,3 +382,4 @@ const s = {
 };
 
 export default GestionOrdenes;
+

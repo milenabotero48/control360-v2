@@ -751,3 +751,4 @@ export default function GestionQR({ user }) {
     </div>
   );
 }
+

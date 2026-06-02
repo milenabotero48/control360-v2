@@ -794,7 +794,7 @@ const ModalPinBloqueo = ({ bloqueo, empresas, clienteNombre, onAutorizado, onCan
     setVerificando(true); setError('');
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch('http://localhost:5000/api/companies/verificar-pin', {
+      const res = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000/api'}/companies/verificar-pin`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ pin })

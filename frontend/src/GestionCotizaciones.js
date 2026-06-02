@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 const formatCOP = (v) => {
@@ -1118,7 +1118,7 @@ const VistaPDF = ({ cot, onVolver }) => {
   useEffect(() => {
     if (cot.empresaId) {
       const token = localStorage.getItem('token');
-      axios.get(`http://localhost:5000/api/companies/${cot.empresaId}`, {
+      axios.get(`${process.env.REACT_APP_API_URL || 'http://localhost:5000/api'}/companies/${cot.empresaId}`, {
         headers: { Authorization: `Bearer ${token}` }
       }).then(r => {
         const logo = r.data?.logo || r.data?.logoUrl || cot.empresaLogo || '';
@@ -1424,3 +1424,4 @@ const s = {
 };
 
 export default GestionCotizaciones;
+

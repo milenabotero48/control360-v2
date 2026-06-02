@@ -7,7 +7,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const COLORES_PRIORIDAD = {
   critica:     { bg: '#fef2f2', border: '#fca5a5', text: '#991b1b', icon: '🔴' },
@@ -245,3 +245,4 @@ const CampanaAlertas = ({ inSidebar = false }) => {
 };
 
 export default CampanaAlertas;
+

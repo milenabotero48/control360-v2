@@ -13,7 +13,7 @@ import axios from 'axios';
 //   4) Sin cambios visuales/branding en el resto de la UI.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const ROLES = [
   { value: 'admin',      label: 'Administrador',  emoji: '👑', color: '#7c3aed' },
@@ -737,3 +737,4 @@ const s = {
 };
 
 export default GestionUsuarios;
+

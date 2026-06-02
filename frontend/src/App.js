@@ -247,7 +247,7 @@ export default function AppRoot() {
     const token = localStorage.getItem('token');
     const cargarAlertas = async () => {
       try {
-        const res = await fetch('http://localhost:5000/api/cxc/gestiones/todas', { headers: { Authorization: `Bearer ${token}` } });
+        const res = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000/api'}/cxc/gestiones/todas`, { headers: { Authorization: `Bearer ${token}` } });
         const gestiones = await res.json();
         const hoyStr = new Date().toISOString().split('T')[0];
         const porCliente = {};
@@ -490,3 +490,4 @@ export default function AppRoot() {
     </div>
   );
 }
+
