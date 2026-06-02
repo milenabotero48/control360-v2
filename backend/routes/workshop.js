@@ -321,9 +321,12 @@ router.get('/insumos/alertas', async (req, res) => {
 router.get('/ordenes', async (req, res) => {
   try {
     const adminId = getAdminId(req);
+    // AISLAMIENTO SAAS: filtrar por adminId en Firestore (no en forEach)
+    // El bug anterior filtraba en forEach pero solo para no-admin,
+    // dejando que todos los admins vieran órdenes de cualquier tenant.
     const snap = await db.collection('orders')
+      .where('adminId', '==', adminId)
       .where('estado', '==', 'en_taller')
-      .orderBy('createdAt', 'asc')
       .get();
 
     const ahora = new Date();
@@ -331,8 +334,7 @@ router.get('/ordenes', async (req, res) => {
 
     snap.forEach(doc => {
       const data = doc.data();
-      // Solo las del adminId correspondiente
-      if ((data.adminId || data.creadoPor) !== adminId && req.user.role !== 'admin') return;
+      // adminId ya filtrado en el query — no necesitamos filtrar aquí
 
       // ✅ NUEVO: Filtrar items SOLO de taller (recarga, mantenimiento, prueba hidrostática)
       const itemsTaller = (data.items || []).filter(item => esItemTaller(item));
@@ -768,18 +770,21 @@ router.get('/dashboard', async (req, res) => {
 
     // Órdenes completadas hoy
     const snapHoy = await db.collection('orders')
-  .where('tallerCompletado', '==', true)
-  .get();
+      .where('adminId', '==', adminId)
+      .where('tallerCompletado', '==', true)
+      .get();
 
     // Órdenes completadas este mes
     const snapMes = await db.collection('orders')
-  .where('tallerCompletado', '==', true)
-  .get();
+      .where('adminId', '==', adminId)
+      .where('tallerCompletado', '==', true)
+      .get();
 
     // Órdenes actualmente en taller
     const snapEnTaller = await db.collection('orders')
-  .where('estado', '==', 'en_taller')
-  .get();
+      .where('adminId', '==', adminId)
+      .where('estado', '==', 'en_taller')
+      .get();
 
     // Calcular equipos recargados HOY (solo recarga/mantenimiento/PH).
     // Un botiquín o domicilio NO cuenta aunque esté en la orden.
