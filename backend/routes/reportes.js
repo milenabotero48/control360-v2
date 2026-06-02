@@ -89,10 +89,10 @@ router.get('/mensajero', async (req, res) => {
       .where('role', '==', 'mensajero')
       .get();
     let mensajeros = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-    // Fallback: si no hay con creadoPor (suscriptores legacy), buscar por role solo
+    // Sin fallback sin filtro — si no hay mensajeros con creadoPor,
+    // simplemente no hay mensajeros para este admin (sistema aislado)
     if (mensajeros.length === 0) {
-      const all = await db.collection('users').where('role', '==', 'mensajero').get();
-      mensajeros = all.docs.map(d => ({ id: d.id, ...d.data() }));
+      return res.json({ mensajeros: [], resumen: {} });
     }
 
     // 2. Cargar órdenes en rango (excluir anuladas e internas)
@@ -256,9 +256,9 @@ router.get('/comercial', async (req, res) => {
       .where('role', '==', 'comercial')
       .get();
     let comerciales = usersSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // Sin fallback sin filtro — sistema aislado por tenant
     if (comerciales.length === 0) {
-      const all = await db.collection('users').where('role', '==', 'comercial').get();
-      comerciales = all.docs.map(d => ({ id: d.id, ...d.data() }));
+      return res.json({ comerciales: [], ranking: [] });
     }
 
     // 2. Órdenes del rango
