@@ -20,3 +20,4 @@ export const exportarExcel = (datos, columnas, nombreArchivo) => {
   link.click();
   URL.revokeObjectURL(url);
 };
+

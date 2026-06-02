@@ -8,7 +8,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const COLORES = {
   critica:     { bg: '#fef2f2', border: '#fca5a5', text: '#991b1b', accent: '#dc2626' },
@@ -158,3 +158,4 @@ const PanelAlertasInteligentes = ({ filtroTipo = null }) => {
 };
 
 export default PanelAlertasInteligentes;
+

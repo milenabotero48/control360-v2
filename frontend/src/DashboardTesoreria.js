@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloque 3
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard de Tesorería (Control360 v2 — Ola 2)
@@ -219,3 +219,4 @@ const DashboardTesoreria = ({ user }) => {
 };
 
 export default DashboardTesoreria;
+

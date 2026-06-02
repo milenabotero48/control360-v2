@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { exportarExcel } from './exportExcel';
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 const soloNumeros = (val) => val.replace(/\D/g, '');
@@ -1423,3 +1423,4 @@ const s = {
 };
 
 export default GestionClientes;
+

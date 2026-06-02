@@ -1575,3 +1575,4 @@ const S = {
 };
 
 export default ConfigEmpresas;
+

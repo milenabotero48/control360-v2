@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard Comercial (Control360 v2 — Ola 2)
@@ -240,3 +240,4 @@ const ResumenRow = ({ label, value, color, bold }) => (
 );
 
 export default DashboardComercial;
+

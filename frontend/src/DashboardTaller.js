@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard del Taller (Control360 v2 — Ola 2)
@@ -272,3 +272,4 @@ const DashboardTaller = ({ user }) => {
 };
 
 export default DashboardTaller;
+

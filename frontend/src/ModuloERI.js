@@ -9,7 +9,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { exportarExcel } from './exportExcel';
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const fmtCop = (n) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 const fmtPct = (n) => `${(n || 0).toFixed(1)}%`;
@@ -591,3 +591,4 @@ const s = {
 };
 
 export default ModuloERI;
+
