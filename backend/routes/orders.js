@@ -491,18 +491,25 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
 router.get('/', authenticate, async (req, res) => {
   try {
     const { estado, clienteId, mensajeroId, tipoOrden, empresaId, buscar, limite = 50 } = req.query;
+    // AISLAMIENTO SAAS: filtrar siempre por adminId
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
 
-    let query = db.collection('orders').orderBy('createdAt', 'desc').limit(parseInt(limite));
-
-    if (estado) query = db.collection('orders').where('estado', '==', estado).orderBy('createdAt', 'desc');
-    if (tipoOrden) query = db.collection('orders').where('tipoOrden', '==', tipoOrden).orderBy('createdAt', 'desc');
-    if (empresaId) query = db.collection('orders').where('empresaId', '==', empresaId).orderBy('createdAt', 'desc');
+    let query = db.collection('orders')
+      .where('adminId', '==', adminId)
+      .orderBy('createdAt', 'desc')
+      .limit(parseInt(limite));
 
     if (req.user.role === 'mensajero') {
-      query = db.collection('orders').where('mensajeroId', '==', req.adminId || req.user.uid).orderBy('createdAt', 'desc');
+      query = db.collection('orders')
+        .where('adminId', '==', adminId)
+        .where('mensajeroId', '==', req.adminId || req.user.uid)
+        .orderBy('createdAt', 'desc');
     }
     if (req.user.role === 'taller') {
-      query = db.collection('orders').where('estado', 'in', ['en_taller']).orderBy('createdAt', 'desc');
+      query = db.collection('orders')
+        .where('adminId', '==', adminId)
+        .where('estado', 'in', ['en_taller'])
+        .orderBy('createdAt', 'desc');
     }
 
     const snap = await query.get();
