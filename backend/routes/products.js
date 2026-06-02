@@ -498,14 +498,18 @@ router.post('/importar', authenticate, async (req, res) => {
     const { productos } = req.body;
     if (!productos?.length) return res.status(400).json({ error: 'Sin productos para importar' });
 
+    // AISLAMIENTO SAAS: usar adminId del token
+    const adminId = req.adminId || req.user.uid || req.user.id;
+
     let creados = 0, errores = [];
     const batch = db.batch();
 
     for (const p of productos) {
       if (!p.Nombre || !p.Categoria) { errores.push(`Fila sin nombre o categoría`); continue; }
 
-      // Buscar categoría
+      // Buscar categoría DENTRO DEL MISMO TENANT
       const catSnap = await db.collection('product_categories')
+        .where('adminId', '==', adminId)
         .where('nombre', '==', p.Categoria.toUpperCase().trim()).get();
 
       let categoriaId = '', categoriaNombre = p.Categoria.toUpperCase(), prefijo = 'PRD';
@@ -516,8 +520,10 @@ router.post('/importar', authenticate, async (req, res) => {
 
       const codigoFinal = (p.Codigo || await generarCodigo(prefijo)).toUpperCase().trim();
 
-      // Verificar que el código no exista
-      const codigoExiste = await db.collection('products').where('codigo', '==', codigoFinal).get();
+      // Verificar código duplicado SOLO EN EL MISMO TENANT
+      const codigoExiste = await db.collection('products')
+        .where('creadoPor', '==', adminId)
+        .where('codigo', '==', codigoFinal).get();
       if (!codigoExiste.empty) {
         errores.push(`Código ${codigoFinal} ya existe — omitido`);
         continue;
@@ -539,7 +545,7 @@ router.post('/importar', authenticate, async (req, res) => {
         requiereQR: false,
         requiereCertificado: false,
         activo: true,
-        creadoPor: req.user.uid || req.user.id,
+        creadoPor: adminId, // AISLAMIENTO SAAS
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
