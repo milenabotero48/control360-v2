@@ -172,13 +172,14 @@ router.delete('/categorias/:id', authenticate, async (req, res) => {
 router.get('/', authenticate, async (req, res) => {
   try {
     const { categoriaId, tipo, buscar, activo, soloStock } = req.query;
-    let query = db.collection('products');
+    // AISLAMIENTO SAAS: cada admin solo ve sus propios productos
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    let query = db.collection('products').where('creadoPor', '==', adminId);
 
     if (categoriaId) query = query.where('categoriaId', '==', categoriaId);
     if (tipo) query = query.where('tipo', '==', tipo);
     if (activo !== undefined) query = query.where('activo', '==', activo === 'true');
 
-    query = query.orderBy('nombre', 'asc');
     const snap = await query.get();
 
     let productos = [];
