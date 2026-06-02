@@ -89,7 +89,12 @@ const hashearPassword = async (raw) => bcrypt.hash(String(raw), SALT_ROUNDS);
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/', authenticate, soloAdmin, async (req, res) => {
   try {
-    const snapshot = await db.collection('users').orderBy('createdAt', 'desc').get();
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    // AISLAMIENTO SAAS: cada admin ve solo sus propios usuarios
+    const snapshot = await db.collection('users')
+      .where('creadoPor', '==', adminId)
+      .orderBy('createdAt', 'desc')
+      .get();
     const usuarios = [];
     snapshot.forEach(doc => {
       const data = doc.data();
