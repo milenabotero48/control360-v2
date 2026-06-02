@@ -140,6 +140,8 @@ router.get('/:id/pin', authenticate, async (req, res) => {
 router.post('/', authenticate, soloAdmin, async (req, res) => {
   try {
     const { nombre, email, codigo, password, pin, role, modulos, activo = true } = req.body;
+    // AISLAMIENTO SAAS: obtener adminId del token
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
 
     if (!nombre || !email || !codigo || !password || !role) {
       return res.status(400).json({ error: 'Campos obligatorios: nombre, email, código, contraseña, rol' });
@@ -149,15 +151,19 @@ router.post('/', authenticate, soloAdmin, async (req, res) => {
       return res.status(400).json({ error: 'El PIN debe ser de 4 dígitos numéricos' });
     }
 
-    // Email duplicado
+    // Email duplicado (solo dentro del mismo tenant)
     const emailNorm = String(email).trim().toLowerCase();
-    const emailExiste = await db.collection('users').where('email', '==', emailNorm).get();
+    const emailExiste = await db.collection('users')
+      .where('creadoPor', '==', adminId)
+      .where('email', '==', emailNorm).get();
     if (!emailExiste.empty) {
       return res.status(400).json({ error: 'Ya existe un usuario con ese email' });
     }
 
-    // Código duplicado
-    const codigoExiste = await db.collection('users').where('codigo', '==', codigo).get();
+    // Código duplicado (solo dentro del mismo tenant)
+    const codigoExiste = await db.collection('users')
+      .where('creadoPor', '==', adminId)
+      .where('codigo', '==', codigo).get();
     if (!codigoExiste.empty) {
       return res.status(400).json({ error: 'Ya existe un usuario con ese código' });
     }
@@ -271,9 +277,12 @@ router.put('/:id', authenticate, soloAdmin, async (req, res) => {
       cambios.email = emailNorm;
     }
 
-    // Si cambia código
+    // Si cambia código — verificar duplicado solo en el mismo tenant
     if (codigo && codigo !== datosActuales.codigo) {
-      const codigoExiste = await db.collection('users').where('codigo', '==', codigo).get();
+      const adminIdPut = req.adminId || req.user?.uid || req.user?.id;
+      const codigoExiste = await db.collection('users')
+        .where('creadoPor', '==', adminIdPut)
+        .where('codigo', '==', codigo).get();
       if (!codigoExiste.empty && codigoExiste.docs[0].id !== id) {
         return res.status(400).json({ error: 'Ya existe un usuario con ese código' });
       }
@@ -422,27 +431,16 @@ router.get('/auditoria/log', authenticate, soloAdmin, async (req, res) => {
   try {
     const { modulo, documento, usuarioId, desde, hasta, limite = 200 } = req.query;
     const lim = Math.min(parseInt(limite) || 200, 1000);
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
 
     const { desdeISO, hastaISO } = rangoFechasCO(desde, hasta);
 
-    // Construcción de query: priorizamos un único filtro indexado para no
-    // necesitar índices compuestos. El resto se filtra en memoria.
-    let query;
-    if (usuarioId) {
-      query = db.collection('audit_logs')
-        .where('usuarioId', '==', usuarioId)
-        .orderBy('fecha', 'desc')
-        .limit(lim);
-    } else if (modulo) {
-      query = db.collection('audit_logs')
-        .where('modulo', '==', modulo)
-        .orderBy('fecha', 'desc')
-        .limit(lim);
-    } else {
-      query = db.collection('audit_logs')
-        .orderBy('fecha', 'desc')
-        .limit(lim);
-    }
+    // AISLAMIENTO SAAS: siempre filtrar por adminId primero
+    // El resto se filtra en memoria para evitar índices compuestos
+    let query = db.collection('audit_logs')
+      .where('adminId', '==', adminId)
+      .orderBy('fecha', 'desc')
+      .limit(lim);
 
     const snapshot = await query.get();
     let logs = [];

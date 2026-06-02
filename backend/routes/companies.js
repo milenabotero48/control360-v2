@@ -39,28 +39,14 @@ const limpiarEmpresa = (data) => {
 
 router.get('/', async (req, res) => {
   try {
-    let userId = req.user.uid || req.user.id;
-
-    if (req.user.role !== 'admin') {
-      try {
-        const userDoc = await db.collection('users').doc(userId).get();
-        if (userDoc.exists && userDoc.data().adminId) {
-          userId = userDoc.data().adminId;
-        } else if (userDoc.exists && userDoc.data().creadoPor) {
-          userId = userDoc.data().creadoPor;
-        }
-      } catch (e) { console.error('Error buscando adminId:', e.message); }
-    }
+    // AISLAMIENTO SAAS: usar adminId del token (ya resuelto en auth.js)
+    // Para admin suscriptor: adminId = su propio UID
+    // Para subordinados: adminId = UID del admin que los creó
+    const userId = req.adminId || req.user.uid || req.user.id;
 
     const snapshot = await db.collection('companies')
       .where('user_id', '==', userId)
       .get();
-
-    if (snapshot.empty && req.user.role !== 'admin') {
-      const allSnap = await db.collection('companies').get();
-      const companies = allSnap.docs.map(doc => ({ id: doc.id, ...limpiarEmpresa(doc.data()) }));
-      return res.json(companies);
-    }
 
     const companies = snapshot.docs.map(doc => ({ id: doc.id, ...limpiarEmpresa(doc.data()) }));
     res.json(companies);
