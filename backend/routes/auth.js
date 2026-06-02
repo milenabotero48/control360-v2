@@ -56,13 +56,16 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Credenciales inválidas' });
     }
 
+    const esAdmin = user.role === 'admin';
+    const adminId = esAdmin ? userDoc.id : (user.creadoPor || userDoc.id);
+
     const token = jwt.sign(
       {
         uid: userDoc.id,
         email: user.email,
         role: user.role,
         nombre: user.nombre || user.email,
-        adminId: user.creadoPor || userDoc.id
+        adminId
       },
       process.env.JWT_SECRET || 'control360secret',
       { expiresIn: '24h' }
@@ -77,7 +80,7 @@ router.post('/login', async (req, res) => {
         role: user.role,
         modulos: user.modulos || [],
         codigo: user.codigo || '',
-        adminId: user.creadoPor || userDoc.id
+        adminId
       }
     });
   } catch (error) {
