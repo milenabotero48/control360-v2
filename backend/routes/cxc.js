@@ -43,15 +43,18 @@ router.get('/', authenticate, async (req, res) => {
 
     // Traer órdenes en estado CXC o con forma de pago CxC no pagadas
     // AISLAMIENTO SAAS: filtrar por adminId (sin orderBy para evitar índice compuesto)
-const [snapEstado, snapFormaPago] = await Promise.all([
+    // ✅ FIX: incluir todas las variantes de formaPago CxC
+const [snapEstado, snapFP1, snapFP2, snapFP3] = await Promise.all([
   db.collection('orders').where('adminId', '==', userId).where('estado', '==', 'cxc').get(),
   db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'CXC').where('pagado', '==', false).get(),
+  db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'A crédito (CxC)').where('pagado', '==', false).get(),
+  db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'A crédito').where('pagado', '==', false).get(),
 ]);
 
 // Combinar sin duplicados
 const docsVistos = new Set();
 const snap = { forEach: (fn) => {
-  [...snapEstado.docs, ...snapFormaPago.docs].forEach(doc => {
+  [...snapEstado.docs, ...snapFP1.docs, ...snapFP2.docs, ...snapFP3.docs].forEach(doc => {
     if (!docsVistos.has(doc.id)) { docsVistos.add(doc.id); fn(doc); }
   });
 }};
