@@ -759,6 +759,7 @@ router.post('/', authenticate, async (req, res) => {
       fotoTransferenciaUrl: fotoTransferenciaUrl || null,
       cobradoPorMensajero: false,
       creadoPor: req.user.uid || req.user.id,
+      creadoPorId: req.user.uid || req.user.id,   // ✅ FIX: requerido por dashboard comercial
       creadoPorEmail: req.user.email,
       creadoPorNombre: req.user.nombre || req.user.email,
       adminId: req.adminId || req.user.uid || req.user.id,
