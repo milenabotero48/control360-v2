@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloque 3
 
-const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+const API = 'http://localhost:5000/api';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard del Admin (Control360 v2 — Ola 2)
@@ -220,16 +220,23 @@ const Dashboard = ({ user }) => {
       )}
 
       {/* ── 8 KPIs ─────────────────────────────────────────────────────────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 14, marginBottom: 24 }}>
-        <KpiCard icon="📋" label="Órdenes hoy"        value={fmtNum(k.ordenesHoy)}        sub="Creadas hoy"               color="#7c3aed" />
-        <KpiCard icon="💵" label="Recaudo hoy"        value={fmtCop(k.recaudoHoy)}        sub="Ingresos en caja"          color="#16a34a" />
-        <KpiCard icon="🔧" label="En taller"          value={fmtNum(k.enTaller)}          sub="Activas ahora"             color="#8b5cf6" alerta={k.enTaller > 10} />
-        <KpiCard icon="🚚" label="Mensajeros activos" value={fmtNum(k.mensajerosActivos)} sub="En ruta"                   color="#0891b2" />
-        <KpiCard icon="📦" label="Stock crítico"      value={fmtNum(k.stockCritico)}      sub="productos bajo mínimo"     color="#b45309" alerta={k.stockCritico > 0} />
-        <KpiCard icon="💳" label="CxC pendiente"      value={fmtCop(k.cxcPendiente)}      sub={`${k.clientesConMora} cliente(s) en mora`} color="#dc2626" alerta={k.clientesConMora > 0} />
-        <KpiCard icon="💸" label="Egresos mes"        value={fmtCop(k.egresosMes)}        sub={mesLabel}                  color="#f59e0b" />
-        <KpiCard icon="📈" label="Utilidad mes"       value={fmtCop(k.utilidadMes)}       sub={`Ventas − Egresos · ${mesLabel}`} color={k.utilidadMes >= 0 ? '#16a34a' : '#dc2626'} />
-      </div>
+      {(() => {
+        const mods = user?.modulos || [];
+        const sinFiltro = mods.length === 0;
+        const tiene = (m) => sinFiltro || mods.includes(m);
+        return (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 14, marginBottom: 24 }}>
+            <KpiCard icon="📋" label="Órdenes hoy"        value={fmtNum(k.ordenesHoy)}        sub="Creadas hoy"               color="#7c3aed" />
+            <KpiCard icon="💵" label="Recaudo hoy"        value={fmtCop(k.recaudoHoy)}        sub="Ingresos en caja"          color="#16a34a" />
+            {tiene('taller')    && <KpiCard icon="🔧" label="En taller"          value={fmtNum(k.enTaller)}          sub="Activas ahora"             color="#8b5cf6" alerta={k.enTaller > 10} />}
+            {tiene('logistica') && <KpiCard icon="🚚" label="Mensajeros activos" value={fmtNum(k.mensajerosActivos)} sub="En ruta"                   color="#0891b2" />}
+            <KpiCard icon="📦" label="Stock crítico"      value={fmtNum(k.stockCritico)}      sub="productos bajo mínimo"     color="#b45309" alerta={k.stockCritico > 0} />
+            {tiene('cxc')       && <KpiCard icon="💳" label="CxC pendiente"      value={fmtCop(k.cxcPendiente)}      sub={`${k.clientesConMora} cliente(s) en mora`} color="#dc2626" alerta={k.clientesConMora > 0} />}
+            {tiene('egresos')   && <KpiCard icon="💸" label="Egresos mes"        value={fmtCop(k.egresosMes)}        sub={mesLabel}                  color="#f59e0b" />}
+            {tiene('eri')       && <KpiCard icon="📈" label="Utilidad mes"       value={fmtCop(k.utilidadMes)}       sub={`Ventas − Egresos · ${mesLabel}`} color={k.utilidadMes >= 0 ? '#16a34a' : '#dc2626'} />}
+          </div>
+        );
+      })()}
 
       {/* ── BARRAS DE META + STOCK CRÍTICO (lado a lado) ───────────────────── */}
       <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 16, marginBottom: 24 }}>
@@ -239,8 +246,10 @@ const Dashboard = ({ user }) => {
             🎯 Avance del mes — {mesLabel}
           </h3>
           <BarraMeta label="Ventas del mes"          actual={k.ventasMes}     meta={metas.metaVentas}     color="#667eea" unidad="$"            emoji="💰" />
-          <BarraMeta label="Domicilios completados"  actual={k.domiciliosMes} meta={metas.metaDomicilios} color="#0284c7" unidad="domicilios"   emoji="🚚" />
-          <BarraMeta label="Extintores recargados"   actual={k.extintoresMes} meta={metas.metaExtintores} color="#8b5cf6" unidad="extintores"   emoji="🧯" />
+          {((user?.modulos || []).length === 0 || (user?.modulos || []).includes('logistica')) &&
+            <BarraMeta label="Domicilios completados"  actual={k.domiciliosMes} meta={metas.metaDomicilios} color="#0284c7" unidad="domicilios"   emoji="🚚" />}
+          {((user?.modulos || []).length === 0 || (user?.modulos || []).includes('taller')) &&
+            <BarraMeta label="Extintores recargados"   actual={k.extintoresMes} meta={metas.metaExtintores} color="#8b5cf6" unidad="extintores"   emoji="🧯" />}
         </div>
 
         {/* Stock crítico */}
@@ -324,4 +333,3 @@ const st = {
 };
 
 export default Dashboard;
-
