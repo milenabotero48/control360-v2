@@ -17,8 +17,10 @@ const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = 
 };
 
 // ─── HELPER: generar código automático ───────────────────────────────────────
-const generarCodigo = async (prefijo) => {
+// ✅ FIX: filtra por adminId para que el consecutivo sea por tenant
+const generarCodigo = async (prefijo, adminId) => {
   const snap = await db.collection('products')
+    .where('creadoPor', '==', adminId)
     .where('codigo', '>=', prefijo + '-')
     .where('codigo', '<=', prefijo + '-\uf8ff')
     .get();
@@ -249,9 +251,9 @@ router.post('/', authenticate, async (req, res) => {
 
     const adminId = req.adminId || req.user.uid || req.user.id;
 
-    const codigoFinal = (codigo || await generarCodigo(categoriaPrefijo || 'PRD')).toUpperCase().trim();
+    // ✅ FIX: pasar adminId para que el consecutivo sea por tenant
+    const codigoFinal = (codigo || await generarCodigo(categoriaPrefijo || 'PRD', adminId)).toUpperCase().trim();
 
-    // Verificar código único dentro del mismo tenant
     const codigoExiste = await db.collection('products')
       .where('creadoPor', '==', adminId)
       .where('codigo', '==', codigoFinal).get();
@@ -283,7 +285,7 @@ router.post('/', authenticate, async (req, res) => {
       requiereQR: false,
       requiereCertificado: false,
       activo,
-      adminId,                                          // ✅ FIX: campo requerido por validarTenant
+      adminId,           // ✅ campo requerido por validarTenant
       creadoPor: adminId,
       creadoPorNombre: req.user.nombre || req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -402,7 +404,10 @@ router.post('/ajuste-masivo/preview', authenticate, async (req, res) => {
     const { porcentaje, categoriaId, tipo } = req.body;
     if (!porcentaje || porcentaje <= 0) return res.status(400).json({ error: 'Porcentaje inválido' });
 
-    let query = db.collection('products').where('activo', '==', true);
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    let query = db.collection('products')
+      .where('creadoPor', '==', adminId)
+      .where('activo', '==', true);
     if (categoriaId) query = query.where('categoriaId', '==', categoriaId);
     if (tipo) query = query.where('tipo', '==', tipo);
 
@@ -469,7 +474,9 @@ router.post('/ajuste-masivo/aplicar', authenticate, async (req, res) => {
 router.get('/exportar/excel', authenticate, async (req, res) => {
   try {
     const adminId = req.adminId || req.user?.uid || req.user?.id;
-    const snap = await db.collection('products').where('creadoPor', '==', adminId).where('activo', '==', true).get();
+    const snap = await db.collection('products')
+      .where('creadoPor', '==', adminId)
+      .where('activo', '==', true).get();
     const productos = [];
     snap.forEach(doc => {
       const d = doc.data();
@@ -504,7 +511,7 @@ router.post('/importar', authenticate, async (req, res) => {
     const batch = db.batch();
 
     for (const p of productos) {
-      // ✅ FIX: limpiar espacios de los encabezados del CSV (ej: "Categoria ")
+      // ✅ FIX: limpiar espacios de encabezados del CSV
       const nombreProducto = (p.Nombre || p['Nombre '] || '').trim();
       const categoriaCSV = (p.Categoria || p['Categoria '] || '').toUpperCase().trim();
       const tipoCSV = (p.Tipo || p['Tipo '] || 'simple').trim().toLowerCase();
@@ -531,13 +538,14 @@ router.post('/importar', authenticate, async (req, res) => {
         prefijo = catSnap.docs[0].data().prefijo || 'PRD';
         categoriaNombre = catSnap.docs[0].data().nombre || categoriaCSV;
       } else {
-        errores.push(`Categoría "${categoriaCSV}" no encontrada — producto "${nombreProducto}" asignado a PRD`);
+        errores.push(`Categoría "${categoriaCSV}" no encontrada — "${nombreProducto}" asignado a PRD`);
       }
 
-      const codigoFinal = ((p.Codigo || p['Codigo '] || '')).trim().toUpperCase() ||
-        await generarCodigo(prefijo);
+      // ✅ FIX: pasar adminId a generarCodigo para consecutivo por tenant
+      const codigoCSV = (p.Codigo || p['Codigo '] || '').trim().toUpperCase();
+      const codigoFinal = codigoCSV || await generarCodigo(prefijo, adminId);
 
-      // Verificar código duplicado en el mismo tenant
+      // Verificar duplicado en el mismo tenant
       const codigoExiste = await db.collection('products')
         .where('creadoPor', '==', adminId)
         .where('codigo', '==', codigoFinal).get();
@@ -562,7 +570,7 @@ router.post('/importar', authenticate, async (req, res) => {
         requiereQR: false,
         requiereCertificado: false,
         activo: true,
-        adminId,           // ✅ FIX: campo requerido por validarTenant
+        adminId,           // ✅ campo requerido por validarTenant
         creadoPor: adminId,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
