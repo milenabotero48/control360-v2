@@ -23,6 +23,88 @@ const formatCOP = (v) => {
   return new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', minimumFractionDigits: 0 }).format(v);
 };
 
+
+// ─── BUSCADOR DE COMPONENTES ─────────────────────────────────────────────────
+const BuscadorComponente = ({ productos, onAgregar }) => {
+  const [busqueda, setBusqueda] = React.useState('');
+  const [abierto, setAbierto] = React.useState(false);
+  const ref = React.useRef();
+
+  const productosFiltrados = productos
+    .filter(p => p.tipo !== 'compuesto' && p.tipo !== 'combo' && p.activo !== false)
+    .filter(p => {
+      if (!busqueda.trim()) return true;
+      const q = busqueda.toLowerCase();
+      return (
+        (p.nombre || '').toLowerCase().includes(q) ||
+        (p.codigo || '').toLowerCase().includes(q)
+      );
+    })
+    .slice(0, 12);
+
+  React.useEffect(() => {
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setAbierto(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const seleccionar = (prod) => {
+    onAgregar(prod);
+    setBusqueda('');
+    setAbierto(false);
+  };
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, border: '2px solid #e5e7eb', borderRadius: 8, padding: '8px 12px', background: '#fff', cursor: 'text' }}
+        onClick={() => setAbierto(true)}>
+        <span style={{ color: '#9ca3af', fontSize: 14 }}>🔍</span>
+        <input
+          type="text"
+          value={busqueda}
+          onChange={e => { setBusqueda(e.target.value); setAbierto(true); }}
+          onFocus={() => setAbierto(true)}
+          placeholder="Buscar por nombre o código..."
+          style={{ border: 'none', outline: 'none', flex: 1, fontSize: 13, color: '#111', background: 'transparent' }}
+        />
+        {busqueda && (
+          <button onClick={() => { setBusqueda(''); setAbierto(false); }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 16, padding: 0 }}>×</button>
+        )}
+      </div>
+
+      {abierto && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 999,
+          background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.12)', maxHeight: 280,
+          overflowY: 'auto', marginTop: 4
+        }}>
+          {productosFiltrados.length === 0 ? (
+            <div style={{ padding: '14px 16px', color: '#9ca3af', fontSize: 13, textAlign: 'center' }}>
+              Sin resultados para "{busqueda}"
+            </div>
+          ) : productosFiltrados.map(p => (
+            <div key={p.id}
+              onClick={() => seleccionar(p)}
+              style={{ padding: '10px 16px', cursor: 'pointer', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+              onMouseEnter={e => e.currentTarget.style.background = '#f5f3ff'}
+              onMouseLeave={e => e.currentTarget.style.background = '#fff'}>
+              <div>
+                <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace', marginRight: 8 }}>{p.codigo}</span>
+                <span style={{ fontSize: 13, fontWeight: 600, color: '#111' }}>{p.nombre}</span>
+              </div>
+              <span style={{ fontSize: 12, color: '#7c3aed', fontWeight: 700 }}>+ Agregar</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const GestionProductos = ({ user }) => {
   const [vista, setVista]               = useState('productos'); // productos | categorias | ajuste
   const [categorias, setCategorias]     = useState([]);
@@ -721,16 +803,11 @@ const GestionProductos = ({ user }) => {
               {form.tipo === 'compuesto' && (
                 <div style={s.campo}>
                   <label style={s.label}>Componentes * <span style={s.hint}>(busca y agrega)</span></label>
-                  <select style={s.input} onChange={e => {
-                    const prod = productos.find(p => p.id === e.target.value);
-                    if (prod) agregarComponente(prod);
-                    e.target.value = '';
-                  }}>
-                    <option value="">+ Agregar componente...</option>
-                    {productos.filter(p => p.tipo !== 'compuesto' && p.tipo !== 'combo' && p.activo !== false).map(p => (
-                      <option key={p.id} value={p.id}>{p.codigo} — {p.nombre}</option>
-                    ))}
-                  </select>
+                  {/* ✅ Buscador de componentes con filtro por texto */}
+                  <BuscadorComponente
+                    productos={productos}
+                    onAgregar={agregarComponente}
+                  />
 
                   {form.componentes.length > 0 && (
                     <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
