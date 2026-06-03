@@ -502,19 +502,21 @@ const GestionClientes = ({ user, empresas = [] }) => {
       const nl = String.fromCharCode(10);
       const lineas = text.split(nl).filter(l => l.trim());
       if (lineas.length < 2) return;
-      const hdrs = lineas[0].split(',').map(h => h.replace(/"/g, '').trim());
+      // ✅ FIX: detectar separador (coma o punto y coma)
+      const sep = lineas[0].includes(';') ? ';' : ',';
+      const hdrs = lineas[0].split(sep).map(h => h.replace(/"/g, '').replace(/\uFEFF/g, '').trim());
       const datos = lineas.slice(1).map(linea => {
         const vals = [];
         let inside = false, cur = '';
-        for (let ch of linea + ',') {
+        for (let ch of linea + sep) {
           if (ch === '"') { inside = !inside; }
-          else if (ch === ',' && !inside) { vals.push(cur.trim()); cur = ''; }
+          else if (ch === sep && !inside) { vals.push(cur.trim()); cur = ''; }
           else { cur += ch; }
         }
         const obj = {};
         hdrs.forEach((h, i) => { obj[h] = (vals[i] || '').replace(/^"|"$/g, '').trim(); });
         return obj;
-      }).filter(d => d.nombre && d.nombre.trim());
+      }).filter(d => (d.Nombre || d.nombre || '').trim());
       setPrevistaImportCli(datos);
     };
     reader.readAsText(file, 'UTF-8');
@@ -528,18 +530,19 @@ const GestionClientes = ({ user, empresas = [] }) => {
       for (const c of previstaImportCli) {
         try {
           await axios.post(API + '/clients', {
-            nombre: (c.nombre || '').toUpperCase().trim(),
-            nit: c.nit || '',
-            tipoDocumento: c.tipoDocumento || 'NIT',
-            celular: c.celular || '',
-            telefono: c.telefono || '',
-            emailLegal: c.emailLegal || '',
-            direccionPrincipal: c.direccionPrincipal || '',
-            ciudad: c.ciudad || '',
-            departamento: c.departamento || '',
-            empresaId: empresasDisponibles.find(e => e.name === c.empresaNombre)?.id || '',
-            empresaNombre: c.empresaNombre || '',
-            notas: c.notas || '',
+            // ✅ FIX: soportar campos con mayúscula (del CSV) y minúscula
+            nombre: (c.Nombre || c.nombre || '').toUpperCase().trim(),
+            nit: c.NIT || c.nit || '',
+            tipoDocumento: c.TipoDocumento || c.tipoDocumento || 'NIT',
+            celular: c.Celular || c.celular || '',
+            telefono: c.Telefono || c.telefono || '',
+            emailLegal: c.EmailLegal || c.emailLegal || '',
+            direccionPrincipal: c.DireccionPrincipal || c.direccionPrincipal || '',
+            ciudad: c.Ciudad || c.ciudad || '',
+            departamento: c.Departamento || c.departamento || '',
+            empresaId: empresasDisponibles.find(e => e.name === (c.Empresa || c.empresaNombre || ''))?.id || '',
+            empresaNombre: c.Empresa || c.empresaNombre || '',
+            notas: c.Notas || c.notas || '',
             confirmarDuplicado: true
           }, { headers });
           creados++;
@@ -1423,4 +1426,3 @@ const s = {
 };
 
 export default GestionClientes;
-
