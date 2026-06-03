@@ -81,7 +81,9 @@ const NAV_GRUPOS = {
 const buildGrupos = (role, userModulos) => {
   const grupos = NAV_GRUPOS[role] || NAV_GRUPOS['visor'];
   const modulosActivos = userModulos || [];
-  const esAdmin = role === 'admin';
+  // ✅ FIX: admin también filtra por modulos si tiene lista definida
+  // Si modulos está vacío, se muestra todo (compatibilidad con admin principal)
+  const tieneModulosDefinidos = modulosActivos.length > 0;
 
   return grupos.map(g => ({
     grupo: g.grupo,
@@ -89,8 +91,9 @@ const buildGrupos = (role, userModulos) => {
       .map(key => TODOS_LOS_MODULOS.find(m => m.key === key))
       .filter(item => {
         if (!item) return false;
-        if (esAdmin) return true;
-        // Comparar por nombre del módulo O por key del menú
+        // Si no tiene módulos definidos, mostrar todo (admin principal sin restricciones)
+        if (!tieneModulosDefinidos) return true;
+        // Si tiene módulos definidos, filtrar también para admin
         return modulosActivos.includes(item.modulo) ||
                modulosActivos.includes(item.key) ||
                modulosActivos.includes(item.label?.toLowerCase());
