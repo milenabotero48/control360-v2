@@ -151,14 +151,22 @@ router.post('/', authenticate, async (req, res) => {
       return res.status(400).json({ error: 'El teléfono debe contener solo números' });
     }
 
-    // Anti-duplicado NIT
+    // Anti-duplicado NIT — solo dentro del mismo tenant Y misma empresa
+    const adminIdActual = req.adminId || req.user.uid || req.user.id;
     if (nit && !confirmarDuplicado) {
-      const nitExiste = await db.collection('clients').where('nit', '==', nit.toString()).get();
+      const nitExiste = await db.collection('clients')
+        .where('adminId', '==', adminIdActual)
+        .where('nit', '==', nit.toString())
+        .get();
       if (!nitExiste.empty) {
-        return res.status(409).json({
-          error: 'Ya existe un cliente con ese NIT',
-          clienteExistente: { id: nitExiste.docs[0].id, ...nitExiste.docs[0].data() }
-        });
+        // Solo es duplicado si es la misma empresa
+        const mismaEmpresa = nitExiste.docs.some(d => d.data().empresaId === empresaId);
+        if (mismaEmpresa) {
+          return res.status(409).json({
+            error: 'Ya existe un cliente con ese NIT en esta empresa',
+            clienteExistente: { id: nitExiste.docs[0].id, ...nitExiste.docs[0].data() }
+          });
+        }
       }
     }
 
