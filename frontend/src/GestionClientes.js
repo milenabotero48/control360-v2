@@ -540,7 +540,9 @@ const GestionClientes = ({ user, empresas = [] }) => {
             direccionPrincipal: c.DireccionPrincipal || c.direccionPrincipal || '',
             ciudad: c.Ciudad || c.ciudad || '',
             departamento: c.Departamento || c.departamento || '',
-            empresaId: empresasDisponibles.find(e => e.name === (c.Empresa || c.empresaNombre || ''))?.id || '',
+            empresaId: empresasDisponibles.find(e => 
+              e.name?.toUpperCase().trim() === (c.Empresa || c.empresaNombre || '').toUpperCase().trim()
+            )?.id || '',
             empresaNombre: c.Empresa || c.empresaNombre || '',
             notas: c.Notas || c.notas || '',
             confirmarDuplicado: true
