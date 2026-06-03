@@ -755,8 +755,11 @@ const GestionCxC = ({ user }) => {
       cajaId: formPago.cajaId,
       fechaPago: formPago.fechaPago,
       retencion: Number(formPago.retencion) || 0,
+      // ✅ FIX: pasar montoAbono al backend para abonos parciales
+      montoAbono: formPago.montoAbono || null,
+      esAbonoParcial: formPago.esAbonoParcial || false,
     }, { headers });
-    toast('Pago registrado ✓');
+    toast(formPago.esAbonoParcial ? 'Abono registrado ✓' : 'Pago registrado ✓');
     setModalDetalle(null);
     await cargar();
   };

@@ -204,6 +204,7 @@ router.post('/', authenticate, soloAdmin, async (req, res) => {
       modulos: modulosFinales,
       activo,
       password_hash: passHash,
+      adminId,           // ✅ FIX: necesario para aislamiento SaaS
       creadoPor: req.user.uid || req.user.id,
       creadoPorNombre: req.user.nombre || req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
