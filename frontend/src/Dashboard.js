@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloque 3
 
-const API = 'http://localhost:5000/api';
+const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard del Admin (Control360 v2 — Ola 2)
@@ -245,11 +245,11 @@ const Dashboard = ({ user }) => {
           <h3 style={{ margin: '0 0 14px', fontSize: 16, fontWeight: 700, color: '#111' }}>
             🎯 Avance del mes — {mesLabel}
           </h3>
-          <BarraMeta label="Ventas del mes"          actual={k.ventasMes}     meta={metas.metaVentas}     color="#667eea" unidad="$"            emoji="💰" />
+          <BarraMeta label="Ventas del mes" actual={k.ventasMes} meta={metas.metaVentas} color="#667eea" unidad="$" emoji="💰" />
           {((user?.modulos || []).length === 0 || (user?.modulos || []).includes('logistica')) &&
-            <BarraMeta label="Domicilios completados"  actual={k.domiciliosMes} meta={metas.metaDomicilios} color="#0284c7" unidad="domicilios"   emoji="🚚" />}
+            <BarraMeta label="Domicilios completados" actual={k.domiciliosMes} meta={metas.metaDomicilios} color="#0284c7" unidad="domicilios" emoji="🚚" />}
           {((user?.modulos || []).length === 0 || (user?.modulos || []).includes('taller')) &&
-            <BarraMeta label="Extintores recargados"   actual={k.extintoresMes} meta={metas.metaExtintores} color="#8b5cf6" unidad="extintores"   emoji="🧯" />}
+            <BarraMeta label="Extintores recargados" actual={k.extintoresMes} meta={metas.metaExtintores} color="#8b5cf6" unidad="extintores" emoji="🧯" />}
         </div>
 
         {/* Stock crítico */}

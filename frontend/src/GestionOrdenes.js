@@ -4,7 +4,7 @@ import NuevaOrden from './NuevaOrden';
 import DetalleOrden from './DetalleOrden';
 import { exportarExcel } from './exportExcel';
 
-const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+const API = 'http://localhost:5000/api';
 
 const ESTADOS = {
   completada:       { label: 'Completada',        color: '#16a34a', bg: '#f0fdf4' },
@@ -262,7 +262,12 @@ const GestionOrdenes = ({ user }) => {
             </thead>
             <tbody>
               {ordenesFiltradas.map((o, i) => {
-                const est = ESTADOS[o.estado] || { label: o.estado, color: '#666', bg: '#f3f4f6' };
+                // ✅ FIX: si está completada pero sin pagar y es CxC → mostrar "Cuenta por Cobrar"
+                const esCxcSinPagar = o.estado === 'completada' && o.pagado === false &&
+                  ['A crédito (CxC)', 'A crédito', 'CXC', 'Cuenta por Pagar'].includes(o.formaPago);
+                const est = esCxcSinPagar
+                  ? { label: '💳 Cuenta por Cobrar', color: '#b45309', bg: '#fef3c7' }
+                  : (ESTADOS[o.estado] || { label: o.estado, color: '#666', bg: '#f3f4f6' });
                 return (
                   <tr key={o.id} style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb', cursor: 'pointer' }}
                     onClick={() => abrirDetalle(o)}>
@@ -382,4 +387,3 @@ const s = {
 };
 
 export default GestionOrdenes;
-
