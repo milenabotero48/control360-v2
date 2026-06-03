@@ -251,17 +251,26 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
     if (!ordenDoc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
 
     const orden = ordenDoc.data();
-    if (orden.estado !== 'cxc') {
-      return res.status(400).json({ error: 'La orden no está en estado CXC' });
+    // ✅ FIX: aceptar órdenes en estado 'cxc' O 'completada' con formaPago CxC sin pagar
+    const esCxcValida = orden.estado === 'cxc' ||
+      (orden.estado === 'completada' && orden.pagado === false &&
+       ['A crédito (CxC)', 'A crédito', 'CXC', 'Cuenta por Pagar'].includes(orden.formaPago));
+    if (!esCxcValida) {
+      return res.status(400).json({ error: 'La orden no tiene saldo pendiente por cobrar' });
     }
 
-    // Anti-doble-suma: si ya entró a caja, no se cobra de nuevo
-    if (orden.dineroEnCaja === true) {
-      return res.status(409).json({ error: 'Esta CxC ya fue pagada (no se duplicó).', yaPagada: true });
+    // Anti-doble-suma: si ya entró a caja completamente, no se cobra de nuevo
+    if (orden.dineroEnCaja === true && orden.pagado === true) {
+      return res.status(409).json({ error: 'Esta CxC ya fue pagada completamente.', yaPagada: true });
     }
 
     const montoRetencion = Number(retencion) || 0;
-    const montoAPagar = (orden.total || 0) - montoRetencion;
+    // ✅ FIX: usar montoAbono si se envía (abono parcial), si no usar total
+    const saldoActual = orden.cxcSaldo !== undefined ? orden.cxcSaldo : (orden.total - (orden.montoPagado || 0));
+    const montoAbonoSolicitado = req.body.montoAbono ? Number(req.body.montoAbono) : null;
+    const montoAPagar = montoAbonoSolicitado
+      ? Math.min(montoAbonoSolicitado - montoRetencion, saldoActual)
+      : (saldoActual - montoRetencion);
     const facturaLimpia = numeroFactura ? numeroFactura.trim().toUpperCase() : (orden.numeroFactura || '');
 
     // 1. Actualizar saldo de caja
@@ -276,28 +285,49 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // 2. Cambiar estado de la orden a completada (con candado dineroEnCaja)
-    batch.update(ordenRef, {
-      estado: 'completada',
-      pagado: true,
-      montoPagado: orden.total,
-      fechaPago: fechaPago || new Date().toISOString(),
-      formaPago,
-      cajaId,
-      numeroFactura: facturaLimpia,
-      dineroEnCaja: true,
-      dineroEnCajaFecha: new Date().toISOString(),
-      dineroEnCajaPor: req.user.email,
-      retencionPracticada: montoRetencion,
+    // 2. Actualizar orden — si quedó saldo 0 marcar completada, si no dejar como abono parcial
+    const nuevoSaldo = Math.max(0, saldoActual - montoAPagar - montoRetencion);
+    const quedoPagada = nuevoSaldo === 0;
+    const ordenUpdate = {
+      cxcSaldo: nuevoSaldo,
+      cxcEstado: quedoPagada ? 'pagada' : 'parcial',
+      montoPagado: admin.firestore.FieldValue.increment(montoAPagar),
+      fechaPago: quedoPagada ? (fechaPago || new Date().toISOString()) : undefined,
+      cajaId: quedoPagada ? cajaId : undefined,
+      numeroFactura: facturaLimpia || undefined,
+      retencionPracticada: quedoPagada ? montoRetencion : undefined,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      cxcHistorial: admin.firestore.FieldValue.arrayUnion({
+        tipo: quedoPagada ? 'pago_total' : 'abono_parcial',
+        monto: montoAPagar,
+        retencion: montoRetencion,
+        metodoPago: formaPago,
+        fecha: new Date().toISOString(),
+        saldoAnterior: saldoActual,
+        saldoNuevo: nuevoSaldo,
+        registradoPor: req.user.email
+      }),
       historialEstados: admin.firestore.FieldValue.arrayUnion({
-        estado: 'completada',
+        estado: quedoPagada ? 'completada' : 'abono_parcial',
         fecha: new Date().toISOString(),
         usuarioId: req.adminId || req.user.uid || req.user.id,
         usuarioNombre: req.user.nombre || req.user.email,
-        nota: `Pago CXC registrado — ${formaPago}${montoRetencion > 0 ? ` — Retención: $${montoRetencion.toLocaleString('es-CO')}` : ''}`
+        nota: quedoPagada
+          ? `Pago CxC completo — ${formaPago} — $${montoAPagar.toLocaleString('es-CO')}`
+          : `Abono parcial — ${formaPago} — $${montoAPagar.toLocaleString('es-CO')} — Saldo restante: $${nuevoSaldo.toLocaleString('es-CO')}`
       })
-    });
+    };
+    // Solo marcar pagada si quedó saldo 0
+    if (quedoPagada) {
+      ordenUpdate.estado = 'completada';
+      ordenUpdate.pagado = true;
+      ordenUpdate.dineroEnCaja = true;
+      ordenUpdate.dineroEnCajaFecha = new Date().toISOString();
+      ordenUpdate.dineroEnCajaPor = req.user.email;
+    }
+    // Limpiar undefined
+    Object.keys(ordenUpdate).forEach(k => ordenUpdate[k] === undefined && delete ordenUpdate[k]);
+    batch.update(ordenRef, ordenUpdate);
 
     await batch.commit();
 
@@ -341,7 +371,13 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
       datos: { ordenId, formaPago, cajaId, montoAPagar, montoRetencion }
     });
 
-    res.json({ ok: true, montoIngresado: montoAPagar, retencion: montoRetencion });
+    res.json({ 
+      ok: true, 
+      montoIngresado: montoAPagar, 
+      retencion: montoRetencion,
+      saldoRestante: nuevoSaldo,
+      quedoPagada
+    });
   } catch (e) {
     console.error('POST CXC pago:', e);
     res.status(500).json({ error: e.message });

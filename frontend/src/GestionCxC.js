@@ -120,6 +120,7 @@ const generarHtmlEstadoCuenta = (cliente, empresa, cuentaBancaria) => {
 const ModalEstadoCuenta = ({ cliente, cajas, formasPago, formasPagoConfig, empresas, onPagar, onCerrar }) => {
   const [ordenesSeleccionadas, setOrdenesSeleccionadas] = useState({});
   const [formPago, setFormPago] = useState({ formaPago: '', cajaId: '', cajaLabel: '', fechaPago: new Date().toISOString().split('T')[0], retencion: '' });
+  const [montoAbono, setMontoAbono] = useState(''); // ✅ FIX: permite abono parcial
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState('');
   const [mostrarPago, setMostrarPago] = useState(false);
@@ -150,14 +151,27 @@ const ModalEstadoCuenta = ({ cliente, cajas, formasPago, formasPagoConfig, empre
     if (!formPago.formaPago) { setError('Selecciona la forma de pago'); return; }
     if (!formPago.cajaId) { setError('La forma de pago seleccionada no tiene caja asignada en Mi Empresa'); return; }
     if (ordenesChecked.length === 0) { setError('Selecciona al menos una orden'); return; }
+    // ✅ FIX: si hay monto de abono, validar que sea > 0 y <= saldo total
+    const montoAbonoNum = Number(montoAbono) || 0;
+    if (montoAbono && montoAbonoNum <= 0) { setError('El monto del abono debe ser mayor a 0'); return; }
+    if (montoAbono && montoAbonoNum > totalSeleccionado) { setError('El abono no puede superar el saldo total'); return; }
     setGuardando(true); setError('');
     try {
-      // Pagar cada orden seleccionada
       for (const orden of ordenesChecked) {
-        await onPagar(orden.id, { ...formPago, retencion: Number(formPago.retencion) || 0 });
+        // Si hay abono parcial y solo hay una orden seleccionada, usar el monto del abono
+        const montoOrden = (montoAbono && ordenesChecked.length === 1)
+          ? montoAbonoNum
+          : (orden.saldoPendiente || orden.total || 0);
+        await onPagar(orden.id, {
+          ...formPago,
+          retencion: Number(formPago.retencion) || 0,
+          montoAbono: montoOrden,
+          esAbonoParcial: montoOrden < (orden.saldoPendiente || orden.total || 0)
+        });
       }
       setOrdenesSeleccionadas({});
       setMostrarPago(false);
+      setMontoAbono('');
       setFormPago({ formaPago: '', cajaId: '', cajaLabel: '', fechaPago: new Date().toISOString().split('T')[0], retencion: '' });
     } catch (e) { setError(e.response?.data?.error || 'Error al registrar pago'); }
     setGuardando(false);
@@ -327,6 +341,24 @@ const ModalEstadoCuenta = ({ cliente, cajas, formasPago, formasPagoConfig, empre
                     value={formPago.retencion} onChange={e => setFormPago(p => ({ ...p, retencion: e.target.value }))} />
                 </div>
               </div>
+              {/* ✅ FIX: campo abono parcial */}
+              <div style={s.campo}>
+                <label style={s.label}>
+                  Monto a abonar
+                  <span style={{ fontWeight: 400, color: '#9ca3af', marginLeft: 6 }}>
+                    (dejar vacío = pago total de {fmt(totalSeleccionado)})
+                  </span>
+                </label>
+                <input type="number" min="1" max={totalSeleccionado} style={{ ...s.input, fontWeight: 700, fontSize: 15 }}
+                  placeholder={String(totalSeleccionado)}
+                  value={montoAbono}
+                  onChange={e => setMontoAbono(e.target.value)} />
+                {montoAbono && Number(montoAbono) < totalSeleccionado && (
+                  <div style={{ marginTop: 6, padding: '8px 12px', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 8, fontSize: 12, color: '#92400e' }}>
+                    💡 Abono parcial: {fmt(Number(montoAbono))} de {fmt(totalSeleccionado)} — saldo restante: <strong>{fmt(totalSeleccionado - Number(montoAbono))}</strong>
+                  </div>
+                )}
+              </div>
 
               {Number(formPago.retencion) > 0 && (
                 <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, padding: '8px 12px', fontSize: 13, marginBottom: 12 }}>
@@ -339,7 +371,7 @@ const ModalEstadoCuenta = ({ cliente, cajas, formasPago, formasPagoConfig, empre
               <div style={{ display: 'flex', gap: 10 }}>
                 <button onClick={handlePagar} disabled={guardando}
                   style={{ padding: '10px 24px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700 }}>
-                  {guardando ? 'Registrando...' : `✅ Confirmar pago · ${fmt(totalSeleccionado)}`}
+                  {guardando ? 'Registrando...' : `✅ Confirmar ${montoAbono && Number(montoAbono) < totalSeleccionado ? 'abono' : 'pago'} · ${fmt(montoAbono ? Number(montoAbono) : totalSeleccionado)}`}
                 </button>
                 <button onClick={() => { setMostrarPago(false); setError(''); }}
                   style={{ padding: '10px 20px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 8, cursor: 'pointer' }}>
