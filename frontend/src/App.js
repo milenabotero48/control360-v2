@@ -79,11 +79,15 @@ const NAV_GRUPOS = {
 
 // Construir grupos filtrados por módulos activos del usuario
 const buildGrupos = (role, userModulos) => {
-  const grupos = NAV_GRUPOS[role] || NAV_GRUPOS['visor'];
   const modulosActivos = userModulos || [];
-  // ✅ FIX: admin también filtra por modulos si tiene lista definida
-  // Si modulos está vacío, se muestra todo (compatibilidad con admin principal)
-  const tieneModulosDefinidos = modulosActivos.length > 0;
+  const tieneModulosPersonalizados = modulosActivos.length > 0;
+
+  // ✅ FIX: si el usuario tiene módulos personalizados (ej: comercial con egresos, caja, etc.)
+  // usar siempre NAV_GRUPOS['admin'] como base para que todos los módulos sean accesibles
+  // Si no tiene módulos personalizados → usar el grupo de su rol (comportamiento original)
+  const grupos = (tieneModulosPersonalizados && role !== 'admin')
+    ? NAV_GRUPOS['admin']
+    : (NAV_GRUPOS[role] || NAV_GRUPOS['visor']);
 
   return grupos.map(g => ({
     grupo: g.grupo,
@@ -91,12 +95,16 @@ const buildGrupos = (role, userModulos) => {
       .map(key => TODOS_LOS_MODULOS.find(m => m.key === key))
       .filter(item => {
         if (!item) return false;
-        // Si no tiene módulos definidos, mostrar todo (admin principal sin restricciones)
-        if (!tieneModulosDefinidos) return true;
-        // Si tiene módulos definidos, filtrar también para admin
-        return modulosActivos.includes(item.modulo) ||
-               modulosActivos.includes(item.key) ||
-               modulosActivos.includes(item.label?.toLowerCase());
+        // Admin sin módulos definidos → ver todo
+        if (role === 'admin' && !tieneModulosPersonalizados) return true;
+        // Cualquier rol con módulos definidos → filtrar por lista
+        if (tieneModulosPersonalizados) {
+          return modulosActivos.includes(item.modulo) ||
+                 modulosActivos.includes(item.key) ||
+                 modulosActivos.includes(item.label?.toLowerCase());
+        }
+        // Rol sin módulos definidos → comportamiento original por rol
+        return true;
       })
   })).filter(g => g.items.length > 0);
 };
