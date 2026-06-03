@@ -576,7 +576,19 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
               <div style={s.seccion}>
                 <label style={s.label}>Tipo de servicio</label>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
-                  {TIPOS.map(t => (
+                  {TIPOS.filter(t => {
+                    const mods = user?.modulos || [];
+                    // Si no tiene módulos definidos (admin principal) → mostrar todos
+                    if (mods.length === 0) return true;
+                    // Tipos que requieren módulo específico
+                    if (t.value === 'taller')     return mods.includes('taller');
+                    if (t.value === 'despacho')   return mods.includes('logistica');
+                    if (t.value === 'domicilio')  return mods.includes('logistica');
+                    if (t.value === 'cobranza')   return mods.includes('cxc');
+                    if (t.value === 'produccion') return mods.includes('taller');
+                    if (t.value === 'interna')    return mods.includes('logistica') || mods.includes('taller');
+                    return true; // oficina siempre visible
+                  }).map(t => (
                     <button key={t.value} type="button" onClick={() => { setTipoServicio(t.value); if (t.value === 'cobranza' && clienteSel) cargarCxcCliente(clienteSel.id); }} style={{ padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: tipoServicio === t.value ? t.color : '#f3f4f6', color: tipoServicio === t.value ? '#fff' : '#374151', border: tipoServicio === t.value ? '2px solid ' + t.color : '2px solid transparent', transition: 'all 0.15s' }}>{t.label}</button>
                   ))}
                 </div>
@@ -706,7 +718,9 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                               {(() => {
                                 const cat = (item.categoria || '').toLowerCase();
                                 const esRecarga = cat.includes('recarga') || cat.includes('mantenimiento');
-                                if (!esRecarga) return null;
+                                // ✅ FIX: solo mostrar si tiene módulo qr activo
+                                const tieneQR = (user?.modulos || []).length === 0 || (user?.modulos || []).includes('qr');
+                                if (!esRecarga || !tieneQR) return null;
                                 const activo = !!item.esCambio;
                                 return (
                                   <div style={{ marginTop: 6 }}>
@@ -794,7 +808,7 @@ const ModalPinBloqueo = ({ bloqueo, empresas, clienteNombre, onAutorizado, onCan
     setVerificando(true); setError('');
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000/api'}/companies/verificar-pin`, {
+      const res = await fetch('http://localhost:5000/api/companies/verificar-pin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ pin })
