@@ -786,7 +786,7 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
         <div style={s.modalFooter}>
           <button onClick={onCerrar} style={s.btnCancelar}>Cancelar</button>
           <button onClick={handleAvanzar} disabled={guardando || subiendoFoto}
-            style={{ padding: '10px 24px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: 9, cursor: 'pointer', fontWeight: 700 }}>
+            style={{ padding: '16px', background: guardando || subiendoFoto ? '#9ca3af' : 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: 12, cursor: guardando || subiendoFoto ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 16, width: '100%' }}>
             {guardando ? 'Guardando...' : '▶️ Avanzar estado'}
           </button>
         </div>
@@ -1427,14 +1427,14 @@ const s = {
   kpiLabel:   { fontSize: 11, color: '#9ca3af', fontWeight: 600, textTransform: 'uppercase' },
   searchWrap: { display: 'flex', alignItems: 'center', background: '#fff', border: '2px solid #e5e7eb', borderRadius: 8, padding: '0 12px', flex: 1, maxWidth: 340 },
   searchInput:{ flex: 1, border: 'none', outline: 'none', fontSize: 13, padding: '9px 8px', background: 'transparent' },
-  overlay:    { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16 },
-  modal:      { background: '#fff', borderRadius: 16, width: '100%', maxWidth: 780, maxHeight: '95vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' },
-  modalHeader:{ padding: '16px 20px', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexShrink: 0 },
-  modalTitulo:{ margin: 0, fontSize: 18, fontWeight: 700, color: '#111' },
+  overlay:    { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 1000, padding: '0' },
+  modal:      { background: '#fff', borderRadius: '16px 16px 0 0', width: '100%', maxWidth: 780, maxHeight: '95vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 -8px 40px rgba(0,0,0,0.2)' },
+  modalHeader:{ padding: '16px 16px 12px', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexShrink: 0 },
+  modalTitulo:{ margin: 0, fontSize: 16, fontWeight: 700, color: '#111' },
   btnCerrar:  { background: '#f3f4f6', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer', fontSize: 16, color: '#6b7280', flexShrink: 0 },
-  modalBody:  { padding: '16px 20px', overflow: 'auto', flex: 1 },
-  modalFooter:{ padding: '14px 20px', borderTop: '1px solid #f3f4f6', display: 'flex', justifyContent: 'flex-end', gap: 12, flexShrink: 0 },
-  btnCancelar:{ padding: '10px 22px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 9, cursor: 'pointer', fontWeight: 600 },
+  modalBody:  { padding: '12px 16px', overflow: 'auto', flex: 1 },
+  modalFooter:{ padding: '12px 16px', borderTop: '1px solid #f3f4f6', display: 'flex', flexDirection: 'column', gap: 10, flexShrink: 0 },
+  btnCancelar:{ padding: '14px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 12, cursor: 'pointer', fontWeight: 600, width: '100%', fontSize: 15 },
   label:      { fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 6, display: 'block' },
   input:      { padding: '9px 12px', border: '2px solid #e5e7eb', borderRadius: 8, fontSize: 13, outline: 'none', color: '#111', background: '#fff', width: '100%', boxSizing: 'border-box' },
 };

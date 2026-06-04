@@ -68,7 +68,7 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo } = req.body;
+    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, web, whatsapp } = req.body;
 
     if (!name)                      return res.status(400).json({ error: 'Nombre requerido' });
     if (!validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido: mínimo 8 dígitos' });
@@ -92,6 +92,8 @@ router.post('/', async (req, res) => {
       ciudad:     ciudad.trim(),         // Mini-Ola 2.6
       phone,
       cellphone,
+      web: web || '',
+      whatsapp: whatsapp || cellphone || '',
       email,
       iva:        parseInt(iva),
       logo:       logoUrl || '',
@@ -110,7 +112,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     // Aceptamos configCertificado pero IGNORAMOS pinAutorizacion (deprecado).
-    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, configCertificado } = req.body;
+    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, configCertificado, web, whatsapp } = req.body;
 
     if (nit       && !validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido' });
     if (phone     && !validarTelefono(phone))     return res.status(400).json({ error: 'Teléfono inválido' });
@@ -128,6 +130,8 @@ router.put('/:id', async (req, res) => {
     if (ciudad !== undefined) updateData.ciudad = ciudad.trim();   // Mini-Ola 2.6
     if (phone)     updateData.phone     = phone;
     if (cellphone) updateData.cellphone = cellphone;
+    if (web !== undefined)       updateData.web       = web;
+    if (whatsapp !== undefined)  updateData.whatsapp  = whatsapp;
     if (email)     updateData.email     = email;
     if (iva)       updateData.iva       = parseInt(iva);
     if (configCertificado !== undefined) updateData.configCertificado = configCertificado;

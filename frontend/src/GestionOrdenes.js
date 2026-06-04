@@ -7,18 +7,27 @@ import { exportarExcel } from './exportExcel';
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const ESTADOS = {
-  completada:       { label: 'Completada',        color: '#16a34a', bg: '#f0fdf4' },
-  cxc:              { label: 'CXC',               color: '#dc2626', bg: '#fef2f2' },
-  programada:       { label: 'Programada',        color: '#6366f1', bg: '#eef2ff' },
-  en_ruta_recogida: { label: 'En Ruta Recogida',  color: '#f59e0b', bg: '#fffbeb' },
-  en_taller:        { label: 'En Taller',         color: '#8b5cf6', bg: '#f5f3ff' },
-  facturado:        { label: 'Facturado',         color: '#0284c7', bg: '#e0f2fe' },
-  despacho:         { label: 'Despacho',          color: '#d97706', bg: '#fef3c7' },
-  en_ruta_entrega:  { label: 'En Ruta Entrega',  color: '#059669', bg: '#ecfdf5' },
-  entrega_cobranza: { label: 'Entrega Cobranza', color: '#ea580c', bg: '#fff7ed' },
-  reparacion_proceso: { label: 'Reparación en Proceso', color: '#e11d48', bg: '#ffe4e8' },
-  cuadre_dinero:    { label: 'Cuadre Dinero',    color: '#0891b2', bg: '#ecfeff' },
-  anulada:          { label: 'Anulada',           color: '#6b7280', bg: '#f3f4f6' },
+  completada:         { label: 'Completada',           color: '#16a34a', bg: '#f0fdf4',  modulo: null },
+  cxc:                { label: 'CXC',                  color: '#dc2626', bg: '#fef2f2',  modulo: 'cxc' },
+  programada:         { label: 'Programada',           color: '#6366f1', bg: '#eef2ff',  modulo: null },
+  en_ruta_recogida:   { label: 'En Ruta Recogida',     color: '#f59e0b', bg: '#fffbeb',  modulo: 'logistica' },
+  en_taller:          { label: 'En Taller',            color: '#8b5cf6', bg: '#f5f3ff',  modulo: 'taller' },
+  facturado:          { label: 'Facturado',            color: '#0284c7', bg: '#e0f2fe',  modulo: null },
+  despacho:           { label: 'Despacho',             color: '#d97706', bg: '#fef3c7',  modulo: 'logistica' },
+  en_ruta_entrega:    { label: 'En Ruta Entrega',      color: '#059669', bg: '#ecfdf5',  modulo: 'logistica' },
+  entrega_cobranza:   { label: 'Entrega Cobranza',     color: '#ea580c', bg: '#fff7ed',  modulo: 'logistica' },
+  reparacion_proceso: { label: 'Reparación en Proceso',color: '#e11d48', bg: '#ffe4e8',  modulo: 'taller' },
+  cuadre_dinero:      { label: 'Cuadre Dinero',        color: '#0891b2', bg: '#ecfeff',  modulo: 'logistica' },
+  anulada:            { label: 'Anulada',              color: '#6b7280', bg: '#f3f4f6',  modulo: null },
+};
+
+// Helper: filtrar estados según módulos activos del usuario
+const estadosVisibles = (userModulos) => {
+  const mods = userModulos || [];
+  const sinFiltro = mods.length === 0;
+  return Object.entries(ESTADOS).filter(([, v]) =>
+    sinFiltro || !v.modulo || mods.includes(v.modulo)
+  );
 };
 
 const PRIORIDAD_COLOR = { normal: '#6b7280', alta: '#f59e0b', urgente: '#dc2626' };
@@ -170,7 +179,7 @@ const GestionOrdenes = ({ user }) => {
 
       {/* STATS RÁPIDAS */}
       <div style={s.statsRow}>
-        {Object.entries(ESTADOS).map(([key, val]) => {
+        {estadosVisibles(user?.modulos).map(([key, val]) => {
           const count = ordenes.filter(o => o.estado === key).length;
           return (
             <button key={key} onClick={() => setFiltroEstado(filtroEstado === key ? '' : key)}
@@ -219,7 +228,7 @@ const GestionOrdenes = ({ user }) => {
 
         <select style={s.select} value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)}>
           <option value="">Todos los estados</option>
-          {Object.entries(ESTADOS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+          {estadosVisibles(user?.modulos).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
         </select>
         <select style={s.select} value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
           <option value="">Todos los tipos</option>
