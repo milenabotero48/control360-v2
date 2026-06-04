@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Control360 — Información del Equipo</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --rojo: #e63946; --rojo-light: #fff0f0;
+      --verde: #2d6a4f; --verde-light: #d8f3dc;
+      --naranja: #f4a261;
+      --gris: #f8f9fa; --gris2: #e9ecef;
+      --texto: #1a1a2e; --texto2: #6c757d;
+      --blanco: #ffffff;
+      --sombra: 0 4px 24px rgba(0,0,0,0.08);
+      --radio: 16px;
+    }
+    body { font-family: 'DM Sans', sans-serif; background: var(--gris); color: var(--texto); min-height: 100vh; padding-bottom: 40px; }
+
+    /* SPLASH */
+    #splash { position: fixed; inset: 0; z-index: 9999; background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.6s ease; }
+    #splash img { width: 100%; height: 100%; object-fit: cover; opacity: 0.95; }
+    #splash-skip { position: absolute; bottom: 32px; right: 24px; background: rgba(255,255,255,0.18); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.3); color: #fff; padding: 10px 20px; border-radius: 30px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+    #splash-timer { width: 28px; height: 28px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.5); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+    #splash.oculto { opacity: 0; pointer-events: none; }
+
+    /* CONTENIDO */
+    #app { max-width: 480px; margin: 0 auto; padding: 20px 16px; }
+
+    /* LOADING */
+    .loading { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; gap: 16px; color: var(--texto2); }
+    .spinner { width: 40px; height: 40px; border: 3px solid var(--gris2); border-top-color: #7c3aed; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* HEADER EMPRESA */
+    .header-empresa { background: var(--blanco); border-radius: var(--radio); padding: 20px; box-shadow: var(--sombra); margin-bottom: 16px; display: flex; align-items: center; gap: 16px; }
+    .header-empresa img { width: 64px; height: 64px; object-fit: contain; border-radius: 12px; border: 1px solid var(--gris2); flex-shrink: 0; }
+    .empresa-inicial { width: 64px; height: 64px; border-radius: 12px; background: linear-gradient(135deg, #7c3aed, #4c1d95); display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 800; color: #fff; flex-shrink: 0; }
+    .empresa-nombre { font-size: 16px; font-weight: 700; }
+    .empresa-sub { font-size: 12px; color: var(--texto2); margin-top: 2px; }
+
+    /* ALERTAS */
+    .alerta-vencido { background: linear-gradient(135deg, #e63946, #c1121f); color: #fff; border-radius: var(--radio); padding: 20px; margin-bottom: 16px; text-align: center; box-shadow: 0 8px 32px rgba(230,57,70,0.3); animation: pulsar 2s infinite; }
+    .alerta-proximo { background: linear-gradient(135deg, #f4a261, #e76f51); color: #fff; border-radius: var(--radio); padding: 20px; margin-bottom: 16px; text-align: center; }
+    @keyframes pulsar { 0%,100%{transform:scale(1)} 50%{transform:scale(1.01)} }
+    .alerta-icon { font-size: 36px; margin-bottom: 8px; }
+    .alerta-titulo { font-size: 18px; font-weight: 800; }
+    .alerta-sub { font-size: 13px; opacity: 0.9; margin-top: 4px; }
+
+    /* CARD */
+    .card { background: var(--blanco); border-radius: var(--radio); padding: 20px; box-shadow: var(--sombra); margin-bottom: 16px; }
+    .card-titulo { font-size: 11px; font-weight: 700; color: var(--texto2); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+    .card-titulo::after { content:''; flex:1; height:1px; background:var(--gris2); }
+
+    /* BADGE TIPO */
+    .badge-tipo { display: inline-flex; align-items: center; gap: 8px; background: #1a1a2e; color: #fff; padding: 8px 16px; border-radius: 30px; font-size: 15px; font-weight: 700; margin-bottom: 16px; }
+    .badge-co2 { background: linear-gradient(135deg,#0077b6,#023e8a); }
+    .badge-abc { background: linear-gradient(135deg,#2d6a4f,#1b4332); }
+    .badge-bc  { background: linear-gradient(135deg,#7209b7,#480ca8); }
+
+    /* GRID INFO */
+    .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .info-item { background: var(--gris); border-radius: 10px; padding: 12px; }
+    .info-label { font-size: 10px; font-weight: 700; color: var(--texto2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+    .info-valor { font-size: 14px; font-weight: 600; color: var(--texto); }
+    .info-item.vencido .info-valor { color: var(--rojo); }
+    .info-item.ok .info-valor { color: var(--verde); }
+    .info-item.full { grid-column: 1 / -1; }
+
+    /* PROPIETARIO */
+    .propietario { display: flex; align-items: center; gap: 12px; background: #f0f7ff; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+    .prop-avatar { width: 40px; height: 40px; border-radius: 50%; background: linear-gradient(135deg,#0077b6,#023e8a); display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 800; color: #fff; flex-shrink: 0; }
+    .prop-nombre { font-size: 15px; font-weight: 700; }
+    .prop-sub { font-size: 12px; color: var(--texto2); margin-top: 1px; }
+
+    /* BOTONES */
+    .btn-wa { width:100%; padding:16px; border:none; border-radius:14px; background:linear-gradient(135deg,#25d366,#128c7e); color:#fff; font-family:'DM Sans',sans-serif; font-size:15px; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:10px; box-shadow:0 4px 16px rgba(37,211,102,0.3); transition:transform 0.15s; text-decoration:none; }
+    .btn-wa:active { transform:scale(0.98); }
+    .btn-web { width:100%; padding:14px; border:2px solid var(--gris2); border-radius:14px; background:var(--blanco); color:var(--texto); font-family:'DM Sans',sans-serif; font-size:14px; font-weight:600; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:10px; margin-bottom:10px; text-decoration:none; }
+    .btn-lista { width:100%; padding:16px; border:none; border-radius:14px; background:linear-gradient(135deg,#1a1a2e,#16213e); color:#fff; font-family:'DM Sans',sans-serif; font-size:15px; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:10px; box-shadow:0 4px 16px rgba(26,26,46,0.2); transition:transform 0.15s; }
+    .btn-lista:active { transform:scale(0.98); }
+
+    /* MODAL LISTA */
+    #modal-lista { position:fixed; inset:0; z-index:888; background:rgba(0,0,0,0.6); backdrop-filter:blur(4px); display:flex; align-items:flex-end; justify-content:center; opacity:0; pointer-events:none; transition:opacity 0.3s; }
+    #modal-lista.visible { opacity:1; pointer-events:all; }
+    .modal-sheet { background:var(--blanco); width:100%; max-width:500px; border-radius:24px 24px 0 0; max-height:90vh; overflow:hidden; display:flex; flex-direction:column; }
+    .modal-header { padding:20px 20px 0; display:flex; justify-content:space-between; align-items:flex-start; }
+    .modal-titulo { font-size:18px; font-weight:700; }
+    .modal-sub { font-size:12px; color:var(--texto2); margin-top:4px; }
+    .modal-close { width:32px; height:32px; border-radius:50%; background:var(--gris); border:none; font-size:18px; cursor:pointer; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+    #lista-body { flex:1; overflow-y:auto; padding:16px 20px; }
+    .tabla-header { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:8px; padding:8px 0; border-bottom:2px solid var(--gris2); font-size:10px; font-weight:700; color:var(--texto2); text-transform:uppercase; }
+    .tabla-fila { display:grid; grid-template-columns:2fr 1fr 1fr 1fr; gap:8px; padding:10px 0; border-bottom:1px solid var(--gris2); font-size:12px; }
+    .tabla-fila.vencido { background:#fff0f0; border-radius:8px; padding:10px 8px; }
+    .celda-fecha { font-size:11px; color:var(--texto2); }
+    .celda-fecha.vence { color:var(--rojo); font-weight:700; }
+    .modal-footer { padding:16px 20px; border-top:1px solid var(--gris2); display:flex; gap:10px; }
+    .btn-imprimir { flex:1; padding:12px; border:2px solid var(--gris2); border-radius:12px; background:var(--blanco); font-size:13px; font-weight:600; cursor:pointer; }
+    .btn-cerrar-modal { flex:1; padding:12px; border:none; border-radius:12px; background:var(--texto); color:#fff; font-size:13px; font-weight:600; cursor:pointer; }
+
+    /* FOOTER */
+    .footer-c360 { text-align:center; margin-top:24px; font-size:11px; color:var(--texto2); }
+    .footer-c360 a { color:#7c3aed; text-decoration:none; }
+
+    /* ERROR */
+    .error-state { text-align:center; padding:60px 20px; }
+    .error-icon { font-size:64px; margin-bottom:16px; }
+    .error-titulo { font-size:20px; font-weight:700; margin-bottom:8px; }
+    .error-sub { font-size:14px; color:var(--texto2); }
+  </style>
+</head>
+<body>
+
+<!-- SPLASH PROMO -->
+<div id="splash">
+  <div id="splash-timer-ring" style="display:none"></div>
+  <button id="splash-skip" onclick="cerrarSplash()">
+    <div id="splash-timer">5</div>
+    Saltar
+  </button>
+</div>
+
+<!-- CONTENIDO -->
+<div id="app">
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <div>Cargando información del equipo...</div>
+  </div>
+</div>
+
+<!-- MODAL LISTA EQUIPOS -->
+<div id="modal-lista">
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <div>
+        <div class="modal-titulo" id="lista-titulo">Mis Extintores</div>
+        <div class="modal-sub" id="lista-sub"></div>
+      </div>
+      <button class="modal-close" onclick="cerrarModal()">✕</button>
+    </div>
+    <div id="lista-body"></div>
+    <div class="modal-footer">
+      <button class="btn-imprimir" onclick="imprimirLista()">🖨️ Imprimir</button>
+      <button class="btn-cerrar-modal" onclick="cerrarModal()">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const API = 'https://control360-v2-production.up.railway.app/api';
+  const params = new URLSearchParams(window.location.search);
+  const codigo = (params.get('c') || '').toUpperCase().trim();
+
+  // ── SPLASH ──────────────────────────────────────────────────────────────────
+  let splashTimer = null;
+  function iniciarSplash(imagenUrl, segundos) {
+    const splash = document.getElementById('splash');
+    if (imagenUrl) {
+      const img = document.createElement('img');
+      img.src = imagenUrl;
+      splash.insertBefore(img, splash.firstChild);
+    } else {
+      splash.style.background = 'linear-gradient(135deg, #1a1a2e, #4c1d95)';
+      const logo = document.createElement('div');
+      logo.innerHTML = '<div style="color:#fff;font-size:48px;margin-bottom:16px">🧯</div><div style="color:#fff;font-size:24px;font-weight:800;letter-spacing:2px">Control360</div>';
+      splash.insertBefore(logo, splash.firstChild);
+    }
+    let cuenta = segundos || 5;
+    document.getElementById('splash-timer').textContent = cuenta;
+    splashTimer = setInterval(() => {
+      cuenta--;
+      const el = document.getElementById('splash-timer');
+      if (el) el.textContent = cuenta;
+      if (cuenta <= 0) cerrarSplash();
+    }, 1000);
+  }
+
+  function cerrarSplash() {
+    if (splashTimer) clearInterval(splashTimer);
+    const splash = document.getElementById('splash');
+    splash.classList.add('oculto');
+    setTimeout(() => splash.style.display = 'none', 600);
+  }
+
+  // ── HELPERS ─────────────────────────────────────────────────────────────────
+  function fmtFecha(val) {
+    if (!val) return '—';
+    const d = new Date(val);
+    if (isNaN(d)) return val;
+    return d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  function getTipoBadgeClass(tipo) {
+    const t = (tipo || '').toLowerCase();
+    if (t.includes('co2')) return 'badge-co2';
+    if (t.includes('abc')) return 'badge-abc';
+    if (t.includes('bc') || t.includes('bcf')) return 'badge-bc';
+    return '';
+  }
+
+  // ── INIT ─────────────────────────────────────────────────────────────────────
+  async function init() {
+    if (!codigo) {
+      mostrarError('Código no válido', 'Este QR no contiene un código de equipo válido.');
+      cerrarSplash();
+      return;
+    }
+
+    // Verificar si hay sesión activa (usuario interno)
+    const token = localStorage.getItem('c360_token') || sessionStorage.getItem('c360_token');
+    if (token) {
+      // Redirigir al sistema con el código para ver historial
+      window.location.href = `/?qr=${codigo}`;
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API}/qr/public/${codigo}`);
+      if (!res.ok) throw new Error('not_found');
+      const data = await res.json();
+
+      // Iniciar splash con config de la empresa
+      const seg = data.config?.tiempoSplash || 5;
+      iniciarSplash(data.config?.imagenPromo || null, seg);
+
+      renderEquipo(data);
+    } catch (e) {
+      cerrarSplash();
+      mostrarError('Equipo no encontrado', 'No encontramos información para este código QR. Verifica que el equipo esté registrado.');
+    }
+  }
+
+  // ── RENDER EQUIPO ────────────────────────────────────────────────────────────
+  function renderEquipo(data) {
+    const empresa = data.empresa || {};
+    const hoy = new Date();
+    const proxRecarga = data.proximaRecarga ? new Date(data.proximaRecarga) : null;
+    const diasParaVencer = proxRecarga ? Math.ceil((proxRecarga - hoy) / (1000 * 60 * 60 * 24)) : null;
+    const vencido = diasParaVencer !== null && diasParaVencer < 0;
+    const alertaProximo = !vencido && diasParaVencer !== null && diasParaVencer <= 30;
+
+    let html = '';
+
+    // Header empresa
+    html += `<div class="header-empresa">
+      ${empresa.logo
+        ? `<img src="${empresa.logo}" alt="${empresa.nombre}" />`
+        : `<div class="empresa-inicial">${(empresa.nombre || 'E')[0]}</div>`}
+      <div>
+        <div class="empresa-nombre">${empresa.nombre || 'Control360'}</div>
+        <div class="empresa-sub">🔒 Hoja de vida del equipo</div>
+      </div>
+    </div>`;
+
+    // Alerta vencimiento
+    if (vencido) {
+      html += `<div class="alerta-vencido">
+        <div class="alerta-icon">🚨</div>
+        <div class="alerta-titulo">¡Equipo VENCIDO!</div>
+        <div class="alerta-sub">Este extintor venció hace ${Math.abs(diasParaVencer)} día(s). Solicita recarga inmediata.</div>
+      </div>`;
+    } else if (alertaProximo) {
+      html += `<div class="alerta-proximo">
+        <div class="alerta-icon">⚠️</div>
+        <div class="alerta-titulo">Próximo a vencer</div>
+        <div class="alerta-sub">Este extintor vence en ${diasParaVencer} día(s). Te recomendamos programar la recarga.</div>
+      </div>`;
+    }
+
+    // Card info equipo
+    html += `<div class="card">
+      <div class="card-titulo">🧯 Información del equipo</div>`;
+
+    // Propietario
+    if (data.propietario) {
+      html += `<div class="propietario">
+        <div class="prop-avatar">${data.propietario[0].toUpperCase()}</div>
+        <div>
+          <div class="prop-nombre">${data.propietario}</div>
+          <div class="prop-sub">${data.ubicacion || 'Propietario registrado'}</div>
+        </div>
+      </div>`;
+    }
+
+    // Badge tipo
+    html += `<div class="badge-tipo ${getTipoBadgeClass(data.tipo)}">
+      🧯 ${data.tipo || 'EXTINTOR'} — ${data.capacidad || ''}
+    </div>`;
+
+    // Grid fechas
+    html += `<div class="info-grid">
+      <div class="info-item">
+        <div class="info-label">📅 Fecha de recarga</div>
+        <div class="info-valor">${fmtFecha(data.fechaUltimaRecarga)}</div>
+      </div>
+      <div class="info-item ${vencido ? 'vencido' : 'ok'}">
+        <div class="info-label">⏳ Próxima recarga</div>
+        <div class="info-valor">${fmtFecha(data.proximaRecarga)}</div>
+      </div>`;
+
+    if (data.requierePH) {
+      html += `<div class="info-item">
+        <div class="info-label">🧪 Últ. prueba hidrostática</div>
+        <div class="info-valor">${fmtFecha(data.fechaPH)}</div>
+      </div>
+      <div class="info-item">
+        <div class="info-label">🔧 Próx. prueba hidrostática</div>
+        <div class="info-valor">${fmtFecha(data.proximoMantenimiento)}</div>
+      </div>`;
+    }
+
+    if (data.ubicacion) {
+      html += `<div class="info-item full">
+        <div class="info-label">📍 Ubicación</div>
+        <div class="info-valor">${data.ubicacion}</div>
+      </div>`;
+    }
+
+    if (data.notas) {
+      html += `<div class="info-item full">
+        <div class="info-label">📝 Notas</div>
+        <div class="info-valor" style="font-size:13px;font-style:italic">${data.notas}</div>
+      </div>`;
+    }
+
+    html += `</div></div>`;
+
+    // Botones acción
+    html += `<div>`;
+
+    // WhatsApp
+    const waNum = (empresa.whatsapp || empresa.cellphone || '').replace(/\D/g, '');
+    const waMensaje = vencido
+      ? `Hola ${empresa.nombre || ''}, escaneé el QR del extintor ${data.codigoQR} y está VENCIDO. ¿Cuándo pueden hacer la recarga?`
+      : alertaProximo
+      ? `Hola ${empresa.nombre || ''}, mi extintor ${data.codigoQR} vence en ${diasParaVencer} días. ¿Pueden programar la recarga?`
+      : `Hola ${empresa.nombre || ''}, escaneé el QR de mi extintor ${data.codigoQR}. Quisiera información sobre el servicio.`;
+    const waUrl = waNum
+      ? `https://wa.me/57${waNum}?text=${encodeURIComponent(waMensaje)}`
+      : `https://wa.me/?text=${encodeURIComponent(waMensaje)}`;
+
+    html += `<a href="${waUrl}" target="_blank" class="btn-wa">
+      💬 ${vencido || alertaProximo ? 'Solicitar recarga urgente' : 'Contactar por WhatsApp'}
+    </a>`;
+
+    // Página web
+    if (empresa.web) {
+      const webUrl = empresa.web.startsWith('http') ? empresa.web : 'https://' + empresa.web;
+      html += `<a href="${webUrl}" target="_blank" class="btn-web">
+        🌐 Visitar nuestro sitio web
+      </a>`;
+    }
+
+    // Ver todos los equipos del cliente
+    if (data.clienteId) {
+      html += `<button class="btn-lista" onclick="verTodosEquipos('${data.clienteId}', '${data.adminId}', '${(data.propietario || '').replace(/'/g, "\\'")}')">
+        📋 Ver todos mis extintores
+      </button>`;
+    }
+
+    html += `</div>`;
+
+    // Footer
+    html += `<div class="footer-c360">
+      🔒 Información generada por <a href="https://ctrl360.netlify.app" target="_blank">Control360</a><br/>
+      Sistema operativo para empresas de servicios
+    </div>`;
+
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('app').innerHTML = html;
+  }
+
+  // ── VER TODOS LOS EQUIPOS ────────────────────────────────────────────────────
+  async function verTodosEquipos(clienteId, adminId, propietario) {
+    const modal = document.getElementById('modal-lista');
+    const body = document.getElementById('lista-body');
+    document.getElementById('lista-titulo').textContent = propietario || 'Mis Extintores';
+    body.innerHTML = '<div class="loading" style="min-height:200px"><div class="spinner"></div></div>';
+    modal.classList.add('visible');
+
+    try {
+      const res = await fetch(`${API}/qr/public/cliente/${clienteId}?adminId=${adminId}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      const empresa = data.empresa || {};
+
+      document.getElementById('lista-sub').textContent =
+        `${data.totalEquipos} equipo(s) registrado(s)${data.equiposVencidos > 0 ? ` · ${data.equiposVencidos} vencido(s)` : ''}`;
+
+      let html = `<div class="tabla-header">
+        <div>Tipo / Capacidad</div><div>F. Recarga</div><div>F. Vence</div><div>Estado</div>
+      </div>`;
+
+      if (!data.equipos?.length) {
+        html += `<div style="text-align:center;padding:32px;color:#6c757d">Sin equipos registrados</div>`;
+      } else {
+        data.equipos.forEach(eq => {
+          const hoy = new Date();
+          const prox = eq.proximaRecarga ? new Date(eq.proximaRecarga) : null;
+          const dias = prox ? Math.ceil((prox - hoy) / (1000 * 60 * 60 * 24)) : null;
+          const venc = dias !== null && dias < 0;
+          const proximo = !venc && dias !== null && dias <= 30;
+          const estado = venc ? '🔴 Vencido' : proximo ? '🟡 Por vencer' : '🟢 Al día';
+
+          html += `<div class="tabla-fila ${venc ? 'vencido' : ''}">
+            <div><strong>${eq.tipo || '—'}</strong><br/><span style="font-size:11px;color:#6c757d">${eq.capacidad || ''}</span></div>
+            <div class="celda-fecha">${fmtFecha(eq.fechaUltimaRecarga)}</div>
+            <div class="celda-fecha ${venc ? 'vence' : ''}">${fmtFecha(eq.proximaRecarga)}</div>
+            <div style="font-size:11px">${estado}</div>
+          </div>`;
+        });
+      }
+
+      html += `<div style="padding:16px 0 4px;font-size:11px;color:#6c757d;text-align:center">
+        Generado por Control360 · ${new Date().toLocaleDateString('es-CO')}
+      </div>`;
+
+      body.innerHTML = html;
+    } catch (e) {
+      body.innerHTML = '<div style="padding:32px;text-align:center;color:#e63946">Error al cargar equipos</div>';
+    }
+  }
+
+  function cerrarModal() { document.getElementById('modal-lista').classList.remove('visible'); }
+  function imprimirLista() { setTimeout(() => window.print(), 300); }
+  document.getElementById('modal-lista').addEventListener('click', function(e) { if (e.target === this) cerrarModal(); });
+
+  function mostrarError(titulo, sub) {
+    cerrarSplash();
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('app').innerHTML = `
+      <div class="error-state">
+        <div class="error-icon">🔍</div>
+        <div class="error-titulo">${titulo}</div>
+        <div class="error-sub">${sub}</div>
+      </div>
+      <div class="footer-c360">Powered by <a href="https://ctrl360.netlify.app">Control360</a></div>`;
+  }
+
+  init();
+</script>
+</body>
+</html>

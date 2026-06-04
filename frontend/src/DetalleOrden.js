@@ -1192,7 +1192,7 @@ const sValidPago = {
 // ─── GENERADOR HTML IMPRESIÓN ORDEN ──────────────────────────────────────────
 const generarHTMLImpresion = (orden, empresa, formato) => {
   const isPos = formato === 'pos';
-  const ancho = isPos ? '80mm' : '148mm';
+  const ancho = isPos ? '58mm' : '148mm';
   const items = (orden.items || []).map(item => `
     <tr>
       <td>${item.nombre}${item.notas ? `<br/><small style="color:#666">${item.notas}</small>` : ''}</td>
@@ -1207,21 +1207,25 @@ const generarHTMLImpresion = (orden, empresa, formato) => {
   <title>${orden.numeroOrden}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; font-size: ${isPos ? '10px' : '11px'}; width: ${ancho}; margin: 0 auto; padding: ${isPos ? '4mm' : '8mm'}; }
-    .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 8px; margin-bottom: 8px; }
-    .empresa-logo { font-size: ${isPos ? '14px' : '18px'}; font-weight: bold; color: #4c1d95; }
-    .empresa-datos { font-size: ${isPos ? '9px' : '10px'}; color: #666; margin-top: 4px; }
-    .orden-num { font-size: ${isPos ? '16px' : '20px'}; font-weight: bold; margin: 8px 0; }
-    .cliente-box { background: #f5f5f5; padding: 6px; border-radius: 4px; margin-bottom: 8px; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
-    th { background: #f0f0f0; padding: 4px 6px; text-align: left; font-size: ${isPos ? '9px' : '10px'}; }
-    td { padding: 4px 6px; border-bottom: 1px solid #eee; vertical-align: top; }
-    .totales { border-top: 2px solid #333; padding-top: 6px; }
-    .total-final { font-size: ${isPos ? '14px' : '16px'}; font-weight: bold; color: #16a34a; }
-    .footer { text-align: center; margin-top: 12px; padding-top: 8px; border-top: 1px dashed #ccc; font-size: ${isPos ? '8px' : '9px'}; color: #999; }
-    .notas { background: #fffbeb; border: 1px solid #fcd34d; padding: 6px; border-radius: 4px; margin-bottom: 8px; font-size: ${isPos ? '9px' : '10px'}; }
-    .pago-box { background: #f0fdf4; border: 1px solid #86efac; padding: 6px; border-radius: 4px; margin-top: 6px; font-size: ${isPos ? '9px' : '10px'}; }
-    @media print { body { width: ${ancho}; } }
+    body { font-family: 'Courier New', monospace; font-size: ${isPos ? '12px' : '11px'}; width: ${ancho}; margin: 0; padding: ${isPos ? '2mm 3mm' : '8mm'}; }
+    .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 6px; margin-bottom: 6px; }
+    .empresa-logo { font-size: ${isPos ? '13px' : '18px'}; font-weight: bold; color: #000; }
+    .empresa-datos { font-size: ${isPos ? '10px' : '10px'}; color: #444; margin-top: 3px; line-height: 1.4; }
+    .orden-num { font-size: ${isPos ? '15px' : '20px'}; font-weight: bold; margin: 6px 0; }
+    .cliente-box { padding: 4px 0; border-bottom: 1px dashed #999; margin-bottom: 6px; font-size: ${isPos ? '11px' : '11px'}; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+    th { padding: 3px 2px; text-align: left; font-size: ${isPos ? '10px' : '10px'}; border-bottom: 1px solid #333; }
+    td { padding: 3px 2px; border-bottom: 1px dashed #ddd; vertical-align: top; font-size: ${isPos ? '11px' : '10px'}; }
+    .totales { border-top: 2px solid #333; padding-top: 4px; font-size: ${isPos ? '12px' : '11px'}; }
+    .total-final { font-size: ${isPos ? '15px' : '16px'}; font-weight: bold; color: #000; }
+    .footer { text-align: center; margin-top: 8px; padding-top: 6px; border-top: 1px dashed #999; font-size: ${isPos ? '10px' : '9px'}; color: #666; }
+    .notas { border: 1px dashed #999; padding: 4px; margin-bottom: 6px; font-size: ${isPos ? '10px' : '10px'}; }
+    .pago-box { border: 1px solid #333; padding: 4px; margin-top: 4px; font-size: ${isPos ? '11px' : '10px'}; font-weight: bold; }
+    @media print {
+      * { margin: 0 !important; }
+      body { width: ${ancho} !important; margin: 0 !important; padding: ${isPos ? '0 2mm' : '8mm'} !important; }
+      @page { margin: 0; size: ${isPos ? '58mm auto' : 'auto'}; }
+    }
   </style></head><body>
   <div class="header">
     ${empresa?.logo ? `<img src="${empresa.logo}" style="height:${isPos ? '40px' : '55px'};object-fit:contain;margin-bottom:4px" /><br/>` : ''}

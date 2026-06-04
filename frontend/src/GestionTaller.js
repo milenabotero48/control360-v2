@@ -91,7 +91,27 @@ const ModalProcesoEquipo = ({ equipo, ordenId, numeroOrden, procesos, insumos, o
   const pasos = proceso?.pasos || [];
   const todosCompletados = proceso?.modoRapido ? pasosCompletados.rapido : (pasos.length > 0 && pasos.every(p => pasosCompletados[p.id]));
 
-  const togglePaso = id => setPasosCompletados(prev => ({ ...prev, [id]: !prev[id] }));
+  const togglePaso = (id) => {
+    const nuevoEstado = !pasosCompletados[id];
+    setPasosCompletados(prev => ({ ...prev, [id]: nuevoEstado }));
+    // ✅ FIX: al marcar un paso, inicializar insumos con cantidadPorEquipo por defecto
+    if (nuevoEstado) {
+      const paso = pasos.find(p => p.id === id);
+      if (paso?.insumos?.length > 0) {
+        setInsumosUsados(prev => {
+          const nuevos = { ...prev };
+          paso.insumos.forEach(ins => {
+            const key = `${id}_${ins.insumoId}`;
+            // Solo inicializar si no fue editado manualmente
+            if (!nuevos[key]) {
+              nuevos[key] = { pasoId: id, insumoId: ins.insumoId, cantidad: ins.cantidadPorEquipo || 1 };
+            }
+          });
+          return nuevos;
+        });
+      }
+    }
+  };
   const setInsumo = (pasoId, insumoId, cantidad) => setInsumosUsados(prev => ({ ...prev, [`${pasoId}_${insumoId}`]: { pasoId, insumoId, cantidad: parseFloat(cantidad) || 0 } }));
 
   const handleCompletar = async () => {
