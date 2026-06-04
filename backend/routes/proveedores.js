@@ -1,11 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const { db, admin } = require('../config/firebase');
+const { authenticate } = require('../middleware/auth');
 
 // GET /api/proveedores
-router.get('/', async (req, res) => {
+router.get('/', authenticate, async (req, res) => {
   try {
-    const snap = await db.collection('proveedores').where('userId', '==', req.user.uid).get();
+    const adminId = req.adminId || req.user.uid;
+    const snap = await db.collection('proveedores').where('adminId', '==', adminId).get();
     const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     lista.sort((a, b) => (a.nombre || '').localeCompare(b.nombre || ''));
     res.json(lista);
@@ -13,12 +15,14 @@ router.get('/', async (req, res) => {
 });
 
 // POST /api/proveedores
-router.post('/', async (req, res) => {
+router.post('/', authenticate, async (req, res) => {
   try {
+    const adminId = req.adminId || req.user.uid;
     const { nombre, nit, telefono, email, direccion, notas } = req.body;
     if (!nombre?.trim()) return res.status(400).json({ error: 'Nombre requerido' });
     const nuevo = {
-      userId: req.user.uid,
+      adminId,
+      creadoPor: req.user.uid,
       nombre: nombre.toUpperCase().trim(),
       nit: (nit || '').replace(/\D/g, ''),
       telefono: (telefono || '').replace(/\D/g, ''),
@@ -34,7 +38,7 @@ router.post('/', async (req, res) => {
 });
 
 // PUT /api/proveedores/:id
-router.put('/:id', async (req, res) => {
+router.put('/:id', authenticate, async (req, res) => {
   try {
     const { nombre, nit, telefono, email, direccion, notas } = req.body;
     const update = {
@@ -50,7 +54,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // DELETE /api/proveedores/:id
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', authenticate, async (req, res) => {
   try {
     await db.collection('proveedores').doc(req.params.id).update({ activo: false });
     res.json({ ok: true });

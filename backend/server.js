@@ -37,6 +37,9 @@ app.use('/api/quotations',authenticate, require('./routes/quotations'));
 app.use('/api/cotizaciones', authenticate, require('./routes/cotizaciones.routes'));
 app.use('/api/logistics', authenticate, require('./routes/logistics'));
 app.use('/api/workshop',  authenticate, require('./routes/workshop'));
+// Rutas QR públicas (sin autenticación) deben ir ANTES del middleware
+app.use('/api/qr/public', require('./routes/qr_public'));
+// Rutas QR privadas (con autenticación)
 app.use('/api/qr',        authenticate, require('./routes/qr'));
 app.use('/api/companies', authenticate, require('./routes/companies'));
 app.use('/api/users',         authenticate, require('./routes/users'));
