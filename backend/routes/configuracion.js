@@ -435,4 +435,37 @@ router.put('/lineas-servicio', async (req, res) => {
   }
 });
 
+
+// ─── GET/PUT /api/configuracion/metas — Metas del dashboard por adminId ──────
+router.get('/metas', authenticate, async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user.uid;
+    const ref = db.collection('configuracion').doc(adminId);
+    const doc = await ref.get();
+    const metas = doc.exists ? (doc.data().metas || {}) : {};
+    const defaults = { metaVentas: 25000000, metaDomicilios: 80, metaExtintores: 50 };
+    res.json({ ...defaults, ...metas });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/metas', authenticate, async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user.uid;
+    const { metaVentas, metaDomicilios, metaExtintores } = req.body;
+    const metas = {};
+    if (metaVentas !== undefined)     metas.metaVentas     = Number(metaVentas);
+    if (metaDomicilios !== undefined) metas.metaDomicilios = Number(metaDomicilios);
+    if (metaExtintores !== undefined) metas.metaExtintores = Number(metaExtintores);
+    await db.collection('configuracion').doc(adminId).set(
+      { metas, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+    res.json({ ok: true, metas });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
