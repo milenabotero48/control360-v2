@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db, admin } = require('../config/firebase');
+const { authenticate } = require('../middleware/auth');
 
 // Configuración por defecto para nuevos suscriptores
 const FORMAS_PAGO_DEFAULT = [
