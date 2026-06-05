@@ -786,6 +786,104 @@ const VistaForm = ({ form, setForm, cotActual, clientes, productos, totales, onS
 };
 
 // ─── ITEM ROW ─────────────────────────────────────────────────────────────────
+
+// ─── BUSCADOR DE PRODUCTOS COTIZACIÓN ────────────────────────────────────────
+const BuscadorProductoCot = ({ productos, value, onSelect }) => {
+  const [busqueda, setBusqueda] = React.useState('');
+  const [abierto, setAbierto] = React.useState(false);
+  const ref = React.useRef();
+
+  const productoSel = productos.find(p => p.id === value);
+
+  const filtrados = productos
+    .filter(p => p.activo !== false)
+    .filter(p => {
+      if (!busqueda.trim()) return true;
+      const q = busqueda.toLowerCase();
+      return (p.nombre || '').toLowerCase().includes(q) ||
+             (p.codigo || '').toLowerCase().includes(q) ||
+             (p.categoria || '').toLowerCase().includes(q);
+    })
+    .sort((a, b) => (a.categoria || '').localeCompare(b.categoria || '') || (a.nombre || '').localeCompare(b.nombre || ''))
+    .slice(0, 15);
+
+  // Agrupar por categoría
+  const grupos = {};
+  filtrados.forEach(p => {
+    const cat = p.categoria || 'SIN CATEGORÍA';
+    if (!grupos[cat]) grupos[cat] = [];
+    grupos[cat].push(p);
+  });
+
+  React.useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setAbierto(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const seleccionar = (prod) => {
+    onSelect(prod.id);
+    setBusqueda('');
+    setAbierto(false);
+  };
+
+  return (
+    <div ref={ref} style={{ position: 'relative', marginBottom: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1.5px solid #e5e7eb', borderRadius: 8, padding: '6px 10px', background: '#fff', cursor: 'text' }}
+        onClick={() => setAbierto(true)}>
+        <span style={{ color: '#9ca3af', fontSize: 13 }}>🔍</span>
+        <input
+          type="text"
+          value={abierto ? busqueda : (productoSel ? `${productoSel.codigo || ''} — ${productoSel.nombre}` : '')}
+          onChange={e => { setBusqueda(e.target.value); setAbierto(true); }}
+          onFocus={() => { setAbierto(true); setBusqueda(''); }}
+          placeholder="Buscar por nombre, código o categoría..."
+          style={{ border: 'none', outline: 'none', flex: 1, fontSize: 12, color: '#111', background: 'transparent', width: '100%' }}
+        />
+        {value && (
+          <button onClick={(e) => { e.stopPropagation(); onSelect(''); setBusqueda(''); }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9ca3af', fontSize: 14, padding: 0, lineHeight: 1 }}>✕</button>
+        )}
+      </div>
+      {abierto && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 999,
+          background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.12)', maxHeight: 300,
+          overflowY: 'auto', marginTop: 4
+        }}>
+          {filtrados.length === 0 ? (
+            <div style={{ padding: '14px 16px', color: '#9ca3af', fontSize: 12, textAlign: 'center' }}>
+              Sin resultados para "{busqueda}"
+            </div>
+          ) : Object.entries(grupos).map(([cat, prods]) => (
+            <div key={cat}>
+              <div style={{ padding: '6px 14px', fontSize: 10, fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                {cat}
+              </div>
+              {prods.map(p => (
+                <div key={p.id}
+                  onClick={() => seleccionar(p)}
+                  style={{ padding: '8px 14px', cursor: 'pointer', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#f5f3ff'}
+                  onMouseLeave={e => e.currentTarget.style.background = '#fff'}>
+                  <div>
+                    <span style={{ fontFamily: 'monospace', color: '#9ca3af', marginRight: 6, fontSize: 10 }}>{p.codigo}</span>
+                    <span style={{ fontWeight: 600, color: '#111' }}>{p.nombre}</span>
+                  </div>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: '#16a34a' }}>
+                    {new Intl.NumberFormat('es-CO',{style:'currency',currency:'COP',minimumFractionDigits:0}).format(p.precioVenta||0)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ItemRow = ({ item, idx, productos, onUpdate, onDelete, canDelete }) => {
   const [expanded, setExpanded] = useState(false);
   const subtotal = (Number(item.cantidad) || 0) * (Number(item.precioUnit) || 0) * (1 - (Number(item.descuento) || 0) / 100);
@@ -795,12 +893,11 @@ const ItemRow = ({ item, idx, productos, onUpdate, onDelete, canDelete }) => {
       <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr auto auto', gap: 8, padding: '12px 16px', alignItems: 'center', background: '#fafafa' }}>
         {/* Nombre/Producto */}
         <div>
-          <select value={item.productoId}
-            onChange={e => onUpdate(idx, 'productoId', e.target.value)}
-            style={{ ...s.inputSm, marginBottom: 4 }}>
-            <option value="">— Seleccionar producto —</option>
-            {productos.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
-          </select>
+          <BuscadorProductoCot
+            productos={productos}
+            value={item.productoId}
+            onSelect={val => onUpdate(idx, 'productoId', val)}
+          />
           <input value={item.nombre} onChange={e => onUpdate(idx, 'nombre', e.target.value)}
             placeholder="O escribe descripción libre..." style={s.inputSm} />
         </div>
