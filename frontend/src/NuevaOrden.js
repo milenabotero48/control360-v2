@@ -68,7 +68,8 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [fotoComprobante, setFotoComprobante] = useState('');
   const [subiendoComprobante, setSubiendoComprobante] = useState(false);
   const fotoComprobanteRef = useRef(null);
-  const [items, setItems]                 = useState([]);`n  const [alertaTaller, setAlertaTaller]   = useState(false);
+  const [items, setItems]                 = useState([]);
+  const [alertaTaller, setAlertaTaller]   = useState(false);
   const [buscarCliente, setBuscarCliente] = useState('');
   const [buscarProd, setBuscarProd]       = useState('');
   const [notas, setNotas]                 = useState('');
@@ -210,7 +211,6 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const crearOrden = async (forzar = false) => {
     const esInternaOProd = tipoServicio === 'interna' || tipoServicio === 'produccion';
 
-    // ✅ ALERTA INTELIGENTE: oficina + recarga sin esCambio → va a taller → advertir
     if (!forzar && tipoServicio === 'oficina') {
       const mods = user?.modulos || [];
       const tieneTaller = mods.length === 0 || mods.includes('taller');
@@ -642,7 +642,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                           <br />
                           {tieneLogistica
                             ? 'Si el cliente decide pagar al recoger o al recibir el servicio, el mensajero puede registrar el pago desde Logística. La orden quedará marcada como pagada y NO se permitirá cobrar de nuevo.'
-                            : 'Para registrar el pago o abono cuando el cliente cancele, dirígete al módulo CxC. La orden quedará marcada como pagada automáticamente.'}
+                            : 'Para registrar el pago o abono cuando el cliente cancele, dirígete al módulo CxC.'}
                         </div>
                       </div>
                     );
@@ -798,7 +798,6 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
 
         <div style={s.modalFooter}>
           <button onClick={onCancelar} style={s.btnCancelar}>Cancelar</button>
-          {/* ✅ Modal alerta taller */}
           {alertaTaller && (
             <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
               <div style={{ background: '#fff', borderRadius: 16, padding: 24, maxWidth: 400, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
@@ -821,7 +820,6 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
               </div>
             </div>
           )}
-
           <button onClick={esEdicion ? guardarEdicion : crearOrden}
             disabled={guardando || (bloqueo?.bloqueado && !pinDesbloqueado)}
             style={{ padding: '11px 28px', background: bloqueo?.bloqueado && !pinDesbloqueado ? '#9ca3af' : 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: 9, cursor: (guardando || (bloqueo?.bloqueado && !pinDesbloqueado)) ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 14, opacity: guardando ? 0.7 : 1 }}>
@@ -920,7 +918,7 @@ const MiniFormCliente = ({ token, empresas, onCreado, onCancelar }) => {
   const [form, setForm] = useState({ nombre: '', nit: '', celular: '', email: '', direccionPrincipal: '', empresaId: empresas.length > 0 ? empresas[0].id : '' });
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState('');
-    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const guardar = async () => {
     if (!form.nombre.trim()) return setError('Nombre requerido');
