@@ -12,7 +12,7 @@ const construirFlujo = ordersRouter.construirFlujo;
 // estén en la orden (son venta, no servicio de taller). Lista blanca.
 const CATEGORIAS_TALLER = [
   'recarga', 'mantenimiento', 'prueba hidrostatica', 'prueba hidrostática',
-  'hidrostatica', 'hidrostática'
+  'hidrostatica', 'hidrostática', 'extintor', 'extintores'
 ];
 const esItemTaller = (item = {}) => {
   const cat = (item.categoria || '').toLowerCase();

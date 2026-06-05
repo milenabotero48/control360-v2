@@ -420,7 +420,7 @@ router.post('/resolver', authenticate, async (req, res) => {
       modo: 'generar',
       id: ref.id,
       codigoQR: nuevoCodigo,
-      urlPublica: `/qr-public.html?c=${nuevoCodigo}&t=${adminId}`
+      urlPublica: `/qr-public.html?c=${nuevoCodigo}&t=${req.adminId}`
     });
   } catch (error) {
     console.error('POST /qr/resolver:', error);
