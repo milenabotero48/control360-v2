@@ -207,8 +207,26 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const tipoInfo = TIPOS.find(t => t.value === tipoServicio) || TIPOS[0];
   const necesitaLogistica = ['domicilio', 'taller', 'despacho', 'cobranza'].includes(tipoServicio);
 
-  const crearOrden = async () => {
+  const crearOrden = async (forzar = false) => {
     const esInternaOProd = tipoServicio === 'interna' || tipoServicio === 'produccion';
+
+    // ✅ ALERTA INTELIGENTE: oficina + recarga sin esCambio → va a taller → advertir
+    if (!forzar && tipoServicio === 'oficina') {
+      const mods = user?.modulos || [];
+      const tieneTaller = mods.length === 0 || mods.includes('taller');
+      if (tieneTaller) {
+        const tieneRecargaSinCambio = items.some(item => {
+          const cat = (item.categoria || '').toLowerCase();
+          const esRecarga = cat.includes('recarga') || cat.includes('mantenimiento') || cat.includes('hidrost');
+          return esRecarga && !item.esCambio;
+        });
+        if (tieneRecargaSinCambio) {
+          setAlertaTaller(true);
+          return;
+        }
+      }
+    }
+
     if (!esInternaOProd && !clienteSel) return setError('Selecciona un cliente');
     if (!esInternaOProd && tipoServicio !== 'cobranza' && !empresaSel) return setError('Selecciona la empresa que factura');
     if (esInternaOProd && !mensajeroId) return setError('Selecciona el trabajador a asignar');
@@ -610,20 +628,25 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                   </div>
 
                   {/* Ola 2.5: Aviso CxC */}
-                  {esFormaPagoCxC(formaPago) && (
-                    <div style={{
-                      marginTop: 10, padding: '10px 14px',
-                      background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8,
-                      fontSize: 12, color: '#78350f', display: 'flex', gap: 10, alignItems: 'flex-start'
-                    }}>
-                      <span style={{ fontSize: 18 }}>💳</span>
-                      <div>
-                        <strong>Esta orden inicia como Cuenta por Cobrar (CxC).</strong>
-                        <br />
-                        Si el cliente decide pagar al recoger o al recibir el servicio, el mensajero puede registrar el pago desde Logística. La orden quedará marcada como pagada y NO se permitirá cobrar de nuevo.
+                  {esFormaPagoCxC(formaPago) && (() => {
+                    const tieneLogistica = (user?.modulos || []).length === 0 || (user?.modulos || []).includes('logistica');
+                    return (
+                      <div style={{
+                        marginTop: 10, padding: '10px 14px',
+                        background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8,
+                        fontSize: 12, color: '#78350f', display: 'flex', gap: 10, alignItems: 'flex-start'
+                      }}>
+                        <span style={{ fontSize: 18 }}>💳</span>
+                        <div>
+                          <strong>Estás creando una orden sin pago inmediato.</strong>
+                          <br />
+                          {tieneLogistica
+                            ? 'Si el cliente decide pagar al recoger o al recibir el servicio, el mensajero puede registrar el pago desde Logística. La orden quedará marcada como pagada y NO se permitirá cobrar de nuevo.'
+                            : 'Para registrar el pago o abono cuando el cliente cancele, dirígete al módulo CxC. La orden quedará marcada como pagada automáticamente.'}
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Ola 2.5: Comprobante de pago adelantado para formas virtuales */}
                   {esFormaPagoVirtual(formaPago) && (
@@ -775,6 +798,30 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
 
         <div style={s.modalFooter}>
           <button onClick={onCancelar} style={s.btnCancelar}>Cancelar</button>
+          {/* ✅ Modal alerta taller */}
+          {alertaTaller && (
+            <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+              <div style={{ background: '#fff', borderRadius: 16, padding: 24, maxWidth: 400, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+                <div style={{ fontSize: 40, textAlign: 'center', marginBottom: 12 }}>⚠️</div>
+                <h3 style={{ textAlign: 'center', fontSize: 17, fontWeight: 800, marginBottom: 8 }}>Extintor irá al taller</h3>
+                <p style={{ fontSize: 13, color: '#6b7280', textAlign: 'center', lineHeight: 1.5, marginBottom: 20 }}>
+                  Tienes productos de recarga/mantenimiento sin marcar como <strong>"Es cambio"</strong>. El extintor pasará al proceso de taller.<br/><br/>
+                  Si el cliente solo viene a recoger un extintor ya listo, márcalo como <strong>cambio</strong> para que vaya directo a entrega.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <button onClick={() => { setAlertaTaller(false); crearOrden(true); }}
+                    style={{ padding: '13px', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 10, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>
+                    ✅ Sí, el extintor va al taller
+                  </button>
+                  <button onClick={() => setAlertaTaller(false)}
+                    style={{ padding: '13px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 10, fontWeight: 600, fontSize: 14, cursor: 'pointer' }}>
+                    ← Volver y marcar como cambio
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           <button onClick={esEdicion ? guardarEdicion : crearOrden}
             disabled={guardando || (bloqueo?.bloqueado && !pinDesbloqueado)}
             style={{ padding: '11px 28px', background: bloqueo?.bloqueado && !pinDesbloqueado ? '#9ca3af' : 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: 9, cursor: (guardando || (bloqueo?.bloqueado && !pinDesbloqueado)) ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 14, opacity: guardando ? 0.7 : 1 }}>
@@ -873,6 +920,7 @@ const MiniFormCliente = ({ token, empresas, onCreado, onCancelar }) => {
   const [form, setForm] = useState({ nombre: '', nit: '', celular: '', email: '', direccionPrincipal: '', empresaId: empresas.length > 0 ? empresas[0].id : '' });
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState('');
+  const [alertaTaller, setAlertaTaller] = useState(false); // ✅ alerta oficina sin cambio
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const guardar = async () => {

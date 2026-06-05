@@ -29,15 +29,21 @@ const auditar = async ({ accion, descripcion, usuarioId, usuarioEmail }) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get('/ordenes', async (req, res) => {
   try {
+    // ✅ FIX LOGISTICA-003: filtrar por adminId — sin esto se veían órdenes de otros suscriptores
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    
+    // Filtrar por adminId primero, luego por estado en memoria (evita índice compuesto)
     const snap = await db.collection('orders')
-      .where('estado', 'in', ['programada', 'despacho', 'en_ruta_recogida', 'en_ruta_entrega', 'entrega_cobranza'])
+      .where('adminId', '==', adminId)
       .get();
 
+    const estadosLogistica = ['programada', 'despacho', 'en_ruta_recogida', 'en_ruta_entrega', 'entrega_cobranza'];
     const hoy = new Date().toISOString().split('T')[0];
     const ordenes = [];
 
     snap.forEach(doc => {
       const o = { id: doc.id, ...doc.data() };
+      if (!estadosLogistica.includes(o.estado)) return; // filtrar estados en memoria
       const fechaProg = o.fechaProgramada || o.createdAt?.toDate?.()?.toISOString()?.split('T')[0] || hoy;
       ordenes.push({ ...o, fechaProgramada: fechaProg });
     });

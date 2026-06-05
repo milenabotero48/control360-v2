@@ -373,13 +373,21 @@ const ModalQR = ({ orden, equipo, onResolver, onCerrar }) => {
             </div>
           )}
         </div>
-        <div style={s.modalFooter}>
-          <button onClick={onCerrar} style={s.btnSecundario}>Cancelar</button>
+        <div style={{ ...s.modalFooter, flexDirection: 'column', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 10, width: '100%' }}>
+            <button onClick={onCerrar} style={{ ...s.btnSecundario, flex: 1 }}>Cancelar</button>
+            <button
+              onClick={confirmar}
+              disabled={!modo || guardando}
+              style={{ ...s.btnPrimario, flex: 2, opacity: (!modo || guardando) ? 0.5 : 1 }}>
+              {guardando ? 'Procesando...' : (modo === 'generar' ? 'Generar QR' : 'Confirmar QR')}
+            </button>
+          </div>
+          {/* ✅ QR-005: botón para continuar sin QR (extintores de carro, uso personal, etc.) */}
           <button
-            onClick={confirmar}
-            disabled={!modo || guardando}
-            style={{ ...s.btnPrimario, opacity: (!modo || guardando) ? 0.5 : 1 }}>
-            {guardando ? 'Procesando...' : (modo === 'generar' ? 'Generar QR' : 'Confirmar QR')}
+            onClick={() => { onCerrar(); }}
+            style={{ width: '100%', padding: '10px', background: 'none', border: '1px dashed #d1d5db', borderRadius: 8, color: '#6b7280', fontSize: 12, cursor: 'pointer', fontWeight: 500 }}>
+            🔧 Continuar sin QR (este extintor no necesita etiqueta)
           </button>
         </div>
       </div>
@@ -735,7 +743,8 @@ export default function GestionTaller({ user }) {
 
   const esItemTallerFront = (item = {}) => {
     const cat = (item.categoria || '').toLowerCase();
-    return ['recarga', 'mantenimiento', 'prueba hidrostatica', 'prueba hidrostática', 'hidrostatica', 'hidrostática']
+    return ['recarga', 'mantenimiento', 'prueba hidrostatica', 'prueba hidrostática',
+            'hidrostatica', 'hidrostática', 'extintor', 'extintores']
       .some(c => cat.includes(c));
   };
 
@@ -774,15 +783,18 @@ export default function GestionTaller({ user }) {
         const cant = it.cantidad || 1;
         const { tipo: tipoEq, capacidad: capEq } = separarTipoCap(it.nombre);
         for (let n = 0; n < cant; n++) {
+          // ✅ TALLER-001: si el producto no requiere QR, no crear slot de QR
+          const necesitaQR = it.requiereQR !== false;
           equiposExpandidos.push({
             codigoQR: null,
-            qrPendiente: true,
+            qrPendiente: necesitaQR, // false = no pedirá QR
             nombre: it.nombre || '',
             tipo: tipoEq,
             capacidad: capEq,
             categoria: it.categoria || '',
             esCambio: !!it.esCambio,
             codigoQRsugerido: it.codigoQR || '',
+            requiereQR: necesitaQR,
             procesado: false,
             _itemIdx: idx, _unidad: n + 1, _totalUnidad: cant
           });

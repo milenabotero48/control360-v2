@@ -979,6 +979,58 @@ router.put('/:id/estado', authenticate, async (req, res) => {
       }
 
       await devolverInventario(actual.items || []);
+
+      // ✅ FIX CAJA-001: revertir caja si el dinero ya había entrado
+      let cajaRevertida = null;
+      if (actual.dineroEnCaja === true && actual.total > 0) {
+        try {
+          // Buscar el movimiento original de esta orden
+          // Solo filtramos por ordenId para evitar índice compuesto
+          const movSnap = await db.collection('movimientos')
+            .where('ordenId', '==', id)
+            .limit(5).get();
+          // Filtrar ingreso en memoria
+          const movDocs = movSnap.docs.filter(d => d.data().tipo === 'ingreso');
+          const movSnapFiltrado = { empty: movDocs.length === 0, docs: movDocs };
+
+          if (!movSnapFiltrado.empty) {
+            const movData = movSnapFiltrado.docs[0].data();
+            const cajaId = movData.cajaId;
+            const montoRevertir = movData.monto || actual.total || 0;
+
+            if (cajaId && cajaId !== 'sin_asignar' && montoRevertir > 0) {
+              const cajaRef = db.collection('cajas').doc(cajaId);
+              const cajaDoc = await cajaRef.get();
+              if (cajaDoc.exists) {
+                const saldoActual = Number(cajaDoc.data().saldo) || 0;
+                await cajaRef.update({
+                  saldo: saldoActual - montoRevertir,
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                // Registrar egreso por anulación
+                await db.collection('movimientos').add({
+                  userId: req.adminId || req.user.uid,
+                  cajaId,
+                  tipo: 'egreso',
+                  concepto: `ANULACIÓN ${actual.numeroOrden} — ${actual.clienteNombre || ''} — ${String(notas).trim()}`,
+                  monto: montoRevertir,
+                  referencia: actual.numeroOrden,
+                  ordenId: id,
+                  formaPago: actual.formaPago || '',
+                  esAnulacion: true,
+                  creadoPor: usuarioNombre,
+                  createdAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+                cajaRevertida = { cajaId, montoRevertido: montoRevertir };
+              }
+            }
+          }
+        } catch (eCaja) {
+          console.error('Error revirtiendo caja al anular:', eCaja);
+          // No bloqueamos la anulación si falla la reversión de caja
+        }
+      }
+
       historial.push({ estado: 'anulada', fecha: ahora(), usuarioId, usuarioNombre, notas: notas || '' });
       await ordenRef.update({
         estado: 'anulada',
@@ -986,16 +1038,17 @@ router.put('/:id/estado', authenticate, async (req, res) => {
         anuladaPor: usuarioNombre,
         anuladaEn: ahora(),
         motivoAnulacion: String(notas).trim(),
+        dineroEnCaja: false, // ✅ marcar que ya no está en caja
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
       await auditar({
         accion: 'ANULAR_ORDEN',
-        descripcion: `${usuarioNombre} anuló orden ${actual.numeroOrden} — Motivo: ${notas}`,
+        descripcion: `${usuarioNombre} anuló orden ${actual.numeroOrden} — Motivo: ${notas}${cajaRevertida ? ` — Caja revertida: -$${cajaRevertida.montoRevertido.toLocaleString('es-CO')}` : ''}`,
         usuarioId, usuarioNombre, ordenId: id,
         documento: actual.numeroOrden,
-        datos: { estadoAnterior: actual.estado, motivo: notas }
+        datos: { estadoAnterior: actual.estado, motivo: notas, cajaRevertida }
       });
-      return res.json({ id, estado: 'anulada', historialEstados: historial });
+      return res.json({ id, estado: 'anulada', historialEstados: historial, cajaRevertida });
     }
 
     if (!ESTADOS.includes(nuevoEstado)) {

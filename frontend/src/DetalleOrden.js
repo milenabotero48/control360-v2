@@ -1197,8 +1197,8 @@ const generarHTMLImpresion = (orden, empresa, formato) => {
     <tr>
       <td>${item.nombre}${item.notas ? `<br/><small style="color:#666">${item.notas}</small>` : ''}</td>
       <td style="text-align:center">${item.cantidad}</td>
-      <td style="text-align:right">${formatCOP(item.precioUnitario)}</td>
-      ${item.descuento > 0 ? `<td style="text-align:center;color:#dc2626">-${item.descuento}%</td>` : '<td></td>'}
+      ${isPos ? '' : `<td style="text-align:right">${formatCOP(item.precioUnitario)}</td>`}
+      ${isPos ? '' : (item.descuento > 0 ? `<td style="text-align:center;color:#dc2626">-${item.descuento}%</td>` : '<td></td>')}
       <td style="text-align:right;font-weight:bold">${formatCOP(item.subtotalItem)}</td>
     </tr>
   `).join('');
@@ -1228,7 +1228,7 @@ const generarHTMLImpresion = (orden, empresa, formato) => {
     }
   </style></head><body>
   <div class="header">
-    ${empresa?.logo ? `<img src="${empresa.logo}" style="height:${isPos ? '40px' : '55px'};object-fit:contain;margin-bottom:4px" /><br/>` : ''}
+    ${empresa?.logo ? `<img src="${empresa.logo}" style="height:${isPos ? '70px' : '55px'};max-width:${isPos ? '100%' : '160px'};object-fit:contain;margin-bottom:6px;display:block;margin-left:auto;margin-right:auto" /><br/>` : ''}
     <div class="empresa-logo">${empresa?.name || 'EXTINTORES'}</div>
     <div class="empresa-datos">
       NIT: ${empresa?.nit || ''} | Tel: ${empresa?.cellphone || empresa?.phone || ''}<br/>
@@ -1247,7 +1247,7 @@ const generarHTMLImpresion = (orden, empresa, formato) => {
   </div>
   ${orden.notasOrden ? `<div class="notas">📝 ${orden.notasOrden}</div>` : ''}
   <table>
-    <thead><tr><th>Descripción</th><th>Cant</th><th>Precio</th><th>Desc</th><th>Total</th></tr></thead>
+    <thead><tr><th>Descripción</th><th>Cant</th>${isPos ? '' : '<th>Precio</th><th>Desc</th>'}<th>Total</th></tr></thead>
     <tbody>${items}</tbody>
   </table>
   <div class="totales">
