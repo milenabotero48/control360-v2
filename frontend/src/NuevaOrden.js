@@ -68,7 +68,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [fotoComprobante, setFotoComprobante] = useState('');
   const [subiendoComprobante, setSubiendoComprobante] = useState(false);
   const fotoComprobanteRef = useRef(null);
-  const [items, setItems]                 = useState([]);
+  const [items, setItems]                 = useState([]);`n  const [alertaTaller, setAlertaTaller]   = useState(false);
   const [buscarCliente, setBuscarCliente] = useState('');
   const [buscarProd, setBuscarProd]       = useState('');
   const [notas, setNotas]                 = useState('');
@@ -920,8 +920,7 @@ const MiniFormCliente = ({ token, empresas, onCreado, onCancelar }) => {
   const [form, setForm] = useState({ nombre: '', nit: '', celular: '', email: '', direccionPrincipal: '', empresaId: empresas.length > 0 ? empresas[0].id : '' });
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState('');
-  const [alertaTaller, setAlertaTaller] = useState(false); // ✅ alerta oficina sin cambio
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+    const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const guardar = async () => {
     if (!form.nombre.trim()) return setError('Nombre requerido');
