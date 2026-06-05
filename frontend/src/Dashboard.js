@@ -126,12 +126,7 @@ const Dashboard = ({ user }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState('');
   const [mostrarMetas, setMostrarMetas] = useState(false);
-  const [metas, setMetas]     = useState(() => {
-    try {
-      const s = localStorage.getItem('c360_metas');
-      return s ? JSON.parse(s) : { metaVentas: 25000000, metaDomicilios: 80, metaExtintores: 50 };
-    } catch { return { metaVentas: 25000000, metaDomicilios: 80, metaExtintores: 50 }; }
-  });
+  const [metas, setMetas] = useState({ metaVentas: 25000000, metaDomicilios: 80, metaExtintores: 50 });
 
   const token = localStorage.getItem('token');
   const isAdmin = user?.role === 'admin';
@@ -139,8 +134,15 @@ const Dashboard = ({ user }) => {
   const cargar = useCallback(async () => {
     try {
       const headers = { Authorization: `Bearer ${token}` };
-      const r = await axios.get(`${API}/dashboards/admin`, { headers });
+      const [r, rMetas] = await Promise.all([
+        axios.get(`${API}/dashboards/admin`, { headers }),
+        axios.get(`${API}/configuracion/metas`, { headers }).catch(() => ({ data: {} }))
+      ]);
       setData(r.data);
+      // ✅ FIX: cargar metas desde Firestore por adminId (no localStorage)
+      if (rMetas.data && Object.keys(rMetas.data).length > 0) {
+        setMetas(prev => ({ ...prev, ...rMetas.data }));
+      }
       setError('');
     } catch (e) {
       setError('No se pudo cargar el dashboard');
@@ -155,9 +157,11 @@ const Dashboard = ({ user }) => {
     return () => clearInterval(t);
   }, [cargar]);
 
-  const guardarMetas = (m) => {
+  const guardarMetas = async (m) => {
     setMetas(m);
-    localStorage.setItem('c360_metas', JSON.stringify(m));
+    try {
+      await axios.put(`${API}/configuracion/metas`, m, { headers: { Authorization: `Bearer ${token}` } });
+    } catch (e) { console.error('Error guardando metas:', e); }
     setMostrarMetas(false);
   };
 
