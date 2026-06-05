@@ -21,7 +21,7 @@
 
     /* SPLASH */
     #splash { position: fixed; inset: 0; z-index: 9999; background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; transition: opacity 0.6s ease; }
-    #splash img { width: 100%; height: 100%; object-fit: cover; opacity: 0.95; }
+    #splash img { width: 100%; height: 100%; object-fit: contain; background: #000; }
     #splash-skip { position: absolute; bottom: 32px; right: 24px; background: rgba(255,255,255,0.18); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.3); color: #fff; padding: 10px 20px; border-radius: 30px; font-size: 13px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 8px; }
     #splash-timer { width: 28px; height: 28px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.5); display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
     #splash.oculto { opacity: 0; pointer-events: none; }
@@ -217,7 +217,9 @@
     }
 
     try {
-      const res = await fetch(`${API}/qr/public/${codigo}`);
+      const tenantId = params.get('t') || '';
+      const queryStr = tenantId ? `?t=${tenantId}` : '';
+      const res = await fetch(`${API}/qr/public/${codigo}${queryStr}`);
       if (!res.ok) throw new Error('not_found');
       const data = await res.json();
 
@@ -291,13 +293,13 @@
 
     // Grid fechas
     html += `<div class="info-grid">
-      <div class="info-item">
+      <div class="info-item ok">
         <div class="info-label">📅 Fecha de recarga</div>
-        <div class="info-valor">${fmtFecha(data.fechaUltimaRecarga)}</div>
+        <div class="info-valor" style="color:#16a34a;font-weight:700">${fmtFecha(data.fechaUltimaRecarga)}</div>
       </div>
-      <div class="info-item ${vencido ? 'vencido' : 'ok'}">
+      <div class="info-item ${vencido ? 'vencido' : ''}">
         <div class="info-label">⏳ Próxima recarga</div>
-        <div class="info-valor">${fmtFecha(data.proximaRecarga)}</div>
+        <div class="info-valor" style="color:${vencido ? '#dc2626' : alertaProximo ? '#f59e0b' : '#dc2626'};font-weight:700">${fmtFecha(data.proximaRecarga)}</div>
       </div>`;
 
     if (data.requierePH) {

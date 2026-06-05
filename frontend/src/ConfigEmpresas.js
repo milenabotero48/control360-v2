@@ -31,7 +31,7 @@ const TabEmpresas = ({ token }) => {
   const [logoFile, setLogoFile] = useState(null);
   const [mensaje, setMensaje] = useState(null);
   const fileInputRef = useRef();
-  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '' });
+  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '' });
   const [errores, setErrores] = useState({});
 
   useEffect(() => { cargarEmpresas(); }, []);
@@ -110,7 +110,7 @@ const TabEmpresas = ({ token }) => {
 
   const handleEditar = (emp) => {
     setEditando(emp.id);
-    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '' });
+    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '' });
     setLogoPreview(emp.logo || null); setLogoFile(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -123,13 +123,13 @@ const TabEmpresas = ({ token }) => {
     } catch { mostrarMensaje('Error al eliminar', 'error'); }
   };
 
-  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
+  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
 
   const campo = (label, key, tipo = 'text', placeholder = '') => (
     <div style={S.campo}>
       <label style={S.label}>{label} *</label>
       <input type={tipo} value={formData[key]} placeholder={placeholder}
-        onChange={(e) => { let val = e.target.value; if (['nit','phone','cellphone','iva'].includes(key)) val = val.replace(/\D/g,''); setFormData({...formData,[key]:val}); if(errores[key]) setErrores({...errores,[key]:null}); }}
+        onChange={(e) => { let val = e.target.value; if (['nit','phone','cellphone','iva','whatsapp'].includes(key)) val = val.replace(/\D/g,''); setFormData({...formData,[key]:val}); if(errores[key]) setErrores({...errores,[key]:null}); }}
         style={{ ...S.input, ...(errores[key] ? { borderColor: '#dc3545' } : {}) }} />
       {errores[key] && <span style={{ color: '#dc3545', fontSize: 11, marginTop: 4 }}>{errores[key]}</span>}
     </div>
@@ -154,6 +154,8 @@ const TabEmpresas = ({ token }) => {
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 18 }}>
               {campo('Nombre Empresa', 'name')}{campo('NIT', 'nit', 'text', '88273572')}{campo('Dirección', 'address')}{campo('Ciudad', 'ciudad', 'text', 'Cali')}{campo('Teléfono', 'phone', 'text', '6022226686')}{campo('Celular', 'cellphone', 'text', '3148361622')}{campo('Email', 'email', 'email', 'empresa@correo.com')}{campo('IVA (%)', 'iva', 'text', '19')}
+                {campo('WhatsApp', 'whatsapp', 'text', '3148361622')}
+                {campo('Página Web', 'web', 'text', 'www.miempresa.com')}
             </div>
             <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
               <button type="submit" disabled={guardando} style={{ ...S.btnPrimario, opacity: guardando ? 0.7 : 1 }}>{guardando ? 'Guardando...' : editando ? '💾 Actualizar' : '✅ Crear Empresa'}</button>
@@ -180,6 +182,8 @@ const TabEmpresas = ({ token }) => {
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>🏙 Ciudad</span><span>{emp.ciudad || <span style={{ color: '#dc2626', fontStyle: 'italic' }}>Falta agregar</span>}</span></div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>📞 Teléfono</span><span>{emp.phone}</span></div>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>✉️ Email</span><span>{emp.email}</span></div>
+                  {emp.whatsapp && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>💬 WhatsApp</span><span>{emp.whatsapp}</span></div>}
+                  {emp.web && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>🌐 Web</span><span style={{ color: '#7c3aed' }}>{emp.web}</span></div>}
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>💰 IVA</span><span>{emp.iva}%</span></div>
                 </div>
                 <div style={{ display: 'flex', gap: 10 }}>

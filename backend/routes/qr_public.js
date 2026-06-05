@@ -50,9 +50,21 @@ const getEmpresaPublica = async (adminId, empresaId) => {
 router.get('/:codigo', async (req, res) => {
   try {
     const codigo = req.params.codigo.toUpperCase().trim();
-    const snap = await db.collection('qr_equipos')
-      .where('codigoQR', '==', codigo)
-      .limit(1).get();
+    const tenantId = req.query.t || null; // ✅ FIX: filtrar por tenant para evitar colisión
+
+    let snap;
+    if (tenantId) {
+      // Con tenant: busca exacto (sin colisión entre suscriptores)
+      snap = await db.collection('qr_equipos')
+        .where('codigoQR', '==', codigo)
+        .where('adminId', '==', tenantId)
+        .limit(1).get();
+    } else {
+      // Sin tenant (QR antiguos): busca solo por código
+      snap = await db.collection('qr_equipos')
+        .where('codigoQR', '==', codigo)
+        .limit(1).get();
+    }
 
     if (snap.empty) return res.status(404).json({ error: 'Equipo no encontrado' });
 

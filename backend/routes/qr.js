@@ -188,7 +188,7 @@ router.post('/', authenticate, async (req, res) => {
       activo: true, createdAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
     const ref = await db.collection('qr_equipos').add(nuevoQR);
-    res.status(201).json({ id: ref.id, codigoQR, ...nuevoQR, urlPublica: `/qr-public?c=${codigoQR}` });
+    res.status(201).json({ id: ref.id, codigoQR, ...nuevoQR, urlPublica: `/qr-public.html?c=${codigoQR}&t=${adminId}` });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
@@ -420,7 +420,7 @@ router.post('/resolver', authenticate, async (req, res) => {
       modo: 'generar',
       id: ref.id,
       codigoQR: nuevoCodigo,
-      urlPublica: `/qr-public?c=${nuevoCodigo}`
+      urlPublica: `/qr-public.html?c=${nuevoCodigo}&t=${adminId}`
     });
   } catch (error) {
     console.error('POST /qr/resolver:', error);
