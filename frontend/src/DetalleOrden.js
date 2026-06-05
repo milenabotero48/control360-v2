@@ -1207,20 +1207,20 @@ const generarHTMLImpresion = (orden, empresa, formato) => {
   <title>${orden.numeroOrden}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Courier New', monospace; font-size: ${isPos ? '12px' : '11px'}; width: ${ancho}; margin: 0; padding: ${isPos ? '2mm 3mm' : '8mm'}; }
-    .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 6px; margin-bottom: 6px; }
-    .empresa-logo { font-size: ${isPos ? '13px' : '18px'}; font-weight: bold; color: #000; }
-    .empresa-datos { font-size: ${isPos ? '10px' : '10px'}; color: #444; margin-top: 3px; line-height: 1.4; }
-    .orden-num { font-size: ${isPos ? '15px' : '20px'}; font-weight: bold; margin: 6px 0; }
-    .cliente-box { padding: 4px 0; border-bottom: 1px dashed #999; margin-bottom: 6px; font-size: ${isPos ? '11px' : '11px'}; }
+    body { font-family: 'Courier New', monospace; font-size: ${isPos ? '14px' : '11px'}; color: ${isPos ? '#000' : '#333'}; width: ${ancho}; margin: 0; padding: ${isPos ? '2mm 2mm' : '8mm'}; font-weight: ${isPos ? '600' : '400'}; }
+    .header { text-align: center; border-bottom: ${isPos ? '3px solid #000' : '2px solid #333'}; padding-bottom: 6px; margin-bottom: 6px; }
+    .empresa-logo { font-size: ${isPos ? '15px' : '18px'}; font-weight: 900; color: #000; }
+    .empresa-datos { font-size: ${isPos ? '12px' : '10px'}; color: ${isPos ? '#000' : '#444'}; margin-top: 3px; line-height: 1.4; }
+    .orden-num { font-size: ${isPos ? '18px' : '20px'}; font-weight: 900; margin: 6px 0; color: #000; }
+    .cliente-box { padding: 4px 0; border-bottom: ${isPos ? '2px dashed #000' : '1px dashed #999'}; margin-bottom: 6px; font-size: ${isPos ? '13px' : '11px'}; color: #000; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
-    th { padding: 3px 2px; text-align: left; font-size: ${isPos ? '10px' : '10px'}; border-bottom: 1px solid #333; }
-    td { padding: 3px 2px; border-bottom: 1px dashed #ddd; vertical-align: top; font-size: ${isPos ? '11px' : '10px'}; }
-    .totales { border-top: 2px solid #333; padding-top: 4px; font-size: ${isPos ? '12px' : '11px'}; }
-    .total-final { font-size: ${isPos ? '15px' : '16px'}; font-weight: bold; color: #000; }
-    .footer { text-align: center; margin-top: 8px; padding-top: 6px; border-top: 1px dashed #999; font-size: ${isPos ? '10px' : '9px'}; color: #666; }
-    .notas { border: 1px dashed #999; padding: 4px; margin-bottom: 6px; font-size: ${isPos ? '10px' : '10px'}; }
-    .pago-box { border: 1px solid #333; padding: 4px; margin-top: 4px; font-size: ${isPos ? '11px' : '10px'}; font-weight: bold; }
+    th { padding: 3px 2px; text-align: left; font-size: ${isPos ? '12px' : '10px'}; border-bottom: ${isPos ? '2px solid #000' : '1px solid #333'}; font-weight: 900; color: #000; }
+    td { padding: 3px 2px; border-bottom: ${isPos ? '1px dashed #000' : '1px dashed #ddd'}; vertical-align: top; font-size: ${isPos ? '13px' : '10px'}; color: #000; }
+    .totales { border-top: ${isPos ? '3px solid #000' : '2px solid #333'}; padding-top: 4px; font-size: ${isPos ? '14px' : '11px'}; color: #000; }
+    .total-final { font-size: ${isPos ? '18px' : '16px'}; font-weight: 900; color: #000; }
+    .footer { text-align: center; margin-top: 8px; padding-top: 6px; border-top: ${isPos ? '2px dashed #000' : '1px dashed #999'}; font-size: ${isPos ? '11px' : '9px'}; color: ${isPos ? '#000' : '#666'}; }
+    .notas { border: ${isPos ? '2px dashed #000' : '1px dashed #999'}; padding: 4px; margin-bottom: 6px; font-size: ${isPos ? '12px' : '10px'}; color: #000; }
+    .pago-box { border: ${isPos ? '3px solid #000' : '1px solid #333'}; padding: ${isPos ? '6px' : '4px'}; margin-top: 4px; font-size: ${isPos ? '14px' : '10px'}; font-weight: 900; color: #000; }
     @media print {
       * { margin: 0 !important; }
       body { width: ${ancho} !important; margin: 0 !important; padding: ${isPos ? '0 2mm' : '8mm'} !important; }
@@ -1237,7 +1237,7 @@ const generarHTMLImpresion = (orden, empresa, formato) => {
   </div>
   <div style="text-align:center">
     <div class="orden-num">${orden.numeroOrden}</div>
-    <div style="font-size:${isPos ? '9px' : '10px'};color:#666">${formatFecha(orden.fechaProgramada)}</div>
+    <div style="font-size:${isPos ? '12px' : '10px'};color:${isPos ? '#000' : '#666'}">${formatFecha(orden.fechaProgramada)}</div>
   </div>
   <div class="cliente-box">
     <strong>${orden.clienteNombre}</strong><br/>

@@ -80,7 +80,7 @@ const ModalDetalleQR = ({ equipo, clientes, onGuardar, onCerrar }) => {
     setGuardando(false);
   };
 
-  const urlPublica = QR_PUBLIC_URL + equipo.codigoQR;
+  const urlPublica = QR_PUBLIC_URL + equipo.codigoQR + '&t=' + (equipo.adminId || '');
 
   return (
     <div style={s.overlay}>
