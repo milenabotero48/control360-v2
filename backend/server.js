@@ -1,6 +1,19 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+const rateLimit = require('express-rate-limit');
+
+const limiterGeneral = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  message: { error: 'Demasiadas peticiones, intenta en 15 minutos.' }
+});
+
+const limiterLogin = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Demasiados intentos de login, intenta en 15 minutos.' }
+});
 const jwt = require('jsonwebtoken');
 
 // Firebase se inicializa SOLO en config/firebase.js
@@ -8,6 +21,8 @@ require('./config/firebase');
 
 const app = express();
 app.use(cors());
+app.use('/api/', limiterGeneral);
+app.use('/api/auth/login', limiterLogin);
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
