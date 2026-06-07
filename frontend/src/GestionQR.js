@@ -190,7 +190,7 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
   const toggle = (codigo) => {
     if (seleccionados.includes(codigo)) {
       setSeleccionados(prev => prev.filter(c => c !== codigo));
-    } else if (seleccionados.length < 9) {
+    } else if (seleccionados.length < 6) {
       setSeleccionados(prev => [...prev, codigo]);
     }
   };
@@ -241,12 +241,12 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
       return `
       <div class="etiqueta">
         <div class="qr-wrap">
-          <img src="https://api.qrserver.com/v1/create-qr-code/?size=60x60&data=${encodeURIComponent(QR_PUBLIC_URL + eq.codigoQR)}&bgcolor=ffffff&color=1a1a2e&margin=1" width="60" height="60" />
+          <img src="https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(QR_PUBLIC_URL + eq.codigoQR + '&t=' + (eq.adminId || ''))}&bgcolor=ffffff&color=1a1a2e&margin=1" width="80" height="80" />
         </div>
         <div class="info">
           <div class="propietario">${propietario}</div>
-          <div class="id-equipo">ID: ${eq.codigoQR}</div>
-          <div class="tipo">${eq.tipo || ''} ${eq.capacidad || ''}</div>
+          <div class="id-equipo">${eq.codigoQR}</div>
+          <div class="tipo">${eq.tipo || ''} — ${eq.capacidad || ''}</div>
           <div class="orden">${lineaOrden}</div>
         </div>
       </div>
@@ -257,11 +257,11 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body { font-family: Arial, sans-serif; background: #fff; }
-      .hoja { display: grid; grid-template-columns: repeat(3, 32mm); grid-template-rows: repeat(3, 25mm); gap: 2mm; padding: 10mm; }
-      .etiqueta { width: 32mm; height: 25mm; border: 0.5px solid #ccc; border-radius: 2mm; display: flex; align-items: center; gap: 1mm; padding: 1mm; overflow: hidden; }
-      .qr-wrap { flex-shrink: 0; }
-      .info { flex: 1; overflow: hidden; line-height: 1.15; }
-      /* PAQUETE C: nombre completo en hasta 2 líneas */
+      @page { size: 100mm 150mm; margin: 0; }
+      .hoja { display: grid; grid-template-columns: repeat(2, 40mm); grid-template-rows: repeat(3, 40mm); gap: 5mm; padding: 10mm 10mm; width: 100mm; box-sizing: border-box; }
+      .etiqueta { width: 40mm; height: 40mm; border: 0.5px solid #ccc; border-radius: 2mm; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding: 2mm 1.5mm 1mm; overflow: hidden; text-align: center; gap: 0.5mm; }
+      .qr-wrap { flex-shrink: 0; margin-bottom: 0.5mm; }
+      .info { width: 100%; overflow: hidden; line-height: 1.2; text-align: center; }
       .propietario {
         font-size: 5.5px;
         font-weight: 800;
@@ -271,10 +271,11 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
         -webkit-box-orient: vertical;
         overflow: hidden;
         word-break: break-word;
+        text-align: center;
       }
-      .id-equipo { font-size: 5px; color: #1a1a2e; font-weight: 700; font-family: monospace; margin-top: 1px; }
-      .tipo { font-size: 5px; color: #374151; margin-top: 1px; }
-      .orden { font-size: 5px; color: #6b7280; margin-top: 1px; font-family: monospace; font-weight: 600; }
+      .id-equipo { font-size: 5.5px; color: #1a1a2e; font-weight: 700; font-family: monospace; margin-top: 0.5px; }
+      .tipo { font-size: 5px; color: #374151; margin-top: 0.5px; font-weight: 600; }
+      .orden { font-size: 4.5px; color: #6b7280; margin-top: 0.5px; font-family: monospace; font-weight: 600; }
       @media print { body { padding: 0; } }
     </style></head><body>
     <div class="hoja">${filas}</div>
@@ -293,13 +294,13 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
         <div style={s.mHeader}>
           <div>
             <h3 style={s.mTitulo}>🖨️ Imprimir Etiquetas QR</h3>
-            <p style={{ margin: '2px 0 0', fontSize: 12, color: '#6b7280' }}>Selecciona hasta 9 equipos (hoja 3x3 de 32x25mm)</p>
+            <p style={{ margin: '2px 0 0', fontSize: 12, color: '#6b7280' }}>Selecciona hasta 6 equipos (hoja 2x3 de 4x4cm — papel 10x15cm)</p>
           </div>
           <button onClick={onCerrar} style={s.btnX}>✕</button>
         </div>
         <div style={s.mBody}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: '#374151' }}>{seleccionados.length}/9 seleccionados</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: '#374151' }}>{seleccionados.length}/6 seleccionados</span>
             {seleccionados.length > 0 && <button onClick={() => setSeleccionados([])} style={s.btnOutline}>Limpiar</button>}
           </div>
 
@@ -329,7 +330,7 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
           {/* Preview etiqueta */}
           {seleccionados.length > 0 && (
             <div style={{ marginTop: 16, padding: 14, background: '#f9fafb', borderRadius: 10 }}>
-              <p style={{ ...s.secTit, marginBottom: 12 }}>Vista previa de etiqueta (32x25mm)</p>
+              <p style={{ ...s.secTit, marginBottom: 12 }}>Vista previa de etiqueta (4x4cm)</p>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: 128, height: 100, border: '1px dashed #d1d5db', borderRadius: 6, padding: 4, background: '#fff' }}>
                 <QRImg value={QR_PUBLIC_URL + seleccionados[0]} size={72} />
                 <div style={{ flex: 1, overflow: 'hidden' }}>
