@@ -108,12 +108,36 @@ const ModalCuadrarDefinitivo = ({ provisional, cajas, onCuadrado, onCerrar }) =>
   const real = Number(valorReal) || 0;
   const diferencia = base - real; // positiva = vuelto / negativa = falta
 
+
+// ✅ COMPRESIÓN DE IMÁGENES antes de subir a Cloudinary (ahorra ~70% de espacio)
+const comprimirImagen = (file, maxWidth, quality) => {
+  maxWidth = maxWidth || 1200;
+  quality = quality || 0.82;
+  return new Promise(function(resolve) {
+    if (file.size < 300 * 1024) { resolve(file); return; }
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = function() {
+      let w = img.width, h = img.height;
+      if (w > maxWidth) { h = Math.round(h * maxWidth / w); w = maxWidth; }
+      canvas.width = w; canvas.height = h;
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob(function(blob) {
+        resolve(new File([blob], 'foto.jpg', { type: 'image/jpeg' }));
+      }, 'image/jpeg', quality);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+};
+
   const subirFactura = async (file) => {
     if (!file) return;
     setSubiendo(true);
     try {
+      const fileComp = await comprimirImagen(file, 1200, 0.82);
       const fd = new FormData();
-      fd.append('file', file);
+      fd.append('file', fileComp);
       fd.append('upload_preset', 'control360');
       const r = await fetch('https://api.cloudinary.com/v1_1/dk8hposft/image/upload', { method: 'POST', body: fd });
       const data = await r.json();

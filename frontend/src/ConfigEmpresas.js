@@ -59,9 +59,33 @@ const TabEmpresas = ({ token }) => {
     setLogoPreview(URL.createObjectURL(file));
   };
 
+
+// ✅ COMPRESIÓN DE IMÁGENES antes de subir a Cloudinary (ahorra ~70% de espacio)
+const comprimirImagen = (file, maxWidth, quality) => {
+  maxWidth = maxWidth || 1200;
+  quality = quality || 0.82;
+  return new Promise(function(resolve) {
+    if (file.size < 300 * 1024) { resolve(file); return; }
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = function() {
+      let w = img.width, h = img.height;
+      if (w > maxWidth) { h = Math.round(h * maxWidth / w); w = maxWidth; }
+      canvas.width = w; canvas.height = h;
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob(function(blob) {
+        resolve(new File([blob], 'foto.jpg', { type: 'image/jpeg' }));
+      }, 'image/jpeg', quality);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+};
+
   const subirLogoCloudinary = async (file) => {
+    const fileComp = await comprimirImagen(file, 800, 0.90);
     const fd = new FormData();
-    fd.append('file', file);
+    fd.append('file', fileComp);
     fd.append('upload_preset', CLOUDINARY_PRESET);
     fd.append('folder', 'control360/logos');
     const r = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`, { method: 'POST', body: fd });
