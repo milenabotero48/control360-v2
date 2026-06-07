@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
+const Sentry = require('./config/sentry');
 const rateLimit = require('express-rate-limit');
 
 const limiterGeneral = rateLimit({
@@ -62,6 +63,7 @@ app.use('/api/reportes',  authenticate, require('./routes/reportes'));
 app.use('/api/alertas',   authenticate, require('./routes/alertas'));
 app.use('/api/auditoria', authenticate, require('./routes/auditoria'));
 
+Sentry.setupExpressErrorHandler(app);
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Backend corriendo en http://localhost:${PORT}`);
