@@ -18,14 +18,6 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'Backend running ✅', firebase: 'Connected ✅' });
 });
 
-app.get('/api/test-token', (req, res) => {
-  const token = jwt.sign(
-    { uid: '3oUbFf2KvgbC97FXQFb8PHpwNBW2', email: 'sandra@empresa.com', role: 'admin' },
-    process.env.JWT_SECRET,
-    { expiresIn: '24h' }
-  );
-  res.json({ token });
-});
 
 // Routes
 app.use('/api/auth',      require('./routes/auth'));
