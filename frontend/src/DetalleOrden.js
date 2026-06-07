@@ -1228,7 +1228,10 @@ const generarHTMLImpresion = (orden, empresa, formato) => {
     }
   </style></head><body>
   <div class="header">
-    ${empresa?.logo ? `<img src="${empresa.logo}" style="height:${isPos ? '70px' : '55px'};max-width:${isPos ? '100%' : '160px'};object-fit:contain;margin-bottom:6px;display:block;margin-left:auto;margin-right:auto" /><br/>` : ''}
+    ${empresa?.logo ? `<img src="${empresa.logo}" style="${isPos
+      ? 'width:52mm;max-width:100%;height:auto;object-fit:contain;margin:0 auto 6px;display:block'
+      : 'height:100px;max-width:220px;object-fit:contain;margin:0 auto 8px;display:block'
+    }" /><br/>` : ''}
     <div class="empresa-logo">${empresa?.name || 'EXTINTORES'}</div>
     <div class="empresa-datos">
       NIT: ${empresa?.nit || ''} | Tel: ${empresa?.cellphone || empresa?.phone || ''}<br/>
@@ -1321,7 +1324,7 @@ const generarHTMLCertificadoDinamico = (orden, empresa, configCat = null) => {
   </style></head><body>
   <div class="header">
     <div class="empresa-info">
-      ${empresa?.logo ? `<img src="${empresa.logo}" style="height:70px;object-fit:contain;margin-bottom:8px"/><br/>` : ''}
+      ${empresa?.logo ? `<img src="${empresa.logo}" style="height:90px;max-width:200px;object-fit:contain;margin:0 auto 8px;display:block"/><br/>` : ''}
       <h1>${empresa?.name || ''}</h1>
       <p>NIT: ${empresa?.nit || ''} | Tel: ${empresa?.cellphone || empresa?.phone || ''}</p>
       <p>${empresa?.address || ''}</p>
@@ -1420,7 +1423,7 @@ const generarHTMLCertificado = (orden, empresa) => {
   </style></head><body>
   <div class="header">
     <div class="empresa-info">
-      ${empresa?.logo ? `<img src="${empresa.logo}" style="height:70px;object-fit:contain;margin-bottom:8px" /><br/>` : ''}
+      ${empresa?.logo ? `<img src="${empresa.logo}" style="height:90px;max-width:200px;object-fit:contain;margin:0 auto 8px;display:block" /><br/>` : ''}
       <h1>${empresa?.name || 'EXTINTORES DEL SUR'}</h1>
       <p>NIT: ${empresa?.nit || ''} | Tel: ${empresa?.cellphone || empresa?.phone || ''}</p>
       <p>${empresa?.address || ''}</p>

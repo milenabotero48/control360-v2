@@ -947,6 +947,7 @@ const GestionLogistica = ({ user }) => {
   const [loading, setLoading]           = useState(true);
   const [modalAsignar, setModalAsignar] = useState(false);
   const [modalAvanzar, setModalAvanzar] = useState(null);
+  const [isMobile] = useState(() => window.innerWidth < 768);
   const [modalCuadre, setModalCuadre]   = useState(null);
   const [buscarExt, setBuscarExt]       = useState('');
   const [filtroExtEstado, setFiltroExtEstado] = useState('prestado');
@@ -1145,14 +1146,50 @@ const GestionLogistica = ({ user }) => {
                     display: 'flex', alignItems: 'center', gap: 10,
                     padding: '10px 16px',
                     background: sector.color || '#6b7280',
-                    color: '#fff', borderRadius: '10px 10px 0 0',
-                    fontWeight: 700, fontSize: 14
+                    color: '#fff', borderRadius: isMobile ? 10 : '10px 10px 0 0',
+                    fontWeight: 700, fontSize: 14, marginBottom: isMobile ? 8 : 0
                   }}>
                     📍 {sector.etiqueta}
                     <span style={{ background: 'rgba(255,255,255,0.25)', padding: '2px 10px', borderRadius: 10, fontSize: 12 }}>
                       {ordsGrupo.length} {ordsGrupo.length === 1 ? 'orden' : 'órdenes'}
                     </span>
                   </div>
+
+                  {/* MÓVIL: tarjetas */}
+                  {isMobile ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {ordsGrupo.map(o => (
+                        <div key={o.id} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 14, borderLeft: `4px solid ${sector.color || '#6b7280'}` }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                            <div>
+                              <code style={{ fontSize: 13, fontWeight: 700, color: '#1e1b4b' }}>{o.numeroOrden}</code>
+                              <EstadoBadge estado={o.estado} orden={o} />
+                            </div>
+                            <span style={{ fontSize: 16, fontWeight: 800, color: '#16a34a' }}>{fmt(o.total)}</span>
+                          </div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: '#111', marginBottom: 4 }}>{o.clienteNombre}</div>
+                          {(o.sucursalDireccion || o.clienteDireccion) && (
+                            <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>📍 {o.sucursalDireccion || o.clienteDireccion}</div>
+                          )}
+                          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10 }}>
+                            📅 {fmtFecha(o.fechaProgramada)} · {o.lugarAtencion || 'servicio'}
+                          </div>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button onClick={() => setModalAvanzar(o)}
+                              style={{ flex: 1, padding: '12px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: 10, cursor: 'pointer', fontSize: 15, fontWeight: 800 }}>
+                              ▶️ Avanzar
+                            </button>
+                            {isAdmin && (
+                              <button onClick={() => setModalAsignarMensajero([o.id])}
+                                style={{ padding: '12px 14px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 10, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                                👤
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
                   <table style={{ ...s.tabla, borderRadius: '0 0 10px 10px', overflow: 'hidden' }}>
                     <thead>
                       <tr style={s.theadRow}>
@@ -1168,7 +1205,6 @@ const GestionLogistica = ({ user }) => {
                           <tr key={o.id} style={{
                             background: i % 2 === 0 ? '#fff' : '#f9fafb',
                             borderBottom: '1px solid #f3f4f6',
-                            // Mini-Ola 2.6: leve tinte cuando ya tiene mensajero
                             borderLeft: tieneAsignado ? `3px solid ${sector.color || '#6b7280'}` : 'none'
                           }}>
                             <td style={s.td}><code style={{ fontSize: 12 }}>{o.numeroOrden}</code></td>
@@ -1224,6 +1260,7 @@ const GestionLogistica = ({ user }) => {
                       })}
                     </tbody>
                   </table>
+                  )} {/* fin ternario móvil/desktop */}
                 </div>
               ))}
             </div>
