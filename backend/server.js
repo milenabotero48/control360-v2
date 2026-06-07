@@ -21,10 +21,10 @@ require('./config/firebase');
 
 const app = express();
 app.use(cors());
-app.use('/api/', limiterGeneral);
-app.use('/api/auth/login', limiterLogin);
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
+app.use('/api/', limiterGeneral);
+app.use('/api/auth/login', limiterLogin);
 
 const { db } = require('./config/firebase');
 const { authenticate, validarTenant } = require('./middleware/auth.js');
