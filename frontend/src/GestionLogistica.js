@@ -222,6 +222,27 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
   const CLOUDINARY_URL = 'https://api.cloudinary.com/v1_1/dk8hposft/image/upload';
   const CLOUDINARY_PRESET = 'control360';
 
+
+// ✅ COMPRESIÓN DE IMÁGENES antes de subir a Cloudinary (ahorra ~70% de espacio)
+const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
+  return new Promise((resolve) => {
+    if (file.size < 300 * 1024) { resolve(file); return; } // < 300KB = no comprimir
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxWidth) { height = Math.round(height * maxWidth / width); width = maxWidth; }
+      canvas.width = width; canvas.height = height;
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob(blob => {
+        resolve(new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }));
+      }, 'image/jpeg', quality);
+    };
+    img.src = URL.createObjectURL(file);
+  });
+};
+
   const subirFoto = async (file, setter) => {
     setSubiendoFoto(true);
 
@@ -234,8 +255,9 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
       gpsData = { lat: pos.coords.latitude, lng: pos.coords.longitude, timestamp: new Date().toISOString() };
     } catch { /* GPS no disponible */ }
 
+    const fileComprimido = await comprimirImagen(file, 1200, 0.82);
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append('file', fileComprimido);
     formData.append('upload_preset', CLOUDINARY_PRESET);
     formData.append('folder', 'control360/logistica');
     if (gpsData) formData.append('context', `lat=${gpsData.lat}|lng=${gpsData.lng}`);
