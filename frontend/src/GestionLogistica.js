@@ -947,7 +947,7 @@ const GestionLogistica = ({ user }) => {
   const [loading, setLoading]           = useState(true);
   const [modalAsignar, setModalAsignar] = useState(false);
   const [modalAvanzar, setModalAvanzar] = useState(null);
-  const [isMobile] = useState(() => window.innerWidth < 768);
+  const [isMobile] = useState(() => window.innerWidth < 1024);
   const [modalCuadre, setModalCuadre]   = useState(null);
   const [buscarExt, setBuscarExt]       = useState('');
   const [filtroExtEstado, setFiltroExtEstado] = useState('prestado');
@@ -1156,7 +1156,7 @@ const GestionLogistica = ({ user }) => {
                   </div>
 
                   {/* MÓVIL: tarjetas */}
-                  {isMobile ? (
+                  {(isMobile || isMensajero) ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                       {ordsGrupo.map(o => (
                         <div key={o.id} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 14, borderLeft: `4px solid ${sector.color || '#6b7280'}` }}>
