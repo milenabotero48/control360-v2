@@ -1179,12 +1179,7 @@ const GestionLogistica = ({ user }) => {
                               style={{ flex: 1, padding: '12px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: 10, cursor: 'pointer', fontSize: 15, fontWeight: 800 }}>
                               ▶️ Avanzar
                             </button>
-                            {isAdmin && (
-                              <button onClick={() => setModalAsignarMensajero([o.id])}
-                                style={{ padding: '12px 14px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 10, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-                                👤
-                              </button>
-                            )}
+
                           </div>
                         </div>
                       ))}
