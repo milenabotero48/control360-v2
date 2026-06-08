@@ -747,7 +747,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                         <div key={p.id} style={s.dropItem} onClick={() => agregarProducto(p)}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                             <div><code style={{ fontSize: 11, color: '#9ca3af' }}>{p.codigo}</code><strong style={{ marginLeft: 8, fontSize: 13 }}>{p.nombre}</strong><span style={{ marginLeft: 8, fontSize: 11, color: '#9ca3af' }}>{p.categoria}</span></div>
-                            <strong style={{ color: '#16a34a', fontSize: 13 }}>{fmt(p.precioVenta)}</strong>
+                            {tipoServicio !== 'produccion' && <strong style={{ color: '#16a34a', fontSize: 13 }}>{fmt(p.precioVenta)}</strong>}
                           </div>
                         </div>
                       ))}
@@ -760,7 +760,10 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 480 }}>
                       <thead>
                         <tr style={{ background: '#f9fafb' }}>
-                          {['Producto', 'Cant.', 'Precio', 'Desc.%', 'Notas', 'Total', ''].map(h => (
+                          {(tipoServicio === 'produccion'
+                            ? ['Producto', 'Cant.', 'Notas', '']
+                            : ['Producto', 'Cant.', 'Precio', 'Desc.%', 'Notas', 'Total', '']
+                          ).map(h => (
                             <th key={h} style={{ padding: '8px 8px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{h}</th>
                           ))}
                         </tr>
@@ -817,16 +820,23 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                                 );
                               })()}
                             </td>
-                            <td style={{ padding: '8px 8px', fontWeight: 700, color: '#16a34a', whiteSpace: 'nowrap' }}>{fmt((Number(item.precioUnitario) || 0) * (Number(item.cantidad) || 1) * (1 - (Number(item.descuento) || 0) / 100))}</td>
+                            <td style={{ padding: '8px 8px', fontWeight: 700, color: '#16a34a', whiteSpace: 'nowrap' }}>{tipoServicio !== 'produccion' && fmt((Number(item.precioUnitario) || 0) * (Number(item.cantidad) || 1) * (1 - (Number(item.descuento) || 0) / 100))}</td>
                             <td style={{ padding: '8px 4px' }}><button onClick={() => eliminarItem(idx)} style={{ background: '#fef2f2', border: 'none', borderRadius: 4, padding: '3px 7px', cursor: 'pointer', color: '#dc2626', fontSize: 12 }}>✕</button></td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                     <div style={{ marginTop: 8, padding: '10px 12px', background: '#f9fafb', borderRadius: 8, fontSize: 13 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', color: '#6b7280', marginBottom: 4 }}><span>Subtotal</span><span>{fmt(subtotal)}</span></div>
-                      {ivaPct > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', color: '#6b7280', marginBottom: 4 }}><span>IVA ({ivaPct}%)</span><span>{fmt(ivaValor)}</span></div>}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 800, fontSize: 15, borderTop: '1px solid #e5e7eb', paddingTop: 6 }}><span>TOTAL</span><span style={{ color: '#16a34a' }}>{fmt(total)}</span></div>
+                      {tipoServicio !== 'produccion' && <>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', color: '#6b7280', marginBottom: 4 }}><span>Subtotal</span><span>{fmt(subtotal)}</span></div>
+                        {ivaPct > 0 && <div style={{ display: 'flex', justifyContent: 'space-between', color: '#6b7280', marginBottom: 4 }}><span>IVA ({ivaPct}%)</span><span>{fmt(ivaValor)}</span></div>}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 800, fontSize: 15, borderTop: '1px solid #e5e7eb', paddingTop: 6 }}><span>TOTAL</span><span style={{ color: '#16a34a' }}>{fmt(total)}</span></div>
+                      </>}
+                      {tipoServicio === 'produccion' && (
+                        <div style={{ color: '#6b7280', fontSize: 12, fontStyle: 'italic', textAlign: 'center' }}>
+                          Orden interna — sin costo para el cliente
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
