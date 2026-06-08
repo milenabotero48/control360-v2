@@ -37,6 +37,7 @@ app.get('/api/health', (req, res) => {
 
 // Routes
 app.use('/api/auth',      require('./routes/auth'));
+app.use('/api/auth',      require('./routes/password-reset'));
 app.use('/api/orders',    authenticate, require('./routes/orders'));
 app.use('/api/clients',   authenticate, require('./routes/clients'));
 app.use('/api/products',  require('./routes/products'));
