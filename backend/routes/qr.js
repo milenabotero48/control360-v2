@@ -318,6 +318,20 @@ router.post('/resolver', authenticate, async (req, res) => {
     const proximaRecarga = new Date(ahora);
     proximaRecarga.setFullYear(proximaRecarga.getFullYear() + 1);
 
+    // ── MODO SIN QR: el equipo no necesita etiqueta ───────────────────────────
+    if (modo === 'sin_qr') {
+      // Solo limpia la señal qrPendiente de la orden y marca el slot como resuelto
+      if (ordenId) {
+        await db.collection('orders').doc(ordenId)
+          .update({ qrPendiente: false }).catch(() => {});
+      }
+      return res.json({
+        message: 'Equipo marcado como sin QR (no necesita etiqueta)',
+        modo: 'sin_qr',
+        codigoQR: null
+      });
+    }
+
     // ── MODO ESCANEAR: equipo que ya tiene QR (vuelve a recarga) ─────────────
     if (modo === 'escanear') {
       if (!codigoQR) return res.status(400).json({ error: 'Debes escanear o digitar el código QR del equipo' });
@@ -491,6 +505,37 @@ router.post('/produccion', authenticate, async (req, res) => {
     res.json({ message: `${generados.length} equipos de cambio producidos`, generados: generados.length, qrs: generados });
   } catch (error) {
     console.error('POST /qr/produccion:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/qr/:id — Eliminar QR creado por error
+// ─────────────────────────────────────────────────
+// Solo Admin puede eliminar. Solo se permite si el equipo NO tiene
+// propietario asignado (no está en manos de un cliente).
+router.delete('/:id', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el Admin puede eliminar QR' });
+    }
+    const { id } = req.params;
+    const doc = await db.collection('qr_equipos').doc(id).get();
+    if (!doc.exists) return res.status(404).json({ error: 'QR no encontrado' });
+
+    const data = doc.data();
+    // Verificar que pertenece al mismo tenant
+    if (data.adminId !== req.adminId) {
+      return res.status(403).json({ error: 'No tienes permiso para eliminar este QR' });
+    }
+    // Solo se puede eliminar si no tiene propietario (no está asignado a un cliente)
+    if (data.propietario || data.clienteId) {
+      return res.status(400).json({ error: 'No se puede eliminar un QR que tiene propietario asignado. Primero desasigna el cliente.' });
+    }
+
+    await db.collection('qr_equipos').doc(id).delete();
+    res.json({ message: `QR ${data.codigoQR} eliminado correctamente` });
+  } catch (error) {
+    console.error('DELETE /qr/:id:', error);
     res.status(500).json({ error: error.message });
   }
 });

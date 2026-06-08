@@ -231,11 +231,12 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
     if (!esInternaOProd && tipoServicio !== 'cobranza' && !empresaSel) return setError('Selecciona la empresa que factura');
     if (esInternaOProd && !mensajeroId) return setError('Selecciona el trabajador a asignar');
     if (tipoServicio !== 'interna' && tipoServicio !== 'cobranza' && items.length === 0) return setError('Agrega al menos un producto');
-    if (esInternaOProd && items.length === 0) return setError('Agrega al menos una tarea o ítem');
+    if (tipoServicio === 'interna' && !notas.trim()) return setError('Describe qué debe hacer el mensajero en el campo "¿Qué debe hacer?"');
+    if (tipoServicio === 'produccion' && items.length === 0) return setError('Agrega al menos un equipo a producir');
     if (!esInternaOProd && tipoServicio !== 'cobranza' && !formaPago) return setError('Selecciona la forma de pago');
     // Ola 2.5: si marcó "cliente ya pagó" exige el comprobante
     if (pagoAdelantado && !fotoComprobante) {
-      return setError('Marcaste que el cliente ya pagó. Sube la foto del comprobante o desmarca la casilla.');
+      return setError('Marcaste que el cliente ya pagó. Sube la foto o PDF del comprobante, o desmarca la casilla.');
     }
     setGuardando(true); setError('');
     try {
@@ -396,6 +397,32 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                         : 'Ej: Mensajero → comprar resma de papel. Es una diligencia, sin inventario.'}
                     </div>
                   </div>
+                  {tipoServicio === 'interna' && (
+                    <div style={{ marginTop: 10 }}>
+                      <label style={s.label}>Dirección <span style={{ fontWeight: 400, color: '#9ca3af' }}>(opcional)</span></label>
+                      <input
+                        style={{ ...s.input, marginBottom: 8 }}
+                        placeholder="Ej: Calle 5 # 23-10, Centro Comercial Unicentro..."
+                        value={notas.startsWith('DIR:') ? notas.split('\n')[0].replace('DIR:', '').trim() : ''}
+                        onChange={e => {
+                          const dir = e.target.value;
+                          const resto = notas.includes('\n') ? notas.split('\n').slice(1).join('\n') : (notas.startsWith('DIR:') ? '' : notas);
+                          setNotas(dir ? `DIR: ${dir}\n${resto}` : resto);
+                        }}
+                      />
+                      <label style={s.label}>¿Qué debe hacer? *</label>
+                      <textarea
+                        style={{ ...s.input, height: 70, resize: 'vertical', fontFamily: 'inherit' }}
+                        placeholder="Ej: Recoger vinilo de Jhonny Publicidad, comprar resma de papel carta..."
+                        value={notas.includes('\n') ? notas.split('\n').slice(1).join('\n') : (notas.startsWith('DIR:') ? '' : notas)}
+                        onChange={e => {
+                          const tarea = e.target.value;
+                          const dir = notas.startsWith('DIR:') ? notas.split('\n')[0] : '';
+                          setNotas(dir ? `${dir}\n${tarea}` : tarea);
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
               ) : (
                 <>
@@ -500,6 +527,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                 </div>
               )}
 
+              {!(tipoServicio === 'interna' || tipoServicio === 'produccion') && (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <div style={s.seccion}>
                   {(() => {
@@ -560,6 +588,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                   <input style={s.input} placeholder="#001, #002..." value={extintorPrestamo} onChange={e => setExtintor(e.target.value)} />
                 </div>
               </div>
+              )}
 
               {necesitaLogistica && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
@@ -667,15 +696,25 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                       {pagoAdelantado && (
                         <div style={{ marginTop: 10 }}>
                           <div style={{ fontSize: 11, color: '#1e3a8a', marginBottom: 6 }}>
-                            📷 Sube la captura/foto del comprobante. Quedará pendiente de validación por Admin/Tesorería.
+                            📎 Sube la foto o PDF del comprobante. Quedará pendiente de validación por Admin/Tesorería.
                           </div>
-                          <input ref={fotoComprobanteRef} type="file" accept="image/*"
+                          <input ref={fotoComprobanteRef} type="file" accept="image/*,application/pdf,.pdf"
                             style={{ display: 'none' }}
                             onChange={e => e.target.files[0] && subirComprobante(e.target.files[0])} />
                           {fotoComprobante ? (
                             <div style={{ position: 'relative' }}>
-                              <img src={fotoComprobante} alt="comprobante"
-                                style={{ width: '100%', maxHeight: 200, objectFit: 'contain', borderRadius: 6, background: '#fff' }} />
+                              {fotoComprobante.includes('.pdf') || fotoComprobante.includes('/pdf') ? (
+                                <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 6, padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                                  <span style={{ fontSize: 24 }}>📄</span>
+                                  <div>
+                                    <div style={{ fontSize: 13, fontWeight: 700, color: '#166534' }}>PDF cargado</div>
+                                    <a href={fotoComprobante} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#0284c7' }}>Ver documento</a>
+                                  </div>
+                                </div>
+                              ) : (
+                                <img src={fotoComprobante} alt="comprobante"
+                                  style={{ width: '100%', maxHeight: 200, objectFit: 'contain', borderRadius: 6, background: '#fff' }} />
+                              )}
                               <button type="button" onClick={() => setFotoComprobante('')}
                                 style={{ position: 'absolute', top: 6, right: 6, background: '#dc2626', color: '#fff', border: 'none', borderRadius: '50%', width: 26, height: 26, cursor: 'pointer', fontSize: 13 }}>✕</button>
                             </div>
@@ -683,7 +722,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                             <button type="button" onClick={() => fotoComprobanteRef.current?.click()}
                               disabled={subiendoComprobante}
                               style={{ width: '100%', padding: '10px', border: '2px dashed #93c5fd', borderRadius: 8, background: '#fff', cursor: 'pointer', fontSize: 13, color: '#1e3a8a', fontWeight: 600 }}>
-                              {subiendoComprobante ? 'Subiendo...' : '📷 Cargar foto del comprobante'}
+                              {subiendoComprobante ? 'Subiendo...' : '📎 Cargar foto o PDF del comprobante'}
                             </button>
                           )}
                         </div>

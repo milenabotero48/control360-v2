@@ -129,16 +129,16 @@ const GestionCotizaciones = ({ user }) => {
       clienteEmail: c.emailLegal || '',
       clienteDireccion: c.direccionPrincipal || '',
       empresaId: emp?.id || c.empresaId || '',
-      empresaNombre: emp?.nombre || c.empresaNombre || '',
+      empresaNombre: emp?.name || emp?.nombre || c.empresaNombre || '',
       empresaNit: emp?.nit || '',
-      empresaTel: emp?.telefono || emp?.celular || '',
-      empresaDireccion: emp?.direccion || '',
+      empresaTel: emp?.cellphone || emp?.phone || emp?.telefono || emp?.celular || '',
+      empresaDireccion: emp?.address || emp?.direccion || '',
       empresaEmail: emp?.email || '',
-      empresaLogo: emp?.logoUrl || '',
+      empresaLogo: emp?.logo || emp?.logoUrl || '',
       empresaIva: (emp?.iva ?? 0) > 0,
       notas: f.notas.map(n => {
         if (n.key === 'tipoEmpresa') return { ...n, texto: `Pertenecemos al régimen común NIT ${emp?.nit || ''}.` };
-        if (n.key === 'datosBancarios') return { ...n, texto: emp?.datosBancarios || `Por transferencia bancaria a nombre de ${emp?.nombre || ''}.` };
+        if (n.key === 'datosBancarios') return { ...n, texto: emp?.datosBancarios || `Por transferencia bancaria a nombre de ${emp?.name || emp?.nombre || ''}.` };
         return n;
       }),
     }));
@@ -205,7 +205,9 @@ const GestionCotizaciones = ({ user }) => {
     setGuardando(true);
     setError('');
     try {
-      const vencimiento = new Date(form.fecha);
+      // Interpretar la fecha como medianoche Colombia (UTC-5 = +5h en UTC)
+      // para evitar que Railway/UTC la interprete un día antes
+      const vencimiento = new Date(form.fecha + 'T05:00:00Z');
       vencimiento.setDate(vencimiento.getDate() + Number(form.validezDias));
       // Garantizar que los items siempre tengan valores numéricos
       const itemsSanitizados = form.items.map(it => ({
@@ -231,6 +233,9 @@ const GestionCotizaciones = ({ user }) => {
       };
       if (cotActual?.id) {
         await axios.put(`${API}/cotizaciones/${cotActual.id}`, payload, { headers });
+        // Actualizar cotActual inmediatamente con los datos guardados
+        // para que el detalle los refleje sin esperar el reload completo
+        setCotActual({ ...cotActual, ...payload });
         setExito('Cotización actualizada');
       } else {
         // Crear: la respuesta del backend trae el número real asignado.
