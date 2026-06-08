@@ -385,7 +385,7 @@ const ModalQR = ({ orden, equipo, onResolver, onCerrar }) => {
           </div>
           {/* ✅ QR-005: botón para continuar sin QR (extintores de carro, uso personal, etc.) */}
           <button
-            onClick={() => { onCerrar(); }}
+            onClick={() => onResolver({ orden, equipo, modo: 'sin_qr', codigoQR: '' })}
             style={{ width: '100%', padding: '10px', background: 'none', border: '1px dashed #d1d5db', borderRadius: 8, color: '#6b7280', fontSize: 12, cursor: 'pointer', fontWeight: 500 }}>
             🔧 Continuar sin QR (este extintor no necesita etiqueta)
           </button>
@@ -883,7 +883,7 @@ export default function GestionTaller({ user }) {
       clienteNombre: orden.clienteNombre || '',
       ubicacion: orden.sucursalNombre || orden.sucursalDireccion || '',
       tipo: equipo?.tipo || 'ABC',
-      capacidad: equipo?.capacidad || equipo?.nombre || '',
+      capacidad: equipo?.capacidad || '',
       requierePH: (equipo?.tipo || '').toUpperCase() === 'CO2',
       tipoIntervencion: 'Recarga / Mantenimiento'
     };

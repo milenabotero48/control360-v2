@@ -199,6 +199,19 @@ const calcularEstadoInicial = (lugarAtencion, requiereFactura, tieneEquipoTaller
   return 'programada';
 };
 
+// ─── HELPER: ajuste de fecha para timezone Colombia (UTC-5) ──────────────────
+// Railway corre en UTC. El frontend envía "2026-06-07" (sin hora).
+// Sin ajuste, Firestore interpreta eso como 2026-06-07T00:00:00Z = 2026-06-06T19:00:00
+// en Colombia → la orden aparece un día antes.
+// Solución: interpretar la cadena de fecha como medianoche Colombia (UTC+5h).
+const ajustarFechaTimezone = (fechaStr) => {
+  if (!fechaStr) return null;
+  // Si ya tiene hora/zona, no tocar
+  if (fechaStr.includes('T') || fechaStr.includes('Z')) return fechaStr;
+  // "YYYY-MM-DD" → interpretamos como medianoche Colombia = 05:00 UTC
+  return `${fechaStr}T05:00:00.000Z`;
+};
+
 // ─── HELPER: auditoría ────────────────────────────────────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, ordenId, documento, datos = {} }) => {
   try {
@@ -588,9 +601,6 @@ router.post('/', authenticate, async (req, res) => {
     if (esProduccion && items.length === 0) {
       return res.status(400).json({ error: 'La orden de producción debe tener al menos un equipo a cargar' });
     }
-    if (esInterna && items.length === 0) {
-      return res.status(400).json({ error: 'La orden interna debe tener al menos una tarea o ítem' });
-    }
 
     // ─── Ola 2.5 Bloque 1: validación de Domicilio ─────────────────────────
     // Una orden de Domicilio existe porque el cliente tiene equipos a RECARGAR
@@ -727,7 +737,7 @@ router.post('/', authenticate, async (req, res) => {
       subtotal: Math.round(subtotal),
       ivaValor,
       total: Math.round(total),
-      fechaProgramada: fechaProgramada || null,
+      fechaProgramada: ajustarFechaTimezone(fechaProgramada) || null,
       horaProgramada: horaProgramada || null,
       prioridad,
       mensajeroId: mensajeroId || null,
@@ -903,7 +913,7 @@ router.put('/:id', authenticate, async (req, res) => {
       cambios.qrPendiente = requiereCertificado(items);
     }
 
-    if (fechaProgramada !== undefined) cambios.fechaProgramada = fechaProgramada;
+    if (fechaProgramada !== undefined) cambios.fechaProgramada = ajustarFechaTimezone(fechaProgramada) || null;
     if (horaProgramada !== undefined) cambios.horaProgramada = horaProgramada;
     if (prioridad) cambios.prioridad = prioridad;
     if (mensajeroId !== undefined) { cambios.mensajeroId = mensajeroId; cambios.mensajeroNombre = mensajeroNombre || ''; }
@@ -1229,17 +1239,43 @@ router.put('/:id/estado', authenticate, async (req, res) => {
     }
 
     // ── Ola 2.5 Bloque 2: cuando una OP se completa ─────────────────────────
-    // 1) Suma cada producto terminado al stock (composición inversa).
-    //    Antes solo se descontaban los componentes pero el terminado nunca
-    //    aparecía en bodega.
-    // 2) Genera un QR por cada unidad producida (queda "sin asignar" hasta
+    // 1) Descuenta componentes del inventario (los insumos que el taller consumió).
+    // 2) Suma cada producto terminado al stock (composición inversa).
+    // 3) Genera un QR por cada unidad producida (queda "sin asignar" hasta
     //    que se venda).
     let qrGenerados = 0;
     if (actual.tipoOrden === 'produccion' &&
         (estadoCursor === 'completada' || estadoCursor === 'cuadre_dinero') &&
         actual.estado !== 'completada' && actual.estado !== 'cuadre_dinero') {
 
-      // 1) Sumar stock del producto terminado
+      // 1) Descontar componentes de cada producto compuesto producido
+      for (const item of (actual.items || [])) {
+        if (!item.productoId) continue;
+        const cant = Number(item.cantidad) || 0;
+        if (cant <= 0) continue;
+        try {
+          const prodDoc = await db.collection('products').doc(item.productoId).get();
+          if (!prodDoc.exists) continue;
+          const prod = prodDoc.data();
+          if (prod.tipo === 'compuesto' && prod.componentes?.length > 0) {
+            for (const comp of prod.componentes) {
+              if (!comp.productoId) continue;
+              try {
+                await db.collection('products').doc(comp.productoId).update({
+                  stock: admin.firestore.FieldValue.increment(-(comp.cantidad * cant)),
+                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+              } catch (e) {
+                console.warn(`Error descontando componente ${comp.productoId} en OP:`, e.message);
+              }
+            }
+          }
+        } catch (e) {
+          console.error(`Error leyendo producto ${item.productoId} para descontar componentes:`, e.message);
+        }
+      }
+
+      // 2) Sumar stock del producto terminado
       for (const item of (actual.items || [])) {
         if (!item.productoId) continue;
         const cant = Number(item.cantidad) || 0;
@@ -1784,15 +1820,13 @@ router.get('/:id/certificado/html', authenticate, async (req, res) => {
             </div>
           ` : ''}
 
-          <!-- Firmas -->
-          <div style="display:flex; justify-content:space-between; gap:60px; margin-top:60px; font-size:12px;">
-            <div style="flex:1; text-align:center; border-top:1px solid #333; padding-top:8px;">
-              <strong>Técnico responsable</strong><br>
-              <span style="color:#666;">${esc(orden.tecnicoNombre || 'Pedro García')}</span>
-            </div>
-            <div style="flex:1; text-align:center; border-top:1px solid #333; padding-top:8px;">
-              <strong>Supervisor técnico</strong><br>
-              <span style="color:#666;">Milena Botero</span>
+          <!-- Firma institucional -->
+          <div style="display:flex; justify-content:center; margin-top:60px; font-size:12px;">
+            <div style="text-align:center; border-top:1px solid #333; padding-top:10px; min-width:260px;">
+              <strong style="font-size:13px;">${esc(empresa.name || '')}</strong><br>
+              <span style="color:#666;">NIT: ${esc(empresa.nit || '')}</span><br>
+              ${empresa.phone ? `<span style="color:#666;">${esc(empresa.phone)}</span><br>` : ''}
+              <span style="color:#888; font-size:11px;">Empresa certificada</span>
             </div>
           </div>
 

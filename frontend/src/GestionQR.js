@@ -136,16 +136,47 @@ const ModalDetalleQR = ({ equipo, clientes, onGuardar, onCerrar }) => {
               <div style={s.sep} />
               <p style={s.secTit}>Propietario actual: {equipo.propietario || 'Sin asignar'}</p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                <div>
+                <div style={{ position: 'relative' }}>
                   <label style={s.label}>Cliente</label>
-                  <select style={s.select} value={form.clienteId} onChange={e => {
-                    const cli = clientes.find(c => c.id === e.target.value);
-                    set('clienteId', e.target.value);
-                    set('clienteNombre', cli?.nombre || '');
-                  }}>
-                    <option value="">Sin propietario (equipo de cambio)</option>
-                    {clientes.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
-                  </select>
+                  <input
+                    style={s.input}
+                    placeholder="Buscar cliente por nombre..."
+                    value={form.clienteNombre}
+                    onChange={e => {
+                      set('clienteNombre', e.target.value);
+                      set('clienteId', '');
+                    }}
+                  />
+                  {form.clienteNombre && !form.clienteId && (() => {
+                    const filtrados = clientes.filter(c =>
+                      c.nombre?.toLowerCase().includes(form.clienteNombre.toLowerCase())
+                    ).slice(0, 8);
+                    if (filtrados.length === 0) return null;
+                    return (
+                      <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff', border: '1.5px solid #e5e7eb', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 100, maxHeight: 200, overflowY: 'auto' }}>
+                        <div
+                          onClick={() => { set('clienteId', ''); set('clienteNombre', ''); }}
+                          style={{ padding: '8px 12px', cursor: 'pointer', fontSize: 12, color: '#6b7280', borderBottom: '1px solid #f3f4f6', fontStyle: 'italic' }}>
+                          Sin propietario (equipo de cambio)
+                        </div>
+                        {filtrados.map(c => (
+                          <div key={c.id}
+                            onClick={() => { set('clienteId', c.id); set('clienteNombre', c.nombre); }}
+                            style={{ padding: '9px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#111', borderBottom: '1px solid #f9fafb' }}
+                            onMouseEnter={e => e.currentTarget.style.background = '#f5f3ff'}
+                            onMouseLeave={e => e.currentTarget.style.background = '#fff'}>
+                            {c.nombre}
+                            {c.nit && <span style={{ fontSize: 11, color: '#9ca3af', marginLeft: 6 }}>NIT: {c.nit}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                  {form.clienteId && (
+                    <div style={{ fontSize: 11, color: '#16a34a', marginTop: 4, fontWeight: 600 }}>
+                      ✓ Cliente seleccionado
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -259,12 +290,12 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
       body { font-family: Arial, sans-serif; background: #fff; }
       @page { size: 100mm 150mm; margin: 0; }
       .hoja { display: grid; grid-template-columns: repeat(2, 40mm); grid-template-rows: repeat(3, 40mm); gap: 5mm; padding: 10mm 10mm; width: 100mm; box-sizing: border-box; }
-      .etiqueta { width: 40mm; height: 40mm; border: 0.5px solid #ccc; border-radius: 2mm; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding: 2mm 1.5mm 1mm; overflow: hidden; text-align: center; gap: 0.5mm; }
-      .qr-wrap { flex-shrink: 0; margin-bottom: 0.5mm; }
-      .info { width: 100%; overflow: hidden; line-height: 1.2; text-align: center; }
+      .etiqueta { width: 40mm; height: 40mm; border: 1.5px solid #1a1a2e; border-radius: 2mm; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding: 1.5mm 1.5mm 1mm; overflow: hidden; text-align: center; gap: 0.3mm; }
+      .qr-wrap { flex-shrink: 0; margin-bottom: 0.3mm; }
+      .info { width: 100%; overflow: hidden; line-height: 1.3; text-align: center; }
       .propietario {
-        font-size: 5.5px;
-        font-weight: 800;
+        font-size: 7px;
+        font-weight: 900;
         color: #1a1a2e;
         display: -webkit-box;
         -webkit-line-clamp: 2;
@@ -273,9 +304,9 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
         word-break: break-word;
         text-align: center;
       }
-      .id-equipo { font-size: 5.5px; color: #1a1a2e; font-weight: 700; font-family: monospace; margin-top: 0.5px; }
-      .tipo { font-size: 5px; color: #374151; margin-top: 0.5px; font-weight: 600; }
-      .orden { font-size: 4.5px; color: #6b7280; margin-top: 0.5px; font-family: monospace; font-weight: 600; }
+      .id-equipo { font-size: 6.5px; color: #1a1a2e; font-weight: 700; font-family: monospace; margin-top: 0.5px; }
+      .tipo { font-size: 6.5px; color: #374151; margin-top: 0.5px; font-weight: 700; }
+      .orden { font-size: 6px; color: #6b7280; margin-top: 0.5px; font-family: monospace; font-weight: 600; }
       @media print { body { padding: 0; } }
     </style></head><body>
     <div class="hoja">${filas}</div>
@@ -501,6 +532,16 @@ export default function GestionQR({ user }) {
     cargar();
   };
 
+  const eliminarQR = async (eq) => {
+    try {
+      await axios.delete(`${API}/qr/${eq.id}`, auth());
+      notif(`QR ${eq.codigoQR} eliminado`);
+      cargar();
+    } catch (e) {
+      alert(e.response?.data?.error || 'Error al eliminar el QR');
+    }
+  };
+
   // ── Guardar config ──
   const [guardandoCfg, setGuardandoCfg] = useState(false);
   const [imagenPromoLocal, setImagenPromoLocal] = useState(null);
@@ -638,6 +679,15 @@ export default function GestionQR({ user }) {
                         <span style={{ fontSize: 11, color: eq.vencido ? '#dc2626' : '#16a34a', fontWeight: 600 }}>⏳ Vence: {fmtFecha(eq.proximaRecarga)}</span>
                       </div>
                     </div>
+                    {/* Botón eliminar — solo si el equipo no tiene propietario asignado */}
+                    {!eq.propietario && (
+                      <button
+                        onClick={e => { e.stopPropagation(); if (window.confirm(`¿Eliminar QR ${eq.codigoQR}? Esta acción no se puede deshacer.`)) eliminarQR(eq); }}
+                        style={{ flexShrink: 0, padding: '4px 8px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, color: '#dc2626', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+                        title="Eliminar QR creado por error">
+                        🗑️
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
