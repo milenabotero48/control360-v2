@@ -624,10 +624,14 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                 <label style={s.label}>Tipo de servicio</label>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
                   {TIPOS.filter(t => {
-                    const mods = user?.modulos || [];
+                    // modulosTenant: modulos del admin del tenant (que modulos tiene
+                    // contratados el suscriptor). Determina que tipos de orden existen.
+                    // user.modulos solo controla el menu de navegacion del usuario.
+                    // Fallback: si no hay modulosTenant usar modulos del usuario.
+                    const mods = user?.modulosTenant || user?.modulos || [];
                     // Si no tiene módulos definidos (admin principal) → mostrar todos
                     if (mods.length === 0) return true;
-                    // Tipos que requieren módulo específico
+                    // Tipos que requieren módulo específico del TENANT
                     if (t.value === 'taller')     return mods.includes('taller');
                     if (t.value === 'despacho')   return mods.includes('logistica');
                     if (t.value === 'domicilio')  return mods.includes('logistica');
@@ -658,7 +662,8 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
 
                   {/* Ola 2.5: Aviso CxC */}
                   {esFormaPagoCxC(formaPago) && (() => {
-                    const tieneLogistica = (user?.modulos || []).length === 0 || (user?.modulos || []).includes('logistica');
+                    const modsT = user?.modulosTenant || user?.modulos || [];
+                    const tieneLogistica = modsT.length === 0 || modsT.includes('logistica');
                     return (
                       <div style={{
                         marginTop: 10, padding: '10px 14px',

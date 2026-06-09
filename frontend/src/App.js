@@ -22,6 +22,7 @@ import GestionCxC from './GestionCxC';
 import GestionCxP from './GestionCxP';
 import GestionProveedores from './GestionProveedores';
 import GestionQR from './GestionQR';
+import GestionCompras from './GestionCompras';
 
 // ─── NAV POR GRUPOS Y ROL ────────────────────────────────────────────────────
 // ─── MAPA COMPLETO DE MÓDULOS ─────────────────────────────────────────────────
@@ -38,6 +39,7 @@ const TODOS_LOS_MODULOS = [
      { key: 	'qr',          	label: 	'QR Activos',    	icon: 	'📲', modulo: 'qr' },
   { key: 'caja',        label: 'Caja',          icon: '💰', modulo: 'caja' },
   { key: 'egresos',     label: 'Egresos',       icon: '💸', modulo: 'egresos' },
+  { key: 'compras',     label: 'Compras',       icon: '🛒', modulo: 'compras' },
   { key: 'cxc',         label: 'CxC',           icon: '💳', modulo: 'cxc' },
   { key: 'cxp',         label: 'CxP',           icon: '📋', modulo: 'cxp' },
   { key: 'eri',         label: 'ERI',           icon: '📈', modulo: 'eri' },
@@ -52,7 +54,7 @@ const NAV_GRUPOS = {
     { grupo: 'Principal',      modulos: ['admin'] },
     { grupo: 'Operaciones',    modulos: ['ordenes', 'cotizaciones', 'clientes', 'productos', 'proveedores'] },
     { grupo: 'Ejecución',      modulos: ['logistica', 'taller', 'qr'] },
-    { grupo: 'Finanzas',       modulos: ['caja', 'egresos', 'cxc', 'cxp', 'eri', 'reportes'] },
+    { grupo: 'Finanzas',       modulos: ['caja', 'egresos', 'compras', 'cxc', 'cxp', 'eri', 'reportes'] },
     { grupo: 'Configuración',  modulos: ['config', 'usuarios'] },
   ],
   comercial: [
@@ -472,6 +474,7 @@ export default function AppRoot() {
           {currentPage === 'ordenes'      && <GestionOrdenes user={user} />}
           {currentPage === 'cotizaciones' && <GestionCotizaciones user={user} />}
           {currentPage === 'egresos'      && <GestionEgresos user={user} />}
+          {currentPage === 'compras'      && <GestionCompras user={user} />}
           {currentPage === 'caja'         && <GestionCaja user={user} />}
           {currentPage === 'cxc'          && <GestionCxC user={user} />}
           {currentPage === 'cxp'          && <GestionCxP user={user} />}

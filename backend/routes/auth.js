@@ -59,6 +59,23 @@ router.post('/login', async (req, res) => {
     const esAdmin = user.role === 'admin';
     const adminId = esAdmin ? userDoc.id : (user.creadoPor || userDoc.id);
 
+    // modulosTenant: modulos del admin del tenant.
+    // Controla que tipos de orden están disponibles para TODOS los usuarios
+    // del tenant, independientemente de los modulos asignados al usuario.
+    // user.modulos solo controla el menu de navegacion del usuario.
+    let modulosTenant = user.modulos || [];
+    if (!esAdmin && adminId && adminId !== userDoc.id) {
+      try {
+        const adminDoc = await db.collection('users').doc(adminId).get();
+        if (adminDoc.exists) {
+          modulosTenant = adminDoc.data().modulos || [];
+        }
+      } catch (e) {
+        // Si falla la consulta, usar modulos del propio usuario como fallback
+        modulosTenant = user.modulos || [];
+      }
+    }
+
     const token = jwt.sign(
       {
         uid: userDoc.id,
@@ -79,6 +96,7 @@ router.post('/login', async (req, res) => {
         nombre: user.nombre,
         role: user.role,
         modulos: user.modulos || [],
+        modulosTenant,
         codigo: user.codigo || '',
         adminId
       }
