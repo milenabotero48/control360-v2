@@ -383,7 +383,7 @@ export default function GestionCompras({ user }) {
         totalRetenciones: tots.totalReten,
         netoPagar: netoPagarFinal(),
         formaPago,
-        cajaId: formaPago === 'Contado' ? cajaId : '',
+        cajaId: (formaPago === 'Contado' || formaPago === 'Transferencia') ? cajaId : '',
         notas,
         origenXML: origen === 'xml',
         xmlNombre
