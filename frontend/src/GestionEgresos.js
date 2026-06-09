@@ -740,13 +740,31 @@ function ModalPagar({ egreso, cajas, formasPago, formasPagoConfig, onPagar, onCl
 
 // ─── Modal Editar Pagado ──────────────────────────────────────────────────────
 function ModalEditarPagado({ egreso, onSave, onClose }) {
-  const [paso, setPaso]   = useState('auth');
-  const [pwd, setPwd]     = useState('');
+  const [paso, setPaso]     = useState('auth');
+  const [pwd, setPwd]       = useState('');
   const [motivo, setMotivo] = useState('');
-  const [form, setForm]   = useState({ ...egreso });
+  const [form, setForm]     = useState({ ...egreso });
   const [saving, setSaving] = useState(false);
+  const [errorAuth, setErrorAuth] = useState('');
+  const [verificando, setVerificando] = useState(false);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-  const ADMIN_PASSWORD = 'password123';
+
+  const verificarPassword = async () => {
+    if (!pwd.trim()) { setErrorAuth('Ingresa tu contrasena'); return; }
+    if (!motivo.trim()) { setErrorAuth('El motivo es obligatorio'); return; }
+    setVerificando(true); setErrorAuth('');
+    try {
+      const token = localStorage.getItem('token');
+      await axios.post(`${API}/users/verificar-password`,
+        { password: pwd },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setPaso('editar');
+    } catch (e) {
+      setErrorAuth(e.response?.data?.error || 'Contrasena incorrecta');
+    }
+    setVerificando(false);
+  };
 
   return (
     <div style={S.overlay}>
@@ -761,9 +779,10 @@ function ModalEditarPagado({ egreso, onSave, onClose }) {
               <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: 14, marginBottom: 16, fontSize: 13, color: '#991b1b' }}>
                 🚨 Este egreso ya fue <strong>PAGADO</strong>. Editarlo requiere contraseña de administrador y queda en auditoría.
               </div>
+              {errorAuth && <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#991b1b', marginBottom: 12 }}>{errorAuth}</div>}
               <div style={S.field}>
                 <label style={S.label}>Contraseña admin *</label>
-                <input type="password" style={S.input} value={pwd} onChange={e => setPwd(e.target.value)} placeholder="••••••••" />
+                <input type="password" style={S.input} value={pwd} onChange={e => setPwd(e.target.value)} placeholder="••••••••" onKeyDown={e => e.key === 'Enter' && verificarPassword()} />
               </div>
               <div style={S.field}>
                 <label style={S.label}>Motivo de edición *</label>
@@ -771,9 +790,9 @@ function ModalEditarPagado({ egreso, onSave, onClose }) {
               </div>
               <div style={S.modalFooter}>
                 <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
-                <button onClick={() => { if (pwd !== ADMIN_PASSWORD) return alert('Contraseña incorrecta'); if (!motivo.trim()) return alert('Motivo requerido'); setPaso('editar'); }}
+                <button onClick={verificarPassword} disabled={verificando}
                   style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#dc2626,#b91c1c)' }}>
-                  Continuar →
+                  {verificando ? 'Verificando...' : 'Continuar →'}
                 </button>
               </div>
             </>

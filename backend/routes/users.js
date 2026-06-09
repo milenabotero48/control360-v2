@@ -497,4 +497,43 @@ router.get('/auditoria/modulos', authenticate, soloAdmin, async (req, res) => {
   ]);
 });
 
+// POST /api/users/verificar-password — Valida contrasena del usuario logueado
+// Usado por GestionEgresos para autorizar edicion de egreso pagado
+router.post('/verificar-password', authenticate, async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ autorizado: false, error: 'Contrasena requerida' });
+
+    const yo = req.user.uid || req.user.id;
+    const doc = await db.collection('users').doc(yo).get();
+    if (!doc.exists) return res.status(404).json({ autorizado: false, error: 'Usuario no encontrado' });
+
+    const u = doc.data();
+    if (u.role !== 'admin') {
+      return res.status(403).json({ autorizado: false, error: 'Solo el administrador puede autorizar esta accion' });
+    }
+
+    if (!u.password_hash) {
+      return res.status(400).json({ autorizado: false, error: 'Este usuario no tiene contrasena configurada en el sistema' });
+    }
+
+    const ok = await bcrypt.compare(String(password), String(u.password_hash));
+
+    await registrarAuditoria({
+      accion: ok ? 'PASSWORD_VERIFICADA' : 'PASSWORD_FALLIDA',
+      modulo: 'egresos',
+      descripcion: `${u.nombre || u.email} ${ok ? 'verifico contrasena para editar egreso' : 'fallo verificacion de contrasena'}`,
+      usuarioId: yo,
+      usuarioNombre: u.nombre || u.email,
+      datos: { ok }
+    });
+
+    if (!ok) return res.status(403).json({ autorizado: false, error: 'Contrasena incorrecta' });
+    res.json({ autorizado: true });
+  } catch (e) {
+    console.error('verificar-password:', e);
+    res.status(500).json({ autorizado: false, error: e.message });
+  }
+});
+
 module.exports = router;

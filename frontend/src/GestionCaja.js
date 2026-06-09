@@ -476,7 +476,7 @@ export default function GestionCaja({ user }) {
       alert('Movimiento registrado correctamente');
     } catch (e) {
       console.error('Error registrando movimiento:', e);
-      alert('Error: ' + e.response?.data?.error || e.message);
+      alert('Error: ' + (e.response?.data?.error || e.message || 'Error desconocido'));
     }
   };
 
