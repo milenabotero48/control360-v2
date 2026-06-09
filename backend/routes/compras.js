@@ -52,47 +52,54 @@ const genNumeroCompra = async (adminId) => {
   return `CMP-${String(siguiente).padStart(4, '0')}`;
 };
 
-// ─── HELPER: actualizar stock y precio de costo al confirmar compra ──────────
+// ─── HELPER: actualizar stock al confirmar compra ────────────────────────────
+// destino 'taller' → taller_insumos | destino 'catalogo' → products
 const aplicarCompraAInventario = async (lineas) => {
   const alertasMargen = [];
   for (const linea of lineas) {
     if (!linea.productoId || !linea.cantidad || linea.cantidad <= 0) continue;
     try {
-      const prodRef = db.collection('products').doc(linea.productoId);
-      const prodDoc = await prodRef.get();
-      if (!prodDoc.exists) continue;
-      const prod = prodDoc.data();
-
-      const costoPrevio = prod.precioCosto || 0;
-      const costoNuevo = Number(linea.precioUnitario) || 0;
-
-      const update = {
-        stock: admin.firestore.FieldValue.increment(Number(linea.cantidad)),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      };
-
-      // Actualizar precio de costo si cambio
-      if (costoNuevo > 0 && costoNuevo !== costoPrevio) {
-        update.precioCosto = costoNuevo;
-        const precioVenta = prod.precioVenta || 0;
-        if (precioVenta > 0) {
-          const margenPrevio = costoPrevio > 0 ? (((precioVenta - costoPrevio) / precioVenta) * 100).toFixed(1) : 0;
-          const margenNuevo = (((precioVenta - costoNuevo) / precioVenta) * 100).toFixed(1);
-          if (Number(margenNuevo) < Number(margenPrevio)) {
-            alertasMargen.push({
-              productoId: linea.productoId,
-              nombre: prod.nombre,
-              precioVenta,
-              costoPrevio,
-              costoNuevo,
-              margenPrevio,
-              margenNuevo
-            });
+      const esTaller = linea.destino === 'taller';
+      if (esTaller) {
+        const insRef = db.collection('taller_insumos').doc(linea.productoId);
+        const insDoc = await insRef.get();
+        if (!insDoc.exists) continue;
+        await insRef.update({
+          stock: admin.firestore.FieldValue.increment(Number(linea.cantidad)),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      } else {
+        const prodRef = db.collection('products').doc(linea.productoId);
+        const prodDoc = await prodRef.get();
+        if (!prodDoc.exists) continue;
+        const prod = prodDoc.data();
+        const costoPrevio = prod.precioCosto || 0;
+        const costoNuevo = Number(linea.precioUnitario) || 0;
+        const update = {
+          stock: admin.firestore.FieldValue.increment(Number(linea.cantidad)),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        };
+        if (costoNuevo > 0 && costoNuevo !== costoPrevio) {
+          update.precioCosto = costoNuevo;
+          const precioVenta = prod.precioVenta || 0;
+          if (precioVenta > 0) {
+            const margenPrevio = costoPrevio > 0 ? (((precioVenta - costoPrevio) / precioVenta) * 100).toFixed(1) : 0;
+            const margenNuevo = (((precioVenta - costoNuevo) / precioVenta) * 100).toFixed(1);
+            if (Number(margenNuevo) < Number(margenPrevio)) {
+              alertasMargen.push({
+                productoId: linea.productoId,
+                nombre: prod.nombre,
+                precioVenta,
+                costoPrevio,
+                costoNuevo,
+                margenPrevio,
+                margenNuevo
+              });
+            }
           }
         }
+        await prodRef.update(update);
       }
-
-      await prodRef.update(update);
     } catch (e) {
       console.warn('Error actualizando inventario compra:', linea.productoId, e.message);
     }
