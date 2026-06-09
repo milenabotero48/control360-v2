@@ -133,7 +133,7 @@ export default function GestionCompras({ user }) {
 
   const cargarCategorias = async () => {
     try {
-      const r = await axios.get(`${API}/products/categorias`, { headers });
+      const r = await axios.get(`${API}/products/categorias/lista`, { headers });
       setCategorias(r.data || []);
     } catch {}
   };
