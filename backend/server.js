@@ -1,20 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
-const Sentry = require('./config/sentry');
-const rateLimit = require('express-rate-limit');
-
-const limiterGeneral = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: { error: 'Demasiadas peticiones, intenta en 15 minutos.' }
-});
-
-const limiterLogin = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { error: 'Demasiados intentos de login, intenta en 15 minutos.' }
-});
 const jwt = require('jsonwebtoken');
 
 // Firebase se inicializa SOLO en config/firebase.js
@@ -24,8 +10,6 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
-app.use('/api/', limiterGeneral);
-app.use('/api/auth/login', limiterLogin);
 
 const { db } = require('./config/firebase');
 const { authenticate, validarTenant } = require('./middleware/auth.js');
@@ -34,10 +18,17 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'Backend running ✅', firebase: 'Connected ✅' });
 });
 
+app.get('/api/test-token', (req, res) => {
+  const token = jwt.sign(
+    { uid: '3oUbFf2KvgbC97FXQFb8PHpwNBW2', email: 'sandra@empresa.com', role: 'admin' },
+    process.env.JWT_SECRET,
+    { expiresIn: '24h' }
+  );
+  res.json({ token });
+});
 
 // Routes
 app.use('/api/auth',      require('./routes/auth'));
-app.use('/api/auth',      require('./routes/password-reset'));
 app.use('/api/orders',    authenticate, require('./routes/orders'));
 app.use('/api/clients',   authenticate, require('./routes/clients'));
 app.use('/api/products',  require('./routes/products'));
@@ -63,8 +54,8 @@ app.use('/api/eri',       authenticate, require('./routes/eri'));
 app.use('/api/reportes',  authenticate, require('./routes/reportes'));
 app.use('/api/alertas',   authenticate, require('./routes/alertas'));
 app.use('/api/auditoria', authenticate, require('./routes/auditoria'));
+app.use('/api/compras',  authenticate, require('./routes/compras'));
 
-Sentry.setupExpressErrorHandler(app);
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Backend corriendo en http://localhost:${PORT}`);
