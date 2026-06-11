@@ -14,6 +14,8 @@ const GestionCxP = ({ user }) => {
   const [tab, setTab]             = useState('proveedores');
   const [modalPago, setModalPago] = useState(null);
   const [formPago, setFormPago]   = useState({ formaPago: '', cajaId: '', cajaLabel: '', fechaPago: new Date().toISOString().split('T')[0] });
+  const [montoAbono, setMontoAbono] = useState('');
+  const [verAbonos, setVerAbonos] = useState(null); // egresoId del que se muestran los abonos
   const [guardando, setGuardando] = useState(false);
   const [exito, setExito]         = useState('');
   const [error, setError]         = useState('');
@@ -48,11 +50,16 @@ const GestionCxP = ({ user }) => {
 
   const registrarPago = async () => {
     if (!formPago.formaPago || !formPago.cajaId) return setError('Selecciona forma de pago — debe tener caja asignada');
+    const montoAbonoNum = Number(montoAbono) || 0;
+    if (montoAbono && montoAbonoNum <= 0) return setError('El monto del abono debe ser mayor a 0');
+    if (montoAbono && montoAbonoNum > (modalPago.saldo || 0)) return setError('El abono no puede superar el saldo pendiente');
     setGuardando(true); setError('');
     try {
-      await axios.post(`${API}/cxp/${modalPago.id}/pagar`, formPago, { headers });
-      setExito('Pago registrado ✓');
+      const payload = { ...formPago, montoAbono: montoAbonoNum || undefined };
+      const { data: resp } = await axios.post(`${API}/cxp/${modalPago.id}/pagar`, payload, { headers });
+      setExito(resp.esAbonoParcial ? `Abono de ${fmt(resp.montoPagado)} registrado. Saldo restante: ${fmt(resp.saldoRestante)}` : 'Pago total registrado ✓');
       setModalPago(null);
+      setMontoAbono('');
       setFormPago({ formaPago: '', cajaId: '', cajaLabel: '', fechaPago: new Date().toISOString().split('T')[0] });
       setTimeout(() => setExito(''), 3000);
       await cargar();
@@ -266,23 +273,90 @@ const GestionCxP = ({ user }) => {
       {/* MODAL PAGO */}
       {modalPago && (
         <div style={s.overlay}>
-          <div style={{ background: '#fff', borderRadius: 16, maxWidth: 460, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)', overflow: 'hidden' }}>
-            <div style={{ background: 'linear-gradient(135deg,#7c3aed,#6d28d9)', padding: '20px 24px' }}>
-              <h3 style={{ margin: 0, color: '#fff', fontSize: 16, fontWeight: 700 }}>💳 Registrar Pago CxP</h3>
-              <p style={{ margin: '4px 0 0', color: 'rgba(255,255,255,0.8)', fontSize: 13 }}>{modalPago.concepto}</p>
+          <div style={{ background: '#fff', borderRadius: 16, maxWidth: 480, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)', overflow: 'hidden', maxHeight: '90vh', overflowY: 'auto' }}>
+            <div style={{ background: 'linear-gradient(135deg,#7c3aed,#6d28d9)', padding: '20px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <h3 style={{ margin: 0, color: '#fff', fontSize: 16, fontWeight: 700 }}>💳 Registrar Pago / Abono</h3>
+                <p style={{ margin: '4px 0 0', color: 'rgba(255,255,255,0.8)', fontSize: 13 }}>{modalPago.concepto}</p>
+              </div>
+              <button onClick={() => { setModalPago(null); setError(''); setMontoAbono(''); }} style={{ background: 'rgba(255,255,255,0.2)', border: 'none', borderRadius: 8, color: '#fff', width: 28, height: 28, cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
             </div>
             <div style={{ padding: '20px 24px' }}>
-              <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 10, padding: '12px 16px', marginBottom: 20 }}>
-                <div style={{ fontSize: 13, color: '#166534', fontWeight: 600 }}>Total a pagar</div>
-                <div style={{ fontSize: 24, fontWeight: 800, color: '#15803d' }}>{fmt(modalPago.saldo)}</div>
+              {/* Saldo actual */}
+              <div style={{ background: '#faf5ff', border: '1px solid #c4b5fd', borderRadius: 10, padding: '14px 16px', marginBottom: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#6b7280', fontWeight: 600, textTransform: 'uppercase' }}>Saldo pendiente</div>
+                    <div style={{ fontSize: 24, fontWeight: 800, color: '#7c3aed' }}>{fmt(modalPago.saldo)}</div>
+                  </div>
+                  {(modalPago.abonos?.length > 0) && (
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 11, color: '#6b7280' }}>{modalPago.abonos.length} abono(s) previo(s)</div>
+                      <div style={{ fontSize: 13, color: '#16a34a', fontWeight: 700 }}>Pagado: {fmt(modalPago.montoPagado || 0)}</div>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+
+              {/* Historial de abonos anteriores */}
+              {(modalPago.abonos?.length > 0) && (
+                <div style={{ marginBottom: 16 }}>
+                  <button onClick={() => setVerAbonos(verAbonos === modalPago.id ? null : modalPago.id)}
+                    style={{ background: 'none', border: '1px solid #e5e7eb', borderRadius: 8, padding: '6px 12px', fontSize: 12, color: '#6b7280', cursor: 'pointer', fontWeight: 600, width: '100%' }}>
+                    {verAbonos === modalPago.id ? '▲ Ocultar' : '▼ Ver'} historial de abonos ({modalPago.abonos.length})
+                  </button>
+                  {verAbonos === modalPago.id && (
+                    <div style={{ marginTop: 8, border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                        <thead><tr style={{ background: '#f9fafb' }}>
+                          <th style={{ padding: '8px 10px', textAlign: 'left', color: '#6b7280', fontWeight: 700 }}>Fecha</th>
+                          <th style={{ padding: '8px 10px', textAlign: 'left', color: '#6b7280', fontWeight: 700 }}>Forma</th>
+                          <th style={{ padding: '8px 10px', textAlign: 'right', color: '#6b7280', fontWeight: 700 }}>Monto</th>
+                          <th style={{ padding: '8px 10px', textAlign: 'right', color: '#6b7280', fontWeight: 700 }}>Saldo</th>
+                        </tr></thead>
+                        <tbody>
+                          {(modalPago.abonos || []).map((ab, i) => (
+                            <tr key={i} style={{ borderTop: '1px solid #f3f4f6' }}>
+                              <td style={{ padding: '8px 10px' }}>{ab.fecha ? ab.fecha.slice(0,10) : '—'}</td>
+                              <td style={{ padding: '8px 10px' }}>{ab.formaPago}</td>
+                              <td style={{ padding: '8px 10px', textAlign: 'right', color: '#16a34a', fontWeight: 700 }}>{fmt(ab.monto)}</td>
+                              <td style={{ padding: '8px 10px', textAlign: 'right', color: '#dc2626' }}>{fmt(ab.saldoDespues)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Monto del abono */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
+                <label style={{ fontSize: 13, fontWeight: 700, color: '#374151' }}>
+                  Monto a pagar <span style={{ fontWeight: 400, color: '#6b7280' }}>(vacío = pagar todo el saldo)</span>
+                </label>
+                <input
+                  type="number"
+                  value={montoAbono}
+                  onChange={e => setMontoAbono(e.target.value)}
+                  placeholder={`Máx: ${(modalPago.saldo || 0).toLocaleString('es-CO')}`}
+                  style={{ padding: '10px 12px', border: '2px solid #e5e7eb', borderRadius: 8, fontSize: 15, fontWeight: 700, outline: 'none', color: '#7c3aed' }}
+                />
+                {montoAbono && Number(montoAbono) < (modalPago.saldo || 0) && (
+                  <div style={{ fontSize: 12, color: '#f59e0b', fontWeight: 600 }}>
+                    ⚠️ Abono parcial — quedará saldo de {fmt((modalPago.saldo || 0) - Number(montoAbono))}
+                  </div>
+                )}
+              </div>
+
+              {/* Forma de pago */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14 }}>
                 <label style={{ fontSize: 13, fontWeight: 700, color: '#374151' }}>Forma de pago *</label>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   {formasPago.map(f => (
                     <button key={f} type="button" onClick={() => handleFormaPago(f)} style={{
                       padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, border: 'none',
-                      background: formPago.formaPago === f ? '#16a34a' : '#f3f4f6',
+                      background: formPago.formaPago === f ? '#7c3aed' : '#f3f4f6',
                       color: formPago.formaPago === f ? '#fff' : '#374151',
                     }}>{f}</button>
                   ))}
@@ -290,17 +364,20 @@ const GestionCxP = ({ user }) => {
                 {formPago.cajaLabel && <div style={{ fontSize: 12, color: '#16a34a', fontWeight: 600 }}>✅ Caja: {formPago.cajaLabel}</div>}
                 {formPago.formaPago && !formPago.cajaId && <div style={{ fontSize: 12, color: '#dc2626', fontWeight: 600 }}>⚠️ Sin caja asignada en Mi Empresa</div>}
               </div>
+
+              {/* Fecha */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
                 <label style={{ fontSize: 13, fontWeight: 700, color: '#374151' }}>Fecha de pago</label>
                 <input type="date" value={formPago.fechaPago} onChange={e => setFormPago(p => ({ ...p, fechaPago: e.target.value }))}
                   style={{ padding: '9px 12px', border: '2px solid #e5e7eb', borderRadius: 8, fontSize: 13, outline: 'none' }} />
               </div>
+
               {error && <div style={{ color: '#dc2626', fontSize: 13, marginBottom: 12, fontWeight: 600 }}>⚠️ {error}</div>}
             </div>
             <div style={{ padding: '0 24px 20px', display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-              <button onClick={() => { setModalPago(null); setError(''); }} style={{ padding: '10px 20px', background: '#f3f4f6', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>Cancelar</button>
-              <button onClick={registrarPago} disabled={guardando} style={{ padding: '10px 24px', background: 'linear-gradient(135deg,#16a34a,#15803d)', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700 }}>
-                {guardando ? 'Registrando...' : '✅ Confirmar pago'}
+              <button onClick={() => { setModalPago(null); setError(''); setMontoAbono(''); }} style={{ padding: '10px 20px', background: '#f3f4f6', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>Cancelar</button>
+              <button onClick={registrarPago} disabled={guardando} style={{ padding: '10px 24px', background: 'linear-gradient(135deg,#7c3aed,#6d28d9)', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700 }}>
+                {guardando ? 'Registrando...' : montoAbono && Number(montoAbono) < (modalPago.saldo || 0) ? '💰 Registrar abono' : '✅ Pagar total'}
               </button>
             </div>
           </div>

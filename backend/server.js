@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
-const jwt = require('jsonwebtoken');
 
 // Firebase se inicializa SOLO en config/firebase.js
 require('./config/firebase');
@@ -16,15 +15,6 @@ const { authenticate, validarTenant } = require('./middleware/auth.js');
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'Backend running ✅', firebase: 'Connected ✅' });
-});
-
-app.get('/api/test-token', (req, res) => {
-  const token = jwt.sign(
-    { uid: '3oUbFf2KvgbC97FXQFb8PHpwNBW2', email: 'sandra@empresa.com', role: 'admin' },
-    process.env.JWT_SECRET,
-    { expiresIn: '24h' }
-  );
-  res.json({ token });
 });
 
 // Routes
@@ -55,6 +45,17 @@ app.use('/api/reportes',  authenticate, require('./routes/reportes'));
 app.use('/api/alertas',   authenticate, require('./routes/alertas'));
 app.use('/api/auditoria', authenticate, require('./routes/auditoria'));
 app.use('/api/compras',  authenticate, require('./routes/compras'));
+
+// Panel Maestro de Suscriptores — SIN authenticate global a propósito:
+// la ruta tiene su propio authenticate + verificación superAdmin que se
+// valida contra Firestore en cada petición (no contra el JWT).
+app.use('/api/superadmin', require('./routes/superadmin'));
+
+// WhatsApp: el webhook de Meta es público — el authenticate va POR RUTA
+// dentro del archivo (config, envío de prueba y log sí están protegidos)
+app.use('/api/whatsapp', require('./routes/whatsapp'));
+// Motor de Vencimientos (Fase 2)
+app.use('/api/vencimientos', authenticate, require('./routes/vencimientos'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {

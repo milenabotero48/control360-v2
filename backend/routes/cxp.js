@@ -130,10 +130,10 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST /api/cxp/:egresoId/pagar — Registrar pago de CxP proveedor
+// POST /api/cxp/:egresoId/pagar — Registrar pago o abono parcial de CxP proveedor
 router.post('/:egresoId/pagar', async (req, res) => {
   try {
-    const { cajaId, formaPago, fechaPago } = req.body;
+    const { cajaId, formaPago, fechaPago, montoAbono } = req.body;
     if (!cajaId || !formaPago) return res.status(400).json({ error: 'cajaId y formaPago requeridos' });
 
     const egresoRef = db.collection('egresos').doc(req.params.egresoId);
@@ -142,24 +142,49 @@ router.post('/:egresoId/pagar', async (req, res) => {
 
     const egreso = egresoDoc.data();
 
-    // Aislamiento: solo el dueño (adminId) puede pagar el egreso
     const userId = req.adminId || req.user.uid || req.user.id;
     if (egreso.userId && egreso.userId !== userId) {
       return res.status(403).json({ error: 'No tienes acceso a este egreso' });
     }
 
-    const totalPagar = egreso.totalPagar || egreso.monto || 0;
+    const saldoActual = egreso.saldo ?? (egreso.totalPagar || egreso.monto || 0);
+    if (saldoActual <= 0) return res.status(400).json({ error: 'Este egreso ya esta completamente pagado' });
+
+    const montoAbonoNum = Number(montoAbono) || 0;
+    const montoPagar = (montoAbonoNum > 0 && montoAbonoNum < saldoActual)
+      ? montoAbonoNum
+      : saldoActual;
+
+    const nuevoSaldo = saldoActual - montoPagar;
+    const nuevoMontoPagado = (egreso.montoPagado || 0) + montoPagar;
+    const esAbonoParcial = nuevoSaldo > 0;
+    const nuevoEstado = esAbonoParcial ? 'PENDIENTE' : 'PAGADO';
+
+    const abono = {
+      monto: montoPagar,
+      formaPago,
+      cajaId,
+      fecha: fechaPago || new Date().toISOString(),
+      creadoPor: req.user.email || '',
+      saldoAntes: saldoActual,
+      saldoDespues: nuevoSaldo,
+      createdAt: new Date().toISOString()
+    };
 
     const batch = db.batch();
     batch.update(egresoRef, {
-      estado: 'PAGADO', cajaId, formaPago,
-      fechaPago: fechaPago || new Date().toISOString(),
+      estado: nuevoEstado,
+      saldo: nuevoSaldo,
+      montoPagado: nuevoMontoPagado,
+      cajaId, formaPago,
+      fechaPago: esAbonoParcial ? (egreso.fechaPago || null) : (fechaPago || new Date().toISOString()),
+      abonos: admin.firestore.FieldValue.arrayUnion(abono),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
     const cajaRef = db.collection('cajas').doc(cajaId);
     batch.update(cajaRef, {
-      saldo: admin.firestore.FieldValue.increment(-totalPagar),
+      saldo: admin.firestore.FieldValue.increment(-montoPagar),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -167,33 +192,35 @@ router.post('/:egresoId/pagar', async (req, res) => {
 
     await db.collection('movimientos').add({
       userId, cajaId, tipo: 'egreso',
-      concepto: `Pago CxP ${egreso.numero} — ${egreso.proveedor || ''}`,
-      monto: totalPagar,
+      concepto: `${esAbonoParcial ? 'Abono' : 'Pago'} CxP ${egreso.numero} — ${egreso.proveedor || ''}`,
+      monto: montoPagar,
       referencia: egreso.numero,
       formaPago,
       egresoId: req.params.egresoId,
+      esAbonoParcial,
       creadoPor: req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    // Auditoría con documento (egreso.numero)
     try {
       await db.collection('audit_logs').add({
-        accion: 'CXP_PAGADA',
+        accion: esAbonoParcial ? 'CXP_ABONO' : 'CXP_PAGADA',
         modulo: 'cxp',
-        descripcion: `Pago CxP ${egreso.numero} — ${egreso.proveedor || ''} — ${fmt(totalPagar)}`,
+        descripcion: `${esAbonoParcial ? 'Abono' : 'Pago total'} CxP ${egreso.numero} — ${egreso.proveedor || ''} — ${fmt(montoPagar)} — Saldo: ${fmt(nuevoSaldo)}`,
         usuarioId: userId,
         usuarioNombre: req.user.email,
         documento: egreso.numero,
+        datos: { montoPagado: montoPagar, saldoAnterior: saldoActual, saldoNuevo: nuevoSaldo },
         fecha: new Date().toISOString(),
         timestamp: admin.firestore.FieldValue.serverTimestamp()
       });
     } catch {}
 
-    res.json({ ok: true });
+    res.json({ ok: true, esAbonoParcial, saldoRestante: nuevoSaldo, montoPagado: montoPagar });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
+
 
 module.exports = router;

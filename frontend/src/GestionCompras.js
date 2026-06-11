@@ -98,6 +98,11 @@ export default function GestionCompras({ user }) {
   const [proveedores, setProveedores]     = useState([]);
   const [guardando, setGuardando]         = useState(false);
   const [alertasMargen, setAlertasMargen] = useState([]);
+  const [modalAnular, setModalAnular]     = useState(null); // compra a anular
+  const [pwdAnular, setPwdAnular]         = useState('');
+  const [motivoAnular, setMotivoAnular]   = useState('');
+  const [anulando, setAnulando]           = useState(false);
+  const [errorAnular, setErrorAnular]     = useState('');
 
   useEffect(() => {
     cargarLista();
@@ -402,6 +407,113 @@ export default function GestionCompras({ user }) {
     setGuardando(false);
   };
 
+  // ── Anular compra ────────────────────────────────────────────────────────────
+  const anularCompra = async () => {
+    if (!pwdAnular.trim()) { setErrorAnular('Ingresa tu contraseña'); return; }
+    if (!motivoAnular.trim()) { setErrorAnular('El motivo es obligatorio'); return; }
+    setAnulando(true); setErrorAnular('');
+    try {
+      // Verificar contraseña primero
+      await axios.post(`${API}/users/verificar-password`, { password: pwdAnular }, { headers });
+      // Anular la compra
+      await axios.post(`${API}/compras/${modalAnular.id}/anular`, { motivo: motivoAnular }, { headers });
+      setExito(`Compra ${modalAnular.numero} anulada. Stock revertido.`);
+      setModalAnular(null); setPwdAnular(''); setMotivoAnular('');
+      setVista('lista'); cargarLista();
+    } catch (e) {
+      setErrorAnular(e.response?.data?.error || 'Error al anular');
+    }
+    setAnulando(false);
+  };
+
+  // ── Imprimir compra ───────────────────────────────────────────────────────────
+  const imprimirCompra = (c) => {
+    const empresa = JSON.parse(localStorage.getItem('user') || '{}');
+    const TIPOS_RETEN = { retefuente: 'Retefuente', reteiva: 'ReteIVA', reteica: 'ReteICA' };
+    const fmtP = v => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', minimumFractionDigits: 0 }).format(v || 0);
+    const lineasHtml = (c.lineas || []).map(l => `
+      <tr>
+        <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9">${l.productoNombre || l.descripcionXML || ''}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;text-align:center">${l.destino === 'taller' ? 'Taller' : 'Catálogo'}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;text-align:center">${l.cantidad}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;text-align:right">${fmtP(l.precioUnitario)}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;text-align:right;font-weight:700">${fmtP(l.subtotal)}</td>
+      </tr>`).join('');
+    const retenHtml = (c.retenciones || []).map(r => `
+      <tr><td style="padding:4px 12px;color:#dc2626" colspan="4">${TIPOS_RETEN[r.tipo] || r.tipo} (${r.pct}%)</td>
+      <td style="padding:4px 12px;text-align:right;color:#dc2626">- ${fmtP(r.valor)}</td></tr>`).join('');
+    const html = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">
+      <title>Compra ${c.numero}</title>
+      <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family:'Segoe UI',sans-serif; padding:32px; color:#1e293b; font-size:13px; }
+        .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:24px; padding-bottom:16px; border-bottom:2px solid #1e293b; }
+        .empresa { font-size:20px; font-weight:800; color:#1e293b; }
+        .doc-titulo { font-size:22px; font-weight:800; color:#7c3aed; text-align:right; }
+        .doc-num { font-size:14px; color:#64748b; text-align:right; margin-top:4px; }
+        .seccion { display:grid; grid-template-columns:1fr 1fr; gap:24px; margin-bottom:20px; }
+        .bloque { background:#f8fafc; border-radius:8px; padding:14px 16px; }
+        .bloque-titulo { font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
+        .bloque-valor { font-size:14px; font-weight:700; color:#1e293b; }
+        .bloque-sub { font-size:12px; color:#64748b; margin-top:2px; }
+        table { width:100%; border-collapse:collapse; margin-bottom:16px; }
+        thead th { background:#1e293b; color:#fff; padding:10px 12px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }
+        thead th:last-child { text-align:right; }
+        .totales { margin-left:auto; width:300px; border-top:2px solid #e2e8f0; padding-top:12px; }
+        .total-row { display:flex; justify-content:space-between; padding:4px 0; font-size:13px; color:#64748b; }
+        .total-final { display:flex; justify-content:space-between; padding:10px 0; font-size:18px; font-weight:800; color:#16a34a; border-top:2px solid #e2e8f0; margin-top:8px; }
+        .footer { margin-top:32px; padding-top:16px; border-top:1px solid #e2e8f0; text-align:center; font-size:11px; color:#94a3b8; }
+        .badge-anulado { background:#fee2e2; color:#dc2626; padding:4px 12px; border-radius:20px; font-weight:700; font-size:12px; }
+        @media print { body { padding:20px; } }
+      </style></head><body>
+      <div class="header">
+        <div>
+          <div class="empresa">${empresa.nombre || 'Control360'}</div>
+          <div style="font-size:12px;color:#64748b;margin-top:4px">NIT: ${empresa.nit || ''}</div>
+        </div>
+        <div>
+          <div class="doc-titulo">ORDEN DE COMPRA</div>
+          <div class="doc-num">${c.numero}</div>
+          ${c.estado === 'anulada' ? '<div style="text-align:right;margin-top:6px"><span class="badge-anulado">ANULADA</span></div>' : ''}
+        </div>
+      </div>
+      <div class="seccion">
+        <div class="bloque">
+          <div class="bloque-titulo">Proveedor</div>
+          <div class="bloque-valor">${c.proveedorNombre || '—'}</div>
+          ${c.proveedorNit ? `<div class="bloque-sub">NIT: ${c.proveedorNit}</div>` : ''}
+        </div>
+        <div class="bloque">
+          <div class="bloque-titulo">Datos de la factura</div>
+          <div class="bloque-valor">N° ${c.numeroFactura || '—'}</div>
+          <div class="bloque-sub">Fecha: ${c.fechaFactura || '—'} · Forma de pago: ${c.formaPago || '—'}</div>
+          <div class="bloque-sub">Origen: ${c.origenXML ? 'XML DIAN' : 'Manual'}</div>
+        </div>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Producto</th><th>Destino</th>
+          <th style="text-align:center">Cant.</th>
+          <th style="text-align:right">P. Costo</th>
+          <th style="text-align:right">Subtotal</th>
+        </tr></thead>
+        <tbody>${lineasHtml}</tbody>
+      </table>
+      <div class="totales">
+        <div class="total-row"><span>Subtotal</span><span>${fmtP(c.subtotal)}</span></div>
+        <div class="total-row"><span>IVA</span><span>${fmtP(c.totalIVA)}</span></div>
+        ${retenHtml ? `<table style="width:100%;margin:0"><tbody>${retenHtml}</tbody></table>` : ''}
+        <div class="total-final"><span>Neto a pagar</span><span>${fmtP(c.netoPagar)}</span></div>
+      </div>
+      ${c.notas ? `<div style="margin-top:16px;background:#f8fafc;border-radius:8px;padding:12px 16px;font-size:12px;color:#64748b"><strong>Notas:</strong> ${c.notas}</div>` : ''}
+      <div class="footer">Documento generado por Control360 · ${new Date().toLocaleDateString('es-CO')} · ${new Date().toLocaleTimeString('es-CO')}</div>
+    </body></html>`;
+    const win = window.open('', '_blank');
+    win.document.write(html);
+    win.document.close();
+    setTimeout(() => win.print(), 500);
+  };
+
   const listaBusqueda = destinoMapeo === 'catalogo'
     ? productos.filter(p => !buscarProd || p.nombre?.toLowerCase().includes(buscarProd.toLowerCase()) || p.codigo?.toLowerCase().includes(buscarProd.toLowerCase()))
     : insumos.filter(p => !buscarProd || p.nombre?.toLowerCase().includes(buscarProd.toLowerCase()));
@@ -457,19 +569,69 @@ export default function GestionCompras({ user }) {
   // ── DETALLE ──────────────────────────────────────────────────────────────────
   if (vista === 'detalle' && detalle) return (
     <div style={S.wrap}>
+      {/* Modal anulación */}
+      {modalAnular && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div style={{ background: '#fff', borderRadius: 16, width: 460, maxWidth: '100%', overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.2)' }}>
+            <div style={{ background: 'linear-gradient(135deg,#dc2626,#b91c1c)', padding: '20px 24px' }}>
+              <div style={{ color: '#fff', fontWeight: 800, fontSize: 16 }}>🚫 Anular compra {modalAnular.numero}</div>
+              <div style={{ color: 'rgba(255,255,255,0.8)', fontSize: 12, marginTop: 4 }}>El stock se revertirá automáticamente</div>
+            </div>
+            <div style={{ padding: '20px 24px' }}>
+              <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#991b1b', marginBottom: 16 }}>
+                ⚠️ Esta acción es irreversible. El inventario actualizado por esta compra se revertirá.
+              </div>
+              <div style={{ ...S.field, marginBottom: 14 }}>
+                <label style={S.label}>Contraseña admin *</label>
+                <input type="password" style={S.input} value={pwdAnular} onChange={e => setPwdAnular(e.target.value)} placeholder="••••••••" />
+              </div>
+              <div style={{ ...S.field, marginBottom: 14 }}>
+                <label style={S.label}>Motivo de anulación *</label>
+                <textarea style={{ ...S.input, height: 80, resize: 'vertical' }} value={motivoAnular} onChange={e => setMotivoAnular(e.target.value)} placeholder="Explica por qué se anula esta compra..." />
+              </div>
+              {errorAnular && <div style={S.error}>{errorAnular}</div>}
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <button style={S.btnSecundario} onClick={() => { setModalAnular(null); setPwdAnular(''); setMotivoAnular(''); setErrorAnular(''); }}>Cancelar</button>
+                <button style={{ ...S.btnVerde, background: '#dc2626' }} onClick={anularCompra} disabled={anulando}>
+                  {anulando ? 'Anulando...' : '🚫 Confirmar anulación'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={S.header}>
         <div>
           <h2 style={S.titulo}>Compra {detalle.numero}</h2>
           <p style={S.subtitulo}>{detalle.proveedorNombre} · {detalle.fechaFactura}</p>
         </div>
-        <button style={S.btnSecundario} onClick={() => setVista('lista')}>← Volver</button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button style={S.btnSecundario} onClick={() => setVista('lista')}>← Volver</button>
+          <button style={{ ...S.btnSecundario, color: '#0284c7', borderColor: '#bae6fd' }} onClick={() => imprimirCompra(detalle)}>🖨️ Imprimir</button>
+          {detalle.estado === 'confirmada' && (
+            <button style={{ ...S.btnSecundario, color: '#dc2626', borderColor: '#fca5a5' }} onClick={() => { setModalAnular(detalle); setErrorAnular(''); }}>🚫 Anular</button>
+          )}
+          {detalle.estado === 'anulada' && <span style={S.badge('#dc2626')}>ANULADA</span>}
+        </div>
       </div>
+
       <div style={S.card}>
         <div style={S.row3}>
           <div style={S.field}><label style={S.label}>Proveedor</label><span style={{ fontSize: 15, fontWeight: 700 }}>{detalle.proveedorNombre}</span><span style={{ fontSize: 12, color: '#64748b' }}>NIT: {detalle.proveedorNit || '—'}</span></div>
           <div style={S.field}><label style={S.label}>Factura</label><span style={{ fontSize: 15 }}>{detalle.numeroFactura || '—'}</span></div>
-          <div style={S.field}><label style={S.label}>Neto pagado</label><span style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>{fmt(detalle.netoPagar)}</span></div>
+          <div style={S.field}><label style={S.label}>Neto pagado</label><span style={{ fontSize: 18, fontWeight: 800, color: detalle.estado === 'anulada' ? '#dc2626' : '#16a34a' }}>{fmt(detalle.netoPagar)}</span></div>
         </div>
+        <div style={{ ...S.row3, marginTop: 0 }}>
+          <div style={S.field}><label style={S.label}>Forma de pago</label><span style={{ fontSize: 14 }}>{detalle.formaPago || '—'}</span></div>
+          <div style={S.field}><label style={S.label}>Origen</label><span style={{ fontSize: 14 }}>{detalle.origenXML ? '📄 XML DIAN' : '✏️ Manual'}</span></div>
+          <div style={S.field}><label style={S.label}>Estado</label><span style={S.badge(detalle.estado === 'confirmada' ? '#16a34a' : detalle.estado === 'anulada' ? '#dc2626' : '#d97706')}>{detalle.estado}</span></div>
+        </div>
+        {detalle.motivoAnulacion && (
+          <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#991b1b', marginBottom: 12 }}>
+            <strong>Motivo de anulación:</strong> {detalle.motivoAnulacion}
+          </div>
+        )}
         <table style={{ ...S.tabla, marginTop: 16 }}>
           <thead><tr><th style={S.th}>Producto</th><th style={S.th}>Destino</th><th style={S.th}>Cant.</th><th style={S.th}>P. Costo</th><th style={S.th}>Subtotal</th></tr></thead>
           <tbody>
@@ -490,6 +652,11 @@ export default function GestionCompras({ user }) {
           {(detalle.retenciones || []).map((r, i) => <div key={i} style={{ color: '#dc2626', fontSize: 13 }}>- {r.tipo}: {fmt(r.valor)}</div>)}
           <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a', marginTop: 8 }}>Neto: {fmt(detalle.netoPagar)}</div>
         </div>
+      </div>
+
+      {/* Botón imprimir abajo también */}
+      <div style={{ display: 'flex', gap: 10 }}>
+        <button style={{ ...S.btnSecundario, color: '#0284c7', borderColor: '#bae6fd' }} onClick={() => imprimirCompra(detalle)}>🖨️ Imprimir orden de compra</button>
       </div>
     </div>
   );

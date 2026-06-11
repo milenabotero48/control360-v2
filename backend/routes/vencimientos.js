@@ -1,0 +1,359 @@
+// ============================================================
+// Control360 — Motor de Vencimientos (Fase 2)
+// Ubicación: backend/routes/vencimientos.js
+// ------------------------------------------------------------
+// MONTAJE en server.js (UNA línea junto a las demás rutas):
+//   app.use('/api/vencimientos', authenticate, require('./routes/vencimientos'));
+//
+// REGLAS DEL DOCUMENTO ARQ-COMERCIAL-V1.1 implementadas aquí:
+//   R-COM-01  El vencimiento pertenece al equipo, no al cliente
+//   R-COM-03  Filas sin fecha → colección prospectos (no clients)
+//   (R-COM-02 / 07 — agrupación y candado 30 días — viven en el
+//    motor automático de la Fase 4, no en este archivo)
+//
+// DISEÑO DEL IMPORTADOR: el frontend parsea el Excel con SheetJS
+// (ya disponible en el stack) y envía JSON. El backend NO necesita
+// dependencias nuevas (multer/xlsx). Cero cambios en package.json.
+//
+// FECHAS: strings 'YYYY-MM-DD' (regla del proyecto: Railway corre
+// en UTC, Colombia es UTC-5 — se evita Date() para días calendario).
+// ============================================================
+
+const express = require('express');
+const router = express.Router();
+const { db, admin } = require('../config/firebase');
+
+// ─── HELPER: auditoría (mismo patrón de clients.js) ─────────────────────────
+const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = {} }) => {
+  try {
+    await db.collection('audit_logs').add({
+      accion, modulo: 'vencimientos', descripcion,
+      usuarioId, usuarioNombre, datos,
+      fecha: new Date().toISOString(),
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (e) { console.error('Auditoría error:', e); }
+};
+
+// ─── HELPER: resolver tenant (patrón estándar del proyecto) ──────────────────
+const getAdminId = (req) => req.adminId || req.user?.uid || req.user?.id;
+
+// ─── HELPER: fechas calendario sin riesgo de zona horaria ────────────────────
+// 'YYYY-MM-DD' + meses → 'YYYY-MM-DD'
+const sumarMeses = (fechaStr, meses) => {
+  const [y, m, d] = fechaStr.split('-').map(Number);
+  const fecha = new Date(Date.UTC(y, m - 1 + meses, d));
+  return fecha.toISOString().slice(0, 10);
+};
+
+const hoyColombia = () => {
+  // UTC-5: restar 5 horas al reloj UTC y tomar la fecha
+  const ahora = new Date(Date.now() - 5 * 60 * 60 * 1000);
+  return ahora.toISOString().slice(0, 10);
+};
+
+const esFechaValida = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+// Estado calculado dinámicamente (no se "pudre" en la base):
+// GESTIONADO se respeta si está marcado; el resto se deriva de la fecha.
+const calcularEstado = (venc, hoy) => {
+  if (venc.gestionado) return 'GESTIONADO';
+  if (!venc.fechaVencimiento) return 'SIN_FECHA';
+  if (venc.fechaVencimiento < hoy) return 'VENCIDO';
+  const limite30 = sumarMeses(hoy, 1); // ~30 días
+  if (venc.fechaVencimiento <= limite30) return 'POR_VENCER';
+  return 'VIGENTE';
+};
+
+// ─── HELPER: normalizar teléfono (mismo criterio del servicio WhatsApp) ──────
+const normalizarTelefono = (telefono) => {
+  if (!telefono) return null;
+  let t = String(telefono).replace(/[\s\-\(\)\+\.]/g, '');
+  if (t.startsWith('57') && t.length === 12) return t;
+  if (t.length === 10 && t.startsWith('3')) return '57' + t;
+  return t.length >= 10 ? t : null;
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GET /api/vencimientos — Listar con filtros (estado, clienteId, mes)
+// Orden en memoria por fechaVencimiento (regla: sin orderBy/índices compuestos)
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const { estado, clienteId, mes } = req.query; // mes: 'YYYY-MM'
+
+    let query = db.collection('vencimientos').where('adminId', '==', adminId);
+    if (clienteId) query = query.where('clienteId', '==', clienteId);
+
+    const snap = await query.limit(2000).get();
+    const hoy = hoyColombia();
+
+    let lista = snap.docs.map(d => {
+      const data = { id: d.id, ...d.data() };
+      data.estado = calcularEstado(data, hoy);
+      return data;
+    });
+
+    if (estado) lista = lista.filter(v => v.estado === estado);
+    if (mes) lista = lista.filter(v => (v.fechaVencimiento || '').startsWith(mes));
+
+    lista.sort((a, b) => (a.fechaVencimiento || '9999').localeCompare(b.fechaVencimiento || '9999'));
+
+    return res.json(lista);
+  } catch (err) {
+    console.error('GET /vencimientos:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GET /api/vencimientos/resumen — Tarjetas del dashboard
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/resumen', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const snap = await db.collection('vencimientos')
+      .where('adminId', '==', adminId)
+      .limit(5000)
+      .get();
+
+    const hoy = hoyColombia();
+    const resumen = { VENCIDO: 0, POR_VENCER: 0, VIGENTE: 0, GESTIONADO: 0, SIN_FECHA: 0, total: 0 };
+
+    snap.docs.forEach(d => {
+      const e = calcularEstado(d.data(), hoy);
+      resumen[e] = (resumen[e] || 0) + 1;
+      resumen.total++;
+    });
+
+    return res.json(resumen);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// POST /api/vencimientos — Crear registro manual (desde ficha cliente o llamada)
+// Body: { clienteId, sucursal?, descripcionEquipo, cantidad?,
+//         fechaUltimaRecarga? | fechaVencimiento?, origenDato? }
+// Si solo viene fechaUltimaRecarga → vencimiento = +12 meses (R-COM-04)
+// ═════════════════════════════════════════════════════════════════════════════
+router.post('/', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const { clienteId, sucursal, descripcionEquipo, cantidad, fechaUltimaRecarga, fechaVencimiento, origenDato, ordenId } = req.body;
+
+    if (!clienteId || !descripcionEquipo) {
+      return res.status(400).json({ error: 'clienteId y descripcionEquipo son requeridos' });
+    }
+
+    let fVenc = esFechaValida(fechaVencimiento) ? fechaVencimiento : null;
+    const fRecarga = esFechaValida(fechaUltimaRecarga) ? fechaUltimaRecarga : null;
+    if (!fVenc && fRecarga) fVenc = sumarMeses(fRecarga, 12);
+    if (!fVenc) return res.status(400).json({ error: 'Se requiere fechaVencimiento o fechaUltimaRecarga (YYYY-MM-DD)' });
+
+    const nuevo = {
+      adminId,
+      clienteId,
+      sucursal: sucursal || null,
+      descripcionEquipo,
+      cantidad: Number(cantidad) || 1,
+      fechaUltimaRecarga: fRecarga,
+      fechaVencimiento: fVenc,
+      gestionado: false,
+      origenDato: origenDato || 'manual',
+      ordenId: ordenId || null,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    const ref = await db.collection('vencimientos').add(nuevo);
+
+    await auditar({
+      accion: 'crear', descripcion: `Vencimiento creado: ${descripcionEquipo} (${fVenc})`,
+      usuarioId: getAdminId(req), usuarioNombre: req.user?.nombre || req.user?.email,
+      datos: { vencimientoId: ref.id, clienteId }
+    });
+
+    return res.status(201).json({ id: ref.id, ...nuevo });
+  } catch (err) {
+    console.error('POST /vencimientos:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// POST /api/vencimientos/importar — Importación masiva (Excel → JSON)
+// El frontend parsea el Excel con SheetJS y envía:
+// Body: { filas: [{ nombre, empresa?, telefono, sucursal?, equipo,
+//                   cantidad?, fechaUltimaRecarga? ('YYYY-MM-DD' o 'YYYY-MM') }] }
+//
+// Enrutamiento por fila (sección 06 del documento):
+//   CON fecha  → cliente (existente o nuevo) + registro en vencimientos
+//   SIN fecha  → colección prospectos (estado NUEVO) para la vendedora
+//   Teléfono ya en clients → no duplica cliente, agrega vencimientos
+// ═════════════════════════════════════════════════════════════════════════════
+router.post('/importar', async (req, res) => {
+  try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el administrador puede importar' });
+    }
+    const adminId = getAdminId(req);
+    const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
+
+    if (!filas.length) return res.status(400).json({ error: 'No se recibieron filas para importar' });
+    if (filas.length > 2000) return res.status(400).json({ error: 'Máximo 2000 filas por importación. Divide el archivo.' });
+
+    // 1. Cargar clientes existentes del tenant UNA vez (mapa por teléfono)
+    const clientesSnap = await db.collection('clients').where('adminId', '==', adminId).get();
+    const porTelefono = new Map();
+    clientesSnap.docs.forEach(d => {
+      const tel = normalizarTelefono(d.data().telefono);
+      if (tel) porTelefono.set(tel, d.id);
+    });
+
+    const resultado = { vencimientosCreados: 0, clientesNuevos: 0, prospectosCreados: 0, errores: [] };
+    let batch = db.batch();
+    let ops = 0;
+    const commitSiLleno = async () => {
+      if (ops >= 400) { await batch.commit(); batch = db.batch(); ops = 0; }
+    };
+
+    for (let i = 0; i < filas.length; i++) {
+      const f = filas[i];
+      const fila = i + 2; // +2: encabezado del Excel
+      try {
+        const nombre = String(f.nombre || f.empresa || '').trim();
+        const telefono = normalizarTelefono(f.telefono);
+
+        if (!nombre || !telefono) {
+          resultado.errores.push({ fila, error: 'Falta nombre o teléfono válido' });
+          continue;
+        }
+
+        // Normalizar fecha: acepta 'YYYY-MM-DD' o 'YYYY-MM' (se asume día 01)
+        let fRecarga = null;
+        const rawFecha = String(f.fechaUltimaRecarga || '').trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(rawFecha)) fRecarga = rawFecha;
+        else if (/^\d{4}-\d{2}$/.test(rawFecha)) fRecarga = rawFecha + '-01';
+
+        if (!fRecarga) {
+          // ─── SIN FECHA → prospecto para la vendedora (R-COM-03 / sección 06)
+          const refP = db.collection('prospectos').doc();
+          batch.set(refP, {
+            adminId,
+            nombre,
+            empresa: f.empresa || null,
+            telefono,
+            sucursal: f.sucursal || null,
+            equipoReportado: f.equipo || null,
+            origen: 'importacion',
+            estado: 'NUEVO',
+            asignadoA: null,
+            proximaLlamada: null,
+            clienteId: porTelefono.get(telefono) || null,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          ops++; resultado.prospectosCreados++;
+          await commitSiLleno();
+          continue;
+        }
+
+        // ─── CON FECHA → cliente + vencimiento
+        let clienteId = porTelefono.get(telefono);
+        if (!clienteId) {
+          const refC = db.collection('clients').doc();
+          batch.set(refC, {
+            adminId,
+            nombre,
+            telefono,
+            email: f.email || null,
+            direccion: f.direccion || null,
+            origen: 'importacion_vencimientos',
+            activo: true,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          clienteId = refC.id;
+          porTelefono.set(telefono, clienteId); // evita duplicar en filas siguientes
+          ops++; resultado.clientesNuevos++;
+        }
+
+        const refV = db.collection('vencimientos').doc();
+        batch.set(refV, {
+          adminId,
+          clienteId,
+          sucursal: f.sucursal || null,
+          descripcionEquipo: f.equipo || 'Extintor',
+          cantidad: Number(f.cantidad) || 1,
+          fechaUltimaRecarga: fRecarga,
+          fechaVencimiento: sumarMeses(fRecarga, 12),
+          gestionado: false,
+          origenDato: 'importacion',
+          ordenId: null,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        ops++; resultado.vencimientosCreados++;
+        await commitSiLleno();
+
+      } catch (errFila) {
+        resultado.errores.push({ fila, error: errFila.message });
+      }
+    }
+
+    if (ops > 0) await batch.commit();
+
+    await auditar({
+      accion: 'importar',
+      descripcion: `Importación: ${resultado.vencimientosCreados} vencimientos, ${resultado.clientesNuevos} clientes nuevos, ${resultado.prospectosCreados} prospectos`,
+      usuarioId: adminId, usuarioNombre: req.user?.nombre || req.user?.email,
+      datos: { totalFilas: filas.length, errores: resultado.errores.length }
+    });
+
+    return res.json(resultado);
+  } catch (err) {
+    console.error('POST /vencimientos/importar:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PUT /api/vencimientos/:id — Actualizar (fecha, sucursal) o marcar gestionado
+// ═════════════════════════════════════════════════════════════════════════════
+router.put('/:id', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const ref = db.collection('vencimientos').doc(req.params.id);
+    const doc = await ref.get();
+
+    if (!doc.exists) return res.status(404).json({ error: 'Vencimiento no encontrado' });
+    if (doc.data().adminId !== adminId) return res.status(403).json({ error: 'No autorizado' }); // aislamiento
+
+    const { sucursal, descripcionEquipo, cantidad, fechaUltimaRecarga, fechaVencimiento, gestionado, ordenId } = req.body;
+    const update = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+    if (sucursal !== undefined) update.sucursal = sucursal;
+    if (descripcionEquipo) update.descripcionEquipo = descripcionEquipo;
+    if (cantidad !== undefined) update.cantidad = Number(cantidad) || 1;
+    if (esFechaValida(fechaUltimaRecarga)) {
+      update.fechaUltimaRecarga = fechaUltimaRecarga;
+      update.fechaVencimiento = sumarMeses(fechaUltimaRecarga, 12);
+    }
+    if (esFechaValida(fechaVencimiento)) update.fechaVencimiento = fechaVencimiento;
+    if (typeof gestionado === 'boolean') update.gestionado = gestionado;
+    if (ordenId !== undefined) update.ordenId = ordenId;
+
+    await ref.update(update);
+
+    await auditar({
+      accion: 'actualizar', descripcion: `Vencimiento ${req.params.id} actualizado`,
+      usuarioId: adminId, usuarioNombre: req.user?.nombre || req.user?.email,
+      datos: { cambios: Object.keys(update) }
+    });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;

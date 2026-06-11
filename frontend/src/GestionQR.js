@@ -304,9 +304,9 @@ const ModalImprimirEtiquetas = ({ equipos, onImprimir, onCerrar }) => {
         word-break: break-word;
         text-align: center;
       }
-      .id-equipo { font-size: 6.5px; color: #1a1a2e; font-weight: 700; font-family: monospace; margin-top: 0.5px; }
-      .tipo { font-size: 6.5px; color: #374151; margin-top: 0.5px; font-weight: 700; }
-      .orden { font-size: 6px; color: #6b7280; margin-top: 0.5px; font-family: monospace; font-weight: 600; }
+      .id-equipo { font-size: 8px; color: #1a1a2e; font-weight: 700; font-family: monospace; margin-top: 0.5px; }
+      .tipo { font-size: 8px; color: #374151; margin-top: 0.5px; font-weight: 700; }
+      .orden { font-size: 7.5px; color: #6b7280; margin-top: 0.5px; font-family: monospace; font-weight: 600; }
       @media print { body { padding: 0; } }
     </style></head><body>
     <div class="hoja">${filas}</div>
