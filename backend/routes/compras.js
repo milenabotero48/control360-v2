@@ -499,4 +499,102 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// ─── POST /api/compras/:id/anular — Anular compra y revertir stock ───────────
+router.post('/:id/anular', async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user.uid;
+    const { motivo } = req.body;
+    if (!motivo?.trim()) return res.status(400).json({ error: 'El motivo de anulacion es obligatorio' });
+
+    const ref = db.collection('compras').doc(req.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Compra no encontrada' });
+    const compra = doc.data();
+    if (compra.adminId !== adminId) return res.status(403).json({ error: 'Acceso denegado' });
+    if (compra.estado === 'anulada') return res.status(400).json({ error: 'Esta compra ya fue anulada' });
+    if (compra.estado !== 'confirmada') return res.status(400).json({ error: 'Solo se pueden anular compras confirmadas' });
+
+    // 1. Revertir stock de cada linea
+    for (const linea of (compra.lineas || [])) {
+      if (!linea.productoId || !linea.cantidad || linea.cantidad <= 0) continue;
+      try {
+        const esTaller = linea.destino === 'taller';
+        const coleccion = esTaller ? 'taller_insumos' : 'products';
+        const docRef = db.collection(coleccion).doc(linea.productoId);
+        const docSnap = await docRef.get();
+        if (docSnap.exists) {
+          await docRef.update({
+            stock: admin.firestore.FieldValue.increment(-Number(linea.cantidad)),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+        }
+      } catch (e) {
+        console.warn('Error revirtiendo stock:', linea.productoId, e.message);
+      }
+    }
+
+    // 2. Si habia egreso asociado, marcarlo como anulado
+    if (compra.egresoId) {
+      try {
+        const egresoRef = db.collection('egresos').doc(compra.egresoId);
+        const egresoDoc = await egresoRef.get();
+        if (egresoDoc.exists) {
+          const egreso = egresoDoc.data();
+          await egresoRef.update({
+            estado: 'ANULADO',
+            motivoAnulacion: `Compra ${compra.numero} anulada: ${motivo}`,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          // Revertir caja si se habia debitado
+          if (egreso.estado === 'PAGADO' && egreso.cajaId && compra.netoPagar > 0) {
+            await db.collection('cajas').doc(egreso.cajaId).update({
+              saldo: admin.firestore.FieldValue.increment(Number(compra.netoPagar)),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            await db.collection('movimientos').add({
+              userId: adminId,
+              cajaId: egreso.cajaId,
+              tipo: 'ingreso',
+              concepto: `Reverso anulacion compra ${compra.numero}`,
+              monto: Number(compra.netoPagar),
+              referencia: compra.numero,
+              creadoPor: req.user.email || '',
+              createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('Error anulando egreso:', compra.egresoId, e.message);
+      }
+    }
+
+    // 3. Marcar compra como anulada
+    await ref.update({
+      estado: 'anulada',
+      motivoAnulacion: motivo,
+      anuladoPor: req.user.email || '',
+      anuladoAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // 4. Auditoria
+    await db.collection('audit_logs').add({
+      accion: 'COMPRA_ANULADA',
+      modulo: 'compras',
+      descripcion: `Compra ${compra.numero} anulada por ${req.user.email || ''}. Motivo: ${motivo}. Stock revertido: ${(compra.lineas || []).length} lineas.`,
+      usuarioId: adminId,
+      usuarioNombre: req.user.email || '',
+      documento: compra.numero,
+      datos: { motivo, netoPagar: compra.netoPagar },
+      fecha: new Date().toISOString(),
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    res.json({ ok: true, mensaje: `Compra ${compra.numero} anulada. Stock revertido correctamente.` });
+  } catch (e) {
+    console.error('POST anular compra:', e);
+    res.status(500).json({ error: 'Error al anular compra', detalle: e.message });
+  }
+});
+
 module.exports = router;

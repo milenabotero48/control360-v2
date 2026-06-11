@@ -23,6 +23,7 @@ import GestionCxP from './GestionCxP';
 import GestionProveedores from './GestionProveedores';
 import GestionQR from './GestionQR';
 import GestionCompras from './GestionCompras';
+import PanelSuscriptores from './PanelSuscriptores'; // Panel Maestro (solo superAdmin)
 
 // ─── NAV POR GRUPOS Y ROL ────────────────────────────────────────────────────
 // ─── MAPA COMPLETO DE MÓDULOS ─────────────────────────────────────────────────
@@ -80,7 +81,7 @@ const NAV_GRUPOS = {
 };
 
 // Construir grupos filtrados por módulos activos del usuario
-const buildGrupos = (role, userModulos) => {
+const buildGrupos = (role, userModulos, esSuperAdmin = false) => {
   const modulosActivos = userModulos || [];
   const tieneModulosPersonalizados = modulosActivos.length > 0;
 
@@ -91,7 +92,7 @@ const buildGrupos = (role, userModulos) => {
     ? NAV_GRUPOS['admin']
     : (NAV_GRUPOS[role] || NAV_GRUPOS['visor']);
 
-  return grupos.map(g => ({
+  const resultado = grupos.map(g => ({
     grupo: g.grupo,
     items: g.modulos
       .map(key => TODOS_LOS_MODULOS.find(m => m.key === key))
@@ -109,6 +110,19 @@ const buildGrupos = (role, userModulos) => {
         return true;
       })
   })).filter(g => g.items.length > 0);
+
+  // Grupo Plataforma: SOLO para el super-admin (Milena). No vive en
+  // NAV_GRUPOS para que ningún otro admin lo vea jamás. La visibilidad
+  // viene de auth.js, pero la seguridad real la valida el backend en
+  // Firestore en cada petición de /api/superadmin.
+  if (esSuperAdmin === true) {
+    resultado.push({
+      grupo: 'Plataforma',
+      items: [{ key: 'suscriptores', label: 'Suscriptores', icon: '🛰️', modulo: 'suscriptores' }]
+    });
+  }
+
+  return resultado;
 };
 
 const BOTTOM_NAV = {
@@ -296,7 +310,7 @@ export default function AppRoot() {
 
   if (!user) return <Login onLoginSuccess={handleLoginSuccess} />;
 
-  const grupos      = buildGrupos(user.role, user.modulos);
+  const grupos      = buildGrupos(user.role, user.modulos, user.superAdmin === true);
   const bnKeys      = BOTTOM_NAV[user.role] || ['admin'];
   const todosItems  = grupos.flatMap(g => g.items);
   const bnItems     = bnKeys.map(k => todosItems.find(i => i.key === k)).filter(Boolean);
@@ -482,6 +496,7 @@ export default function AppRoot() {
           {currentPage === 'qr'           && <GestionQR user={user} />}
           {currentPage === 'eri'          && user.role === 'admin' && <ModuloERI user={user} />}
           {currentPage === 'reportes'     && user.role === 'admin' && <ModuloReportes user={user} />}
+          {currentPage === 'suscriptores' && user?.superAdmin === true && <PanelSuscriptores user={user} />}
         </main>
 
         {/* Bottom nav móvil (oculto en desktop por CSS) */}

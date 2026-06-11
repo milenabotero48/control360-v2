@@ -742,9 +742,11 @@ export default function GestionTaller({ user }) {
   const [equiposOrden, setEquiposOrden] = useState({});
 
   const esItemTallerFront = (item = {}) => {
+    // Solo van al taller servicios de recarga/mantenimiento.
+    // Productos de venta (EXTINTORES) NO van al taller.
     const cat = (item.categoria || '').toLowerCase();
     return ['recarga', 'mantenimiento', 'prueba hidrostatica', 'prueba hidrostática',
-            'hidrostatica', 'hidrostática', 'extintor', 'extintores']
+            'hidrostatica', 'hidrostática']
       .some(c => cat.includes(c));
   };
 
@@ -769,15 +771,28 @@ export default function GestionTaller({ user }) {
       const items = (ord?.items || []).filter(esItemTallerFront);
       const equiposExpandidos = [];
       const separarTipoCap = (nombre) => {
-        const nom = (nombre || '').trim();
+        // Primero quitar prefijos operativos del inicio del nombre del producto.
+        // Ej: "RECARGA ABC 10 LB" -> "ABC 10 LB" -> tipo: ABC, cap: 10 LB
+        // Ej: "MANTENIMIENTO CO2 5 LB" -> "CO2 5 LB" -> tipo: CO2, cap: 5 LB
+        const PREFIJOS = ['RECARGA','MANTENIMIENTO','SERVICIO','REVISIÓN','REVISION','REPARACIÓN','REPARACION','PRUEBA HIDROSTATICA','PRUEBA HIDROSTÁTICA','PRUEBA PH','RECARGA Y MANTENIMIENTO','RECARGAS Y MANTENIMIENTO'];
+        let nom = (nombre || '').trim();
+        const nomUp = nom.toUpperCase();
+        for (const p of PREFIJOS) {
+          if (nomUp.startsWith(p + ' ') || nomUp === p) {
+            nom = nom.substring(p.length).trim();
+            break;
+          }
+        }
         const up = nom.toUpperCase();
-        const tipos = ['ABC','BC','CO2','AGUA','ACETATO','SOLKAFLAM','HALOTRON','PQS'];
+        const tipos = ['CO2','ABC','BC','AGUA','ACETATO','SOLKAFLAM','HALOTRON','PQS'];
         for (const t of tipos) {
           if (up.startsWith(t + ' ') || up === t) {
             return { tipo: t, capacidad: nom.substring(t.length).trim() };
           }
         }
-        return { tipo: 'ABC', capacidad: nom };
+        // Si no se reconoce el tipo, usar el nombre limpio como capacidad
+        // y dejar tipo vacío para no asumir ABC incorrectamente
+        return { tipo: nom.split(' ')[0] || 'N/A', capacidad: nom.split(' ').slice(1).join(' ') || nom };
       };
       items.forEach((it, idx) => {
         const cant = it.cantidad || 1;
@@ -873,6 +888,23 @@ export default function GestionTaller({ user }) {
   // a otra pestaña. Si cierra sin guardar el proceso, el QR queda creado y el
   // equipo se procesa después manualmente (sin rollback).
   const handleResolverQR = async ({ orden, equipo, modo, codigoQR }) => {
+    // BUG2 FIX: cuando el modo es 'sin_qr', NO llamar al backend de QR.
+    // El equipo igual debe pasar por el proceso de recarga/mantenimiento.
+    // Se abre el modal de proceso sin codigoQR — el proceso queda registrado
+    // en la orden sin asociar una etiqueta fisica.
+    if (modo === 'sin_qr') {
+      setModalQR(null);
+      const equipoSinQR = {
+        ...equipo,
+        codigoQR: '',
+        qrPendiente: false,
+        procesado: false,
+        sinQR: true
+      };
+      setModalProcesoEquipo({ orden, equipo: equipoSinQR });
+      return;
+    }
+
     const body = {
       modo,                       // 'generar' | 'escanear'
       codigoQR: codigoQR || '',

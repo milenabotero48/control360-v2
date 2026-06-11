@@ -98,7 +98,11 @@ router.post('/login', async (req, res) => {
         modulos: user.modulos || [],
         modulosTenant,
         codigo: user.codigo || '',
-        adminId
+        adminId,
+        // superAdmin: SOLO para que el frontend muestre el menú del Panel
+        // de Suscriptores. La seguridad real NO depende de este campo:
+        // cada endpoint /api/superadmin verifica la marca en Firestore.
+        superAdmin: user.superAdmin === true
       }
     });
   } catch (error) {
