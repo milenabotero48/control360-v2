@@ -46,16 +46,13 @@ app.use('/api/alertas',   authenticate, require('./routes/alertas'));
 app.use('/api/auditoria', authenticate, require('./routes/auditoria'));
 app.use('/api/compras',  authenticate, require('./routes/compras'));
 
-// Panel Maestro de Suscriptores — SIN authenticate global a propósito:
-// la ruta tiene su propio authenticate + verificación superAdmin que se
-// valida contra Firestore en cada petición (no contra el JWT).
-app.use('/api/superadmin', require('./routes/superadmin'));
-
 // WhatsApp: el webhook de Meta es público — el authenticate va POR RUTA
 // dentro del archivo (config, envío de prueba y log sí están protegidos)
 app.use('/api/whatsapp', require('./routes/whatsapp'));
 // Motor de Vencimientos (Fase 2)
 app.use('/api/vencimientos', authenticate, require('./routes/vencimientos'));
+// Módulo Comercial — pipeline de telemercadeo (Fase 3)
+app.use('/api/comercial', authenticate, require('./routes/comercial'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
