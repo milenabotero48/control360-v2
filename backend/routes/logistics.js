@@ -339,7 +339,8 @@ const actualizarScoreMensajero = async ({ adminId, mensajeroId, restarPuntos, ti
 // ═══════════════════════════════════════════════════════════════════════════════
 router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (req, res) => {
   try {
-    const { nuevoEstado, nota, extintorPrestamo, fotoUrl, cobro, formaPago, fotoTransferenciaUrl, items, gps, prestamoDevueltoId, prestamosDevueltosIds, deficiencia } = req.body;
+    const { nota, extintorPrestamo, fotoUrl, cobro, formaPago, fotoTransferenciaUrl, items, gps, prestamoDevueltoId, prestamosDevueltosIds, deficiencia } = req.body;
+    let nuevoEstado = req.body.nuevoEstado;
     if (!nuevoEstado) return res.status(400).json({ error: 'nuevoEstado requerido' });
 
     const ordenRef = db.collection('orders').doc(req.params.id);
@@ -348,6 +349,58 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
 
     const orden = ordenDoc.data();
     const timestampFoto = new Date().toISOString();
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // VALIDACIÓN DE TRANSICIÓN LEGAL — la máquina de estados manda (Ola 3)
+    // ──────────────────────────────────────────────────────────────────────────
+    // Igual que en orders.js: una pantalla sin refrescar NO puede retroceder
+    // una orden. Si llega 'auto', el backend calcula el siguiente paso él solo.
+    // ══════════════════════════════════════════════════════════════════════════
+    if (typeof construirFlujo === 'function') {
+      const tieneTallerVal = typeof orden.tieneEquipoTaller === 'boolean'
+        ? orden.tieneEquipoTaller
+        : (orden.items || []).some(it => {
+            const c = (it.categoria || '').toLowerCase();
+            return ['recarga', 'mantenimiento', 'hidrostatica', 'hidrostática'].some(k => c.includes(k));
+          });
+      const estadoBaseVal = orden.estado === 'reparacion_proceso' ? 'en_taller' : orden.estado;
+      const flujoVal = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTallerVal);
+
+      // Cadena hacia adelante desde el estado actual
+      const alcanzables = new Set();
+      let cursorVal = estadoBaseVal;
+      let guardiaVal = 0;
+      while (guardiaVal++ < 12) {
+        const pasoVal = flujoVal[cursorVal];
+        if (!pasoVal || !pasoVal.siguiente || alcanzables.has(pasoVal.siguiente)) break;
+        alcanzables.add(pasoVal.siguiente);
+        cursorVal = pasoVal.siguiente;
+      }
+      if (orden.estado === 'reparacion_proceso') alcanzables.add('en_taller');
+      if (orden.estado === 'entrega_cobranza') alcanzables.add('cxc');
+      if (orden.estado === 'cuadre_dinero') { alcanzables.add('completada'); alcanzables.add('cxc'); }
+
+      // Modo AVANZAR automático: el frontend ya no calcula el flujo.
+      if (nuevoEstado === 'auto') {
+        const pasoAuto = flujoVal[estadoBaseVal];
+        if (!pasoAuto || !pasoAuto.siguiente) {
+          return res.status(400).json({
+            error: `La orden está en "${orden.estado}" y no tiene siguiente paso en su flujo.`,
+            estadoActual: orden.estado
+          });
+        }
+        nuevoEstado = pasoAuto.siguiente;
+      }
+
+      const transicionLegal = nuevoEstado === orden.estado || alcanzables.has(nuevoEstado);
+      if (!transicionLegal) {
+        return res.status(409).json({
+          error: `La orden ${orden.numeroOrden} está en "${orden.estado}" y no puede pasar a "${nuevoEstado}". Refresca la pantalla: es posible que otro usuario ya la haya avanzado.`,
+          estadoActual: orden.estado,
+          transicionInvalida: true
+        });
+      }
+    }
 
     const update = {
       estado: nuevoEstado,
@@ -446,8 +499,13 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
     // El dinero NO entra a caja aquí: solo se registra. Entra en el cuadre PIN.
     const fp = (formaPago || '').toLowerCase();
     const esVirtual = /transfer|nequi|daviplata|banco|consign|qr|bancolombia/.test(fp);
-    const esCredito = /crédito|credito|cxc|fiado/.test(fp);
+    const esCredito = /crédito|credito|cxc|fiado|no pag/.test(fp);
     const montoCobro = Number(cobro) || 0;
+    // ── FIX PAGO FANTASMA (Ola 3): si NO hay forma de pago Y NO hay monto,
+    // el cliente NO pagó. Antes el sistema rellenaba el vacío con
+    // "pagó efectivo el total de la orden" — inventaba dinero en el cuadre
+    // del mensajero. Ahora: sin pago explícito = queda en cartera (CxC).
+    const sinPago = !esCredito && !formaPago && montoCobro <= 0;
 
     if (nuevoEstado === 'entrega_cobranza') {
       // Ola 2.5: si la orden YA está pagada (admin la marcó pagada antes, o ya
@@ -512,7 +570,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
       // a caja en este momento, o se perdería.
       const hayMensajero = !!orden.mensajeroId;
 
-      if (esCredito) {
+      if (esCredito || sinPago) {
         update.formaPagoRecaudo = 'A crédito (CxC)';
         update.montoRecaudado = 0;
         update.tipoCobro = 'credito';
@@ -528,12 +586,14 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
         update.tipoCobro = 'virtual';
         if (hayMensajero) update.pagoVirtualPendienteValidar = true;
       } else {
+        // El mensajero eligió una forma de pago en efectivo de forma EXPLÍCITA.
+        // Si no digitó monto, se asume el total de la orden (eligió cobrar).
         update.formaPagoRecaudo = formaPago || 'Efectivo';
         update.montoRecaudado = montoCobro || orden.total || 0;
         update.tipoCobro = 'efectivo';
       }
 
-      if (!esCredito) {
+      if (!esCredito && !sinPago) {
         update.pagado = true;
         update.montoPagado = update.montoRecaudado;
         update.fechaPago = timestampFoto;
@@ -554,7 +614,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
       if (!hayMensajero) {
         const yaEnCobranza = orden.estado === 'entrega_cobranza';
 
-        if (esCredito) {
+        if (esCredito || sinPago) {
           // No pagó → queda en cartera (CxC). Solo cambia estado si ya estaba en cobranza.
           if (yaEnCobranza) {
             update.estado = 'cxc';
@@ -637,7 +697,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
         // FIX Ola 2.5: solo efectivo entra a caja directo. Virtual espera
         // validación de Admin/Tesorería.
         let resultadoCaja = null;
-        if (!esCredito && !esPagoVirtual && typeof registrarIngresoEnCaja === 'function') {
+        if (!esCredito && !sinPago && !esPagoVirtual && typeof registrarIngresoEnCaja === 'function') {
           resultadoCaja = await registrarIngresoEnCaja({
             userId: req.adminId || req.user.uid || req.user.id,
             ordenId: req.params.id,
@@ -660,7 +720,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
         return res.json({
           ok: true,
           estado: update.estado,
-          dineroEnCaja: !esCredito,
+          dineroEnCaja: !esCredito && !sinPago,
           prestamoDevuelto: !!prestamoDevueltoId,
           caja: resultadoCaja
         });
@@ -874,12 +934,23 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
     let totalVirtual = 0;    // pagos virtuales → solo validar comprobante
     const ordenesCobro = [];
     const ordenesVirtual = [];
+    const ordenesSinPago = []; // entregadas sin pago → quedan en cartera (CxC) al cuadrar
 
     snapOrdenes.forEach(doc => {
       const o = doc.data();
       if (o.cuadrado === true) return;
       const monto = Number(o.montoRecaudado) || 0;
-      if (monto <= 0) return;  // sin cobro real (ej. CxC)
+      if (monto <= 0) {
+        // Sin cobro real: NO suma al cuadre, pero el Admin debe verla — al
+        // confirmar el cuadre pasará a CxC (Ola 3: visibilidad de cartera).
+        if (['entrega_cobranza', 'cuadre_dinero'].includes(o.estado)) {
+          ordenesSinPago.push({
+            id: doc.id, numeroOrden: o.numeroOrden, clienteNombre: o.clienteNombre,
+            monto: Number(o.total) || 0
+          });
+        }
+        return;
+      }
 
       const tipo = o.tipoCobro
         || (/transfer|nequi|banco|consign|qr/i.test(o.formaPagoRecaudo || '') ? 'virtual' : 'efectivo');
@@ -949,6 +1020,7 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
       totalAEntregar: totalEfectivo + totalProvisional,
       ordenesCobro,
       ordenesVirtual,
+      ordenesSinPago,         // entregadas sin pago → pasarán a CxC al confirmar
       egresosProv,
       extintoresPendientes,   // préstamos pendientes de devolver/recoger
       cambiosEntregados       // extintores de cambio para confirmar 1x1
@@ -1051,6 +1123,15 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
         fechaCuadre: new Date().toISOString(),
         cuadradoPor: req.user.email,
         estado: estadoFinal,
+        // Ola 3: si queda en cartera, los flags de pago quedan LIMPIOS para
+        // que CxC muestre el saldo completo y nadie crea que ya se cobró.
+        ...(estadoFinal === 'cxc' ? {
+          pagado: false,
+          montoPagado: 0,
+          montoRecaudado: 0,
+          formaPagoRecaudo: 'A crédito (CxC)',
+          tipoCobro: 'credito'
+        } : {}),
         ...(sumaCaja ? {
           dineroEnCaja: true,
           dineroEnCajaFecha: new Date().toISOString(),

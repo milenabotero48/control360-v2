@@ -141,6 +141,10 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
   const [extintor, setExtintor]           = useState(orden.extintorPrestamo || '');
   const [cobro, setCobro]                 = useState('');
   const [formaPago, setFormaPago]         = useState('Efectivo');
+  // Ola 3: resultado EXPLÍCITO del cobro en la entrega. Antes, avanzar sin
+  // digitar nada se interpretaba como "pagó efectivo el total" (pago fantasma).
+  // Ahora el mensajero DEBE decir qué pasó: 'pago' o 'no_pago' (→ CxC).
+  const [resultadoCobro, setResultadoCobro] = useState('');
   const [formasPago, setFormasPago]       = useState(['Efectivo', 'Transferencia', 'Nequi', 'Datafono']);
   const [fotoUrl, setFotoUrl]             = useState('');
   const [fotoTransUrl, setFotoTransUrl]   = useState('');
@@ -272,23 +276,34 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
     setSubiendoFoto(false);
   };
 
-  // Determinar siguiente estado
- const esCobranza = orden.tipoOrden === 'cxc' || orden.lugarAtencion === 'cobranza';
-  const siguienteEstado = {
-    programada: esCobranza ? 'en_ruta_recogida' : 'en_ruta_recogida',
-    en_ruta_recogida: esCobranza ? 'entrega_cobranza' : 'en_taller',
-    despacho: 'en_ruta_entrega',
-    en_ruta_entrega: 'entrega_cobranza',
-  }[orden.estado];
+  // ── Ola 3: el frontend YA NO calcula el siguiente estado ──────────────────
+  // El backend tiene la máquina de estados única (orders.js). Este modal solo
+  // dice "avanzar" (nuevoEstado: 'auto') y el backend decide el paso legal.
+  // Esto elimina el bug de pantallas sin refrescar que retrocedían órdenes.
+  const esCobranza = orden.tipoOrden === 'cxc' || orden.lugarAtencion === 'cobranza';
+  const ESTADOS_MODAL = ['programada', 'en_ruta_recogida', 'despacho', 'en_ruta_entrega'];
+  const puedeAvanzar = ESTADOS_MODAL.includes(orden.estado);
 
   const necesitaFotoRecogida = orden.estado === 'en_ruta_recogida';
   const necesitaFotoEntrega  = orden.estado === 'en_ruta_entrega';
   const necesitaExtintor     = orden.estado === 'en_ruta_recogida';
   const necesitaCobro        = orden.estado === 'en_ruta_entrega' || orden.estado === 'en_ruta_recogida';
   const puedeEditarItems     = ['en_ruta_recogida', 'en_ruta_entrega'].includes(orden.estado);
+  // El paso de entrega exige resultado de cobro explícito (si no está pagada).
+  const exigeResultadoCobro  = orden.estado === 'en_ruta_entrega' && !orden.pagado && !esCobranza;
 
   const handleAvanzar = async () => {
-    if (!siguienteEstado) return setError('No hay siguiente estado disponible');
+    if (!puedeAvanzar) return setError('No hay siguiente estado disponible');
+
+    // ── Ola 3: resultado del cobro OBLIGATORIO al entregar ───────────────────
+    if (exigeResultadoCobro && !resultadoCobro) {
+      setError('⛔ Indica el resultado del cobro: ¿el cliente pagó o queda en CxC?');
+      return;
+    }
+    if (exigeResultadoCobro && resultadoCobro === 'pago' && !formaPago) {
+      setError('⛔ Selecciona la forma de pago.');
+      return;
+    }
 
     // ✅ CTRL-002: Detectar si falta foto (en lugar de bloquear)
     let deficiencia = null;
@@ -312,7 +327,8 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
       formaPago !== 'A crédito' &&
       formaPago !== 'CXC' &&
       formaPago !== 'Cuenta por Pagar';
-    const hayCobroVirtual = esPagoVirtual && (Number(cobro) > 0 || esCobranza);
+    const hayCobroVirtual = esPagoVirtual &&
+      (Number(cobro) > 0 || esCobranza || (exigeResultadoCobro && resultadoCobro === 'pago'));
     if (hayCobroVirtual && !fotoTransUrl) {
       setError(`⛔ Pago por ${formaPago} requiere foto del comprobante (obligatoria).`);
       return;
@@ -356,13 +372,31 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
         .filter(([_, recogido]) => recogido)
         .map(([id]) => id);
 
+      // ── Ola 3: cobro y forma de pago según el resultado EXPLÍCITO ──────────
+      let cobroFinal, formaPagoFinal;
+      if (exigeResultadoCobro) {
+        if (resultadoCobro === 'no_pago') {
+          // El cliente NO pagó → el backend la clasifica como crédito y al
+          // cuadrar pasa a CxC. Nada de montos inventados.
+          cobroFinal = undefined;
+          formaPagoFinal = 'A crédito (CxC)';
+        } else {
+          // Pagó: si no digitó monto, se cobra el total de la orden.
+          cobroFinal = Number(cobro) > 0 ? cobro : String(orden.total || 0);
+          formaPagoFinal = formaPago;
+        }
+      } else {
+        cobroFinal = Number(cobro) > 0 ? cobro : undefined;
+        formaPagoFinal = (Number(cobro) > 0 || esCobranza) ? formaPago : undefined;
+      }
+
       await onAvanzar(orden.id, {
-        nuevoEstado: siguienteEstado,
+        nuevoEstado: 'auto', // el backend calcula el paso legal (máquina única)
         nota,
         extintorPrestamo: necesitaExtintor ? extintor : undefined,
         fotoUrl: fotoUrl || null,
-        cobro: Number(cobro) > 0 ? cobro : undefined,
-        formaPago: (Number(cobro) > 0 || esCobranza) ? formaPago : undefined,
+        cobro: cobroFinal,
+        formaPago: formaPagoFinal,
         fotoTransferenciaUrl: fotoTransUrl || undefined,
         items: puedeEditarItems ? items : undefined,
         deficiencia: deficiencia || null,
@@ -377,7 +411,7 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
     setGuardando(false);
   };
 
-  if (!siguienteEstado) return (
+  if (!puedeAvanzar) return (
     <div style={s.overlay}>
       <div style={{ ...s.modal, maxWidth: 400, padding: 24, textAlign: 'center' }}>
         <p style={{ fontSize: 16, color: '#374151' }}>Esta orden no tiene siguiente estado disponible.</p>
@@ -399,8 +433,9 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
         <div style={s.modalBody}>
           {error && <div style={s.alertError}>{error}</div>}
 
-          <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 13 }}>
-            <EstadoBadge estado={orden.estado} orden={orden} /> → <EstadoBadge estado={siguienteEstado} orden={orden} />
+          <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <EstadoBadge estado={orden.estado} orden={orden} />
+            <span style={{ color: '#16a34a', fontWeight: 700 }}>→ Siguiente paso del flujo</span>
           </div>
 
           {/* Alerta QR sin asignar — solo en despacho */}
@@ -743,8 +778,44 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
                 </div>
               )}
 
+              {/* ── Ola 3: RESULTADO DEL COBRO — obligatorio al entregar ────────
+                  El mensajero declara qué pasó. "No pagó" manda la orden a
+                  cartera (CxC) al cuadrar — ya no se inventan pagos. */}
+              {exigeResultadoCobro && (
+                <div style={{ marginBottom: 14 }}>
+                  <label style={s.label}>Resultado del cobro <span style={{ color: '#dc2626' }}>*</span></label>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <button type="button"
+                      onClick={() => { setResultadoCobro('pago'); if (!cobro) setCobro(String(orden.total || 0)); }}
+                      style={{
+                        padding: '14px 8px', borderRadius: 10, cursor: 'pointer', fontWeight: 700, fontSize: 13,
+                        border: resultadoCobro === 'pago' ? '2px solid #16a34a' : '1px solid #e5e7eb',
+                        background: resultadoCobro === 'pago' ? '#f0fdf4' : '#fff',
+                        color: resultadoCobro === 'pago' ? '#166534' : '#374151'
+                      }}>
+                      💵 El cliente PAGÓ
+                    </button>
+                    <button type="button"
+                      onClick={() => { setResultadoCobro('no_pago'); setCobro(''); }}
+                      style={{
+                        padding: '14px 8px', borderRadius: 10, cursor: 'pointer', fontWeight: 700, fontSize: 13,
+                        border: resultadoCobro === 'no_pago' ? '2px solid #b45309' : '1px solid #e5e7eb',
+                        background: resultadoCobro === 'no_pago' ? '#fffbeb' : '#fff',
+                        color: resultadoCobro === 'no_pago' ? '#92400e' : '#374151'
+                      }}>
+                      📋 NO pagó → CxC
+                    </button>
+                  </div>
+                  {resultadoCobro === 'no_pago' && (
+                    <div style={{ marginTop: 8, padding: '10px 12px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, fontSize: 12, color: '#92400e' }}>
+                      La orden quedará en <strong>Cuentas por Cobrar</strong> con el saldo completo de {fmt(orden.total)}. No suma al cuadre del mensajero.
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Monto cobrado general (NO cobranza — sigue funcionando igual) */}
-              {!esCobranza && !orden.pagado && (
+              {!esCobranza && !orden.pagado && (!exigeResultadoCobro || resultadoCobro === 'pago') && (
                 <div style={{ marginBottom: 14 }}>
                 <label style={s.label}>
                     {orden.estado === 'en_ruta_recogida' ? 'Cobro en recogida' : 'Monto cobrado'}
@@ -760,8 +831,8 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
               </div>
               )}
 
-              {/* Forma de pago — visible siempre que haya cobro o sea cobranza */}
-              {(Number(cobro) > 0 || esCobranza) && (
+              {/* Forma de pago — visible cuando hay cobro, es cobranza o declaró pago */}
+              {(Number(cobro) > 0 || esCobranza || (exigeResultadoCobro && resultadoCobro === 'pago')) && (
                 <div style={{ marginBottom: 14 }}>
                   <label style={s.label}>Forma de pago</label>
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -882,6 +953,28 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Ola 3: órdenes entregadas SIN pago → pasan a CxC al confirmar.
+                  No suman al cuadre: son visibilidad de cartera para el Admin. */}
+              {cuadre.ordenesSinPago?.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={s.label}>Entregadas sin pago — quedan en CxC</label>
+                  <div style={{ border: '1px solid #fcd34d', borderRadius: 8, background: '#fffbeb', overflow: 'hidden' }}>
+                    {cuadre.ordenesSinPago.map((o, i) => (
+                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid #fde68a' }}>
+                        <div>
+                          <code style={{ fontSize: 12, color: '#92400e' }}>{o.numeroOrden}</code>
+                          <span style={{ fontSize: 13, marginLeft: 8 }}>{o.clienteNombre}</span>
+                        </div>
+                        <span style={{ fontWeight: 700, color: '#b45309', fontSize: 13 }}>{fmt(o.monto)} → CxC</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#92400e', marginTop: 4 }}>
+                    Al confirmar el cuadre, estas órdenes pasan a Cuentas por Cobrar con su saldo completo.
                   </div>
                 </div>
               )}

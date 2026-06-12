@@ -31,7 +31,7 @@ const TabEmpresas = ({ token }) => {
   const [logoFile, setLogoFile] = useState(null);
   const [mensaje, setMensaje] = useState(null);
   const fileInputRef = useRef();
-  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '' });
+  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58 });
   const [errores, setErrores] = useState({});
 
   useEffect(() => { cargarEmpresas(); }, []);
@@ -116,7 +116,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
     try {
       let logoUrl = logoPreview?.startsWith('http') ? logoPreview : '';
       if (logoFile) { mostrarMensaje('⏳ Subiendo logo...'); logoUrl = await subirLogoCloudinary(logoFile); }
-      const payload = { ...formData, iva: parseInt(formData.iva), logo: logoUrl };
+      const payload = { ...formData, iva: parseInt(formData.iva), logo: logoUrl, anchoImpresoraPos: Number(formData.anchoImpresoraPos) || 58 };
       const h = { Authorization: `Bearer ${token}` };
       if (editando) {
         await axios.put(`${API}/companies/${editando}`, payload, { headers: h });
@@ -134,7 +134,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
 
   const handleEditar = (emp) => {
     setEditando(emp.id);
-    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '' });
+    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '', anchoImpresoraPos: emp.anchoImpresoraPos || 58 });
     setLogoPreview(emp.logo || null); setLogoFile(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -147,7 +147,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
     } catch { mostrarMensaje('Error al eliminar', 'error'); }
   };
 
-  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
+  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58 }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
 
   const campo = (label, key, tipo = 'text', placeholder = '') => (
     <div style={S.campo}>
@@ -180,6 +180,30 @@ const comprimirImagen = (file, maxWidth, quality) => {
               {campo('Nombre Empresa', 'name')}{campo('NIT', 'nit', 'text', '88273572')}{campo('Dirección', 'address')}{campo('Ciudad', 'ciudad', 'text', 'Cali')}{campo('Teléfono', 'phone', 'text', '6022226686')}{campo('Celular', 'cellphone', 'text', '3148361622')}{campo('Email', 'email', 'email', 'empresa@correo.com')}{campo('IVA (%)', 'iva', 'text', '19')}
                 {campo('WhatsApp', 'whatsapp', 'text', '3148361622')}
                 {campo('Página Web', 'web', 'text', 'www.miempresa.com')}
+            </div>
+            {/* Ola 3: ancho de la impresora POS — la tirilla escala a este ancho */}
+            <div style={{ marginTop: 18 }}>
+              <label style={{ display: 'block', fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 8 }}>
+                🧾 Impresora de tirilla (POS)
+                <span style={{ fontWeight: 400, color: '#9ca3af', marginLeft: 6 }}>El recibo se ajusta automáticamente al ancho del papel</span>
+              </label>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                {[
+                  { v: 58, label: '58 mm', desc: 'Térmica estándar' },
+                  { v: 80, label: '80 mm', desc: 'Térmica grande' },
+                ].map(o => (
+                  <button key={o.v} type="button" onClick={() => setFormData(f => ({ ...f, anchoImpresoraPos: o.v }))}
+                    style={{
+                      padding: '12px 22px', borderRadius: 10, cursor: 'pointer', textAlign: 'center',
+                      border: Number(formData.anchoImpresoraPos) === o.v ? '2px solid #7c3aed' : '1px solid #e5e7eb',
+                      background: Number(formData.anchoImpresoraPos) === o.v ? '#f5f3ff' : '#fff',
+                      color: Number(formData.anchoImpresoraPos) === o.v ? '#5b21b6' : '#374151',
+                    }}>
+                    <div style={{ fontSize: 15, fontWeight: 800 }}>{o.label}</div>
+                    <div style={{ fontSize: 11, color: '#9ca3af' }}>{o.desc}</div>
+                  </button>
+                ))}
+              </div>
             </div>
             <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>
               <button type="submit" disabled={guardando} style={{ ...S.btnPrimario, opacity: guardando ? 0.7 : 1 }}>{guardando ? 'Guardando...' : editando ? '💾 Actualizar' : '✅ Crear Empresa'}</button>

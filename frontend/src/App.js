@@ -24,6 +24,7 @@ import GestionProveedores from './GestionProveedores';
 import GestionQR from './GestionQR';
 import GestionCompras from './GestionCompras';
 import PanelSuscriptores from './PanelSuscriptores'; // Panel Maestro (solo superAdmin)
+import ModuloComercial from './ModuloComercial'; // Fase 3: Telemercadeo
 
 // ─── NAV POR GRUPOS Y ROL ────────────────────────────────────────────────────
 // ─── MAPA COMPLETO DE MÓDULOS ─────────────────────────────────────────────────
@@ -33,6 +34,7 @@ const TODOS_LOS_MODULOS = [
   { key: 'ordenes',     label: 'Órdenes',       icon: '📋', modulo: 'ordenes' },
   { key: 'cotizaciones',label: 'Cotizaciones',  icon: '💬', modulo: 'cotizaciones' },
   { key: 'clientes',    label: 'Clientes',      icon: '👥', modulo: 'clientes' },
+  { key: 'comercial',   label: 'Telemercadeo',  icon: '📞', modulo: 'comercial' },
   { key: 'productos',   label: 'Productos',     icon: '📦', modulo: 'productos' },
   { key: 'proveedores', label: 'Proveedores',   icon: '🏭', modulo: 'proveedores' },
   { key: 'logistica',   label: 'Logística',     icon: '🚚', modulo: 'logistica' },
@@ -53,14 +55,14 @@ const TODOS_LOS_MODULOS = [
 const NAV_GRUPOS = {
   admin: [
     { grupo: 'Principal',      modulos: ['admin'] },
-    { grupo: 'Operaciones',    modulos: ['ordenes', 'cotizaciones', 'clientes', 'productos', 'proveedores'] },
+    { grupo: 'Operaciones',    modulos: ['ordenes', 'cotizaciones', 'clientes', 'comercial', 'productos', 'proveedores'] },
     { grupo: 'Ejecución',      modulos: ['logistica', 'taller', 'qr'] },
     { grupo: 'Finanzas',       modulos: ['caja', 'egresos', 'compras', 'cxc', 'cxp', 'eri', 'reportes'] },
     { grupo: 'Configuración',  modulos: ['config', 'usuarios'] },
   ],
   comercial: [
     { grupo: 'Principal',      modulos: ['admin'] },
-    { grupo: 'Operaciones',    modulos: ['ordenes', 'cotizaciones', 'clientes', 'productos'] },
+    { grupo: 'Operaciones',    modulos: ['comercial', 'ordenes', 'cotizaciones', 'clientes', 'productos'] },
   ],
   mensajero: [
     { grupo: 'Principal',  modulos: ['admin'] },
@@ -127,7 +129,7 @@ const buildGrupos = (role, userModulos, esSuperAdmin = false) => {
 
 const BOTTOM_NAV = {
   admin:     ['admin', 'ordenes', 'logistica', 'caja'],
-  comercial: ['admin', 'ordenes', 'cotizaciones', 'clientes'],
+  comercial: ['admin', 'comercial', 'ordenes', 'clientes'],
   mensajero: ['logistica', 'ordenes', 'clientes', 'productos'],
   taller:    ['taller', 'productos'],
   tesoreria: ['admin', 'caja', 'egresos', 'cxc'],
@@ -189,6 +191,7 @@ const GLOBAL_CSS = `
 
   .c360-mob-topbar { display: none !important; }
   .c360-bottomnav  { display: none !important; }
+  .c360-sb-close   { display: none !important; }
   /* Ola 3 Bloque 3: header desktop visible en >768px */
   .c360-desk-topbar { display: flex !important; }
 
@@ -197,10 +200,15 @@ const GLOBAL_CSS = `
     .c360-sidebar {
       position: fixed !important;
       top: 0; left: 0;
+      /* Ola 3: 100dvh evita que el pie del menú (Salir) quede oculto tras la
+         barra del navegador en iOS/Android. 100vh queda como respaldo. */
       height: 100vh !important;
+      height: 100dvh !important;
       transform: translateX(-100%);
       z-index: 300;
+      padding-bottom: env(safe-area-inset-bottom);
     }
+    .c360-sb-close { display: flex !important; }
     .c360-sidebar.open {
       transform: translateX(0);
     }
@@ -330,9 +338,13 @@ export default function AppRoot() {
       {/* ══ SIDEBAR ══ */}
       <aside className={`c360-sidebar${sidebarOpen ? ' open' : ''}`}>
 
-        {/* Logo Control360 */}
-        <div style={{ padding: '18px 16px 14px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+        {/* Logo Control360 + cerrar (móvil) */}
+        <div style={{ padding: '18px 16px 14px', borderBottom: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
           <LogoControl360 width={150} height={44} />
+          <button className="c360-sb-close" onClick={() => setSidebarOpen(false)} aria-label="Cerrar menú"
+            style={{ width: 34, height: 34, borderRadius: 8, background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.15)', color: '#fff', cursor: 'pointer', fontSize: 16, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            ✕
+          </button>
         </div>
 
         {/* Empresa activa */}
@@ -403,8 +415,8 @@ export default function AppRoot() {
             <div style={{ fontSize: 12, fontWeight: 600, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{user.nombre || user.email}</div>
             <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', textTransform: 'capitalize' }}>{user.role}</div>
           </div>
-          <button onClick={handleLogout} title="Cerrar sesión" style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.6)', borderRadius: 6, padding: '5px 8px', cursor: 'pointer', fontSize: 14, flexShrink: 0 }}>
-            ⏏
+          <button onClick={handleLogout} title="Cerrar sesión" style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.75)', borderRadius: 8, padding: '7px 10px', cursor: 'pointer', fontSize: 12, fontWeight: 700, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 5 }}>
+            ⏏ Salir
           </button>
         </div>
       </aside>
@@ -487,6 +499,7 @@ export default function AppRoot() {
           {currentPage === 'productos'    && <GestionProductos user={user} />}
           {currentPage === 'ordenes'      && <GestionOrdenes user={user} />}
           {currentPage === 'cotizaciones' && <GestionCotizaciones user={user} />}
+          {currentPage === 'comercial'    && <ModuloComercial user={user} />}
           {currentPage === 'egresos'      && <GestionEgresos user={user} />}
           {currentPage === 'compras'      && <GestionCompras user={user} />}
           {currentPage === 'caja'         && <GestionCaja user={user} />}
