@@ -7,6 +7,10 @@ import { exportarExcel } from './exportExcel';
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const fmt = (n) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
+// Ola 3: el saldo de cuentas bancarias viaja en null para no-admins (reservado).
+// Helpers a nivel de módulo: los usan tanto los modales como el componente.
+const fmtSaldo = (v) => (v === null || v === undefined) ? '🔒 Reservado' : fmt(v);
+const labelCajaSelector = (c) => (c.saldo === null || c.saldo === undefined) ? c.nombre : `${c.nombre} (${fmt(c.saldo)})`;
 const fmtDate = (ts) => {
   if (!ts) return '—';
   let d;
@@ -512,10 +516,6 @@ export default function GestionCaja({ user }) {
   });
   const totalSaldo = cajas.filter(c => c.activa && c.saldo !== null && c.saldo !== undefined).reduce((a, c) => a + Number(c.saldo || 0), 0);
   const hayReservadas = cajas.some(c => c.activa && (c.saldo === null || c.saldo === undefined));
-
-  // Ola 3: saldo bancario reservado viaja en null desde el backend.
-  const fmtSaldo = (v) => (v === null || v === undefined) ? '🔒 Reservado' : fmt(v);
-  const labelCajaSelector = (c) => c.saldo === null || c.saldo === undefined ? c.nombre : `${c.nombre} (${fmt(c.saldo)})`;
 
   const iconTipo = (tipo) => ({ ingreso: '📥', egreso: '📤', traslado_salida: '🔄↗', traslado_entrada: '🔄↘', ajuste: '⚖️' }[tipo] || '💰');
   const colorTipo = (tipo) => ['ingreso', 'traslado_entrada'].includes(tipo) ? '#16a34a' : '#dc2626';
