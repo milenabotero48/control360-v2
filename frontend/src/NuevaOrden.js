@@ -1,7 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+// Ola 3: plantilla ÚNICA de impresión (compartida con DetalleOrden).
+// La vista al CREAR la orden es la MISMA que al verla — se acabó la doble plantilla.
+import { abrirImpresionOrden } from './printOrden';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+
+// ── Ola 3: detección de pantalla móvil (responsive sin CSS externo) ─────────
+const useEsMovil = () => {
+  const [esMovil, setEsMovil] = useState(typeof window !== 'undefined' && window.innerWidth < 768);
+  useEffect(() => {
+    const onResize = () => setEsMovil(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return esMovil;
+};
 const fmt = v => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', minimumFractionDigits: 0 }).format(v || 0);
 const hoyStr = () => {
   const d = new Date();
@@ -19,34 +33,10 @@ const TIPOS = [
   { value: 'produccion', label: 'Producción', estado: 'programada', color: '#0891b2' },
 ];
 
-const generarHtmlOrden = (orden, empresa, tipo = 'carta') => {
-  const esTirilla = tipo === 'tirilla';
-  const fmtFecha = f => f ? new Date(f + 'T00:00:00').toLocaleDateString('es-CO') : new Date().toLocaleDateString('es-CO');
-  const filas = (orden.items || []).map(it => {
-    const sub = (it.precioUnitario || 0) * (it.cantidad || 1) * (1 - (it.descuento || 0) / 100);
-    if (esTirilla) return '<tr><td>' + it.nombre + (it.notas ? ' (' + it.notas + ')' : '') + '</td><td style="text-align:right">' + it.cantidad + '</td><td style="text-align:right">' + fmt(sub) + '</td></tr>';
-    return '<tr><td style="padding:8px 10px;border-bottom:1px solid #f3f4f6">' + it.nombre + '<br/><span style="font-size:11px;color:#9ca3af">' + (it.categoria || '') + (it.notas ? ' \u00b7 ' + it.notas : '') + '</span></td><td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;text-align:center">' + it.cantidad + '</td><td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;text-align:right">' + fmt(it.precioUnitario) + '</td><td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;text-align:right;color:#dc2626">' + (it.descuento > 0 ? it.descuento + '%' : '\u2014') + '</td><td style="padding:8px 10px;border-bottom:1px solid #f3f4f6;text-align:right;font-weight:700;color:#16a34a">' + fmt(sub) + '</td></tr>';
-  }).join('');
-
-  if (esTirilla) return '<!DOCTYPE html><html><head><meta charset="UTF-8"><style>*{margin:0;padding:0;box-sizing:border-box}@page{size:58mm auto;margin:0}body{font-family:monospace;font-size:13px;width:58mm;color:#000;background:#fff;padding:2mm}h1{font-size:15px;text-align:center;font-weight:900;margin-bottom:2px}p{text-align:center;font-size:12px}table{width:100%;border-collapse:collapse}th{border-top:2px solid #000;border-bottom:1px dashed #000;padding:3px 0;font-size:12px;font-weight:900}td{padding:2px 0;font-size:12px}.total{border-top:2px solid #000;font-weight:bold;font-size:14px}img.logo{width:50mm;max-width:100%;height:auto;object-fit:contain;display:block;margin:0 auto 4px}@media print{body{width:58mm;padding:0}}</style></head><body>' + (empresa && empresa.logo ? '<img src="' + empresa.logo + '" class="logo"/>' : '') + '<h1>' + (empresa && empresa.name ? empresa.name : 'ORDEN DE SERVICIO') + '</h1><p>NIT: ' + (empresa && empresa.nit ? empresa.nit : '') + '</p><p>' + (empresa && empresa.phone ? empresa.phone : '') + '</p><p style="margin:6px 0;border-top:1px dashed #000;border-bottom:1px dashed #000;padding:3px 0">' + orden.numeroOrden + ' \u00b7 ' + fmtFecha(orden.fechaProgramada) + '</p><p style="text-align:left;margin:4px 0"><b>Cliente:</b> ' + orden.clienteNombre + '</p>' + (orden.sucursalNombre ? '<p style="text-align:left"><b>Sede:</b> ' + orden.sucursalNombre + '</p>' : '') + '<p style="text-align:left"><b>Pago:</b> ' + (orden.formaPago || '\u2014') + '</p><table><thead><tr><th style="text-align:left">Descripci\u00f3n</th><th>Cant</th><th>Total</th></tr></thead><tbody>' + filas + '</tbody></table><table><tr class="total"><td colspan="2">TOTAL</td><td style="text-align:right">' + fmt(orden.total) + '</td></tr></table>' + (orden.notasOrden ? '<p style="margin-top:6px;text-align:left">Nota: ' + orden.notasOrden + '</p>' : '') + '<p style="margin-top:8px;border-top:1px dashed #000;padding-top:4px">Gracias por su preferencia</p></body></html>';
-
-  const ivaPct2 = empresa && empresa.iva ? empresa.iva : 0;
-  const subtotalOrden = orden.subtotal || Math.round((orden.total || 0) / (1 + ivaPct2 / 100));
-  const ivaOrden = orden.ivaValor || Math.round((orden.total || 0) - subtotalOrden);
-  const filasIva = ivaPct2 > 0
-    ? '<tr style="background:#f9fafb"><td colspan="4" style="padding:8px 10px;text-align:right;color:#6b7280">Subtotal</td><td style="padding:8px 10px;text-align:right;color:#6b7280">' + fmt(subtotalOrden) + '</td></tr><tr style="background:#f9fafb"><td colspan="4" style="padding:8px 10px;text-align:right;color:#6b7280">IVA (' + ivaPct2 + '%)</td><td style="padding:8px 10px;text-align:right;color:#6b7280">' + fmt(ivaOrden) + '</td></tr>'
-    : '';
-
-  const filasCobranza = (orden.ordenesACobrar && orden.ordenesACobrar.length > 0)
-    ? '<div style="margin-top:24px;padding:16px;background:#fef2f2;border-radius:10px"><div style="font-size:14px;font-weight:700;color:#dc2626;margin-bottom:10px;border-bottom:2px solid #fca5a5;padding-bottom:6px">ORDENES A COBRAR</div><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#fca5a5"><th style="padding:8px 10px;text-align:left;color:#7f1d1d">Orden</th><th style="padding:8px 10px;text-align:right;color:#7f1d1d">Saldo pendiente</th></tr></thead><tbody>'
-      + (orden.ordenesACobrar || []).map(o => '<tr style="border-bottom:1px solid #fecaca"><td style="padding:8px 10px">' + (o.numeroOrden || '') + '</td><td style="padding:8px 10px;text-align:right;font-weight:700;color:#dc2626">' + fmt(o.saldo || 0) + '</td></tr>').join('')
-      + '</tbody><tfoot><tr style="background:#fee2e2"><td style="padding:10px;font-weight:800;color:#7f1d1d">Total a cobrar</td><td style="padding:10px;text-align:right;font-size:16px;font-weight:900;color:#dc2626">' + fmt(orden.montoCobrar || 0) + '</td></tr></tfoot></table></div>'
-    : '';
-  return '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>' + orden.numeroOrden + '</title><style>body{font-family:"Segoe UI",sans-serif;margin:0;padding:0;color:#111;background:#fff}@media print{body{padding:0}}</style></head><body><div style="max-width:780px;margin:0 auto;padding:32px"><div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #7c3aed;padding-bottom:20px;margin-bottom:24px"><div>' + (empresa && empresa.logo ? '<img src="' + empresa.logo + '" style="height:60px;object-fit:contain;margin-bottom:8px"/>' : '<div style="font-size:22px;font-weight:900;color:#7c3aed">' + (empresa && empresa.name ? empresa.name : '') + '</div>') + '<div style="font-size:13px;color:#6b7280">' + (empresa && empresa.address ? empresa.address : '') + '</div><div style="font-size:13px;color:#6b7280">' + (empresa && empresa.phone ? empresa.phone : '') + ' \u00b7 ' + (empresa && empresa.email ? empresa.email : '') + '</div><div style="font-size:13px;color:#6b7280">NIT: ' + (empresa && empresa.nit ? empresa.nit : '') + '</div></div><div style="text-align:right"><div style="font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:1px">Orden de Servicio</div><div style="font-size:28px;font-weight:900;color:#7c3aed">' + orden.numeroOrden + '</div><div style="font-size:13px;color:#6b7280">Fecha: ' + fmtFecha(orden.fechaProgramada) + '</div>' + (orden.numeroFactura ? '<div style="font-size:13px;color:#111;font-weight:700;margin-top:4px">Factura: ' + orden.numeroFactura + '</div>' : '') + '</div></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px"><div style="background:#f9fafb;border-radius:10px;padding:14px 16px"><div style="font-size:11px;color:#9ca3af;font-weight:700;text-transform:uppercase;margin-bottom:8px">Cliente</div><div style="font-size:16px;font-weight:700">' + orden.clienteNombre + '</div>' + (orden.clienteNit ? '<div style="font-size:12px;color:#6b7280">NIT: ' + orden.clienteNit + '</div>' : '') + (orden.clienteCelular ? '<div style="font-size:12px;color:#6b7280">Tel: ' + orden.clienteCelular + '</div>' : '') + (orden.sucursalDireccion ? '<div style="font-size:12px;color:#6b7280">Dir: ' + orden.sucursalDireccion + '</div>' : (orden.clienteDireccionPrincipal ? '<div style="font-size:12px;color:#6b7280">Dir: ' + orden.clienteDireccionPrincipal + '</div>' : '')) + (orden.sucursalNombre ? '<div style="font-size:12px;color:#6b7280;margin-top:4px">Sede: ' + orden.sucursalNombre + '</div>' : '') + '</div><div style="background:#f9fafb;border-radius:10px;padding:14px 16px"><div style="font-size:11px;color:#9ca3af;font-weight:700;text-transform:uppercase;margin-bottom:8px">Detalle</div><div style="font-size:13px;color:#374151"><b>Forma de pago:</b> ' + (orden.formaPago || '\u2014') + '</div>' + (orden.extintorPrestamo ? '<div style="font-size:13px;color:#374151;margin-top:4px"><b>Extintor pr\u00e9stamo:</b> ' + orden.extintorPrestamo + '</div>' : '') + (orden.notasOrden ? '<div style="font-size:13px;color:#374151;margin-top:4px"><b>Notas:</b> ' + orden.notasOrden + '</div>' : '') + '</div></div><table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="background:#7c3aed;color:#fff"><th style="padding:10px;text-align:left">Producto / Servicio</th><th style="padding:10px;text-align:center">Cant.</th><th style="padding:10px;text-align:right">Precio</th><th style="padding:10px;text-align:right">Desc.</th><th style="padding:10px;text-align:right">Subtotal</th></tr></thead><tbody>' + filas + '</tbody><tfoot>' + filasIva + '<tr style="background:#f9fafb"><td colspan="4" style="padding:10px;text-align:right;font-weight:700">TOTAL</td><td style="padding:10px;text-align:right;font-size:18px;font-weight:900;color:#16a34a">' + fmt(orden.total) + '</td></tr></tfoot></table>' + filasCobranza + '<div style="margin-top:32px;font-size:11px;color:#9ca3af;text-align:center;border-top:1px solid #f3f4f6;padding-top:16px">Documento generado por Control360 \u00b7 Sistema Operativo Empresarial</div></div></body></html>';
-};
 
 const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const esEdicion = !!ordenEditar;
+  const esMovil = useEsMovil();
   const token = localStorage.getItem('token');
   const headers = { Authorization: 'Bearer ' + token };
 
@@ -286,10 +276,10 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   };
 
   const imprimir = (tipo) => {
-    const html = generarHtmlOrden(ordenCreada, empresaSel, tipo);
-    const win = window.open('', '_blank');
-    win.document.write(html); win.document.close(); win.focus();
-    setTimeout(() => win.print(), 600);
+    // Plantilla única compartida (printOrden.js): misma vista que en DetalleOrden.
+    const formato = tipo === 'tirilla' ? 'pos' : 'carta';
+    const ok = abrirImpresionOrden(ordenCreada, empresaSel, formato);
+    if (!ok) setError('El navegador bloqueó la ventana de impresión. Permite ventanas emergentes.');
   };
 
   const enviarWhatsApp = () => {
@@ -311,7 +301,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
             <p style={{ margin: 0, fontSize: 13, color: '#374151', fontWeight: 600 }}>¿Qué deseas hacer?</p>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <button onClick={() => imprimir('carta')} style={s.btnAccionModal}>🖨️ Carta / Media carta<br/><span style={{ fontSize: 11, fontWeight: 400 }}>Full color con membrete</span></button>
-              <button onClick={() => imprimir('tirilla')} style={{ ...s.btnAccionModal, background: '#f9fafb', borderColor: '#374151', color: '#374151' }}>🧾 Tirilla 58mm<br/><span style={{ fontSize: 11, fontWeight: 400 }}>Blanco y negro · POS</span></button>
+              <button onClick={() => imprimir('tirilla')} style={{ ...s.btnAccionModal, background: '#f9fafb', borderColor: '#374151', color: '#374151' }}>🧾 Tirilla {(empresaSel && empresaSel.anchoImpresoraPos) || 58}mm<br/><span style={{ fontSize: 11, fontWeight: 400 }}>Blanco y negro · POS</span></button>
               <button onClick={enviarWhatsApp} style={{ ...s.btnAccionModal, background: '#f0fdf4', borderColor: '#25D366', color: '#15803d' }}>💬 WhatsApp<br/><span style={{ fontSize: 11, fontWeight: 400 }}>Enviar al cliente</span></button>
               <button onClick={() => { if (onCreada) onCreada(tipoServicio); }} style={{ ...s.btnAccionModal, background: '#f9fafb', borderColor: '#e5e7eb', color: '#6b7280' }}>✕ Cerrar<br/><span style={{ fontSize: 11, fontWeight: 400 }}>Volver al listado</span></button>
             </div>
@@ -336,8 +326,8 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   }
 
   return (
-    <div style={s.overlay}>
-      <div style={s.modal}>
+    <div style={{ ...s.overlay, ...(esMovil ? { padding: 0, alignItems: 'stretch' } : {}) }}>
+      <div style={{ ...s.modal, ...(esMovil ? { borderRadius: 0, maxWidth: '100%', height: '100dvh', maxHeight: '100dvh' } : {}) }}>
         <div style={s.modalHeader}>
           <div>
             <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: '#111' }}>{esEdicion ? '✏️ Editar ' + (ordenEditar && ordenEditar.numeroOrden ? ordenEditar.numeroOrden : '') : '+ Nueva Orden de Servicio'}</h3>
@@ -369,7 +359,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
         )}
 
         <div style={s.modalBody}>
-          <div style={s.grid2}>
+          <div style={{ ...s.grid2, ...(esMovil ? { gridTemplateColumns: '1fr', gap: 14 } : {}) }}>
 
             <div style={s.columna}>
               {(tipoServicio === 'interna' || tipoServicio === 'produccion') ? (
@@ -850,7 +840,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
           </div>
         </div>
 
-        <div style={s.modalFooter}>
+        <div style={{ ...s.modalFooter, ...(esMovil ? { flexDirection: 'column-reverse', gap: 8 } : {}) }}>
           <button onClick={onCancelar} style={s.btnCancelar}>Cancelar</button>
           {alertaTaller && (
             <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>

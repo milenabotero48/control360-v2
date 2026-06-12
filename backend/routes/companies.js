@@ -68,7 +68,7 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, web, whatsapp } = req.body;
+    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, web, whatsapp, anchoImpresoraPos } = req.body;
 
     if (!name)                      return res.status(400).json({ error: 'Nombre requerido' });
     if (!validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido: mínimo 8 dígitos' });
@@ -97,6 +97,8 @@ router.post('/', async (req, res) => {
       email,
       iva:        parseInt(iva),
       logo:       logoUrl || '',
+      // Ola 3: ancho impresora POS (mm) — default 58, configurable a 80.
+      anchoImpresoraPos: (() => { const a = parseInt(anchoImpresoraPos); return (!isNaN(a) && a >= 48 && a <= 112) ? a : 58; })(),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
@@ -112,7 +114,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     // Aceptamos configCertificado pero IGNORAMOS pinAutorizacion (deprecado).
-    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, configCertificado, web, whatsapp } = req.body;
+    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, configCertificado, web, whatsapp, anchoImpresoraPos } = req.body;
 
     if (nit       && !validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido' });
     if (phone     && !validarTelefono(phone))     return res.status(400).json({ error: 'Teléfono inválido' });
@@ -135,6 +137,15 @@ router.put('/:id', async (req, res) => {
     if (email)     updateData.email     = email;
     if (iva)       updateData.iva       = parseInt(iva);
     if (configCertificado !== undefined) updateData.configCertificado = configCertificado;
+    // Ola 3: ancho de la impresora POS del suscriptor (mm). La plantilla única
+    // de impresión (printOrden.js) escala la tirilla con este valor.
+    if (anchoImpresoraPos !== undefined) {
+      const ancho = parseInt(anchoImpresoraPos);
+      if (isNaN(ancho) || ancho < 48 || ancho > 112) {
+        return res.status(400).json({ error: 'Ancho de impresora POS inválido (48–112 mm)' });
+      }
+      updateData.anchoImpresoraPos = ancho;
+    }
 
     if (logo && logo.startsWith('data:image')) {
       updateData.logo = await subirLogo(logo);

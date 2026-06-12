@@ -9,6 +9,78 @@ const genId = (prefix) => `${prefix}-${String(Math.floor(Math.random() * 9000) +
 
 const CATEGORIAS_DEFAULT = ['Insumos taller', 'Transporte / Combustible', 'Arriendo', 'Servicios públicos', 'Papelería', 'Mantenimiento', 'Nómina', 'Marketing', 'Impuestos', 'Compra de Mercancia', 'Otros'];
 
+// ════════════════════════════════════════════════════════════════════════════
+// ComboTercero — combobox de tercero/proveedor (Ola 3)
+// ────────────────────────────────────────────────────────────────────────────
+// Escribe y filtra en vivo entre los proveedores registrados; acepta texto
+// libre para terceros ocasionales; y permite crear el proveedor inline sin
+// salir del formulario. Reutilizable después en Compras y CxP.
+// ════════════════════════════════════════════════════════════════════════════
+const ComboTercero = ({ proveedores, valor, proveedorId, onChange, onCrear }) => {
+  const [texto, setTexto]       = useState(valor || '');
+  const [abierto, setAbierto]   = useState(false);
+  const [creando, setCreando]   = useState(false);
+
+  useEffect(() => { setTexto(valor || ''); }, [valor]);
+
+  const q = (texto || '').toLowerCase().trim();
+  const filtrados = q
+    ? proveedores.filter(p => (p.nombre || '').toLowerCase().includes(q) || (p.nit || '').includes(q))
+    : proveedores;
+  const coincideExacto = proveedores.some(p => (p.nombre || '').toLowerCase() === q);
+
+  const elegir = (p) => {
+    onChange(p.nombre, p.id);
+    setTexto(p.nombre);
+    setAbierto(false);
+  };
+
+  const crearNuevo = async () => {
+    if (!q || creando) return;
+    setCreando(true);
+    const ok = await onCrear(texto.trim());
+    setCreando(false);
+    if (ok) setAbierto(false);
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <input
+        style={{ width: '100%', padding: '10px 12px', border: '1px solid #e5e7eb', borderRadius: 9, fontSize: 14, boxSizing: 'border-box' }}
+        value={texto}
+        placeholder="Escribe para buscar o digitar el tercero..."
+        onChange={e => {
+          setTexto(e.target.value);
+          // Texto libre: vale como tercero aunque no esté registrado.
+          onChange(e.target.value, '');
+          setAbierto(true);
+        }}
+        onFocus={() => setAbierto(true)}
+        onBlur={() => setTimeout(() => setAbierto(false), 180)}
+      />
+      {proveedorId && <span style={{ position: 'absolute', right: 10, top: 11, fontSize: 12, color: '#16a34a' }}>✓ registrado</span>}
+      {abierto && (filtrados.length > 0 || (q && !coincideExacto)) && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, boxShadow: '0 10px 30px rgba(0,0,0,0.12)', zIndex: 200, maxHeight: 220, overflow: 'auto', marginTop: 4 }}>
+          {filtrados.slice(0, 30).map(p => (
+            <div key={p.id} onMouseDown={() => elegir(p)}
+              style={{ padding: '9px 12px', cursor: 'pointer', fontSize: 13, borderBottom: '1px solid #f9fafb' }}
+              onMouseEnter={e => e.currentTarget.style.background = '#f9fafb'}
+              onMouseLeave={e => e.currentTarget.style.background = '#fff'}>
+              {p.nombre}{p.nit ? <span style={{ color: '#9ca3af', fontSize: 11 }}> · NIT {p.nit}</span> : ''}
+            </div>
+          ))}
+          {q && !coincideExacto && (
+            <div onMouseDown={crearNuevo}
+              style={{ padding: '10px 12px', cursor: 'pointer', fontSize: 13, fontWeight: 700, color: '#0284c7', background: '#f0f9ff' }}>
+              {creando ? 'Creando...' : `➕ Crear proveedor "${texto.trim()}"`}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Egreso provisional — para mensajeros
 const EgresoProvisional = ({ mensajeros, cajas, formasPagoConfig, onCrear, onCerrar }) => {
   const [mensajeroId, setMensajeroId] = useState('');
@@ -414,15 +486,33 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
               <input style={S.input} value={form.concepto} onChange={e => set('concepto', e.target.value)} placeholder="Ej: Compra gas CO2" />
             </div>
             <div style={S.field}>
-              <label style={S.label}>Proveedor</label>
-              <select style={S.select} value={form.proveedorId || ''} onChange={e => {
-                const prov = proveedores.find(p => p.id === e.target.value);
-                set('proveedorId', e.target.value);
-                set('proveedor', prov?.nombre || '');
-              }}>
-                <option value="">— Seleccionar proveedor —</option>
-                {proveedores.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
-              </select>
+              <label style={S.label}>Tercero / Proveedor</label>
+              {/* Ola 3: combobox — busca entre los proveedores registrados,
+                  acepta texto libre para terceros ocasionales y permite crear
+                  el proveedor sin salir del egreso. Con 200 proveedores el
+                  select cerrado era inusable. */}
+              <ComboTercero
+                proveedores={proveedores}
+                valor={form.proveedor}
+                proveedorId={form.proveedorId || ''}
+                onChange={(nombre, id) => { set('proveedor', nombre); set('proveedorId', id || ''); }}
+                onCrear={async (nombre) => {
+                  try {
+                    const token = localStorage.getItem('token');
+                    const r = await fetch(`${API}/proveedores`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      body: JSON.stringify({ nombre })
+                    });
+                    const data = await r.json();
+                    if (!r.ok) throw new Error(data.error || 'Error creando proveedor');
+                    setProveedores(p => [...p, data]);
+                    set('proveedor', data.nombre);
+                    set('proveedorId', data.id);
+                    return true;
+                  } catch { return false; }
+                }}
+              />
             </div>
           </div>
 

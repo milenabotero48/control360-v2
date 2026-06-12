@@ -555,7 +555,13 @@ router.get('/:id', authenticate, validarTenant('orders'), async (req, res) => {
   try {
     const doc = await db.collection('orders').doc(req.params.id).get();
     if (!doc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
-    res.json({ id: doc.id, ...doc.data() });
+    const dataOrden = doc.data();
+    // siguientePaso: el frontend pinta el botón de avance con esto.
+    // Una sola fuente de verdad del flujo (la máquina de estados de este archivo).
+    res.json({
+      id: doc.id, ...dataOrden,
+      siguientePaso: pasoSiguiente(dataOrden) || null
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -948,7 +954,8 @@ router.put('/:id', authenticate, async (req, res) => {
 router.put('/:id/estado', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-    const { nuevoEstado, notas, numeroFactura, pin } = req.body;
+    const { notas, numeroFactura, pin, forzar, avanzar } = req.body;
+    let nuevoEstado = req.body.nuevoEstado;
 
     const ordenRef = db.collection('orders').doc(id);
     const ordenDoc = await ordenRef.get();
@@ -1061,8 +1068,73 @@ router.put('/:id/estado', authenticate, async (req, res) => {
       return res.json({ id, estado: 'anulada', historialEstados: historial, cajaRevertida });
     }
 
-    if (!ESTADOS.includes(nuevoEstado)) {
+    if (!ESTADOS.includes(nuevoEstado) && nuevoEstado !== 'auto' && avanzar !== true) {
       return res.status(400).json({ error: `Estado inválido. Válidos: ${ESTADOS.join(', ')}` });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // VALIDACIÓN DE TRANSICIÓN LEGAL — la máquina de estados manda (Ola 3)
+    // ──────────────────────────────────────────────────────────────────────────
+    // Antes, este endpoint aceptaba CUALQUIER estado válido aunque no fuera el
+    // paso legal. Una pantalla sin refrescar podía enviar un estado viejo y la
+    // orden RETROCEDÍA (bug real: orden en En Ruta Entrega devuelta a En Taller).
+    // Ahora:
+    //   - avanzar: true (o nuevoEstado: 'auto') → el backend calcula el paso.
+    //   - nuevoEstado explícito → debe estar en la cadena HACIA ADELANTE del
+    //     flujo de la orden. Retrocesos y estados de otro flujo se rechazan.
+    //   - Admin puede forzar con { forzar: true } — queda auditado.
+    // ══════════════════════════════════════════════════════════════════════════
+    const tallerVal = ordenTieneTaller(actual);
+    // reparacion_proceso es una pausa dentro de taller: valida como en_taller.
+    const estadoBaseVal = actual.estado === 'reparacion_proceso' ? 'en_taller' : actual.estado;
+    const flujoVal = construirFlujo(actual.lugarAtencion, actual.requiereFactura, tallerVal);
+
+    // Cadena de estados alcanzables hacia adelante desde el estado actual.
+    const alcanzables = new Set();
+    let cursorVal = estadoBaseVal;
+    let guardiaVal = 0;
+    while (guardiaVal++ < 12) {
+      const pasoVal = flujoVal[cursorVal];
+      if (!pasoVal || !pasoVal.siguiente || alcanzables.has(pasoVal.siguiente)) break;
+      alcanzables.add(pasoVal.siguiente);
+      cursorVal = pasoVal.siguiente;
+    }
+    // Salidas legales fuera de la cadena lineal:
+    if (actual.estado === 'reparacion_proceso') alcanzables.add('en_taller');
+    if (actual.estado === 'entrega_cobranza') alcanzables.add('cxc');       // no pagó → cartera
+    if (actual.estado === 'cuadre_dinero') { alcanzables.add('completada'); alcanzables.add('cxc'); }
+    if (actual.estado === 'cxc') alcanzables.add('completada');             // cobro registrado
+
+    // Modo AVANZAR: el backend decide el siguiente paso. El frontend ya no
+    // necesita (ni debe) calcular el flujo por su cuenta.
+    if (avanzar === true || nuevoEstado === 'auto') {
+      const pasoAuto = flujoVal[estadoBaseVal];
+      if (!pasoAuto || !pasoAuto.siguiente) {
+        return res.status(400).json({
+          error: `La orden está en "${ESTADO_LABELS[actual.estado] || actual.estado}" y no tiene siguiente paso en su flujo.`,
+          estadoActual: actual.estado
+        });
+      }
+      nuevoEstado = pasoAuto.siguiente;
+    }
+
+    const transicionLegal = nuevoEstado === actual.estado || alcanzables.has(nuevoEstado);
+    if (!transicionLegal) {
+      if (forzar === true && req.user.role === 'admin') {
+        await auditar({
+          accion: 'TRANSICION_FORZADA',
+          descripcion: `${usuarioNombre} FORZÓ ${actual.numeroOrden}: ${ESTADO_LABELS[actual.estado] || actual.estado} → ${ESTADO_LABELS[nuevoEstado] || nuevoEstado}`,
+          usuarioId, usuarioNombre, ordenId: id,
+          documento: actual.numeroOrden,
+          datos: { estadoAnterior: actual.estado, estadoForzado: nuevoEstado }
+        });
+      } else {
+        return res.status(409).json({
+          error: `La orden ${actual.numeroOrden} está en "${ESTADO_LABELS[actual.estado] || actual.estado}" y no puede pasar a "${ESTADO_LABELS[nuevoEstado] || nuevoEstado}". Refresca la pantalla: es posible que otro usuario ya la haya avanzado.`,
+          estadoActual: actual.estado,
+          transicionInvalida: true
+        });
+      }
     }
 
     // ── BLOQUEO: Orden Interna no se completa sin egreso definitivo ─────────
@@ -1348,7 +1420,12 @@ router.put('/:id/estado', authenticate, async (req, res) => {
       datos: { estadoAnterior: actual.estado, estadoNuevo: estadoCursor, numeroFactura: facturaLimpia, notas, qrGenerados }
     });
 
-    res.json({ id, estado: estadoCursor, historialEstados: historial });
+    res.json({
+      id, estado: estadoCursor, historialEstados: historial,
+      // El frontend usa esto para pintar el botón del siguiente paso — ya no
+      // calcula el flujo por su cuenta (una sola fuente de verdad).
+      siguientePaso: pasoSiguiente({ ...actual, estado: estadoCursor }) || null
+    });
   } catch (error) {
     console.error('Error cambiando estado:', error);
     res.status(500).json({ error: error.message });

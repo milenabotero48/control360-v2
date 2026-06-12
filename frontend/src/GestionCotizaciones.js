@@ -47,7 +47,10 @@ const NOTAS_PREDEFINIDAS = [
 
 const INTRO_DEFAULT = `agradece la oportunidad que nos brinda de presentar nuestra cotización y ponernos a su entera disposición. Somos una empresa dedicada a la fabricación y comercialización de equipos contra incendio y señalización empresarial con amplia experiencia en el mercado a nivel nacional. Atendiendo su amable solicitud, presentamos a su consideración la siguiente oferta:`;
 
-const ITEM_VACIO = { productoId: '', nombre: '', descripcion: '', cantidad: 1, precioUnit: 0, descuento: 0, notas: '' };
+// Ola 3: el item GUARDA la categoría del producto. Sin ella, al aprobar la
+// cotización el backend no sabía que eran recargas y rechazaba la orden a
+// domicilio (bug COT-0007: orden nunca creada).
+const ITEM_VACIO = { productoId: '', nombre: '', descripcion: '', categoria: '', cantidad: 1, precioUnit: 0, descuento: 0, notas: '' };
 
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 const GestionCotizaciones = ({ user }) => {
@@ -160,6 +163,7 @@ const GestionCotizaciones = ({ user }) => {
             updated.nombre = p.nombre;
             updated.precioUnit = p.precioVenta || 0;
             updated.descripcion = p.descripcion || '';
+            updated.categoria = p.categoria || ''; // Ola 3: viaja a la orden
           }
         }
         return updated;
@@ -251,39 +255,36 @@ const GestionCotizaciones = ({ user }) => {
   };
 
   // ─── CAMBIAR ESTADO ────────────────────────────────────────────────────────
-  const cambiarEstado = async (cot, nuevoEstado, motivo = '') => {
+  // Ola 3: al aprobar, la orden se crea PRIMERO en el backend (que asigna el
+  // número OS-00XX real y valida el flujo). Solo si la orden se crea OK, la
+  // cotización pasa a convertida con el número verdadero. Antes: se inventaba
+  // un "OS-{timestamp}" falso y los errores del backend se tragaban en
+  // silencio (bug COT-0007: cotización "aprobada" sin orden real).
+  // datosOrden: { lugarAtencion, fechaProgramada, formaPago } del mini-paso.
+  const cambiarEstado = async (cot, nuevoEstado, motivo = '', datosOrden = null) => {
     try {
-      // Al aprobar: crear orden automáticamente en el mismo paso
       const crearOrden = nuevoEstado === 'aprobada' || nuevoEstado === 'convertida';
-      const ordenId = crearOrden ? `OS-${Date.now()}` : (cot.ordenId || '');
-
-      const payload = {
-        estado: nuevoEstado === 'aprobada' ? 'convertida' : nuevoEstado,
-        motivo,
-        ordenId,
-        updatedAt: new Date().toISOString(),
-      };
-
-      await axios.put(`${API}/cotizaciones/${cot.id}`, { ...cot, ...payload }, { headers });
+      let ordenCreada = null;
 
       if (crearOrden) {
-        // Mapear items al formato que espera orders.js (precioUnitario, no precioUnit)
-        const itemsParaOrden = (cot.items || []).map(it => ({
-          productoId:     it.productoId || '',
-          nombre:         it.nombre     || '',
-          categoria:      it.categoria  || '',
-          cantidad:       Number(it.cantidad)    || 1,
-          precioUnitario: Number(it.precioUnit)  || 0,   // ← orders.js usa precioUnitario
-          descuento:      Number(it.descuento)   || 0,
-          notas:          it.notas || '',
-        }));
-
-        // Recalcular totales correctamente
-        const subtotalOrden = itemsParaOrden.reduce((acc, it) => {
-          return acc + it.precioUnitario * it.cantidad * (1 - it.descuento / 100);
-        }, 0);
-        const ivaOrden = cot.empresaIva ? subtotalOrden * 0.19 : 0;
-        const totalOrden = subtotalOrden + ivaOrden;
+        // Mapear items al formato de orders.js (precioUnitario, no precioUnit).
+        // Ola 3: si el item NO tiene categoría guardada (cotizaciones viejas),
+        // se re-consulta del catálogo por productoId — así el backend sabe si
+        // hay recargas/mantenimientos y arma el flujo correcto.
+        const itemsParaOrden = (cot.items || []).map(it => {
+          const prodCat = !it.categoria && it.productoId
+            ? (productos.find(x => x.id === it.productoId)?.categoria || '')
+            : (it.categoria || '');
+          return {
+            productoId:     it.productoId || '',
+            nombre:         it.nombre     || '',
+            categoria:      prodCat,
+            cantidad:       Number(it.cantidad)    || 1,
+            precioUnitario: Number(it.precioUnit)  || 0,
+            descuento:      Number(it.descuento)   || 0,
+            notas:          it.notas || '',
+          };
+        });
 
         const ordenPayload = {
           tipoOrden:        'servicio',
@@ -294,20 +295,41 @@ const GestionCotizaciones = ({ user }) => {
           empresaId:        cot.empresaId        || '',
           empresaNombre:    cot.empresaNombre    || '',
           items:            itemsParaOrden,
+          // Datos operativos del mini-paso de aprobación:
+          lugarAtencion:    datosOrden?.lugarAtencion  || 'domicilio',
+          fechaProgramada:  datosOrden?.fechaProgramada || new Date().toISOString().split('T')[0],
+          formaPago:        datosOrden?.formaPago       || 'Efectivo',
+          notasOrden:       `Generada desde cotización ${cot.numero}`,
           cotizacionId:     cot.id,
           cotizacionNumero: cot.numero,
-          createdAt:        new Date().toISOString(),
           creadoPor:        user?.nombre || user?.email,
         };
-        await axios.post(`${API}/orders`, ordenPayload, { headers }).catch(() => {});
+        // El backend asigna numeroOrden real, calcula subtotal/IVA/total y
+        // valida el flujo. Si falla, el error SE MUESTRA y NO se toca la cot.
+        const r = await axios.post(`${API}/orders`, ordenPayload, { headers });
+        ordenCreada = r.data; // { id, numeroOrden, ... }
       }
 
-      setExito('✅ Cotización aprobada — Orden creada automáticamente');
+      const payload = {
+        estado: nuevoEstado === 'aprobada' ? 'convertida' : nuevoEstado,
+        motivo,
+        ordenId:     ordenCreada ? ordenCreada.id            : (cot.ordenId || ''),
+        ordenNumero: ordenCreada ? ordenCreada.numeroOrden   : (cot.ordenNumero || ''),
+        updatedAt: new Date().toISOString(),
+      };
+
+      await axios.put(`${API}/cotizaciones/${cot.id}`, { ...cot, ...payload }, { headers });
+
+      setExito(ordenCreada
+        ? `✅ Cotización aprobada — Orden ${ordenCreada.numeroOrden} creada`
+        : '✅ Estado actualizado');
       await cargarTodo();
       setVista('lista');
       setModalConfirm(null);
     } catch (e) {
-      setError('Error actualizando estado');
+      setError(e.response?.data?.error
+        ? `⛔ No se creó la orden: ${e.response.data.error}`
+        : 'Error actualizando estado');
     }
   };
 
@@ -399,7 +421,7 @@ const GestionCotizaciones = ({ user }) => {
                                 onEditar={() => abrirEditar(cotActual)}
                                 onClonar={() => clonarCotizacion(cotActual)}
                                 onVolver={() => setVista('lista')}
-                                onCambiarEstado={(est, mot) => cambiarEstado(cotActual, est, mot)}
+                                onCambiarEstado={(est, mot, datosOrden) => cambiarEstado(cotActual, est, mot, datosOrden)}
                                 setModalConfirm={setModalConfirm}
                                 onImprimir={() => setVista('pdf')}
                                 enviandoPDF={enviandoPDF} setEnviandoPDF={setEnviandoPDF}
@@ -500,7 +522,7 @@ const VistaLista = ({ cotizaciones, buscar, setBuscar, filtroEstado, setFiltroEs
                     <tr key={c.id} style={s.tr} onClick={() => onDetalle(c)}>
                       <td style={s.td}>
                         <span style={{ fontWeight: 700, color: '#667eea' }}>{c.numero}</span>
-                        {c.ordenId && <div style={{ fontSize: 11, color: '#10b981', marginTop: 2 }}>→ {c.ordenId}</div>}
+                        {c.ordenId && <div style={{ fontSize: 11, color: '#10b981', marginTop: 2 }}>→ {c.ordenNumero || c.ordenId}</div>}
                       </td>
                       <td style={s.td}>
                         <div style={{ fontWeight: 600, color: '#111827' }}>{c.clienteNombre}</div>
@@ -970,6 +992,30 @@ const NotaRow = ({ nota, onToggle, onEditar }) => (
 const VistaDetalle = ({ cot, isAdmin, isComercial, onEditar, onClonar, onVolver,
   onCambiarEstado, setModalConfirm, onImprimir, enviandoPDF, setEnviandoPDF, setExito, setError }) => {
 
+  // ── Ola 3: mini-paso de aprobación ──────────────────────────────────────────
+  // La cotización no tiene los datos operativos que la orden necesita
+  // (tipo de servicio, fecha, forma de pago). Se piden aquí, una sola vez,
+  // y la orden se crea con el flujo correcto desde el primer segundo.
+  const [modalAprobar, setModalAprobar] = useState(false);
+  const [aprobLugar, setAprobLugar]     = useState('domicilio');
+  const [aprobFecha, setAprobFecha]     = useState(() => {
+    const d = new Date();
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+  });
+  const [aprobPago, setAprobPago]       = useState('Efectivo');
+  const [aprobando, setAprobando]       = useState(false);
+
+  const confirmarAprobacion = async () => {
+    setAprobando(true);
+    await onCambiarEstado('aprobada', '', {
+      lugarAtencion: aprobLugar,
+      fechaProgramada: aprobFecha,
+      formaPago: aprobPago,
+    });
+    setAprobando(false);
+    setModalAprobar(false);
+  };
+
   const est = ESTADO_CONFIG[cot.estado] || ESTADO_CONFIG.pendiente;
   const dias = diasRestantes(cot.fechaVencimiento);
   const puedeEditar = isComercial && (cot.estado === 'pendiente' || cot.estado === 'aprobada');
@@ -1159,13 +1205,8 @@ const VistaDetalle = ({ cot, isAdmin, isComercial, onEditar, onClonar, onVolver,
               <div style={s.cardTitle}>⚡ Acciones</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
                 {cot.estado === 'pendiente' && (
-                  <button onClick={() => setModalConfirm({
-                    titulo: '✅ Aprobar cotización',
-                    mensaje: `¿El cliente aprobó ${cot.numero}? Se creará la orden automáticamente.`,
-                    confirmLabel: '✅ Sí, aprobar y crear orden',
-                    confirmColor: '#10b981',
-                    onConfirm: () => onCambiarEstado('aprobada'),
-                  })} style={{ ...s.btnPrimary, background: '#10b981', justifyContent: 'center' }}>
+                  <button onClick={() => setModalAprobar(true)}
+                    style={{ ...s.btnPrimary, background: '#10b981', justifyContent: 'center' }}>
                     ✅ Aprobar → Crear Orden
                   </button>
                 )}
@@ -1200,11 +1241,67 @@ const VistaDetalle = ({ cot, isAdmin, isComercial, onEditar, onClonar, onVolver,
             <div style={{ fontSize: 12, color: '#6b7280' }}>
               <p style={{ margin: '0 0 4px' }}>Creada por: <strong>{cot.creadoPor}</strong></p>
               {cot.createdAt && <p style={{ margin: '0 0 4px' }}>Fecha: <strong>{new Date(cot.createdAt).toLocaleDateString('es-CO')}</strong></p>}
-              {cot.ordenId && <p style={{ margin: 0, color: '#8b5cf6', fontWeight: 700 }}>Orden generada: {cot.ordenId}</p>}
+              {cot.ordenId && <p style={{ margin: 0, color: '#8b5cf6', fontWeight: 700 }}>Orden generada: {cot.ordenNumero || cot.ordenId}</p>}
             </div>
           </div>
         </div>
       </div>
+
+      {/* ── Ola 3: MINI-PASO DE APROBACIÓN — datos operativos de la orden ── */}
+      {modalAprobar && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: 12 }}>
+          <div style={{ background: '#fff', borderRadius: 16, width: '100%', maxWidth: 460, maxHeight: '92vh', overflow: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+            <div style={{ padding: '18px 22px', borderBottom: '1px solid #f3f4f6' }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: '#111' }}>✅ Aprobar {cot.numero} → Crear orden</div>
+              <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>Completa los datos operativos. El sistema asignará el número de orden real.</div>
+            </div>
+            <div style={{ padding: '16px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div>
+                <label style={{ fontSize: 13, fontWeight: 700, color: '#374151', display: 'block', marginBottom: 6 }}>Tipo de servicio</label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {[
+                    { value: 'domicilio', label: '🚚 Domicilio' },
+                    { value: 'oficina',   label: '🏢 Oficina' },
+                    { value: 'taller',    label: '🔧 Taller' },
+                    { value: 'despacho',  label: '📦 Despacho' },
+                  ].map(t => (
+                    <button key={t.value} type="button" onClick={() => setAprobLugar(t.value)} style={{
+                      padding: '8px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, border: 'none',
+                      background: aprobLugar === t.value ? '#10b981' : '#f3f4f6',
+                      color: aprobLugar === t.value ? '#fff' : '#374151'
+                    }}>{t.label}</button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label style={{ fontSize: 13, fontWeight: 700, color: '#374151', display: 'block', marginBottom: 6 }}>Fecha programada</label>
+                <input type="date" value={aprobFecha} onChange={e => setAprobFecha(e.target.value)}
+                  style={{ width: '100%', padding: '10px 12px', border: '1px solid #e5e7eb', borderRadius: 9, fontSize: 14, boxSizing: 'border-box' }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 13, fontWeight: 700, color: '#374151', display: 'block', marginBottom: 6 }}>Forma de pago</label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {['Efectivo', 'Transferencia', 'A crédito (CxC)'].map(f => (
+                    <button key={f} type="button" onClick={() => setAprobPago(f)} style={{
+                      padding: '8px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600, border: 'none',
+                      background: aprobPago === f ? '#0284c7' : '#f3f4f6',
+                      color: aprobPago === f ? '#fff' : '#374151'
+                    }}>{f}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div style={{ padding: '14px 22px', borderTop: '1px solid #f3f4f6', display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button onClick={() => setModalAprobar(false)} disabled={aprobando}
+                style={{ padding: '11px 20px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 9, cursor: 'pointer', fontWeight: 600, fontSize: 14 }}>Cancelar</button>
+              <button onClick={confirmarAprobacion} disabled={aprobando}
+                style={{ padding: '11px 20px', background: aprobando ? '#9ca3af' : '#10b981', color: '#fff', border: 'none', borderRadius: 9, cursor: aprobando ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 14 }}>
+                {aprobando ? 'Creando orden...' : '✅ Aprobar y crear orden'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

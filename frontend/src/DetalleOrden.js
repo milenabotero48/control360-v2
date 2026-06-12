@@ -1,22 +1,38 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+// Ola 3: plantilla ÚNICA de impresión de órdenes (compartida con NuevaOrden).
+// Cualquier ajuste de diseño de impresión se hace SOLO en printOrden.js.
+import { abrirImpresionOrden } from './printOrden';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
+// ── Ola 3: detección de pantalla móvil (responsive sin CSS externo) ─────────
+const useEsMovil = () => {
+  const [esMovil, setEsMovil] = useState(typeof window !== 'undefined' && window.innerWidth < 768);
+  useEffect(() => {
+    const onResize = () => setEsMovil(window.innerWidth < 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return esMovil;
+};
+
+// Solo etiquetas y colores. El SIGUIENTE paso del flujo lo decide ÚNICAMENTE
+// el backend (máquina de estados en orders.js) — llega como orden.siguientePaso.
 const ESTADOS = {
-  programada:       { label: 'Programada',       color: '#6366f1', bg: '#eef2ff',  siguiente: 'en_ruta_recogida' },
-  en_ruta_recogida: { label: 'En Ruta Recogida', color: '#f59e0b', bg: '#fffbeb',  siguiente: 'en_taller' },
-  en_taller:        { label: 'En Taller',         color: '#8b5cf6', bg: '#f5f3ff',  siguiente: 'facturado' },
-  listo_entregar:   { label: 'Listo para Entregar', color: '#0891b2', bg: '#ecfeff', siguiente: 'completada' },
-  facturado:        { label: 'Facturado',          color: '#0284c7', bg: '#e0f2fe',  siguiente: 'despacho' },
-  despacho:         { label: 'Despacho',           color: '#d97706', bg: '#fef3c7',  siguiente: 'en_ruta_entrega' },
-  en_ruta_entrega:  { label: 'En Ruta Entrega',   color: '#059669', bg: '#ecfdf5',  siguiente: 'entrega_cobranza' },
-  entrega_cobranza: { label: 'Entrega Cobranza',  color: '#dc2626', bg: '#fef2f2',  siguiente: 'cuadre_dinero' },
-  reparacion_proceso: { label: 'Reparación en Proceso', color: '#e11d48', bg: '#ffe4e8', siguiente: 'facturado' },
-  cuadre_dinero:    { label: 'Completada',         color: '#16a34a', bg: '#f0fdf4',  siguiente: null },
-  completada:       { label: 'Completada',         color: '#16a34a', bg: '#f0fdf4',  siguiente: null },
-  cxc:              { label: 'Cuenta por Cobrar',  color: '#b45309', bg: '#fffbeb',  siguiente: null },
-  anulada:          { label: 'Anulada',           color: '#dc2626', bg: '#fef2f2',  siguiente: null },
+  programada:       { label: 'Programada',       color: '#6366f1', bg: '#eef2ff' },
+  en_ruta_recogida: { label: 'En Ruta Recogida', color: '#f59e0b', bg: '#fffbeb' },
+  en_taller:        { label: 'En Taller',         color: '#8b5cf6', bg: '#f5f3ff' },
+  listo_entregar:   { label: 'Listo para Entregar', color: '#0891b2', bg: '#ecfeff' },
+  facturado:        { label: 'Facturado',          color: '#0284c7', bg: '#e0f2fe' },
+  despacho:         { label: 'Despacho',           color: '#d97706', bg: '#fef3c7' },
+  en_ruta_entrega:  { label: 'En Ruta Entrega',   color: '#059669', bg: '#ecfdf5' },
+  entrega_cobranza: { label: 'Entrega Cobranza',  color: '#dc2626', bg: '#fef2f2' },
+  reparacion_proceso: { label: 'Reparación en Proceso', color: '#e11d48', bg: '#ffe4e8' },
+  cuadre_dinero:    { label: 'Completada',         color: '#16a34a', bg: '#f0fdf4' },
+  completada:       { label: 'Completada',         color: '#16a34a', bg: '#f0fdf4' },
+  cxc:              { label: 'Cuenta por Cobrar',  color: '#b45309', bg: '#fffbeb' },
+  anulada:          { label: 'Anulada',           color: '#dc2626', bg: '#fef2f2' },
 };
 
 const formatCOP = (v) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', minimumFractionDigits: 0 }).format(v || 0);
@@ -61,6 +77,7 @@ const [configCerts, setConfigCerts]   = useState([]);
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
   const isAdmin = user?.role === 'admin';
+  const esMovil = useEsMovil();
 
   useEffect(() => { cargarOrden(); cargarFormasPago(); cargarConfigCerts(); }, [ordenId]);
 
@@ -94,6 +111,10 @@ const cargarConfigCerts = async () => {
   try {
     setCambiando(true);
     const res = await axios.put(`${API}/orders/${ordenId}/estado`, {
+      // Ola 3: 'avanzar' le dice al backend que calcule el paso legal con la
+      // máquina de estados única, leyendo el estado REAL en base de datos.
+      // Inmune a pantallas sin refrescar. nuevoEstado viaja solo informativo.
+      avanzar: true,
       nuevoEstado,
       notas: notasEstado,
       // Siempre enviamos el N° de factura si está digitado. El backend decide
@@ -254,12 +275,9 @@ const cargarConfigCerts = async () => {
   };
 
   const imprimirOrden = (formato = 'carta') => {
-    const contenido = generarHTMLImpresion(orden, empresa, formato);
-    const ventana = window.open('', '_blank');
-    ventana.document.write(contenido);
-    ventana.document.close();
-    ventana.focus();
-    setTimeout(() => { ventana.print(); }, 500);
+    // Plantilla única compartida (printOrden.js) — misma vista al crear y al ver.
+    const ok = abrirImpresionOrden(orden, empresa, formato);
+    if (!ok) setError('El navegador bloqueó la ventana de impresión. Permite ventanas emergentes.');
   };
 
  // ─── IMPRIMIR CERTIFICADO ───────────────────────────────────────────────────
@@ -317,56 +335,12 @@ const cargarConfigCerts = async () => {
   // Espejo EXACTO de construirFlujo() del backend (orders.js). El frontend NO
   // decide el flujo: solo necesita saber qué etiqueta mostrar en el botón. El
   // backend es la autoridad y puede encadenar en cascada. Mismos valores aquí.
-  const getSiguienteEstado = () => {
-    const norm = (l) => {
-      const x = (l || 'domicilio').toLowerCase();
-      if (x === 'oficina_rapida') return 'oficina';
-      if (x === 'oficina_taller') return 'taller';
-      return x;
-    };
-    const lugar = norm(orden.lugarAtencion);
-    const F = !!orden.requiereFactura;
-    // ¿La orden lleva equipos de taller? Define venta vs servicio.
-    const T = typeof orden.tieneEquipoTaller === 'boolean'
-      ? orden.tieneEquipoTaller
-      : (orden.items || []).some(it => {
-          const c = (it.categoria || '').toLowerCase();
-          return ['recarga','mantenimiento','hidrostatica','hidrostática'].some(k => c.includes(k));
-        });
-
-    const domicilioServicio = F
-      ? { programada: 'en_ruta_recogida', en_ruta_recogida: 'en_taller',
-          en_taller: 'facturado', facturado: 'en_ruta_entrega',
-          en_ruta_entrega: 'entrega_cobranza', entrega_cobranza: 'cuadre_dinero' }
-      : { programada: 'en_ruta_recogida', en_ruta_recogida: 'en_taller',
-          en_taller: 'en_ruta_entrega',
-          en_ruta_entrega: 'entrega_cobranza', entrega_cobranza: 'cuadre_dinero' };
-    // VENTA a domicilio: NO recoge, NO va a taller. Solo entrega y cobra.
-    const domicilioVenta = { programada: 'en_ruta_entrega',
-          en_ruta_entrega: 'entrega_cobranza', entrega_cobranza: 'cuadre_dinero' };
-
-    const flujos = {
-      oficina: F ? { facturado: 'completada' } : {},
-      taller: F
-        ? { en_taller: 'facturado', facturado: 'listo_entregar', listo_entregar: 'completada' }
-        : { en_taller: 'listo_entregar', listo_entregar: 'completada' },
-      despacho: F
-        ? { despacho: 'facturado', facturado: 'en_ruta_entrega',
-            en_ruta_entrega: 'entrega_cobranza', entrega_cobranza: 'cuadre_dinero' }
-        : { despacho: 'en_ruta_entrega',
-            en_ruta_entrega: 'entrega_cobranza', entrega_cobranza: 'cuadre_dinero' },
-      domicilio: T ? domicilioServicio : domicilioVenta,
-      cobranza: { programada: 'en_ruta_recogida',
-            en_ruta_recogida: 'entrega_cobranza', entrega_cobranza: 'cuadre_dinero' },
-      interna: { programada: 'completada' },
-      produccion: { programada: 'en_taller', en_taller: 'completada' }
-    };
-
-    const flujo = flujos[lugar] || flujos.domicilio;
-    return flujo[orden.estado] ?? null;
-  };
-
-  const siguienteEstado = getSiguienteEstado();
+  // ── Ola 3: el frontend YA NO calcula el flujo ──────────────────────────────
+  // El GET /orders/:id devuelve orden.siguientePaso calculado por la máquina
+  // de estados única del backend. Aquí solo se usa para pintar el botón.
+  // (Antes había DOS mapas duplicados en este archivo que divergieron del
+  // backend y causaron retrocesos de órdenes — eliminados.)
+  const siguienteEstado = orden?.siguientePaso?.siguiente ?? null;
 
   // Ocultar "Pasar a Cuadre Dinero" si es oficina_rapida y ya está pagado
   // El cuadre es solo para mensajero que cobró efectivo en campo
@@ -375,10 +349,10 @@ const cargarConfigCerts = async () => {
     !(orden.lugarAtencion === 'oficina_rapida' && orden.pagado && siguienteEstado === 'cuadre_dinero');
 
   return (
-    <div style={s.wrapper}>
+    <div style={{ ...s.wrapper, ...(esMovil ? { padding: '14px 10px' } : {}) }}>
       {/* HEADER */}
-      <div style={s.pageHeader}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+      <div style={{ ...s.pageHeader, ...(esMovil ? { flexDirection: 'column', alignItems: 'stretch' } : {}) }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', ...(esMovil ? { flexWrap: 'wrap', gap: '10px' } : {}) }}>
           <button onClick={onVolver} style={s.btnBack}>← Volver</button>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
@@ -393,7 +367,7 @@ const cargarConfigCerts = async () => {
           </div>
         </div>
 
-        <div style={s.acciones}>
+        <div style={{ ...s.acciones, ...(esMovil ? { width: '100%' } : {}) }}>
           {isAdmin && orden.estado !== 'cuadre_dinero' && orden.estado !== 'anulada' && (
             <button onClick={abrirAnular} style={{ ...s.btnImprimir, background: '#dc2626' }}>🚫 Anular</button>
           )}
@@ -550,13 +524,13 @@ const cargarConfigCerts = async () => {
         );
       })()}
 
-      <div style={s.grid2}>
+      <div style={{ ...s.grid2, ...(esMovil ? { gridTemplateColumns: '1fr' } : {}) }}>
         {/* COLUMNA IZQUIERDA */}
         <div>
           {/* Info básica */}
           <div style={s.card}>
             <h3 style={s.cardTitulo}>📋 Información</h3>
-            <div style={s.infoGrid}>
+            <div style={{ ...s.infoGrid, ...(esMovil ? { gridTemplateColumns: '1fr' } : {}) }}>
               <div style={s.infoItem}><span style={s.infoLabel}>Empresa</span><strong style={{ color: '#7c3aed' }}>{orden.empresaNombre}</strong></div>
               <div style={s.infoItem}><span style={s.infoLabel}>Tipo</span><span>{orden.tipoOrden}</span></div>
               <div style={s.infoItem}><span style={s.infoLabel}>Atención</span><span>{orden.lugarAtencion || '—'}</span></div>
@@ -870,7 +844,7 @@ const cargarConfigCerts = async () => {
           {/* Cliente info */}
           <div style={s.card}>
             <h3 style={s.cardTitulo}>👥 Cliente</h3>
-            <div style={s.infoGrid}>
+            <div style={{ ...s.infoGrid, ...(esMovil ? { gridTemplateColumns: '1fr' } : {}) }}>
               <div style={s.infoItem}><span style={s.infoLabel}>Nombre</span><strong>{orden.clienteNombre}</strong></div>
               {orden.clienteNit && <div style={s.infoItem}><span style={s.infoLabel}>NIT/CC</span><span>{orden.clienteNit}</span></div>}
               {orden.clienteCelular && (
@@ -1189,82 +1163,6 @@ const sValidPago = {
   btnRechazar: { padding: '10px 22px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 700, fontSize: '14px' },
 };
 
-// ─── GENERADOR HTML IMPRESIÓN ORDEN ──────────────────────────────────────────
-const generarHTMLImpresion = (orden, empresa, formato) => {
-  const isPos = formato === 'pos';
-  const ancho = isPos ? '58mm' : '148mm';
-  const items = (orden.items || []).map(item => `
-    <tr>
-      <td>${item.nombre}${item.notas ? `<br/><small style="color:#666">${item.notas}</small>` : ''}</td>
-      <td style="text-align:center">${item.cantidad}</td>
-      ${isPos ? '' : `<td style="text-align:right">${formatCOP(item.precioUnitario)}</td>`}
-      ${isPos ? '' : (item.descuento > 0 ? `<td style="text-align:center;color:#dc2626">-${item.descuento}%</td>` : '<td></td>')}
-      <td style="text-align:right;font-weight:bold">${formatCOP(item.subtotalItem)}</td>
-    </tr>
-  `).join('');
-
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8">
-  <title>${orden.numeroOrden}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Courier New', monospace; font-size: ${isPos ? '14px' : '11px'}; color: ${isPos ? '#000' : '#333'}; width: ${ancho}; margin: 0; padding: ${isPos ? '2mm 2mm' : '8mm'}; font-weight: ${isPos ? '600' : '400'}; }
-    .header { text-align: center; border-bottom: ${isPos ? '3px solid #000' : '2px solid #333'}; padding-bottom: 6px; margin-bottom: 6px; }
-    .empresa-logo { font-size: ${isPos ? '15px' : '18px'}; font-weight: 900; color: #000; }
-    .empresa-datos { font-size: ${isPos ? '12px' : '10px'}; color: ${isPos ? '#000' : '#444'}; margin-top: 3px; line-height: 1.4; }
-    .orden-num { font-size: ${isPos ? '18px' : '20px'}; font-weight: 900; margin: 6px 0; color: #000; }
-    .cliente-box { padding: 4px 0; border-bottom: ${isPos ? '2px dashed #000' : '1px dashed #999'}; margin-bottom: 6px; font-size: ${isPos ? '13px' : '11px'}; color: #000; }
-    table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
-    th { padding: 3px 2px; text-align: left; font-size: ${isPos ? '12px' : '10px'}; border-bottom: ${isPos ? '2px solid #000' : '1px solid #333'}; font-weight: 900; color: #000; }
-    td { padding: 3px 2px; border-bottom: ${isPos ? '1px dashed #000' : '1px dashed #ddd'}; vertical-align: top; font-size: ${isPos ? '13px' : '10px'}; color: #000; }
-    .totales { border-top: ${isPos ? '3px solid #000' : '2px solid #333'}; padding-top: 4px; font-size: ${isPos ? '14px' : '11px'}; color: #000; }
-    .total-final { font-size: ${isPos ? '18px' : '16px'}; font-weight: 900; color: #000; }
-    .footer { text-align: center; margin-top: 8px; padding-top: 6px; border-top: ${isPos ? '2px dashed #000' : '1px dashed #999'}; font-size: ${isPos ? '11px' : '9px'}; color: ${isPos ? '#000' : '#666'}; }
-    .notas { border: ${isPos ? '2px dashed #000' : '1px dashed #999'}; padding: 4px; margin-bottom: 6px; font-size: ${isPos ? '12px' : '10px'}; color: #000; }
-    .pago-box { border: ${isPos ? '3px solid #000' : '1px solid #333'}; padding: ${isPos ? '6px' : '4px'}; margin-top: 4px; font-size: ${isPos ? '14px' : '10px'}; font-weight: 900; color: #000; }
-    @media print {
-      * { margin: 0 !important; }
-      body { width: ${ancho} !important; margin: 0 !important; padding: ${isPos ? '0 2mm' : '8mm'} !important; }
-      @page { margin: 0; size: ${isPos ? '58mm auto' : 'auto'}; }
-    }
-  </style></head><body>
-  <div class="header">
-    ${empresa?.logo ? `<img src="${empresa.logo}" style="${isPos
-      ? 'width:52mm;max-width:100%;height:auto;object-fit:contain;margin:0 auto 6px;display:block'
-      : 'height:100px;max-width:220px;object-fit:contain;margin:0 auto 8px;display:block'
-    }" /><br/>` : ''}
-    <div class="empresa-logo">${empresa?.name || 'EXTINTORES'}</div>
-    <div class="empresa-datos">
-      NIT: ${empresa?.nit || ''} | Tel: ${empresa?.cellphone || empresa?.phone || ''}<br/>
-      ${empresa?.address || ''} | ${empresa?.email || ''}
-    </div>
-  </div>
-  <div style="text-align:center">
-    <div class="orden-num">${orden.numeroOrden}</div>
-    <div style="font-size:${isPos ? '12px' : '10px'};color:${isPos ? '#000' : '#666'}">${formatFecha(orden.fechaProgramada)}</div>
-  </div>
-  <div class="cliente-box">
-    <strong>${orden.clienteNombre}</strong><br/>
-    ${orden.clienteNit ? `NIT: ${orden.clienteNit}<br/>` : ''}
-    ${orden.sucursalDireccion || ''}<br/>
-    ${orden.clienteCelular || ''}
-  </div>
-  ${orden.notasOrden ? `<div class="notas">📝 ${orden.notasOrden}</div>` : ''}
-  <table>
-    <thead><tr><th>Descripción</th><th>Cant</th>${isPos ? '' : '<th>Precio</th><th>Desc</th>'}<th>Total</th></tr></thead>
-    <tbody>${items}</tbody>
-  </table>
-  <div class="totales">
-    <div style="display:flex;justify-content:space-between"><span>Subtotal:</span><span>${formatCOP(orden.subtotal)}</span></div>
-    ${orden.ivaPct > 0 ? `<div style="display:flex;justify-content:space-between"><span>IVA (${orden.ivaPct}%):</span><span>${formatCOP(orden.ivaValor)}</span></div>` : ''}
-    <div class="total-final" style="display:flex;justify-content:space-between;margin-top:4px"><span>TOTAL:</span><span>${formatCOP(orden.total)}</span></div>
-  </div>
-  ${orden.pagado ? `<div class="pago-box">✅ PAGADO — ${orden.formaPago} — ${formatCOP(orden.montoPagado)}</div>` : ''}
-  <div class="footer">
-    Elaborado con Control360 | 📞 3148361622<br/>
-    <em>Sistema operativo para empresas de servicios</em>
-  </div>
-  </body></html>`;
-};
 
 // ─── GENERADOR HTML CERTIFICADO ──────────────────────────────────────────────
 const generarHTMLCertificadoDinamico = (orden, empresa, configCat = null) => {
