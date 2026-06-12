@@ -531,8 +531,9 @@ export default function GestionCaja({ user }) {
           <p style={S.pageSubtitle}>Saldos · Movimientos · Traslados entre cajas</p>
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          {/* Ola 3: cuadre diario imprimible — documento ejecutivo de cierre */}
-          {['admin', 'tesoreria'].includes(user?.role) && (
+          {/* Ola 3: cuadre diario imprimible — quien opera Caja cierra su día.
+              Los saldos bancarios salen reservados para no-admins. */}
+          {(
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <input type="date" value={fechaCuadre} onChange={e => setFechaCuadre(e.target.value)}
                 style={{ padding: '9px 10px', border: '1px solid #e2e8f0', borderRadius: 9, fontSize: 13 }} />

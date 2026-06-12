@@ -262,9 +262,11 @@ router.get('/movimientos/todos', async (req, res) => {
 router.get('/cierre-diario', async (req, res) => {
   try {
     const role = req.user?.role;
-    if (!['admin', 'tesoreria'].includes(role)) {
-      return res.status(403).json({ error: 'Solo administración y tesorería pueden generar el cuadre diario' });
-    }
+    // Ola 3 (ajuste): el cuadre lo genera cualquier usuario con acceso al
+    // módulo Caja (regla de negocio: quien opera la caja cierra su día).
+    // La protección de lo sensible no está aquí sino abajo: los saldos de
+    // cuentas bancarias SOLO viajan para el admin — para todos los demás
+    // salen reservados, en pantalla y en el documento impreso.
     const userId = req.adminId || req.user.uid;
     const fecha = (req.query.fecha || '').trim() || new Date(Date.now() - 5 * 3600000).toISOString().split('T')[0];
     if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
