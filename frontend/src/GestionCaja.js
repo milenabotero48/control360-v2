@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+// Ola 3: plantilla ejecutiva del cuadre diario (documento de cierre del día).
+import { abrirImpresionCuadreDiario } from './printCuadreDiario';
 import { exportarExcel } from './exportExcel';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
@@ -113,7 +115,7 @@ function ModalTraslado({ cajas, onTraslado, onClose }) {
     if (!cajaOrigenId || !cajaDestinoId) return alert('Selecciona origen y destino');
     if (cajaOrigenId === cajaDestinoId) return alert('Origen y destino no pueden ser iguales');
     if (!monto || Number(monto) <= 0) return alert('Ingresa un monto válido');
-    if (cajaOrigen && Number(monto) > cajaOrigen.saldo) return alert(`Saldo insuficiente. Disponible: ${fmt(cajaOrigen.saldo)}`);
+    if (cajaOrigen && cajaOrigen.saldo !== null && cajaOrigen.saldo !== undefined && Number(monto) > cajaOrigen.saldo) return alert(`Saldo insuficiente. Disponible: ${fmt(cajaOrigen.saldo)}`);
     setSaving(true);
     await onTraslado({ cajaOrigenId, cajaDestinoId, monto: Number(monto), concepto: concepto || `Traslado de ${cajaOrigen?.nombre} a ${cajaDestino?.nombre}` });
     setSaving(false);
@@ -134,16 +136,16 @@ function ModalTraslado({ cajas, onTraslado, onClose }) {
             <label style={S.label}>Sale de (caja origen) *</label>
             <select style={S.select} value={cajaOrigenId} onChange={e => setCajaOrigenId(e.target.value)}>
               <option value="">— Seleccionar —</option>
-              {cajas.filter(c => c.activa).map(c => <option key={c.id} value={c.id}>{c.nombre} ({fmt(c.saldo)})</option>)}
+              {cajas.filter(c => c.activa).map(c => <option key={c.id} value={c.id}>{labelCajaSelector(c)}</option>)}
             </select>
-            {cajaOrigen && <div style={{ fontSize: 11, color: '#16a34a', marginTop: 4 }}>Disponible: {fmt(cajaOrigen.saldo)}</div>}
+            {cajaOrigen && cajaOrigen.saldo !== null && cajaOrigen.saldo !== undefined && <div style={{ fontSize: 11, color: '#16a34a', marginTop: 4 }}>Disponible: {fmt(cajaOrigen.saldo)}</div>}
           </div>
           <div style={{ textAlign: 'center', fontSize: 22, color: '#94a3b8', margin: '2px 0' }}>⬇️</div>
           <div style={S.field}>
             <label style={S.label}>Entra a (caja destino) *</label>
             <select style={S.select} value={cajaDestinoId} onChange={e => setCajaDestinoId(e.target.value)}>
               <option value="">— Seleccionar —</option>
-              {cajas.filter(c => c.activa && c.id !== cajaOrigenId).map(c => <option key={c.id} value={c.id}>{c.nombre} ({fmt(c.saldo)})</option>)}
+              {cajas.filter(c => c.activa && c.id !== cajaOrigenId).map(c => <option key={c.id} value={c.id}>{labelCajaSelector(c)}</option>)}
             </select>
           </div>
           <div style={S.field}>
@@ -225,7 +227,7 @@ function ModalMovimiento({ cajas, onSave, onClose, ordenesPendientes = [] }) {
             <label style={S.label}>Caja *</label>
             <select style={S.select} value={form.cajaId} onChange={e => set('cajaId', e.target.value)}>
               <option value="">— Seleccionar —</option>
-              {cajas.filter(c => c.activa).map(c => <option key={c.id} value={c.id}>{c.nombre} ({fmt(c.saldo)})</option>)}
+              {cajas.filter(c => c.activa).map(c => <option key={c.id} value={c.id}>{labelCajaSelector(c)}</option>)}
             </select>
           </div>
 
@@ -379,6 +381,28 @@ export default function GestionCaja({ user }) {
     }
   };
 
+  // ── Ola 3: cuadre diario imprimible ─────────────────────────────────────
+  const hoyCO = () => new Date(Date.now() - 5 * 3600000).toISOString().split('T')[0];
+  const [fechaCuadre, setFechaCuadre] = useState(hoyCO());
+  const [generandoCuadre, setGenerandoCuadre] = useState(false);
+
+  const imprimirCuadreDiario = async () => {
+    setGenerandoCuadre(true);
+    try {
+      const h = getHeaders();
+      const [cierreRes, empRes] = await Promise.all([
+        axios.get(`${API}/cajas/cierre-diario`, { params: { fecha: fechaCuadre }, headers: h }),
+        axios.get(`${API}/companies`, { headers: h }),
+      ]);
+      const empresasList = empRes.data || [];
+      const ok = abrirImpresionCuadreDiario(cierreRes.data, empresasList[0] || {}, empresasList);
+      if (!ok) alert('El navegador bloqueó la ventana de impresión. Permite ventanas emergentes.');
+    } catch (e) {
+      alert(e.response?.data?.error || 'Error generando el cuadre diario');
+    }
+    setGenerandoCuadre(false);
+  };
+
   const cargarDatos = async () => {
     setLoading(true);
     try {
@@ -486,7 +510,12 @@ export default function GestionCaja({ user }) {
     if (filtroHasta && m.createdAt && new Date(m.createdAt) > new Date(filtroHasta + 'T23:59:59')) return false;
     return true;
   });
-  const totalSaldo = cajas.filter(c => c.activa).reduce((a, c) => a + Number(c.saldo || 0), 0);
+  const totalSaldo = cajas.filter(c => c.activa && c.saldo !== null && c.saldo !== undefined).reduce((a, c) => a + Number(c.saldo || 0), 0);
+  const hayReservadas = cajas.some(c => c.activa && (c.saldo === null || c.saldo === undefined));
+
+  // Ola 3: saldo bancario reservado viaja en null desde el backend.
+  const fmtSaldo = (v) => (v === null || v === undefined) ? '🔒 Reservado' : fmt(v);
+  const labelCajaSelector = (c) => c.saldo === null || c.saldo === undefined ? c.nombre : `${c.nombre} (${fmt(c.saldo)})`;
 
   const iconTipo = (tipo) => ({ ingreso: '📥', egreso: '📤', traslado_salida: '🔄↗', traslado_entrada: '🔄↘', ajuste: '⚖️' }[tipo] || '💰');
   const colorTipo = (tipo) => ['ingreso', 'traslado_entrada'].includes(tipo) ? '#16a34a' : '#dc2626';
@@ -501,7 +530,18 @@ export default function GestionCaja({ user }) {
           <h2 style={S.pageTitle}>🏦 Caja</h2>
           <p style={S.pageSubtitle}>Saldos · Movimientos · Traslados entre cajas</p>
         </div>
-        <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {/* Ola 3: cuadre diario imprimible — documento ejecutivo de cierre */}
+          {['admin', 'tesoreria'].includes(user?.role) && (
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input type="date" value={fechaCuadre} onChange={e => setFechaCuadre(e.target.value)}
+                style={{ padding: '9px 10px', border: '1px solid #e2e8f0', borderRadius: 9, fontSize: 13 }} />
+              <button onClick={imprimirCuadreDiario} disabled={generandoCuadre}
+                style={{ ...S.btnPrimary, background: generandoCuadre ? '#9ca3af' : 'linear-gradient(135deg,#16a34a,#15803d)' }}>
+                {generandoCuadre ? '⏳ Generando...' : '🖨️ Cuadre del día'}
+              </button>
+            </div>
+          )}
           {tab === 'movimientos' && (
             <>
               <button onClick={async () => {
@@ -543,14 +583,14 @@ export default function GestionCaja({ user }) {
         {cajas.filter(c => c.activa).map(c => (
           <div key={c.id} style={{ ...S.kpiCard, borderLeft: `4px solid ${c.tipo === 'Banco' ? '#3b82f6' : c.tipo === 'Mensajero' ? '#f59e0b' : '#22c55e'}` }}>
             <div style={S.kpiLabel}>{c.tipo === 'Banco' ? '🏦' : c.tipo === 'Mensajero' ? '🚚' : c.tipo === 'Nequi/Daviplata' ? '📱' : '💵'} {c.nombre}</div>
-            <div style={{ ...S.kpiValue, color: Number(c.saldo) < 0 ? '#dc2626' : '#1e293b' }}>{fmt(c.saldo)}</div>
+            <div style={{ ...S.kpiValue, color: Number(c.saldo) < 0 ? '#dc2626' : '#1e293b', fontSize: c.saldo === null ? 16 : undefined }}>{fmtSaldo(c.saldo)}</div>
             <div style={S.kpiSub}>{c.responsable || '—'}</div>
           </div>
         ))}
         <div style={{ ...S.kpiCard, borderLeft: '4px solid #6366f1', background: '#f5f3ff' }}>
-          <div style={S.kpiLabel}>💼 Total general</div>
+          <div style={S.kpiLabel}>💼 {hayReservadas ? 'Total visible' : 'Total general'}</div>
           <div style={{ ...S.kpiValue, color: '#4f46e5' }}>{fmt(totalSaldo)}</div>
-          <div style={S.kpiSub}>{cajas.filter(c => c.activa).length} cajas activas</div>
+          <div style={S.kpiSub}>{cajas.filter(c => c.activa).length} cajas activas{hayReservadas ? ' · saldos de banco reservados' : ''}</div>
         </div>
       </div>
 
@@ -603,8 +643,8 @@ export default function GestionCaja({ user }) {
                   </div>
                   <div style={{ fontSize: 15, fontWeight: 800, color: '#1e293b', marginBottom: 2 }}>{caja.nombre}</div>
                   {caja.banco && <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>{caja.banco}{caja.numeroCuenta ? ` · ${caja.numeroCuenta}` : ''}</div>}
-                  <div style={{ fontSize: 28, fontWeight: 900, color: Number(caja.saldo) < 0 ? '#dc2626' : '#1e293b', margin: '10px 0 6px' }}>
-                    {fmt(caja.saldo)}
+                  <div style={{ fontSize: caja.saldo === null ? 18 : 28, fontWeight: 900, color: Number(caja.saldo) < 0 ? '#dc2626' : '#1e293b', margin: '10px 0 6px' }}>
+                    {fmtSaldo(caja.saldo)}
                   </div>
                   <div style={{ fontSize: 12, color: '#94a3b8' }}>Responsable: {caja.responsable || '—'}</div>
                 </div>
