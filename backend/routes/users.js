@@ -436,25 +436,45 @@ router.get('/auditoria/log', authenticate, soloAdmin, async (req, res) => {
 
     const { desdeISO, hastaISO } = rangoFechasCO(desde, hasta);
 
-    // AISLAMIENTO SAAS: siempre filtrar por adminId primero
-    // El resto se filtra en memoria para evitar índices compuestos
-    let query = db.collection('audit_logs')
-      .where('adminId', '==', adminId)
-      .orderBy('fecha', 'desc')
-      .limit(lim);
+    // ══════════════════════════════════════════════════════════════════════
+    // AISLAMIENTO SAAS POR USUARIOS DEL TENANT (Ola 3 — fix auditoría vacía)
+    // ──────────────────────────────────────────────────────────────────────
+    // Los registros históricos de audit_logs NO traen adminId (17 de los 18
+    // módulos escribían sin él), así que filtrar where('adminId') devolvía
+    // SIEMPRE cero. Como TODOS los registros sí traen usuarioId, el
+    // aislamiento se hace por el equipo del tenant: el admin + sus
+    // sub-usuarios. Funciona retroactivamente con todo el histórico.
+    // (Deuda técnica: estampar adminId en los escritores vía Camino C.)
+    // ══════════════════════════════════════════════════════════════════════
+    const uidsTenant = new Set([adminId]);
+    const porCreador = await db.collection('users').where('creadoPor', '==', adminId).get();
+    porCreador.forEach(d => uidsTenant.add(d.id));
+    // Compatibilidad: usuarios antiguos que guardaron adminId en vez de creadoPor.
+    const porAdminId = await db.collection('users').where('adminId', '==', adminId).get();
+    porAdminId.forEach(d => uidsTenant.add(d.id));
 
-    const snapshot = await query.get();
+    const uids = Array.from(uidsTenant);
     let logs = [];
-    snapshot.forEach(doc => logs.push({ id: doc.id, ...doc.data() }));
-
-    // Filtros en memoria
-    if (modulo && usuarioId) {
-      // Si se usaron ambos, ya filtramos por usuarioId arriba; falta módulo.
-      logs = logs.filter(l => l.modulo === modulo);
+    // Firestore 'in' admite máximo 30 valores → consultar por bloques.
+    // Sin orderBy en la consulta (regla del proyecto: evitar índices
+    // compuestos) — se ordena en memoria abajo.
+    for (let i = 0; i < uids.length; i += 30) {
+      const bloque = uids.slice(i, i + 30);
+      const snap = await db.collection('audit_logs')
+        .where('usuarioId', 'in', bloque)
+        .limit(2000)
+        .get();
+      snap.forEach(doc => logs.push({ id: doc.id, ...doc.data() }));
     }
 
-    if (desdeISO) logs = logs.filter(l => l.fecha && l.fecha >= desdeISO);
-    if (hastaISO) logs = logs.filter(l => l.fecha && l.fecha <= hastaISO);
+    // ── Orden y filtros EN MEMORIA ────────────────────────────────────────
+    logs.sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+
+    // Fix Ola 3: antes solo se filtraba módulo si TAMBIÉN venía usuarioId.
+    if (modulo)    logs = logs.filter(l => l.modulo === modulo);
+    if (usuarioId) logs = logs.filter(l => l.usuarioId === usuarioId);
+    if (desdeISO)  logs = logs.filter(l => l.fecha && l.fecha >= desdeISO);
+    if (hastaISO)  logs = logs.filter(l => l.fecha && l.fecha <= hastaISO);
 
     if (documento) {
       const q = String(documento).toUpperCase();
@@ -466,7 +486,7 @@ router.get('/auditoria/log', authenticate, soloAdmin, async (req, res) => {
       });
     }
 
-    res.json(logs);
+    res.json(logs.slice(0, lim));
   } catch (error) {
     console.error('Error obteniendo auditoría:', error);
     res.status(500).json({ error: 'Error al obtener auditoría' });
@@ -482,6 +502,8 @@ router.get('/auditoria/modulos', authenticate, soloAdmin, async (req, res) => {
     { key: 'auditoria',    label: 'Auditoría' },
     { key: 'caja',         label: 'Caja' },
     { key: 'clientes',     label: 'Clientes' },
+    { key: 'comercial',    label: 'Telemercadeo' },
+    { key: 'compras',      label: 'Compras' },
     { key: 'cotizaciones', label: 'Cotizaciones' },
     { key: 'cxc',          label: 'CxC' },
     { key: 'cxp',          label: 'CxP' },
@@ -493,7 +515,8 @@ router.get('/auditoria/modulos', authenticate, soloAdmin, async (req, res) => {
     { key: 'proveedores',  label: 'Proveedores' },
     { key: 'qr',           label: 'QR / Hojas de Vida' },
     { key: 'taller',       label: 'Taller' },
-    { key: 'usuarios',     label: 'Usuarios' }
+    { key: 'usuarios',     label: 'Usuarios' },
+    { key: 'vencimientos', label: 'Vencimientos' }
   ]);
 });
 
