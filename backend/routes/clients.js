@@ -82,9 +82,19 @@ router.post('/verificar', authenticate, async (req, res) => {
     const { nit, nombre } = req.body;
     const resultado = { nitDuplicado: false, nombreSimilar: false, clienteExistente: null, similares: [] };
 
-    // Verificar NIT exacto
+    // ── AISLAMIENTO SAAS (Ola 3 fix) ─────────────────────────────────────
+    // Antes esta verificación buscaba el NIT en TODA la base de datos: a un
+    // suscriptor le aparecía "ya existe" por un cliente de OTRO suscriptor
+    // (bloqueaba la creación y filtraba el nombre ajeno). Ahora todo se
+    // verifica SOLO dentro del tenant actual.
+    const adminIdVerif = req.adminId || req.user.uid || req.user.id;
+
+    // Verificar NIT exacto — solo dentro del tenant
     if (nit) {
-      const nitSnap = await db.collection('clients').where('nit', '==', nit.toString()).get();
+      const nitSnap = await db.collection('clients')
+        .where('adminId', '==', adminIdVerif)
+        .where('nit', '==', nit.toString())
+        .get();
       if (!nitSnap.empty) {
         resultado.nitDuplicado = true;
         resultado.clienteExistente = { id: nitSnap.docs[0].id, ...nitSnap.docs[0].data() };
@@ -92,9 +102,11 @@ router.post('/verificar', authenticate, async (req, res) => {
       }
     }
 
-    // Verificar nombre similar
+    // Verificar nombre similar — solo dentro del tenant
     if (nombre) {
-      const todosSnap = await db.collection('clients').get();
+      const todosSnap = await db.collection('clients')
+        .where('adminId', '==', adminIdVerif)
+        .get();
       const similares = [];
       todosSnap.forEach(doc => {
         const data = doc.data();
@@ -237,7 +249,7 @@ router.get('/:id', authenticate, validarTenant('clients'), async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT /api/clients/:id — Editar cliente
 // ─────────────────────────────────────────────────────────────────────────────
-router.put('/:id', authenticate, async (req, res) => {
+router.put('/:id', authenticate, validarTenant('clients'), async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -311,7 +323,7 @@ router.put('/:id', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/clients/:id — Eliminar o desactivar según historial
 // ─────────────────────────────────────────────────────────────────────────────
-router.delete('/:id', authenticate, async (req, res) => {
+router.delete('/:id', authenticate, validarTenant('clients'), async (req, res) => {
   try {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Solo el administrador puede eliminar clientes' });
@@ -363,7 +375,7 @@ router.delete('/:id', authenticate, async (req, res) => {
 //   - QR / equipos asignados (hojas de vida)
 //   - Resumen: total facturado, último servicio, # de servicios, saldo CxC
 // ═════════════════════════════════════════════════════════════════════════════
-router.get('/:id/historial', authenticate, async (req, res) => {
+router.get('/:id/historial', authenticate, validarTenant('clients'), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -465,7 +477,7 @@ router.get('/:id/historial', authenticate, async (req, res) => {
 // Si llega sucursalId → asigna al sector de esa sucursal.
 // Si no llega sucursalId → asigna al sector general del cliente.
 // ─────────────────────────────────────────────────────────────────────────────
-router.put('/:id/asignar-sector', authenticate, async (req, res) => {
+router.put('/:id/asignar-sector', authenticate, validarTenant('clients'), async (req, res) => {
   try {
     const { id } = req.params;
     const { sectorId, sucursalId } = req.body;

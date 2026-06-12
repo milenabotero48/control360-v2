@@ -40,6 +40,11 @@ const MODULOS_DISPONIBLES = [
   { key: 'caja',         label: 'Caja',              emoji: '🏦' },
   { key: 'cxc',          label: 'CxC',               emoji: '💳' },
   { key: 'cxp',          label: 'CxP',               emoji: '📋' },
+  // Ola 3: módulos que existían en el menú pero faltaban en este catálogo
+  // (por eso no se podían activar a los usuarios).
+  { key: 'comercial',    label: 'Telemercadeo',      emoji: '📞' },
+  { key: 'compras',      label: 'Compras',           emoji: '🛒' },
+  { key: 'eri',          label: 'ERI',               emoji: '📈' },
   { key: 'reportes',     label: 'Reportes',          emoji: '📉' },
   { key: 'auditoria',    label: 'Auditoría',         emoji: '🔍' },
   { key: 'usuarios',     label: 'Usuarios',          emoji: '👤' },
