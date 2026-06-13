@@ -99,7 +99,12 @@ router.get('/prospectos', async (req, res) => {
 router.post('/prospectos', async (req, res) => {
   try {
     const adminId = getAdminId(req);
-    const { nombre, empresa, telefono, sucursal, origen, asignadoA, notas } = req.body;
+    const { nombre, empresa, telefono, sucursal, origen, notas } = req.body;
+    // Ola 3: el comercial puede crear prospectos — quedan asignados a él.
+    // Solo el admin puede asignar a otra persona.
+    const asignadoA = req.user?.role === 'admin'
+      ? (req.body.asignadoA || null)
+      : getUserId(req);
 
     const tel = normalizarTelefono(telefono);
     if (!nombre || !tel) return res.status(400).json({ error: 'Nombre y teléfono válido son requeridos' });
@@ -260,6 +265,17 @@ router.get('/mi-dia', async (req, res) => {
     return res.json({
       fecha: hoy,
       cola: { reprogramados, reintentos, nuevos },
+      // Ola 3: ventana al futuro — llamadas agendadas para después de hoy.
+      // Solo consulta: no contamina la cola del día.
+      agendaProxima: prospectos
+        .filter(p => p.proximaLlamada?.fecha && p.proximaLlamada.fecha > hoy && !['CONVERTIDO', 'DESCARTADO'].includes(p.estado))
+        .sort((a, b) => (a.proximaLlamada.fecha + (a.proximaLlamada.hora || '')).localeCompare(b.proximaLlamada.fecha + (b.proximaLlamada.hora || '')))
+        .slice(0, 50)
+        .map(p => ({ id: p.id, nombre: p.nombre, telefono: p.telefono, fecha: p.proximaLlamada.fecha, hora: p.proximaLlamada.hora || '', notas: p.notasUltimaLlamada || '' })),
+      // Ola 3: lo convertido HOY por este asesor — su labor visible.
+      ventasHoy: prospectos
+        .filter(p => p.estado === 'CONVERTIDO' && p.fechaConversion === hoy && (req.user?.role === 'admin' || p.convertidoPor === uid))
+        .map(p => ({ id: p.id, nombre: p.nombre, telefono: p.telefono, clienteId: p.clienteId || null })),
       totalPendientes: reprogramados.length + reintentos.length + nuevos.length,
       meta: {
         objetivo: metaDiaria,
@@ -298,6 +314,7 @@ router.post('/prospectos/:id/llamada', async (req, res) => {
     if (p.adminId !== adminId) return res.status(403).json({ error: 'No autorizado' });
 
     const update = {
+      notasUltimaLlamada: (req.body && req.body.notas) || null,
       totalLlamadas: (p.totalLlamadas || 0) + 1,
       ultimaLlamada: hoy,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -416,7 +433,14 @@ router.post('/prospectos/:id/convertir', async (req, res) => {
     const adminId = getAdminId(req);
     const uid = getUserId(req);
     const hoy = hoyColombia();
-    const { email, direccion, nit } = req.body || {};
+    // Ola 3: la conversión recibe los datos COMPLETOS verificados en el modal
+    // y crea el cliente con el ESQUEMA OFICIAL del módulo Clientes (antes
+    // creaba un "cliente huérfano" con campos de prospecto que no aparecía
+    // en la lista ni se podía editar).
+    const { email, direccion, nit, nombre: nombreBody, celular,
+            empresaId, empresaNombre, ciudad, contacto } = req.body || {};
+    const nombreFinal = String(nombreBody || '').toUpperCase().trim();
+    const nitFinal = (nit || '').toString().replace(/\D/g, '') || null;
 
     const ref = db.collection('prospectos').doc(req.params.id);
     const doc = await ref.get();
@@ -428,22 +452,36 @@ router.post('/prospectos/:id/convertir', async (req, res) => {
     // ¿Ya existe un cliente con ese teléfono? → vincular, no duplicar
     let clienteId = p.clienteId;
     if (!clienteId) {
-      const dup = await db.collection('clients')
-        .where('adminId', '==', adminId)
-        .where('telefono', '==', p.telefono)
-        .limit(1).get();
-      if (!dup.empty) clienteId = dup.docs[0].id;
+      // Los clientes oficiales guardan el número en `celular`; los antiguos
+      // pueden tenerlo en `telefono` — se buscan ambos.
+      const [dupCel, dupTel] = await Promise.all([
+        db.collection('clients').where('adminId', '==', adminId).where('celular', '==', p.telefono).limit(1).get(),
+        db.collection('clients').where('adminId', '==', adminId).where('telefono', '==', p.telefono).limit(1).get(),
+      ]);
+      if (!dupCel.empty) clienteId = dupCel.docs[0].id;
+      else if (!dupTel.empty) clienteId = dupTel.docs[0].id;
     }
 
     if (!clienteId) {
+      if (!empresaId) {
+        return res.status(400).json({ error: 'Selecciona la empresa que factura (igual que al crear un cliente)' });
+      }
       const refC = await db.collection('clients').add({
         adminId,
-        nombre: p.nombre,
-        empresa: p.empresa || null,
+        nombre: nombreFinal || String(p.nombre || '').toUpperCase().trim(),
+        tipoDocumento: 'NIT',
+        nit: nitFinal,
+        celular: p.telefono,
         telefono: p.telefono,
-        email: email || null,
-        direccion: direccion || null,
-        nit: nit || null,
+        emailLegal: email || null,
+        emailsAdicionales: [],
+        direccionPrincipal: direccion || null,
+        ciudad: ciudad || null,
+        contacto: contacto || null,
+        empresaId,
+        empresaNombre: empresaNombre || '',
+        sucursales: [],
+        notas: p.empresa && p.empresa !== p.nombre ? `Empresa reportada en llamada: ${p.empresa}` : '',
         origen: 'telemercadeo',
         activo: true,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -490,7 +528,10 @@ router.post('/prospectos/:id/convertir', async (req, res) => {
       datos: { prospectoId: req.params.id, clienteId, vencimientosCreados }
     });
 
-    return res.json({ ok: true, clienteId, vencimientosCreados });
+    return res.json({
+      ok: true, clienteId, vencimientosCreados,
+      cliente: { id: clienteId, nombre: nombreFinal || String(p.nombre || '').toUpperCase().trim(), nit: nitFinal || '', celular: p.telefono, empresaId: empresaId || '', empresaNombre: empresaNombre || '' }
+    });
   } catch (err) {
     console.error('POST convertir:', err);
     return res.status(500).json({ error: err.message });

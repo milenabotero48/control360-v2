@@ -41,7 +41,7 @@ const telBonito = (t) => {
   return s.length === 10 ? `${s.slice(0,3)} ${s.slice(3,6)} ${s.slice(6)}` : s;
 };
 
-export default function ModuloComercial({ user }) {
+export default function ModuloComercial({ user, onNavegar }) {
   const esAdmin = user?.role === 'admin';
   const [tab, setTab] = useState('midia');
 
@@ -65,7 +65,7 @@ export default function ModuloComercial({ user }) {
         )}
       </div>
 
-      {tab === 'midia'      && <MiDia user={user} />}
+      {tab === 'midia'      && <MiDia user={user} onNavegar={onNavegar} />}
       {tab === 'prospectos' && esAdmin && <Prospectos user={user} />}
       {tab === 'metricas'   && esAdmin && <Metricas user={user} />}
     </div>
@@ -75,10 +75,26 @@ export default function ModuloComercial({ user }) {
 // ════════════════════════════════════════════════════════════════════════════
 // VISTA 1 — MI DÍA (vendedora y admin)
 // ════════════════════════════════════════════════════════════════════════════
-function MiDia({ user }) {
+function MiDia({ user, onNavegar }) {
   const [data, setData] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [prospectoActivo, setProspectoActivo] = useState(null); // abre modal
+  // Ola 3: el comercial también crea prospectos (quedan asignados a él)
+  const [mostrarNuevoP, setMostrarNuevoP] = useState(false);
+  const [nuevoP, setNuevoP] = useState({ nombre: '', empresa: '', telefono: '', sucursal: '', notas: '' });
+  const [agendaAbierta, setAgendaAbierta] = useState(false);
+
+  const crearProspectoMiDia = async () => {
+    if (!nuevoP.nombre || !nuevoP.telefono) return alert('Nombre y teléfono son requeridos');
+    const res = await fetch(`${API}/comercial/prospectos`, {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify(nuevoP),
+    });
+    const json = await res.json();
+    if (!res.ok) return alert(json.error || 'Error creando prospecto');
+    setNuevoP({ nombre: '', empresa: '', telefono: '', sucursal: '', notas: '' });
+    setMostrarNuevoP(false);
+    cargar();
+  };
 
   const cargar = useCallback(async () => {
     try {
@@ -125,6 +141,25 @@ function MiDia({ user }) {
         </div>
       )}
 
+      {/* Ola 3: botón Nuevo prospecto + Ventas de hoy */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+        <button onClick={() => setMostrarNuevoP(true)} style={{ border: 'none', borderRadius: 10, padding: '10px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', background: '#7c3aed', color: '#fff' }}>
+          ➕ Nuevo prospecto
+        </button>
+      </div>
+
+      {(data.ventasHoy || []).length > 0 && (
+        <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 14, padding: '14px 16px', marginBottom: 16 }}>
+          <div style={{ fontWeight: 800, fontSize: 14, color: '#15803d', marginBottom: 8 }}>🎉 Ventas de hoy ({data.ventasHoy.length})</div>
+          {data.ventasHoy.map(v => (
+            <div key={v.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #dcfce7', fontSize: 13 }}>
+              <span style={{ fontWeight: 700, color: '#1a1a2e' }}>{v.nombre}</span>
+              <span style={{ color: '#15803d', fontWeight: 700, fontSize: 12 }}>Cliente creado ✓</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <Seccion titulo="⏰ Reprogramadas para hoy" sub="Te pidieron que llamaras — respeta la hora acordada" lista={cola.reprogramados} conHora
         onLlamar={setProspectoActivo} />
       <Seccion titulo="🔁 Reintentos" sub="No contestaron antes — nuevo intento hoy" lista={cola.reintentos}
@@ -132,10 +167,50 @@ function MiDia({ user }) {
       <Seccion titulo="🆕 Prospectos nuevos" sub="Primera llamada" lista={cola.nuevos}
         onLlamar={setProspectoActivo} />
 
+      {/* Ola 3: agenda de llamadas futuras — para que "el martes 9am" no se
+          sienta perdido: vive aquí hasta que llegue su día. */}
+      {(data.agendaProxima || []).length > 0 && (
+        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: '14px 16px', marginTop: 4 }}>
+          <button onClick={() => setAgendaAbierta(a => !a)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', padding: 0, width: '100%', textAlign: 'left' }}>
+            <span style={{ fontWeight: 800, fontSize: 14, color: '#1a1a2e' }}>📅 Agenda próxima ({data.agendaProxima.length})</span>
+            <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 8 }}>llamadas programadas para los próximos días {agendaAbierta ? '▲' : '▼'}</span>
+          </button>
+          {agendaAbierta && data.agendaProxima.map(a => (
+            <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '8px 0', borderBottom: '1px solid #f3f4f6', fontSize: 13, flexWrap: 'wrap' }}>
+              <div>
+                <span style={{ fontWeight: 700, color: '#1a1a2e' }}>{a.nombre}</span>
+                {a.notas && <span style={{ color: '#9ca3af', fontSize: 12 }}> · {a.notas}</span>}
+              </div>
+              <span style={{ fontWeight: 700, color: '#b45309', fontSize: 12, whiteSpace: 'nowrap' }}>{a.fecha}{a.hora ? ` · ${a.hora}` : ''}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {mostrarNuevoP && (
+        <div onClick={() => setMostrarNuevoP(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 400, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: '16px 16px 0 0', width: '100%', maxWidth: 480, padding: '18px 18px 24px' }}>
+            <div style={{ fontWeight: 800, fontSize: 16, color: '#1a1a2e', marginBottom: 12 }}>➕ Nuevo prospecto</div>
+            {[['nombre', 'Nombre *'], ['empresa', 'Empresa'], ['telefono', 'Teléfono *'], ['sucursal', 'Sucursal'], ['notas', 'Notas']].map(([k, l]) => (
+              <input key={k} value={nuevoP[k]} onChange={e => setNuevoP(s => ({ ...s, [k]: e.target.value }))} placeholder={l}
+                style={{ width: '100%', padding: '10px 11px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 13, boxSizing: 'border-box', marginBottom: 8 }} />
+            ))}
+            <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+              <button onClick={() => setMostrarNuevoP(false)} style={{ flex: 1, border: 'none', borderRadius: 10, padding: '12px', fontWeight: 700, cursor: 'pointer', background: '#f3f4f6', color: '#374151' }}>Cancelar</button>
+              <button onClick={crearProspectoMiDia} style={{ flex: 1, border: 'none', borderRadius: 10, padding: '12px', fontWeight: 700, cursor: 'pointer', background: '#7c3aed', color: '#fff' }}>Guardar — queda a mi nombre</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {prospectoActivo && (
         <ModalLlamada prospecto={prospectoActivo} onCerrar={(huboCambio) => {
           setProspectoActivo(null);
           if (huboCambio) cargar();
+        }} onCrearOrden={(cli) => {
+          // Cliente recién convertido → orden de servicio sin salir a buscarlo.
+          sessionStorage.setItem('c360_orden_prefill', JSON.stringify(cli));
+          if (onNavegar) onNavegar('ordenes');
         }} />
       )}
     </div>
@@ -189,7 +264,7 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar }) {
 // ════════════════════════════════════════════════════════════════════════════
 // MODAL — REGISTRAR LLAMADA (formulario de 4 toques + captura de equipos)
 // ════════════════════════════════════════════════════════════════════════════
-function ModalLlamada({ prospecto, onCerrar }) {
+function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
   const [resultado, setResultado] = useState(null);
   const [notas, setNotas] = useState('');
   const [fecha, setFecha] = useState('');
@@ -197,8 +272,29 @@ function ModalLlamada({ prospecto, onCerrar }) {
   const [motivo, setMotivo] = useState('');
   const [capturar, setCapturar] = useState(false);
   const [equipos, setEquipos] = useState([{ equipo: '', cantidad: 1, sucursal: '', fechaUltimaRecarga: '' }]);
+  // Ola 3: al aceptar, se VERIFICAN los datos completos del cliente — nace
+  // con el esquema oficial (visible y editable en Clientes) y listo para la
+  // orden de servicio.
+  const [cliNombre, setCliNombre] = useState(prospecto.nombre || '');
+  const [cliNit, setCliNit] = useState(prospecto.nit || '');
   const [emailNuevo, setEmailNuevo] = useState('');
   const [direccionNueva, setDireccionNueva] = useState('');
+  const [cliContacto, setCliContacto] = useState('');
+  const [empresas, setEmpresas] = useState([]);
+  const [empresaFac, setEmpresaFac] = useState(null);
+  const [clienteCreado, setClienteCreado] = useState(null);
+
+  // Empresas facturadoras (si hay una sola, queda seleccionada sola)
+  useEffect(() => {
+    fetch(`${API}/companies`, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(d => {
+        const lista = Array.isArray(d) ? d : [];
+        setEmpresas(lista);
+        if (lista.length === 1) setEmpresaFac(lista[0]);
+      })
+      .catch(() => {});
+  }, []);
   const [guardando, setGuardando] = useState(false);
   const [exito, setExito] = useState(null);
   const [error, setError] = useState(null);
@@ -215,6 +311,10 @@ function ModalLlamada({ prospecto, onCerrar }) {
     if (!resultado) return setError('Selecciona el resultado de la llamada');
     if (resultado === 'reprogramar' && !fecha) return setError('Indica la fecha de la próxima llamada');
     if (resultado === 'no_interesa' && !motivo) return setError('Indica el motivo');
+    if (resultado === 'acepta') {
+      if (!cliNombre.trim()) return setError('Verifica el nombre / razón social del cliente');
+      if (!empresaFac) return setError('Selecciona la empresa que factura');
+    }
 
     setGuardando(true);
     try {
@@ -234,11 +334,22 @@ function ModalLlamada({ prospecto, onCerrar }) {
       if (resultado === 'acepta') {
         const resC = await fetch(`${API}/comercial/prospectos/${prospecto.id}/convertir`, {
           method: 'POST', headers: authHeaders(),
-          body: JSON.stringify({ email: emailNuevo || null, direccion: direccionNueva || null }),
+          body: JSON.stringify({
+            nombre: cliNombre.trim(),
+            nit: cliNit || null,
+            email: emailNuevo || null,
+            direccion: direccionNueva || null,
+            contacto: cliContacto || null,
+            empresaId: empresaFac?.id || '',
+            empresaNombre: empresaFac?.name || '',
+          }),
         });
         const jsonC = await resC.json();
         if (!resC.ok) throw new Error(jsonC.error || 'Llamada registrada, pero falló la conversión');
-        setExito('🎉 ¡Venta! Cliente creado. Ya puedes crearle la Orden de Servicio en el módulo Órdenes.');
+        setClienteCreado(jsonC.cliente || { id: jsonC.clienteId, nombre: cliNombre.trim().toUpperCase() });
+        setExito('🎉 ¡Venta! El cliente quedó creado y visible en el módulo Clientes.');
+        setGuardando(false);
+        return; // el éxito de venta muestra botones — no se cierra solo
       } else {
         setExito('✓ Llamada registrada');
       }
@@ -268,7 +379,19 @@ function ModalLlamada({ prospecto, onCerrar }) {
         </div>
 
         {exito ? (
-          <div style={{ background: '#dcfce7', color: '#15803d', borderRadius: 10, padding: '16px 14px', fontWeight: 700, fontSize: 14, textAlign: 'center' }}>{exito}</div>
+          <div>
+            <div style={{ background: '#dcfce7', color: '#15803d', borderRadius: 10, padding: '16px 14px', fontWeight: 700, fontSize: 14, textAlign: 'center' }}>{exito}</div>
+            {clienteCreado && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <button onClick={() => onCerrar(true)} style={{ flex: 1, border: 'none', borderRadius: 10, padding: '13px', fontWeight: 700, cursor: 'pointer', background: '#f3f4f6', color: '#374151', fontSize: 13 }}>
+                  Cerrar
+                </button>
+                <button onClick={() => { onCerrar(true); onCrearOrden && onCrearOrden(clienteCreado); }} style={{ flex: 2, border: 'none', borderRadius: 10, padding: '13px', fontWeight: 800, cursor: 'pointer', background: 'linear-gradient(135deg,#15803d,#16a34a)', color: '#fff', fontSize: 13 }}>
+                  🧾 Crear orden de servicio ahora
+                </button>
+              </div>
+            )}
+          </div>
         ) : (
           <>
             {/* Resultado */}
@@ -309,9 +432,26 @@ function ModalLlamada({ prospecto, onCerrar }) {
 
             {resultado === 'acepta' && (
               <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 800, color: '#15803d', marginBottom: 6 }}>Se creará como CLIENTE — completa si los tienes:</div>
-                <input placeholder="Email (opcional)" value={emailNuevo} onChange={e => setEmailNuevo(e.target.value)} style={{ ...inputStyle, marginBottom: 6 }} />
-                <input placeholder="Dirección (opcional)" value={direccionNueva} onChange={e => setDireccionNueva(e.target.value)} style={inputStyle} />
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#15803d', marginBottom: 8 }}>✅ Se creará como CLIENTE — verifica sus datos:</div>
+                <input placeholder="Nombre / Razón social *" value={cliNombre} onChange={e => setCliNombre(e.target.value)} style={{ ...inputStyle, marginBottom: 6, fontWeight: 700 }} />
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
+                  <input placeholder="NIT / CC" value={cliNit} onChange={e => setCliNit(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+                  <input placeholder="Contacto / Responsable" value={cliContacto} onChange={e => setCliContacto(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+                </div>
+                <input placeholder="Dirección" value={direccionNueva} onChange={e => setDireccionNueva(e.target.value)} style={{ ...inputStyle, marginBottom: 6 }} />
+                <input placeholder="Correo electrónico" value={emailNuevo} onChange={e => setEmailNuevo(e.target.value)} style={{ ...inputStyle, marginBottom: 8 }} />
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#15803d', marginBottom: 5 }}>¿Quién factura? *</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {empresas.map(e => (
+                    <button key={e.id} type="button" onClick={() => setEmpresaFac(e)} style={{
+                      border: empresaFac?.id === e.id ? '2px solid #15803d' : '1px solid #d1d5db',
+                      background: empresaFac?.id === e.id ? '#dcfce7' : '#fff',
+                      color: empresaFac?.id === e.id ? '#15803d' : '#374151',
+                      borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                    }}>🏢 {e.name}</button>
+                  ))}
+                  {!empresas.length && <span style={{ fontSize: 12, color: '#9ca3af' }}>Cargando empresas...</span>}
+                </div>
               </div>
             )}
 
@@ -371,6 +511,74 @@ function Prospectos({ user }) {
   const [msgImport, setMsgImport] = useState(null);
   const [mostrarNuevo, setMostrarNuevo] = useState(false);
   const [nuevo, setNuevo] = useState({ nombre: '', empresa: '', telefono: '', sucursal: '', notas: '' });
+  // Ola 3: importador de VENCIMIENTOS — la puerta para cargar TUS clientes
+  // con sus fechas de recarga. Con fecha → vencimiento (+1 año, arma la cola
+  // del mes solo). Sin fecha → prospecto. Re-importar el mismo archivo
+  // ENRIQUECE lo existente (modo actualizar) — nunca duplica ni borra gestión.
+  const [empresasFact, setEmpresasFact] = useState([]);
+  const [empresaImport, setEmpresaImport] = useState(null);
+  const [importandoV, setImportandoV] = useState(false);
+  const [msgImportV, setMsgImportV] = useState(null);
+
+  useEffect(() => {
+    fetch(`${API}/companies`, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(d => {
+        const l = Array.isArray(d) ? d : [];
+        setEmpresasFact(l);
+        if (l.length === 1) setEmpresaImport(l[0]);
+      }).catch(() => {});
+  }, []);
+
+  const plantillaVencimientos = () => {
+    const csv = '\uFEFFnombre;nit;telefono;sucursal;equipo;cantidad;fechaUltimaRecarga;email;direccion\n' +
+      'INVERSIONES EJEMPLO SAS;900123456;3101234567;Sede Norte;Extintor ABC 10 LB;4;2025-08-15;compras@ejemplo.com;Calle 1 # 2-3\n' +
+      'TIENDA SIN FECHA;;3209876543;;Extintor CO2;1;;;\n';
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'plantilla_vencimientos.csv'; a.click();
+  };
+
+  const importarVencimientos = async (file) => {
+    if (!empresaImport) { setMsgImportV('✗ Selecciona primero la empresa que factura'); return; }
+    setImportandoV(true); setMsgImportV(null);
+    try {
+      const texto = (await file.text()).replace(/^\uFEFF/, '');
+      const lineas = texto.split(/\r?\n/).filter(l => l.trim());
+      if (lineas.length < 2) throw new Error('El archivo está vacío o solo tiene encabezado');
+      const sep = lineas[0].includes(';') ? ';' : ',';
+      const headers = lineas[0].split(sep).map(h => h.trim().toLowerCase());
+      const idx = (n) => headers.findIndex(h => h.includes(n));
+      // Acepta tus columnas de siempre: celular o teléfono, razón social o nombre
+      const iNom = Math.max(idx('nombre'), idx('razon')), iNit = idx('nit'),
+            iTel = Math.max(idx('tel'), idx('celular')), iSuc = idx('sucursal'),
+            iEq = idx('equipo'), iCant = idx('cantidad'), iFecha = idx('fecha'),
+            iEmail = Math.max(idx('email'), idx('correo')), iDir = idx('direcc');
+      if (iNom < 0 || iTel < 0) throw new Error('Se requieren columnas de nombre y teléfono/celular. Descarga la plantilla.');
+
+      const filas = lineas.slice(1).map(l => {
+        const c = l.split(sep);
+        const v = (i) => (i >= 0 ? (c[i] || '').trim() : '');
+        return {
+          nombre: v(iNom), nit: v(iNit), telefono: v(iTel), sucursal: v(iSuc) || null,
+          equipo: v(iEq) || null, cantidad: v(iCant) || null,
+          fechaUltimaRecarga: v(iFecha) || null, email: v(iEmail) || null, direccion: v(iDir) || null,
+        };
+      }).filter(f => f.nombre || f.telefono);
+
+      const res = await fetch(`${API}/vencimientos/importar`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ filas, empresaId: empresaImport.id, empresaNombre: empresaImport.name }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Error al importar');
+      setMsgImportV(`✓ ${json.vencimientosCreados} vencimientos · ${json.clientesNuevos} clientes nuevos · ${json.prospectosCreados} prospectos nuevos · ${json.prospectosActualizados || 0} actualizados${json.errores?.length ? ` · ${json.errores.length} filas con error` : ''}`);
+      cargar();
+    } catch (e) {
+      setMsgImportV(`✗ ${e.message}`);
+    }
+    setImportandoV(false);
+  };
 
   const cargar = useCallback(async () => {
     try {
@@ -472,10 +680,41 @@ function Prospectos({ user }) {
         ) : null)}
       </div>
 
+      {/* ── Ola 3: IMPORTAR VENCIMIENTOS — la puerta para TUS clientes ──
+          Con fecha de última recarga → crea el vencimiento y arma la cola del
+          mes. Sin fecha → cae como prospecto. Re-importar el mismo archivo
+          ACTUALIZA (enriquece NIT/datos) sin duplicar ni borrar gestión. */}
+      <div style={{ background: '#fff', border: '2px solid #c4b5fd', borderRadius: 14, padding: '14px 16px', marginBottom: 14 }}>
+        <div style={{ fontWeight: 800, fontSize: 14, color: '#1a1a2e' }}>📥 Importar vencimientos (clientes con fecha de recarga)</div>
+        <div style={{ fontSize: 12, color: '#6b7280', margin: '4px 0 10px' }}>
+          Sube tu base de clientes con la <strong>fecha de última recarga</strong>: el sistema calcula el vencimiento, arma la cola de llamadas del mes y vincula a los clientes existentes. Las filas sin fecha quedan como prospectos. Re-importar <strong>actualiza sin duplicar</strong>.
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>¿Quién factura?</span>
+          {empresasFact.map(e => (
+            <button key={e.id} type="button" onClick={() => setEmpresaImport(e)} style={{
+              border: empresaImport?.id === e.id ? '2px solid #7c3aed' : '1px solid #d1d5db',
+              background: empresaImport?.id === e.id ? '#f5f3ff' : '#fff',
+              color: empresaImport?.id === e.id ? '#5b21b6' : '#374151',
+              borderRadius: 8, padding: '7px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+            }}>🏢 {e.name}</button>
+          ))}
+          <label style={{ background: importandoV || !empresaImport ? '#9ca3af' : '#16a34a', color: '#fff', borderRadius: 9, padding: '9px 14px', fontWeight: 700, fontSize: 12, cursor: importandoV || !empresaImport ? 'not-allowed' : 'pointer' }}>
+            {importandoV ? 'Importando...' : '⬆ Importar vencimientos'}
+            <input type="file" accept=".csv" hidden disabled={importandoV || !empresaImport}
+              onChange={e => { if (e.target.files[0]) importarVencimientos(e.target.files[0]); e.target.value = ''; }} />
+          </label>
+          <button onClick={plantillaVencimientos} style={{ background: '#fff', border: '1px solid #d1d5db', color: '#374151', borderRadius: 9, padding: '9px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+            ⬇ Plantilla vencimientos
+          </button>
+        </div>
+        {msgImportV && <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color: msgImportV.startsWith('✓') ? '#15803d' : '#b91c1c' }}>{msgImportV}</div>}
+      </div>
+
       {/* Acciones */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
         <label style={{ background: '#7c3aed', color: '#fff', borderRadius: 9, padding: '9px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
-          {importando ? 'Importando...' : '⬆ Importar CSV'}
+          {importando ? 'Importando...' : '⬆ Importar prospectos (números fríos)'}
           <input type="file" accept=".csv" hidden disabled={importando}
             onChange={e => { if (e.target.files[0]) importarCSV(e.target.files[0]); e.target.value = ''; }} />
         </label>

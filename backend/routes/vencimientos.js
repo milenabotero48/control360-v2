@@ -200,18 +200,39 @@ router.post('/importar', async (req, res) => {
     }
     const adminId = getAdminId(req);
     const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
+    // Ola 3: la importación pertenece a UNA empresa facturadora (selector en
+    // pantalla). Los clientes nuevos nacen con el esquema oficial completo.
+    const empresaId = req.body?.empresaId || '';
+    const empresaNombre = req.body?.empresaNombre || '';
 
     if (!filas.length) return res.status(400).json({ error: 'No se recibieron filas para importar' });
     if (filas.length > 2000) return res.status(400).json({ error: 'Máximo 2000 filas por importación. Divide el archivo.' });
+    if (!empresaId) return res.status(400).json({ error: 'Selecciona la empresa que factura para esta importación' });
 
     // 1. Cargar clientes existentes del tenant UNA vez (mapa por teléfono)
     const clientesSnap = await db.collection('clients').where('adminId', '==', adminId).get();
     const porTelefono = new Map();
     clientesSnap.docs.forEach(d => {
-      const tel = normalizarTelefono(d.data().telefono);
-      if (tel) porTelefono.set(tel, d.id);
+      // Clientes oficiales usan `celular`; antiguos pueden usar `telefono`.
+      const data = d.data();
+      [normalizarTelefono(data.celular), normalizarTelefono(data.telefono)]
+        .filter(Boolean)
+        .forEach(t => { if (!porTelefono.has(t)) porTelefono.set(t, d.id); });
     });
 
+    // Prospectos existentes por teléfono → MODO ACTUALIZAR: si la fila trae
+    // datos nuevos (NIT, empresa, equipo), se ENRIQUECE el prospecto en vez
+    // de duplicarlo. Así una re-importación del mismo archivo completa la
+    // base sin tocar el trabajo de llamadas ya hecho.
+    const prospSnap = await db.collection('prospectos').where('adminId', '==', adminId).get();
+    const prospPorTel = new Map();
+    prospSnap.docs.forEach(d => {
+      const t = normalizarTelefono(d.data().telefono);
+      if (t && !prospPorTel.has(t)) prospPorTel.set(t, { id: d.id, ...d.data() });
+    });
+
+
+    let resultadoExtra = { prospectosActualizados: 0 };
     const resultado = { vencimientosCreados: 0, clientesNuevos: 0, prospectosCreados: 0, errores: [] };
     let batch = db.batch();
     let ops = 0;
@@ -223,8 +244,10 @@ router.post('/importar', async (req, res) => {
       const f = filas[i];
       const fila = i + 2; // +2: encabezado del Excel
       try {
-        const nombre = String(f.nombre || f.empresa || '').trim();
-        const telefono = normalizarTelefono(f.telefono);
+        // Alias de columnas — acepta la plantilla de clientes de la empresa:
+        const nombre = String(f.nombre || f.razonSocial || f['razon social'] || f.empresa || '').trim();
+        const telefono = normalizarTelefono(f.telefono || f.celular);
+        const nitFila = String(f.nit || '').replace(/[^0-9]/g, '') || null;
 
         if (!nombre || !telefono) {
           resultado.errores.push({ fila, error: 'Falta nombre o teléfono válido' });
@@ -239,12 +262,30 @@ router.post('/importar', async (req, res) => {
 
         if (!fRecarga) {
           // ─── SIN FECHA → prospecto para la vendedora (R-COM-03 / sección 06)
+          const existente = prospPorTel.get(telefono);
+          if (existente) {
+            // MODO ACTUALIZAR: enriquecer sin duplicar ni borrar gestión.
+            const cambios = {};
+            if (nitFila && !existente.nit) cambios.nit = nitFila;
+            if (f.empresa && !existente.empresa) cambios.empresa = f.empresa;
+            if (f.sucursal && !existente.sucursal) cambios.sucursal = f.sucursal;
+            if (f.equipo && !existente.equipoReportado) cambios.equipoReportado = f.equipo;
+            if (!existente.clienteId && porTelefono.get(telefono)) cambios.clienteId = porTelefono.get(telefono);
+            if (Object.keys(cambios).length) {
+              cambios.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+              batch.update(db.collection('prospectos').doc(existente.id), cambios);
+              ops++; resultadoExtra.prospectosActualizados++;
+              await commitSiLleno();
+            }
+            continue;
+          }
           const refP = db.collection('prospectos').doc();
           batch.set(refP, {
             adminId,
             nombre,
             empresa: f.empresa || null,
             telefono,
+            nit: nitFila,
             sucursal: f.sucursal || null,
             equipoReportado: f.equipo || null,
             origen: 'importacion',
@@ -254,6 +295,7 @@ router.post('/importar', async (req, res) => {
             clienteId: porTelefono.get(telefono) || null,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
           });
+          prospPorTel.set(telefono, { id: refP.id, nombre, telefono });
           ops++; resultado.prospectosCreados++;
           await commitSiLleno();
           continue;
@@ -262,13 +304,23 @@ router.post('/importar', async (req, res) => {
         // ─── CON FECHA → cliente + vencimiento
         let clienteId = porTelefono.get(telefono);
         if (!clienteId) {
+          // Esquema OFICIAL de cliente (visible y editable en el módulo Clientes)
           const refC = db.collection('clients').doc();
           batch.set(refC, {
             adminId,
-            nombre,
+            nombre: nombre.toUpperCase(),
+            tipoDocumento: 'NIT',
+            nit: nitFila,
+            celular: telefono,
             telefono,
-            email: f.email || null,
-            direccion: f.direccion || null,
+            emailLegal: f.email || null,
+            emailsAdicionales: [],
+            direccionPrincipal: f.direccion || null,
+            ciudad: f.ciudad || null,
+            empresaId,
+            empresaNombre,
+            sucursales: [],
+            notas: '',
             origen: 'importacion_vencimientos',
             activo: true,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -276,6 +328,16 @@ router.post('/importar', async (req, res) => {
           clienteId = refC.id;
           porTelefono.set(telefono, clienteId); // evita duplicar en filas siguientes
           ops++; resultado.clientesNuevos++;
+        }
+        // Si existe un prospecto con este teléfono → vincularlo y enriquecerlo
+        const prospLink = prospPorTel.get(telefono);
+        if (prospLink && (!prospLink.clienteId || (nitFila && !prospLink.nit))) {
+          const cambiosP = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+          if (!prospLink.clienteId) cambiosP.clienteId = clienteId;
+          if (nitFila && !prospLink.nit) cambiosP.nit = nitFila;
+          batch.update(db.collection('prospectos').doc(prospLink.id), cambiosP);
+          prospLink.clienteId = clienteId;
+          ops++; resultadoExtra.prospectosActualizados++;
         }
 
         const refV = db.collection('vencimientos').doc();
@@ -304,12 +366,12 @@ router.post('/importar', async (req, res) => {
 
     await auditar({
       accion: 'importar',
-      descripcion: `Importación: ${resultado.vencimientosCreados} vencimientos, ${resultado.clientesNuevos} clientes nuevos, ${resultado.prospectosCreados} prospectos`,
+      descripcion: `Importación: ${resultado.vencimientosCreados} vencimientos, ${resultado.clientesNuevos} clientes nuevos, ${resultado.prospectosCreados} prospectos, ${resultadoExtra.prospectosActualizados} prospectos actualizados`,
       usuarioId: adminId, usuarioNombre: req.user?.nombre || req.user?.email,
       datos: { totalFilas: filas.length, errores: resultado.errores.length }
     });
 
-    return res.json(resultado);
+    return res.json({ ...resultado, ...resultadoExtra });
   } catch (err) {
     console.error('POST /vencimientos/importar:', err);
     return res.status(500).json({ error: err.message });

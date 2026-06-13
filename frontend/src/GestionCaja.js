@@ -388,14 +388,21 @@ export default function GestionCaja({ user }) {
   // ── Ola 3: cuadre diario imprimible ─────────────────────────────────────
   const hoyCO = () => new Date(Date.now() - 5 * 3600000).toISOString().split('T')[0];
   const [fechaCuadre, setFechaCuadre] = useState(hoyCO());
+  const [cajaCuadre, setCajaCuadre] = useState(''); // '' = consolidado (solo admin)
   const [generandoCuadre, setGenerandoCuadre] = useState(false);
 
   const imprimirCuadreDiario = async () => {
+    // No-admin debe cuadrar una caja específica; si solo tiene una, se usa esa.
+    let cajaSeleccion = cajaCuadre;
+    if (!esAdminUser && !cajaSeleccion) {
+      if (cajasVisibles.length === 1) { cajaSeleccion = cajasVisibles[0].id; setCajaCuadre(cajaSeleccion); }
+      else return alert('Selecciona la caja que vas a cuadrar.');
+    }
     setGenerandoCuadre(true);
     try {
       const h = getHeaders();
       const [cierreRes, empRes] = await Promise.all([
-        axios.get(`${API}/cajas/cierre-diario`, { params: { fecha: fechaCuadre }, headers: h }),
+        axios.get(`${API}/cajas/cierre-diario`, { params: { fecha: fechaCuadre, cajaId: cajaSeleccion || undefined }, headers: h }),
         axios.get(`${API}/companies`, { headers: h }),
       ]);
       const empresasList = empRes.data || [];
@@ -514,8 +521,13 @@ export default function GestionCaja({ user }) {
     if (filtroHasta && m.createdAt && new Date(m.createdAt) > new Date(filtroHasta + 'T23:59:59')) return false;
     return true;
   });
-  const totalSaldo = cajas.filter(c => c.activa && c.saldo !== null && c.saldo !== undefined).reduce((a, c) => a + Number(c.saldo || 0), 0);
-  const hayReservadas = cajas.some(c => c.activa && (c.saldo === null || c.saldo === undefined));
+  // ── Opción A (regla de negocio): un no-admin SOLO ve sus cajas de
+  // efectivo (donde es responsable). Las demás existen para los selectores
+  // de operación (egresos por banco, traslados) pero no se muestran aquí.
+  const esAdminUser = user?.role === 'admin';
+  const cajasVisibles = cajas.filter(c => c.activa && (esAdminUser || c.propia));
+  const totalSaldo = cajasVisibles.filter(c => c.saldo !== null && c.saldo !== undefined).reduce((a, c) => a + Number(c.saldo || 0), 0);
+  const hayReservadas = !esAdminUser;
 
   const iconTipo = (tipo) => ({ ingreso: '📥', egreso: '📤', traslado_salida: '🔄↗', traslado_entrada: '🔄↘', ajuste: '⚖️' }[tipo] || '💰');
   const colorTipo = (tipo) => ['ingreso', 'traslado_entrada'].includes(tipo) ? '#16a34a' : '#dc2626';
@@ -531,10 +543,15 @@ export default function GestionCaja({ user }) {
           <p style={S.pageSubtitle}>Saldos · Movimientos · Traslados entre cajas</p>
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          {/* Ola 3: cuadre diario imprimible — quien opera Caja cierra su día.
-              Los saldos bancarios salen reservados para no-admins. */}
-          {(
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          {/* Ola 3: cuadre diario — se selecciona QUÉ caja se cuadra.
+              Admin puede además generar el consolidado de todo el negocio. */}
+          {(esAdminUser || cajasVisibles.length > 0) && (
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select value={cajaCuadre} onChange={e => setCajaCuadre(e.target.value)}
+                style={{ padding: '9px 10px', border: '1px solid #e2e8f0', borderRadius: 9, fontSize: 13, maxWidth: 190 }}>
+                {esAdminUser && <option value="">📊 Todas (consolidado)</option>}
+                {cajasVisibles.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+              </select>
               <input type="date" value={fechaCuadre} onChange={e => setFechaCuadre(e.target.value)}
                 style={{ padding: '9px 10px', border: '1px solid #e2e8f0', borderRadius: 9, fontSize: 13 }} />
               <button onClick={imprimirCuadreDiario} disabled={generandoCuadre}
@@ -581,7 +598,7 @@ export default function GestionCaja({ user }) {
 
       {/* KPIs por caja */}
       <div style={S.kpiRow}>
-        {cajas.filter(c => c.activa).map(c => (
+        {cajasVisibles.map(c => (
           <div key={c.id} style={{ ...S.kpiCard, borderLeft: `4px solid ${c.tipo === 'Banco' ? '#3b82f6' : c.tipo === 'Mensajero' ? '#f59e0b' : '#22c55e'}` }}>
             <div style={S.kpiLabel}>{c.tipo === 'Banco' ? '🏦' : c.tipo === 'Mensajero' ? '🚚' : c.tipo === 'Nequi/Daviplata' ? '📱' : '💵'} {c.nombre}</div>
             <div style={{ ...S.kpiValue, color: Number(c.saldo) < 0 ? '#dc2626' : '#1e293b', fontSize: c.saldo === null ? 16 : undefined }}>{fmtSaldo(c.saldo)}</div>
@@ -589,9 +606,9 @@ export default function GestionCaja({ user }) {
           </div>
         ))}
         <div style={{ ...S.kpiCard, borderLeft: '4px solid #6366f1', background: '#f5f3ff' }}>
-          <div style={S.kpiLabel}>💼 {hayReservadas ? 'Total visible' : 'Total general'}</div>
+          <div style={S.kpiLabel}>💼 {esAdminUser ? 'Total general' : 'Total a tu cargo'}</div>
           <div style={{ ...S.kpiValue, color: '#4f46e5' }}>{fmt(totalSaldo)}</div>
-          <div style={S.kpiSub}>{cajas.filter(c => c.activa).length} cajas activas{hayReservadas ? ' · saldos de banco reservados' : ''}</div>
+          <div style={S.kpiSub}>{cajasVisibles.length} {cajasVisibles.length === 1 ? 'caja' : 'cajas'}{esAdminUser ? ' activas' : ' a tu cargo'}</div>
         </div>
       </div>
 
@@ -625,7 +642,7 @@ export default function GestionCaja({ user }) {
 
       {tab === 'cajas' && (
         <div>
-          {cajas.filter(c => c.activa).length === 0 ? (
+          {cajasVisibles.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '60px 20px', color: '#94a3b8' }}>
               <div style={{ fontSize: 48, marginBottom: 12 }}>🏦</div>
               <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8 }}>No hay cajas configuradas</div>
@@ -633,7 +650,7 @@ export default function GestionCaja({ user }) {
             </div>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16, marginTop: 16 }}>
-              {cajas.filter(c => c.activa).map(caja => (
+              {cajasVisibles.map(caja => (
                 <div key={caja.id} style={{
                   background: '#fff', borderRadius: 14, padding: '20px 22px',
                   boxShadow: '0 1px 4px rgba(0,0,0,0.08)', border: '1px solid #e2e8f0',

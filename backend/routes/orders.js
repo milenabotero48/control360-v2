@@ -1752,6 +1752,90 @@ router.get('/:id/certificado', authenticate, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+// FACTURA ELECTRÓNICA PDF ADJUNTA A LA ORDEN (Ola 3)
+// ──────────────────────────────────────────────────────────────────────────────
+// El PDF de la factura DIAN se sube a Cloudinary desde el frontend y aquí se
+// guarda la referencia en la orden. Cuando el cliente pida copia, cualquiera
+// del equipo entra a la orden, descarga y envía. Carga y borrado quedan en
+// auditoría (regla de negocio).
+// Quién puede cargar/borrar: admin, tesorería y comercial.
+// ══════════════════════════════════════════════════════════════════════════════
+const ROLES_FACTURA_PDF = ['admin', 'tesoreria', 'comercial'];
+
+router.post('/:id/factura-pdf', authenticate, validarTenant('orders'), async (req, res) => {
+  try {
+    if (!ROLES_FACTURA_PDF.includes(req.user?.role)) {
+      return res.status(403).json({ error: 'No tienes permiso para adjuntar la factura' });
+    }
+    const { url, nombre } = req.body || {};
+    if (!url || !/^https:\/\//.test(url)) return res.status(400).json({ error: 'URL del PDF inválida' });
+
+    const ref = db.collection('orders').doc(req.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
+    const o = doc.data();
+
+    const usuarioNombre = req.user.nombre || req.user.email;
+    const reemplazo = !!o.facturaPdfUrl;
+    await ref.update({
+      facturaPdfUrl: url,
+      facturaPdfNombre: nombre || `Factura ${o.numeroFactura || o.numeroOrden}.pdf`,
+      facturaPdfSubidaPor: usuarioNombre,
+      facturaPdfFecha: new Date().toISOString(),
+    });
+
+    await auditar({
+      accion: reemplazo ? 'FACTURA_PDF_REEMPLAZADA' : 'FACTURA_PDF_CARGADA',
+      modulo: 'ordenes',
+      descripcion: `${usuarioNombre} ${reemplazo ? 'reemplazó' : 'adjuntó'} el PDF de factura en ${o.numeroOrden}${o.numeroFactura ? ` (FE ${o.numeroFactura})` : ''}`,
+      usuarioId: req.user.uid || req.user.id, usuarioNombre,
+      ordenId: req.params.id, documento: o.numeroOrden,
+      datos: { url, nombre: nombre || null, urlAnterior: reemplazo ? o.facturaPdfUrl : null }
+    });
+
+    res.json({ ok: true, facturaPdfUrl: url });
+  } catch (e) {
+    console.error('POST factura-pdf:', e);
+    res.status(500).json({ error: 'Error adjuntando la factura' });
+  }
+});
+
+router.delete('/:id/factura-pdf', authenticate, validarTenant('orders'), async (req, res) => {
+  try {
+    if (!ROLES_FACTURA_PDF.includes(req.user?.role)) {
+      return res.status(403).json({ error: 'No tienes permiso para eliminar la factura' });
+    }
+    const ref = db.collection('orders').doc(req.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
+    const o = doc.data();
+    if (!o.facturaPdfUrl) return res.status(400).json({ error: 'Esta orden no tiene factura adjunta' });
+
+    const usuarioNombre = req.user.nombre || req.user.email;
+    await ref.update({
+      facturaPdfUrl: admin.firestore.FieldValue.delete(),
+      facturaPdfNombre: admin.firestore.FieldValue.delete(),
+      facturaPdfSubidaPor: admin.firestore.FieldValue.delete(),
+      facturaPdfFecha: admin.firestore.FieldValue.delete(),
+    });
+
+    await auditar({
+      accion: 'FACTURA_PDF_ELIMINADA',
+      modulo: 'ordenes',
+      descripcion: `${usuarioNombre} eliminó el PDF de factura de ${o.numeroOrden}${o.numeroFactura ? ` (FE ${o.numeroFactura})` : ''}`,
+      usuarioId: req.user.uid || req.user.id, usuarioNombre,
+      ordenId: req.params.id, documento: o.numeroOrden,
+      datos: { urlEliminada: o.facturaPdfUrl }
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('DELETE factura-pdf:', e);
+    res.status(500).json({ error: 'Error eliminando la factura' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 // GET /api/orders/:id/certificado/html — HTML imprimible del certificado
 // ─────────────────────────────────────────────────────────────────────────────
 // Ola 2: Reemplaza la generación de certificado, que antes solo marcaba el flag

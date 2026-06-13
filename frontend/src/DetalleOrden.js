@@ -48,6 +48,44 @@ const DetalleOrden = ({ user, ordenId, onVolver }) => {
   const [cambiandoEstado, setCambiando] = useState(false);
   const [notasEstado, setNotasEstado]   = useState('');
 const [numeroFactura, setNumeroFactura] = useState('');
+
+  // ── Ola 3: Factura electrónica PDF adjunta a la orden ─────────────────────
+  // Sube a Cloudinary (mismo patrón de las fotos) y guarda la referencia en
+  // la orden vía backend (que audita la carga y el borrado).
+  const [subiendoFactura, setSubiendoFactura] = useState(false);
+  const puedeAdjuntarFactura = ['admin', 'tesoreria', 'comercial'].includes(user?.role);
+
+  const adjuntarFacturaPdf = async (file) => {
+    if (!file) return;
+    if (file.type !== 'application/pdf') return setError('Solo se permite PDF de la factura electrónica.');
+    if (file.size > 10 * 1024 * 1024) return setError('El PDF supera 10 MB. Comprime el archivo.');
+    setSubiendoFactura(true);
+    setError(null);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('upload_preset', 'control360');
+      fd.append('folder', 'control360/facturas');
+      const up = await fetch('https://api.cloudinary.com/v1_1/dk8hposft/auto/upload', { method: 'POST', body: fd });
+      const upJson = await up.json();
+      if (!upJson.secure_url) throw new Error(upJson.error?.message || 'Error subiendo el PDF');
+      await axios.post(`${API}/orders/${ordenId}/factura-pdf`, { url: upJson.secure_url, nombre: file.name }, { headers });
+      await cargarOrden();
+    } catch (e) {
+      setError(e.response?.data?.error || e.message || 'Error adjuntando la factura');
+    }
+    setSubiendoFactura(false);
+  };
+
+  const eliminarFacturaPdf = async () => {
+    if (!window.confirm('¿Eliminar el PDF de la factura adjunta? Quedará registrado en auditoría.')) return;
+    try {
+      await axios.delete(`${API}/orders/${ordenId}/factura-pdf`, { headers });
+      await cargarOrden();
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error eliminando la factura');
+    }
+  };
   const [error, setError]               = useState('');
   const [exito, setExito]               = useState('');
   // Pago inline — sin modal separado
@@ -538,6 +576,30 @@ const cargarConfigCerts = async () => {
               <div style={s.infoItem}><span style={s.infoLabel}>Mensajero</span><span>{orden.mensajeroNombre || <em style={{ color: '#9ca3af' }}>Sin asignar</em>}</span></div>
               <div style={s.infoItem}><span style={s.infoLabel}>Creado por</span><span>{orden.creadoPorNombre}</span></div>
 {orden.numeroFactura && <div style={s.infoItem}><span style={s.infoLabel}>📄 N° Factura</span><strong style={{ color: '#0284c7' }}>{orden.numeroFactura}</strong></div>}
+              <div style={s.infoItem}>
+                <span style={s.infoLabel}>📎 Factura electrónica (PDF)</span>
+                {orden.facturaPdfUrl ? (
+                  <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <a href={orden.facturaPdfUrl} target="_blank" rel="noopener noreferrer"
+                      style={{ color: '#0284c7', fontWeight: 700, fontSize: 13, textDecoration: 'none' }}>
+                      ⬇ Ver / Descargar
+                    </a>
+                    <span style={{ fontSize: 11, color: '#9ca3af' }}>{orden.facturaPdfSubidaPor ? `subida por ${orden.facturaPdfSubidaPor}` : ''}</span>
+                    {puedeAdjuntarFactura && (
+                      <button onClick={eliminarFacturaPdf} title="Eliminar (queda en auditoría)"
+                        style={{ border: 'none', background: '#fef2f2', color: '#b91c1c', borderRadius: 6, padding: '3px 8px', cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>🗑 Quitar</button>
+                    )}
+                  </span>
+                ) : puedeAdjuntarFactura ? (
+                  <label style={{ display: 'inline-block', background: subiendoFactura ? '#9ca3af' : '#eff6ff', color: subiendoFactura ? '#fff' : '#1d4ed8', border: '1px dashed #93c5fd', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 700, cursor: subiendoFactura ? 'wait' : 'pointer' }}>
+                    {subiendoFactura ? '⏳ Subiendo PDF...' : '📎 Adjuntar PDF'}
+                    <input type="file" accept="application/pdf" hidden disabled={subiendoFactura}
+                      onChange={e => { adjuntarFacturaPdf(e.target.files[0]); e.target.value = ''; }} />
+                  </label>
+                ) : (
+                  <span style={{ fontSize: 12, color: '#9ca3af' }}>Sin adjuntar</span>
+                )}
+              </div>
               {orden.notasOrden && <div style={{ ...s.infoItem, gridColumn: '1/-1' }}><span style={s.infoLabel}>📝 Notas</span><span style={{ color: '#374151', fontStyle: 'italic' }}>{orden.notasOrden}</span></div>}
             </div>
           </div>
