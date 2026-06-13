@@ -582,9 +582,17 @@ const cargarConfigCerts = async () => {
                 <span style={s.infoLabel}>📎 Factura electrónica (PDF)</span>
                 {orden.facturaPdfUrl ? (
                   <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <a href={orden.facturaPdfUrl} target="_blank" rel="noopener noreferrer"
+                    <a
+                      href={(() => {
+                        // Cloudinary raw/upload: insertar fl_attachment para que el navegador
+                        // descargue el PDF en vez de intentar abrirlo como imagen.
+                        const url = orden.facturaPdfUrl || '';
+                        return url.replace('/raw/upload/', '/raw/upload/fl_attachment/');
+                      })()}
+                      download={orden.facturaPdfNombre || 'factura.pdf'}
+                      target="_blank" rel="noopener noreferrer"
                       style={{ color: '#0284c7', fontWeight: 700, fontSize: 13, textDecoration: 'none' }}>
-                      ⬇ Ver / Descargar
+                      ⬇ Descargar PDF
                     </a>
                     <span style={{ fontSize: 11, color: '#9ca3af' }}>{orden.facturaPdfSubidaPor ? `subida por ${orden.facturaPdfSubidaPor}` : ''}</span>
                     {puedeAdjuntarFactura && (
