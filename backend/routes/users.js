@@ -85,6 +85,32 @@ const pinValido = (v) => typeof v === 'string' && /^\d{4}$/.test(v);
 const hashearPassword = async (raw) => bcrypt.hash(String(raw), SALT_ROUNDS);
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/users/mensajeros — Lista de mensajeros para asignación de rutas
+// ─────────────────────────────────────────────────────────────────────────────
+// Accesible para cualquier usuario del tenant (comercial, tesorería, admin).
+// Solo devuelve id, nombre, celular y rol — sin datos sensibles.
+// Logística lo necesita para el selector de mensajeros en la asignación.
+router.get('/mensajeros', authenticate, async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const snap = await db.collection('users')
+      .where('creadoPor', '==', adminId)
+      .where('role', '==', 'mensajero')
+      .get();
+    const mensajeros = snap.docs.map(d => ({
+      id: d.id,
+      nombre: d.data().nombre || d.data().email || '',
+      celular: d.data().celular || d.data().phone || '',
+      role: 'mensajero',
+      activo: d.data().activo !== false,
+    })).filter(m => m.activo);
+    res.json(mensajeros);
+  } catch (e) {
+    res.status(500).json({ error: 'Error cargando mensajeros' });
+  }
+});
+
 // GET /api/users — Listar todos los usuarios (solo admin)
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/', authenticate, soloAdmin, async (req, res) => {
