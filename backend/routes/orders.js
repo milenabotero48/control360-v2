@@ -1804,8 +1804,30 @@ router.post('/:id/factura-pdf', authenticate, validarTenant('orders'), async (re
     if (!ROLES_FACTURA_PDF.includes(req.user?.role)) {
       return res.status(403).json({ error: 'No tienes permiso para adjuntar la factura' });
     }
-    const { url, nombre } = req.body || {};
-    if (!url || !/^https:\/\//.test(url)) return res.status(400).json({ error: 'URL del PDF inválida' });
+
+    // ── Recibir el PDF en base64 y subirlo a Firebase Storage ────────────────
+    // Cloudinary no servía PDFs correctamente. Firebase Storage con Admin SDK
+    // genera URLs firmadas que el navegador abre y descarga sin problemas.
+    const { base64, mimeType = 'application/pdf', nombre } = req.body || {};
+    let url = req.body.url || null; // compatibilidad si ya viene URL
+
+    if (base64 && !url) {
+      const bucket = admin.storage().bucket('control360-v2.firebasestorage.app');
+      const buffer = Buffer.from(base64, 'base64');
+      const nombreArchivo = `facturas/${req.params.id}_${Date.now()}.pdf`;
+      const file = bucket.file(nombreArchivo);
+      await file.save(buffer, {
+        metadata: { contentType: 'application/pdf', contentDisposition: `attachment; filename="${nombre || 'factura.pdf'}"` }
+      });
+      // URL firmada válida por 10 años (facturas son documentos permanentes)
+      const [signedUrl] = await file.getSignedUrl({
+        action: 'read',
+        expires: Date.now() + 10 * 365 * 24 * 3600 * 1000
+      });
+      url = signedUrl;
+    }
+
+    if (!url) return res.status(400).json({ error: 'Se requiere el archivo PDF' });
 
     const ref = db.collection('orders').doc(req.params.id);
     const doc = await ref.get();
