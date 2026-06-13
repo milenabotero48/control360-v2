@@ -446,6 +446,188 @@ const VistaComercial = ({ desde, hasta, empresaId, headers }) => {
 // ────────────────────────────────────────────────────────────────────────────
 // VISTA 3: TALLER
 // ────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VISTA 5: TELEMERCADEO (Ola 3)
+// ─────────────────────────────────────────────────────────────────────────────
+const VistaTelemercadeo = ({ desde, hasta, headers }) => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [asesoraSel, setAsesoraSel] = useState('');
+
+  const cargar = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const params = new URLSearchParams({ desde, hasta });
+      const r = await axios.get(`${API}/comercial/reporte-telemercadeo?${params}`, { headers });
+      setData(r.data);
+    } catch (e) { setError(e.response?.data?.error || 'Error cargando el reporte'); }
+    setLoading(false);
+  }, [desde, hasta]);
+
+  useEffect(() => { cargar(); }, [cargar]);
+
+  if (loading) return <div style={s.loadingBox}>Cargando reporte de telemercadeo...</div>;
+  if (error)   return <div style={s.errorBox}>{error}</div>;
+  if (!data)   return null;
+
+  const { asesoras = [], embudo = {}, motivos = [], convertidos = [], totales = {} } = data;
+  const sel = asesoraSel ? asesoras.find(a => a.id === asesoraSel) : null;
+  const colores = { bueno: '#16a34a', medio: '#d97706', bajo: '#dc2626' };
+  const semaforo = (val, b, m) => val >= b ? colores.bueno : val >= m ? colores.medio : colores.bajo;
+
+  return (
+    <div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(140px,1fr))', gap: 12, marginBottom: 20 }}>
+        <KPIGrande icon="📞" label="Total llamadas" value={totales.llamadas || 0} />
+        <KPIGrande icon="🎉" label="Conversiones" value={totales.conversiones || 0} color="#16a34a" />
+        <KPIGrande icon="💵" label="Ventas generadas" value={fmtCop(totales.ventasCOP || 0)} color="#16a34a" />
+        <KPIGrande icon="📋" label="Órdenes creadas" value={totales.ordenesGeneradas || 0} />
+        <KPIGrande icon="⚠️" label="Sin orden aún" value={totales.sinOrden || 0} color={totales.sinOrden > 0 ? '#d97706' : '#16a34a'} />
+      </div>
+
+      <div style={s.card}>
+        <h3 style={s.h3}>👤 Desempeño por asesora</h3>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={s.tablaR}>
+            <thead><tr>
+              {['Asesora','Llamadas','Prom/día','Tasa contacto','Conversiones','Tasa conv.','Ventas $','Ticket prom.','% Meta',''].map((h,i) => (
+                <th key={i} style={{ ...s.th, textAlign: i > 0 ? 'right' : 'left' }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {asesoras.map(a => (
+                <tr key={a.id} style={{ borderBottom: '1px solid #f3f4f6', background: asesoraSel === a.id ? '#f5f3ff' : 'transparent' }}>
+                  <td style={s.td}><strong>{a.nombre}</strong></td>
+                  <td style={{ ...s.td, textAlign: 'right' }}>{a.totalLlamadas}</td>
+                  <td style={{ ...s.td, textAlign: 'right' }}>{a.promedioDiario}/día</td>
+                  <td style={{ ...s.td, textAlign: 'right', color: semaforo(a.tasaContacto,60,40), fontWeight:700 }}>{fmtPct(a.tasaContacto)}</td>
+                  <td style={{ ...s.td, textAlign: 'right', color: '#16a34a', fontWeight:800 }}>{a.conversiones}</td>
+                  <td style={{ ...s.td, textAlign: 'right', color: semaforo(a.tasaConversion,30,15), fontWeight:700 }}>{fmtPct(a.tasaConversion)}</td>
+                  <td style={{ ...s.td, textAlign: 'right', fontWeight:700, color:'#16a34a' }}>{fmtCop(a.ventasCOP)}</td>
+                  <td style={{ ...s.td, textAlign: 'right' }}>{fmtCop(a.ticketPromedio)}</td>
+                  <td style={{ ...s.td, textAlign: 'right', color: a.cumplimientoMeta != null ? semaforo(a.cumplimientoMeta,80,50) : '#9ca3af', fontWeight:700 }}>
+                    {a.cumplimientoMeta != null ? `${a.cumplimientoMeta}%` : '—'}
+                  </td>
+                  <td style={s.td}>
+                    <button onClick={() => setAsesoraSel(asesoraSel === a.id ? '' : a.id)} style={s.btnLink}>
+                      {asesoraSel === a.id ? 'Cerrar' : 'Detalle'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {asesoras.length === 0 && (
+                <tr><td colSpan={10} style={{ ...s.td, textAlign:'center', color:'#9ca3af', padding:24 }}>
+                  No hay llamadas registradas en este período
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {sel && (
+          <div style={{ marginTop:16, padding:'14px 16px', background:'#f5f3ff', borderRadius:12, border:'1px solid #c4b5fd' }}>
+            <h4 style={{ margin:'0 0 12px', color:'#5b21b6' }}>📊 {sel.nombre} — detalle</h4>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))', gap:10 }}>
+              {[['📞','Total llamadas',sel.totalLlamadas,null],['✅','Contactadas',sel.contactadas,null],['📵','No contestaron',sel.noContestadas,null],['📅','Reprogramadas',sel.reprogramadas,null],['❌','Descartadas',sel.descartadas,null],['🎉','Conversiones',sel.conversiones,'#16a34a'],['💵','Ventas $',fmtCop(sel.ventasCOP),'#16a34a'],['🎯','Ticket prom.',fmtCop(sel.ticketPromedio),null]].map(([icon,label,val,color],i) => (
+                <div key={i} style={{ background:'#fff', borderRadius:10, padding:'10px 12px', textAlign:'center' }}>
+                  <div style={{ fontSize:18 }}>{icon}</div>
+                  <div style={{ fontSize:11, color:'#6b7280', margin:'2px 0' }}>{label}</div>
+                  <div style={{ fontSize:16, fontWeight:800, color: color || '#1a1a2e' }}>{val}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ ...s.card, marginTop:16 }}>
+        <h3 style={s.h3}>🔽 Embudo del período</h3>
+        <div style={{ display:'flex', flexDirection:'column', gap:6, maxWidth:520 }}>
+          {[
+            { label:'Prospectos asignados', val: embudo.asignados, color:'#6366f1', w:100 },
+            { label:'Contactados', val: embudo.contactados, color:'#0284c7', w: embudo.asignados ? Math.round((embudo.contactados/embudo.asignados)*100) : 0 },
+            { label:'Reprogramados', val: embudo.reprogramados, color:'#d97706', w: embudo.contactados ? Math.round((embudo.reprogramados/embudo.contactados)*100) : 0 },
+            { label:'Convertidos ✓', val: embudo.convertidos, color:'#16a34a', w: embudo.contactados ? Math.round((embudo.convertidos/embudo.contactados)*100) : 0 },
+            { label:'Descartados', val: embudo.descartados, color:'#dc2626', w: embudo.contactados ? Math.round((embudo.descartados/embudo.contactados)*100) : 0 },
+          ].map((e,i) => (
+            <div key={i}>
+              <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginBottom:3 }}>
+                <span style={{ color:'#374151' }}>{e.label}</span>
+                <strong style={{ color: e.color }}>{e.val ?? 0} ({e.w}%)</strong>
+              </div>
+              <div style={{ background:'#f3f4f6', borderRadius:99, height:12, overflow:'hidden' }}>
+                <div style={{ width:`${e.w}%`, height:'100%', background:e.color, borderRadius:99 }} />
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop:12, fontSize:12, color:'#6b7280' }}>
+          Tasa de contacto: <strong style={{ color: semaforo(embudo.pctContacto,60,40) }}>{embudo.pctContacto ?? 0}%</strong>
+          &nbsp;·&nbsp; Tasa de conversión: <strong style={{ color: semaforo(embudo.pctConversion,30,15) }}>{embudo.pctConversion ?? 0}%</strong>
+        </div>
+      </div>
+
+      {motivos.length > 0 && (
+        <div style={{ ...s.card, marginTop:16 }}>
+          <h3 style={s.h3}>🧠 Motivos de descarte</h3>
+          <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+            {motivos.map((m,i) => {
+              const pct = Math.round((m.cantidad/(motivos[0]?.cantidad||1))*100);
+              return (
+                <div key={i}>
+                  <div style={{ display:'flex', justifyContent:'space-between', fontSize:13, marginBottom:3 }}>
+                    <span style={{ fontWeight:600 }}>{m.motivo}</span>
+                    <span style={{ fontWeight:700, color:'#dc2626' }}>{m.cantidad}</span>
+                  </div>
+                  <div style={{ background:'#fee2e2', borderRadius:99, height:8, overflow:'hidden' }}>
+                    <div style={{ width:`${pct}%`, height:'100%', background:'#dc2626', borderRadius:99 }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div style={{ ...s.card, marginTop:16 }}>
+        <h3 style={s.h3}>🎉 Clientes convertidos — {convertidos.length}</h3>
+        {totales.sinOrden > 0 && (
+          <div style={{ background:'#fffbeb', border:'1px solid #fcd34d', borderRadius:8, padding:'8px 12px', marginBottom:12, fontSize:12, color:'#92400e', fontWeight:600 }}>
+            ⚠️ {totales.sinOrden} convertido{totales.sinOrden !== 1 ? 's' : ''} sin orden de servicio aún.
+          </div>
+        )}
+        {convertidos.length === 0
+          ? <p style={{ color:'#9ca3af', fontSize:13 }}>No hay conversiones en este período.</p>
+          : <div style={{ overflowX:'auto' }}>
+              <table style={s.tablaR}>
+                <thead><tr>
+                  {['Cliente','Asesora','Fecha','Orden'].map((h,i) => (
+                    <th key={i} style={{ ...s.th, textAlign: i > 1 ? 'center' : 'left' }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {convertidos.map((c,i) => (
+                    <tr key={i} style={{ borderBottom:'1px solid #f3f4f6' }}>
+                      <td style={s.td}><strong>{c.nombre}</strong></td>
+                      <td style={s.td}>{c.convertidoPorNombre}</td>
+                      <td style={{ ...s.td, textAlign:'center', fontSize:12 }}>{c.fechaConversion}</td>
+                      <td style={{ ...s.td, textAlign:'center' }}>
+                        {c.tieneOrden
+                          ? <span style={{ color:'#16a34a', fontWeight:700, fontSize:12 }}>✅ {fmtCop(c.totalOrden)}</span>
+                          : <span style={{ color:'#d97706', fontWeight:600, fontSize:12 }}>⏳ Pendiente</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+        }
+      </div>
+    </div>
+  );
+};
+
 const VistaTaller = ({ desde, hasta, empresaId, headers }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
