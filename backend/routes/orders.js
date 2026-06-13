@@ -1894,6 +1894,54 @@ router.delete('/:id/factura-pdf', authenticate, validarTenant('orders'), async (
   }
 });
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// POST /api/orders/:id/fotos-adicionales — Subir foto después del momento
+// ──────────────────────────────────────────────────────────────────────────────
+// Admin, tesorería y comercial pueden subir fotos que se olvidaron en su
+// momento: recolección, entrega o comprobante de pago.
+// La foto queda guardada en la orden y auditada.
+// ══════════════════════════════════════════════════════════════════════════════
+router.post('/:id/fotos-adicionales', authenticate, validarTenant('orders'), async (req, res) => {
+  try {
+    const ROLES_FOTO = ['admin', 'tesoreria', 'comercial'];
+    if (!ROLES_FOTO.includes(req.user?.role)) {
+      return res.status(403).json({ error: 'No tienes permiso para subir fotos' });
+    }
+    const { tipo, url } = req.body || {};
+    const camposPorTipo = {
+      recogida:    'fotoRecogida',
+      entrega:     'fotoEntrega',
+      comprobante: 'fotoTransferenciaUrl',
+    };
+    const campo = camposPorTipo[tipo];
+    if (!campo) return res.status(400).json({ error: 'Tipo inválido. Usa: recogida | entrega | comprobante' });
+    if (!url || !url.startsWith('https://')) return res.status(400).json({ error: 'URL inválida' });
+
+    const ref = db.collection('orders').doc(req.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
+    const o = doc.data();
+    const usuarioNombre = req.user.nombre || req.user.email;
+
+    await ref.update({ [campo]: url, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+
+    await auditar({
+      accion: `FOTO_${tipo.toUpperCase()}_CARGADA_POSTERIOR`,
+      modulo: 'ordenes',
+      descripcion: `${usuarioNombre} subió foto de ${tipo} posterior en ${o.numeroOrden}`,
+      usuarioId: req.user.uid || req.user.id, usuarioNombre,
+      ordenId: req.params.id, documento: o.numeroOrden,
+      datos: { tipo, url }
+    });
+
+    res.json({ ok: true, campo, url });
+  } catch (e) {
+    console.error('POST fotos-adicionales:', e);
+    res.status(500).json({ error: 'Error guardando la foto' });
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 // GET /api/orders/:id/certificado/html — HTML imprimible del certificado
 // ─────────────────────────────────────────────────────────────────────────────

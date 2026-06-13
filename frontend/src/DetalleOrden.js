@@ -53,7 +53,8 @@ const [numeroFactura, setNumeroFactura] = useState('');
   // Sube a Cloudinary (mismo patrón de las fotos) y guarda la referencia en
   // la orden vía backend (que audita la carga y el borrado).
   const [subiendoFactura, setSubiendoFactura] = useState(false);
-  const puedeAdjuntarFactura = ['admin', 'tesoreria', 'comercial'].includes(user?.role);
+  const [modalFoto, setModalFoto] = useState(null);
+  const puedeAdjuntarFactura = puedeCargaFactura; // alias — ver bloque de permisos
 
   const adjuntarFacturaPdf = async (file) => {
     if (!file) return;
@@ -117,7 +118,13 @@ const [configCerts, setConfigCerts]   = useState([]);
 
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
-  const isAdmin = user?.role === 'admin';
+  const isAdmin     = user?.role === 'admin';
+  const isTesoreria = user?.role === 'tesoreria';
+  const isComercial = user?.role === 'comercial';
+  const puedeRegistrarPago  = isAdmin || isTesoreria || isComercial;
+  const puedeCargaFactura   = isAdmin || isTesoreria || isComercial;
+  const puedeSubirFotos     = isAdmin || isTesoreria || isComercial;
+  const puedeAvanzarEstado  = isAdmin;
   const esMovil = useEsMovil();
 
   useEffect(() => { cargarOrden(); cargarFormasPago(); cargarConfigCerts(); }, [ordenId]);
@@ -389,7 +396,37 @@ const cargarConfigCerts = async () => {
     orden.estado !== 'anulada' &&
     !(orden.lugarAtencion === 'oficina_rapida' && orden.pagado && siguienteEstado === 'cuadre_dinero');
 
+  const modalFotoRender = modalFoto ? (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+      <div style={{ background: '#fff', borderRadius: 16, width: '100%', maxWidth: 400, padding: 24, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+        <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 8 }}>
+          {modalFoto === 'recogida' ? '📦 Foto de recolección' : modalFoto === 'entrega' ? '✅ Foto de entrega' : '📄 Comprobante de pago'}
+        </div>
+        <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 16 }}>Sube la foto que faltó registrar. Quedará en el historial de la orden.</div>
+        <label style={{ display: 'block', background: '#6366f1', color: '#fff', borderRadius: 10, padding: '12px 0', textAlign: 'center', fontWeight: 700, cursor: 'pointer', marginBottom: 10 }}>
+          📷 Seleccionar archivo
+          <input type="file" accept="image/*" hidden onChange={async (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            try {
+              const fd = new FormData();
+              fd.append('file', file); fd.append('upload_preset', 'control360'); fd.append('folder', 'control360/logistica');
+              const up = await fetch('https://api.cloudinary.com/v1_1/dk8hposft/image/upload', { method: 'POST', body: fd });
+              const upJson = await up.json();
+              if (!upJson.secure_url) throw new Error('Error subiendo');
+              await axios.post(`${API}/orders/${ordenId}/fotos-adicionales`, { tipo: modalFoto, url: upJson.secure_url }, { headers });
+              await cargarOrden(); setModalFoto(null);
+            } catch (err) { alert(err.message || 'Error subiendo foto'); }
+            e.target.value = '';
+          }} />
+        </label>
+        <button onClick={() => setModalFoto(null)} style={{ width: '100%', background: '#f3f4f6', border: 'none', borderRadius: 10, padding: '11px 0', fontWeight: 700, cursor: 'pointer' }}>Cancelar</button>
+      </div>
+    </div>
+  ) : null;
+
   return (
+    <>
+    {modalFotoRender}
     <div style={{ ...s.wrapper, ...(esMovil ? { padding: '14px 10px' } : {}) }}>
       {/* HEADER */}
       <div style={{ ...s.pageHeader, ...(esMovil ? { flexDirection: 'column', alignItems: 'stretch' } : {}) }}>
@@ -709,6 +746,25 @@ const cargarConfigCerts = async () => {
             </div>
           )}
 
+          {puedeSubirFotos && (() => {
+            const btns = [];
+            if (!orden.fotoRecogida && ['en_taller','facturado','despacho','en_ruta_entrega','entrega_cobranza','completada'].includes(orden.estado))
+              btns.push(['recogida','📦 Subir foto recolección','#fffbeb','#fcd34d','#92400e']);
+            if (!orden.fotoEntrega && ['entrega_cobranza','cuadre_dinero','completada','cxc'].includes(orden.estado))
+              btns.push(['entrega','✅ Subir foto entrega','#f0fdf4','#86efac','#166534']);
+            if (!orden.fotoTransferenciaUrl && !orden.fotoTransferencia && orden.pagado && orden.formaPago && !['Efectivo','A crédito (CxC)','A crédito'].includes(orden.formaPago))
+              btns.push(['comprobante','📄 Subir comprobante','#eff6ff','#93c5fd','#1d4ed8']);
+            if (!btns.length) return null;
+            return <div style={{ marginBottom: 14, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {btns.map(([tipo,label,bg,border,color]) => (
+                <button key={tipo} onClick={() => setModalFoto(tipo)}
+                  style={{ fontSize: 11, padding: '5px 10px', background: bg, border: `1px solid ${border}`, borderRadius: 7, cursor: 'pointer', color, fontWeight: 700 }}>
+                  {label}
+                </button>
+              ))}
+            </div>;
+          })()}
+
           {/* GALERÍA DE FOTOS */}
           {(() => {
             const todasFotos = [
@@ -756,9 +812,13 @@ const cargarConfigCerts = async () => {
                   <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 12 }}>
                     Total a cobrar: <strong style={{ color: '#111', fontSize: 16 }}>{formatCOP(orden.total)}</strong>
                   </div>
-                  <button onClick={() => setMostrarPago(true)} style={s.btnPrimario}>
-                    + Registrar pago
-                  </button>
+                  {puedeRegistrarPago ? (
+                    <button onClick={() => setMostrarPago(true)} style={s.btnPrimario}>
+                      + Registrar pago
+                    </button>
+                  ) : (
+                    <div style={{ fontSize: 12, color: '#9ca3af' }}>El cobro lo procesa admin o tesorería</div>
+                  )}
                 </div>
               ) : (
                 <div>
@@ -881,12 +941,17 @@ const cargarConfigCerts = async () => {
             ⚠️ Debes ingresar el N° de factura DIAN antes de continuar
           </div>
         )}
-        <button
-          onClick={() => cambiarEstado(siguienteEstado)}
-          disabled={cambiandoEstado || cruzaFactura}
-          style={{ ...s.btnEstado, background: cruzaFactura ? '#9ca3af' : (ESTADOS[siguienteEstado]?.color || '#7c3aed') }}>
-          {cambiandoEstado ? 'Actualizando...' : labelBoton}
-        </button>
+        {puedeAvanzarEstado ? (
+          <button onClick={() => cambiarEstado(siguienteEstado)}
+            disabled={cambiandoEstado || cruzaFactura}
+            style={{ ...s.btnEstado, background: cruzaFactura ? '#9ca3af' : (ESTADOS[siguienteEstado]?.color || '#7c3aed') }}>
+            {cambiandoEstado ? 'Actualizando...' : labelBoton}
+          </button>
+        ) : (
+          <div style={{ padding: '10px 14px', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 10, fontSize: 12, color: '#6b7280', textAlign: 'center' }}>
+            🔒 Solo el administrador puede avanzar el estado de la orden
+          </div>
+        )}
       </>
     );
   })()}
@@ -1176,6 +1241,7 @@ const cargarConfigCerts = async () => {
         </div>
       )}
     </div>
+    </>
   );
 };
 
