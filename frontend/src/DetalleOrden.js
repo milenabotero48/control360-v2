@@ -66,9 +66,10 @@ const [numeroFactura, setNumeroFactura] = useState('');
       fd.append('file', file);
       fd.append('upload_preset', 'control360');
       fd.append('folder', 'control360/facturas');
-      // raw/upload: Cloudinary almacena el PDF como archivo crudo (no como imagen).
-      // Con auto/upload lo guardaba como image/upload y el navegador no podía abrirlo.
-      const up = await fetch('https://api.cloudinary.com/v1_1/dk8hposft/raw/upload', { method: 'POST', body: fd });
+      fd.append('resource_type', 'raw');
+      // Subir como raw con resource_type explícito — garantiza que la URL
+      // generada sea descargable directamente por el navegador.
+      const up = await fetch('https://api.cloudinary.com/v1_1/dk8hposft/auto/upload', { method: 'POST', body: fd });
       const upJson = await up.json();
       if (!upJson.secure_url) throw new Error(upJson.error?.message || 'Error subiendo el PDF');
       await axios.post(`${API}/orders/${ordenId}/factura-pdf`, { url: upJson.secure_url, nombre: file.name }, { headers });
@@ -582,18 +583,11 @@ const cargarConfigCerts = async () => {
                 <span style={s.infoLabel}>📎 Factura electrónica (PDF)</span>
                 {orden.facturaPdfUrl ? (
                   <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <a
-                      href={(() => {
-                        // Cloudinary raw/upload: insertar fl_attachment para que el navegador
-                        // descargue el PDF en vez de intentar abrirlo como imagen.
-                        const url = orden.facturaPdfUrl || '';
-                        return url.replace('/raw/upload/', '/raw/upload/fl_attachment/');
-                      })()}
-                      download={orden.facturaPdfNombre || 'factura.pdf'}
-                      target="_blank" rel="noopener noreferrer"
-                      style={{ color: '#0284c7', fontWeight: 700, fontSize: 13, textDecoration: 'none' }}>
+                    <button
+                      onClick={() => window.open(orden.facturaPdfUrl, '_blank')}
+                      style={{ background: 'none', border: 'none', padding: 0, color: '#0284c7', fontWeight: 700, fontSize: 13, cursor: 'pointer', textDecoration: 'underline' }}>
                       ⬇ Descargar PDF
-                    </a>
+                    </button>
                     <span style={{ fontSize: 11, color: '#9ca3af' }}>{orden.facturaPdfSubidaPor ? `subida por ${orden.facturaPdfSubidaPor}` : ''}</span>
                     {puedeAdjuntarFactura && (
                       <button onClick={eliminarFacturaPdf} title="Eliminar (queda en auditoría)"
