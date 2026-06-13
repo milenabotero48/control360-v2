@@ -344,7 +344,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
             <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>+ Nuevo cliente rápido</h3>
             <button onClick={() => setMostrarFormCliente(false)} style={s.btnCerrar}>✕</button>
           </div>
-          <MiniFormCliente token={token} empresas={empresas} onCreado={(c) => { seleccionarCliente(c); setMostrarFormCliente(false); cargarClientes(); }} onCancelar={() => setMostrarFormCliente(false)} />
+          <MiniFormCliente token={token} empresas={empresas} nombreInicial={buscarCliente} onCreado={(c) => { seleccionarCliente(c); setMostrarFormCliente(false); cargarClientes(); }} onCancelar={() => setMostrarFormCliente(false)} />
         </div>
       </div>
     );
@@ -982,9 +982,9 @@ const ModalPinBloqueo = ({ bloqueo, empresas, clienteNombre, onAutorizado, onCan
   );
 };
 
-const MiniFormCliente = ({ token, empresas, onCreado, onCancelar }) => {
+const MiniFormCliente = ({ token, empresas, onCreado, onCancelar, nombreInicial = '' }) => {
   const headers = { Authorization: 'Bearer ' + token };
-  const [form, setForm] = useState({ nombre: '', nit: '', celular: '', email: '', direccionPrincipal: '', empresaId: empresas.length > 0 ? empresas[0].id : '' });
+  const [form, setForm] = useState({ nombre: nombreInicial.toUpperCase().trim(), nit: '', celular: '', email: '', direccionPrincipal: '', empresaId: empresas.length > 0 ? empresas[0].id : '' });
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState('');
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));

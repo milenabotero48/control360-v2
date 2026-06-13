@@ -22,12 +22,13 @@ const MOTIVOS_DESCARTE = [
 ];
 
 const ETIQUETA_ESTADO = {
-  NUEVO:        { txt: 'Nuevo',        bg: '#ede9fe', color: '#7c3aed' },
-  EN_GESTION:   { txt: 'En gestión',   bg: '#dbeafe', color: '#1d4ed8' },
-  REPROGRAMADO: { txt: 'Reprogramado', bg: '#fef3c7', color: '#b45309' },
-  CONVERTIDO:   { txt: 'Convertido ✓', bg: '#dcfce7', color: '#15803d' },
-  DESCARTADO:   { txt: 'Descartado',   bg: '#fee2e2', color: '#b91c1c' },
-  SIN_CONTACTO: { txt: 'Sin contacto', bg: '#f3f4f6', color: '#6b7280' },
+  NUEVO:          { txt: 'Nuevo',           bg: '#ede9fe', color: '#7c3aed' },
+  EN_GESTION:     { txt: 'En gestión',      bg: '#dbeafe', color: '#1d4ed8' },
+  REPROGRAMADO:   { txt: 'Reprogramado',    bg: '#fef3c7', color: '#b45309' },
+  CONVERTIDO:     { txt: 'Convertido ✓',   bg: '#dcfce7', color: '#15803d' },
+  DESCARTADO:     { txt: 'Descartado',      bg: '#fee2e2', color: '#b91c1c' },
+  SIN_CONTACTO:   { txt: 'Sin contacto',    bg: '#f3f4f6', color: '#6b7280' },
+  NUMERO_ERRADO:  { txt: '📵 Nº errado',   bg: '#fff7ed', color: '#c2410c' },
 };
 
 const authHeaders = () => ({
@@ -176,12 +177,19 @@ function MiDia({ user, onNavegar }) {
             <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 8 }}>llamadas programadas para los próximos días {agendaAbierta ? '▲' : '▼'}</span>
           </button>
           {agendaAbierta && data.agendaProxima.map(a => (
-            <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '8px 0', borderBottom: '1px solid #f3f4f6', fontSize: 13, flexWrap: 'wrap' }}>
-              <div>
+            <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '10px 0', borderBottom: '1px solid #f3f4f6', fontSize: 13, flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
                 <span style={{ fontWeight: 700, color: '#1a1a2e' }}>{a.nombre}</span>
-                {a.notas && <span style={{ color: '#9ca3af', fontSize: 12 }}> · {a.notas}</span>}
+                {a.empresa && <span style={{ color: '#9ca3af', fontSize: 12 }}> · {a.empresa}</span>}
+                {a.notas && <div style={{ color: '#9ca3af', fontSize: 11, marginTop: 2 }}>📝 {a.notas}</div>}
               </div>
-              <span style={{ fontWeight: 700, color: '#b45309', fontSize: 12, whiteSpace: 'nowrap' }}>{a.fecha}{a.hora ? ` · ${a.hora}` : ''}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                <span style={{ fontWeight: 700, color: '#b45309', fontSize: 12, whiteSpace: 'nowrap' }}>{a.fecha}{a.hora ? ` · ${a.hora}` : ''}</span>
+                <button onClick={() => setProspectoActivo(a)} style={{
+                  border: 'none', borderRadius: 8, padding: '6px 12px',
+                  background: '#7c3aed', color: '#fff', fontWeight: 800, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap',
+                }}>☎ Registrar</button>
+              </div>
             </div>
           ))}
         </div>
@@ -280,6 +288,7 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
   const [emailNuevo, setEmailNuevo] = useState('');
   const [direccionNueva, setDireccionNueva] = useState('');
   const [cliContacto, setCliContacto] = useState('');
+  const [telefonoCorregido, setTelefonoCorregido] = useState('');
   const [empresas, setEmpresas] = useState([]);
   const [empresaFac, setEmpresaFac] = useState(null);
   const [clienteCreado, setClienteCreado] = useState(null);
@@ -300,10 +309,11 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
   const [error, setError] = useState(null);
 
   const RESULTADOS = [
-    { value: 'acepta',      label: '✅ Acepta el servicio', bg: '#dcfce7', color: '#15803d' },
-    { value: 'reprogramar', label: '📅 Llamar después',     bg: '#fef3c7', color: '#b45309' },
-    { value: 'no_contesto', label: '📵 No contestó',        bg: '#f3f4f6', color: '#6b7280' },
-    { value: 'no_interesa', label: '❌ No le interesa',     bg: '#fee2e2', color: '#b91c1c' },
+    { value: 'acepta',         label: '✅ Acepta el servicio', bg: '#dcfce7', color: '#15803d' },
+    { value: 'reprogramar',    label: '📅 Llamar después',     bg: '#fef3c7', color: '#b45309' },
+    { value: 'no_contesto',    label: '📵 No contestó',        bg: '#f3f4f6', color: '#6b7280' },
+    { value: 'no_interesa',    label: '❌ No le interesa',     bg: '#fee2e2', color: '#b91c1c' },
+    { value: 'numero_errado',  label: '🚫 Número errado',      bg: '#fff7ed', color: '#c2410c' },
   ];
 
   const guardar = async () => {
@@ -311,6 +321,7 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
     if (!resultado) return setError('Selecciona el resultado de la llamada');
     if (resultado === 'reprogramar' && !fecha) return setError('Indica la fecha de la próxima llamada');
     if (resultado === 'no_interesa' && !motivo) return setError('Indica el motivo');
+    if (resultado === 'numero_errado' && !telefonoCorregido.trim()) return setError('Escribe el número correcto o déjalo en blanco para buscarlo después');
     if (resultado === 'acepta') {
       if (!cliNombre.trim()) return setError('Verifica el nombre / razón social del cliente');
       if (!empresaFac) return setError('Selecciona la empresa que factura');
@@ -323,6 +334,7 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
         proximaLlamada: resultado === 'reprogramar' ? { fecha, hora: hora || null } : undefined,
         motivoDescarte: resultado === 'no_interesa' ? motivo : undefined,
         equiposCapturados: capturar ? equipos.filter(e => e.equipo) : undefined,
+        telefonoCorregido: resultado === 'numero_errado' && telefonoCorregido.trim() ? telefonoCorregido.trim() : undefined,
       };
       const res = await fetch(`${API}/comercial/prospectos/${prospecto.id}/llamada`, {
         method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
@@ -427,6 +439,20 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
                   <option value="">— Selecciona —</option>
                   {MOTIVOS_DESCARTE.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
                 </select>
+              </div>
+            )}
+
+            {resultado === 'numero_errado' && (
+              <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#c2410c', marginBottom: 6 }}>🚫 El número no pertenece a esta empresa</div>
+                <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 8 }}>Si ya tienes el número correcto escríbelo aquí. Si no, déjalo en blanco y búscalo después — el prospecto quedará marcado para corrección.</div>
+                <input
+                  type="tel"
+                  placeholder="Número correcto (si lo tienes)"
+                  value={telefonoCorregido}
+                  onChange={e => setTelefonoCorregido(e.target.value)}
+                  style={inputStyle}
+                />
               </div>
             )}
 

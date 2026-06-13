@@ -50,6 +50,23 @@ const sumarDias = (fechaStr, dias) => {
   return new Date(Date.UTC(y, m - 1, d + dias)).toISOString().slice(0, 10);
 };
 
+// Devuelve el próximo día hábil (lunes–viernes) a partir de la fecha dada.
+// Si la fecha base ya es hábil la retorna igual; si no, avanza hasta el lunes.
+const proximoDiaHabil = (fechaStr) => {
+  const [y, m, d] = fechaStr.split('-').map(Number);
+  const base = new Date(Date.UTC(y, m - 1, d));
+  // 0=Dom, 6=Sáb
+  while (base.getUTCDay() === 0 || base.getUTCDay() === 6) {
+    base.setUTCDate(base.getUTCDate() + 1);
+  }
+  return base.toISOString().slice(0, 10);
+};
+
+// Próximo día hábil después de hoy (para reintentos de no_contesto)
+const siguienteDiaHabil = (fechaStr) => {
+  return proximoDiaHabil(sumarDias(fechaStr, 1));
+};
+
 const normalizarTelefono = (telefono) => {
   if (!telefono) return null;
   let t = String(telefono).replace(/[\s\-\(\)\+\.]/g, '');
@@ -58,7 +75,7 @@ const normalizarTelefono = (telefono) => {
   return t.length >= 10 ? t : null;
 };
 
-const ESTADOS = ['NUEVO', 'EN_GESTION', 'REPROGRAMADO', 'CONVERTIDO', 'DESCARTADO', 'SIN_CONTACTO'];
+const ESTADOS = ['NUEVO', 'EN_GESTION', 'REPROGRAMADO', 'CONVERTIDO', 'DESCARTADO', 'SIN_CONTACTO', 'NUMERO_ERRADO'];
 
 // ═════════════════════════════════════════════════════════════════════════════
 // GET /api/comercial/prospectos — Lista con filtros (admin ve todo;
@@ -301,9 +318,9 @@ router.post('/prospectos/:id/llamada', async (req, res) => {
     const adminId = getAdminId(req);
     const uid = getUserId(req);
     const hoy = hoyColombia();
-    const { resultado, notas, proximaLlamada, motivoDescarte, equiposCapturados } = req.body;
+    const { resultado, notas, proximaLlamada, motivoDescarte, equiposCapturados, telefonoCorregido } = req.body;
 
-    if (!['acepta', 'reprogramar', 'no_contesto', 'no_interesa'].includes(resultado)) {
+    if (!['acepta', 'reprogramar', 'no_contesto', 'no_interesa', 'numero_errado'].includes(resultado)) {
       return res.status(400).json({ error: 'Resultado inválido' });
     }
 
@@ -388,7 +405,8 @@ router.post('/prospectos/:id/llamada', async (req, res) => {
           update.proximaLlamada = null;
         } else {
           update.estado = 'EN_GESTION';
-          update.proximaLlamada = { fecha: sumarDias(hoy, 1), hora: null }; // reintento mañana
+          // Reintento en el próximo DÍA HÁBIL (no fin de semana)
+          update.proximaLlamada = { fecha: siguienteDiaHabil(hoy), hora: null };
         }
         break;
       }
@@ -398,6 +416,28 @@ router.post('/prospectos/:id/llamada', async (req, res) => {
         update.estado = 'DESCARTADO';
         update.motivoDescarte = motivoDescarte;
         update.proximaLlamada = null;
+        break;
+
+      case 'numero_errado':
+        update.estado = 'NUMERO_ERRADO';
+        update.proximaLlamada = null;
+        update.intentosFallidos = 0;
+        // Si la comercial ya consiguió el número correcto, se actualiza en el acto
+        if (telefonoCorregido) {
+          const telNorm = normalizarTelefono(telefonoCorregido);
+          if (telNorm) {
+            // Verificar que no exista otro prospecto con ese teléfono
+            const dup = await db.collection('prospectos')
+              .where('adminId', '==', p.adminId)
+              .where('telefono', '==', telNorm)
+              .limit(1).get();
+            if (!dup.empty && dup.docs[0].id !== req.params.id) {
+              return res.status(409).json({ error: 'Ya existe un prospecto con ese número. Revisa la lista.' });
+            }
+            update.telefono = telNorm;
+            update.estado = 'NUEVO'; // con número correcto vuelve a la cola
+          }
+        }
         break;
     }
 
@@ -549,13 +589,34 @@ router.put('/prospectos/:id', async (req, res) => {
     if (!doc.exists) return res.status(404).json({ error: 'Prospecto no encontrado' });
     if (doc.data().adminId !== adminId) return res.status(403).json({ error: 'No autorizado' });
 
-    const { nombre, empresa, sucursal, asignadoA, notas, estado } = req.body;
+    const { nombre, empresa, sucursal, asignadoA, notas, estado, telefono } = req.body;
     const update = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
 
     if (nombre) update.nombre = String(nombre).trim();
     if (empresa !== undefined) update.empresa = empresa;
     if (sucursal !== undefined) update.sucursal = sucursal;
     if (notas !== undefined) update.notas = notas;
+
+    // Corrección de teléfono (disponible para vendedora cuando estado es NUMERO_ERRADO)
+    if (telefono !== undefined) {
+      const esNumeroErrado = doc.data().estado === 'NUMERO_ERRADO';
+      const puedeEditarTel = req.user?.role === 'admin' || esNumeroErrado;
+      if (!puedeEditarTel) return res.status(403).json({ error: 'Solo puedes editar el teléfono cuando el número está marcado como errado' });
+      const telNorm = normalizarTelefono(telefono);
+      if (!telNorm) return res.status(400).json({ error: 'Teléfono inválido' });
+      // Anti-duplicado
+      const dup = await db.collection('prospectos')
+        .where('adminId', '==', adminId)
+        .where('telefono', '==', telNorm)
+        .limit(1).get();
+      if (!dup.empty && dup.docs[0].id !== req.params.id) {
+        return res.status(409).json({ error: 'Ya existe un prospecto con ese número' });
+      }
+      update.telefono = telNorm;
+      // Si tenía número errado y ahora lo corrige → vuelve a NUEVO
+      if (esNumeroErrado) update.estado = 'NUEVO';
+    }
+
     if (asignadoA !== undefined) {
       if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Solo el admin asigna prospectos' });
       update.asignadoA = asignadoA;
