@@ -54,7 +54,6 @@ const [numeroFactura, setNumeroFactura] = useState('');
   // la orden vía backend (que audita la carga y el borrado).
   const [subiendoFactura, setSubiendoFactura] = useState(false);
   const [modalFoto, setModalFoto] = useState(null);
-  const puedeAdjuntarFactura = puedeCargaFactura; // alias — ver bloque de permisos
 
   const adjuntarFacturaPdf = async (file) => {
     if (!file) return;
@@ -125,6 +124,7 @@ const [configCerts, setConfigCerts]   = useState([]);
   const puedeCargaFactura   = isAdmin || isTesoreria || isComercial;
   const puedeSubirFotos     = isAdmin || isTesoreria || isComercial;
   const puedeAvanzarEstado  = isAdmin;
+  const puedeAdjuntarFactura = puedeCargaFactura; // alias — mismo valor
   const esMovil = useEsMovil();
 
   useEffect(() => { cargarOrden(); cargarFormasPago(); cargarConfigCerts(); }, [ordenId]);
