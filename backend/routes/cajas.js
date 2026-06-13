@@ -22,16 +22,36 @@ const registrarAuditoria = async (datos) => {
 // saldo viaja en null desde el backend — no es un ocultamiento de pantalla.
 // El efectivo sí es visible para quien tenga el módulo Caja.
 // ═══════════════════════════════════════════════════════════════════════════════
-const ROLES_VEN_SALDO_BANCO = ['admin'];
+const ROLES_VEN_TODO = ['admin'];
 
-const esCajaBanco = (caja) => (caja?.tipo || '').toLowerCase().includes('banco');
+// Regla corregida (feedback del primer cuadre real): lo VISIBLE es solo el
+// EFECTIVO físico. Banco, Nequi, Daviplata y cualquier cuenta virtual quedan
+// reservados — incluso las cajas nuevas que se creen nacen protegidas.
+const esCajaEfectivo = (caja) => (caja?.tipo || '').toLowerCase().includes('efectivo');
 
-const ocultarSaldosBancarios = (cajas, role) => {
-  if (ROLES_VEN_SALDO_BANCO.includes(role)) return cajas;
-  return cajas.map(c => esCajaBanco(c)
-    ? { ...c, saldo: null, saldoReservado: true }
-    : c);
+// Opción A (definición de negocio): un no-admin solo "posee" las cajas de
+// efectivo donde figura como responsable (nombre o email del usuario).
+const normTxt = (s) => (s || '').toString().trim().toLowerCase();
+const esCajaPropia = (caja, user) => {
+  const r = normTxt(caja?.responsable);
+  if (!r) return false;
+  return r === normTxt(user?.nombre) || r === normTxt(user?.email);
 };
+
+// Para no-admins: sus cajas de efectivo viajan completas (propia: true);
+// TODAS las demás viajan sin saldo (los selectores de egresos/compras las
+// siguen viendo para operar, pero sin montos). El admin ve todo.
+const aplicarVisibilidadCajas = (cajas, user) => {
+  if (ROLES_VEN_TODO.includes(user?.role)) return cajas.map(c => ({ ...c, propia: true }));
+  return cajas.map(c => {
+    const propia = esCajaEfectivo(c) && esCajaPropia(c, user);
+    return propia
+      ? { ...c, propia: true }
+      : { ...c, saldo: null, saldoReservado: true, propia: false };
+  });
+};
+// Alias de compatibilidad con el resto del archivo:
+const ocultarSaldosBancarios = (cajas, _role, user) => aplicarVisibilidadCajas(cajas, user);
 
 // ─── GET /api/cajas ───────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
@@ -39,8 +59,10 @@ router.get('/', async (req, res) => {
     const snap = await db.collection('cajas')
       .where('userId', '==', req.adminId || req.user.uid)
       .get();
-    const cajas = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    let cajas = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     cajas.sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
+    // Ola 3: saldos de cuentas bancarias SOLO para admin (regla de negocio).
+    cajas = aplicarVisibilidadCajas(cajas, req.user);
     res.json(cajas);
   } catch (e) {
     console.error('GET cajas:', e);
@@ -225,12 +247,23 @@ router.post('/traslado', async (req, res) => {
 // ─── GET /api/cajas/movimientos/todos ─────────────────────────────────────────
 router.get('/movimientos/todos', async (req, res) => {
   try {
+    // Opción A: un no-admin solo ve los movimientos de sus cajas propias.
+    let cajasPropiasIds = null;
+    if (!ROLES_VEN_TODO.includes(req.user?.role)) {
+      const snapC = await db.collection('cajas').where('userId', '==', req.adminId || req.user.uid).get();
+      cajasPropiasIds = snapC.docs
+        .map(d => ({ id: d.id, ...d.data() }))
+        .filter(c => esCajaEfectivo(c) && esCajaPropia(c, req.user))
+        .map(c => c.id);
+    }
     const snap = await db.collection('movimientos')
       .where('userId', '==', req.adminId || req.user.uid)
       .orderBy('createdAt', 'desc')
       .limit(200)
       .get();
-    res.json(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    let movsTodos = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (cajasPropiasIds) movsTodos = movsTodos.filter(m => cajasPropiasIds.includes(m.cajaId));
+    res.json(movsTodos);
   } catch (e) {
     console.error('GET movimientos:', e);
     try {
@@ -238,7 +271,8 @@ router.get('/movimientos/todos', async (req, res) => {
         .where('userId', '==', req.adminId || req.user.uid)
         .limit(200)
         .get();
-      const docs = snap2.docs.map(d => ({ id: d.id, ...d.data() }));
+      let docs = snap2.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (cajasPropiasIds) docs = docs.filter(m => cajasPropiasIds.includes(m.cajaId));
       docs.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
       res.json(docs);
     } catch (e2) {
@@ -269,6 +303,7 @@ router.get('/cierre-diario', async (req, res) => {
     // salen reservados, en pantalla y en el documento impreso.
     const userId = req.adminId || req.user.uid;
     const fecha = (req.query.fecha || '').trim() || new Date(Date.now() - 5 * 3600000).toISOString().split('T')[0];
+    const cajaIdFiltro = (req.query.cajaId || '').trim(); // '' = consolidado (todas)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
       return res.status(400).json({ error: 'Fecha inválida. Formato: YYYY-MM-DD' });
     }
@@ -295,7 +330,25 @@ router.get('/cierre-diario', async (req, res) => {
       db.collection('egresos').where('userId', '==', userId).limit(3000).get(),
     ]);
 
-    const cajas = snapCajas.docs.map(d => ({ id: d.id, ...d.data() })).filter(c => c.activa !== false);
+    let cajas = snapCajas.docs.map(d => ({ id: d.id, ...d.data() })).filter(c => c.activa !== false);
+
+    // ── SELECTOR DE CAJA (feedback del primer cuadre real) ────────────────
+    // Quien opera un punto de venta cuadra SU caja, no un consolidado.
+    //  - cajaId presente  → cuadre INDIVIDUAL de esa caja.
+    //  - sin cajaId       → CONSOLIDADO de todo el negocio (solo admin).
+    // No-admin: solo puede cuadrar una caja de efectivo donde sea responsable.
+    const esAdminRol = ROLES_VEN_TODO.includes(role);
+    const modoIndividual = !!cajaIdFiltro;
+    if (modoIndividual) {
+      const cajaSel = cajas.find(c => c.id === cajaIdFiltro);
+      if (!cajaSel) return res.status(404).json({ error: 'Caja no encontrada' });
+      if (!esAdminRol && !(esCajaEfectivo(cajaSel) && esCajaPropia(cajaSel, req.user))) {
+        return res.status(403).json({ error: 'Solo puedes cuadrar una caja de efectivo donde seas el responsable' });
+      }
+      cajas = [cajaSel];
+    } else if (!esAdminRol) {
+      return res.status(403).json({ error: 'El cuadre consolidado es solo para el administrador. Selecciona tu caja.' });
+    }
     const movs = snapMovs.docs.map(d => ({ id: d.id, ...d.data(), _ms: 0 }))
       .map(m => ({ ...m, _ms: msDe(m.createdAt) || msDe(m.fecha) }));
 
@@ -316,7 +369,7 @@ router.get('/cierre-diario', async (req, res) => {
       return {
         id: c.id, nombre: c.nombre, tipo: c.tipo || 'Efectivo',
         responsable: c.responsable || '',
-        esBanco: esCajaBanco(c),
+        esBanco: !esCajaEfectivo(c),
         saldoInicial: saldoInicialDia,
         ingresos: suma(['ingreso']),
         egresos: suma(['egreso']),
@@ -331,6 +384,7 @@ router.get('/cierre-diario', async (req, res) => {
     const nombreCaja = (id) => (cajas.find(c => c.id === id)?.nombre) || '—';
     const movimientosDia = movs
       .filter(m => m._ms >= iniDia && m._ms < finDia)
+      .filter(m => !modoIndividual || m.cajaId === cajaIdFiltro)
       .sort((a, b) => a._ms - b._ms)
       .map(m => ({
         hora: horaCO(m._ms), caja: nombreCaja(m.cajaId), tipo: m.tipo,
@@ -361,8 +415,7 @@ router.get('/cierre-diario', async (req, res) => {
       .filter(e => e.estado === 'PAGADO' && msDe(e.fechaPago || e.fecha) >= iniDia && msDe(e.fechaPago || e.fecha) < finDia)
       .map(e => ({ numero: e.numero || e.id, proveedor: e.proveedor || '', concepto: e.concepto || e.categoria || '', formaPago: e.formaPago || '', monto: totalEgreso(e) }));
 
-    // ── Reserva de saldos bancarios para no-admin ─────────────────────────
-    const esAdminRol = ROLES_VEN_SALDO_BANCO.includes(role);
+    // ── Reserva de saldos para no-admin (todo lo que no sea su efectivo) ──
     const cajasFinal = cajasReporte.map(c => (!esAdminRol && c.esBanco)
       ? { ...c, saldoInicial: null, saldoFinal: null, saldoReservado: true }
       : c);
@@ -372,6 +425,8 @@ router.get('/cierre-diario', async (req, res) => {
 
     res.json({
       fecha,
+      modo: modoIndividual ? 'individual' : 'consolidado',
+      cajaNombre: modoIndividual ? (cajas[0]?.nombre || '') : '',
       generadoPor: req.user.nombre || req.user.email,
       generadoEn: new Date().toISOString(),
       rol: role,
@@ -384,8 +439,9 @@ router.get('/cierre-diario', async (req, res) => {
         saldosReservados: cajasFinal.some(c => c.saldoReservado),
       },
       movimientosDia,
-      cxc: { nuevas: cxcNuevas, totalNuevas: sumar(cxcNuevas, 'monto'), cobradas: cxcCobradas, totalCobradas: sumar(cxcCobradas, 'monto') },
-      cxp: { nuevas: cxpNuevas, totalNuevas: sumar(cxpNuevas, 'monto'), pagadasHoy: egresosPagadosHoy, totalPagadasHoy: sumar(egresosPagadosHoy, 'monto') },
+      // CxC y CxP son del NEGOCIO, no de una caja → solo en el consolidado.
+      cxc: modoIndividual ? null : { nuevas: cxcNuevas, totalNuevas: sumar(cxcNuevas, 'monto'), cobradas: cxcCobradas, totalCobradas: sumar(cxcCobradas, 'monto') },
+      cxp: modoIndividual ? null : { nuevas: cxpNuevas, totalNuevas: sumar(cxpNuevas, 'monto'), pagadasHoy: egresosPagadosHoy, totalPagadasHoy: sumar(egresosPagadosHoy, 'monto') },
     });
   } catch (e) {
     console.error('GET cierre-diario:', e);
@@ -398,7 +454,8 @@ router.get('/:id', async (req, res) => {
   try {
     const doc = await db.collection('cajas').doc(req.params.id).get();
     if (!doc.exists) return res.status(404).json({ error: 'Caja no encontrada' });
-    res.json({ id: doc.id, ...doc.data() });
+    const [cajaUnica] = aplicarVisibilidadCajas([{ id: doc.id, ...doc.data() }], req.user);
+    res.json(cajaUnica);
   } catch (e) {
     res.status(500).json({ error: 'Error al obtener caja' });
   }

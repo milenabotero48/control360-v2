@@ -49,6 +49,31 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [sectores, setSectores]           = useState([]); // Mini-Ola 2.6
   const [cxcCliente, setCxcCliente]       = useState([]);
   const [clienteSel, setClienteSel]       = useState(null);
+
+  // ── Ola 3: cliente preseleccionado desde Telemercadeo ─────────────────────
+  // Tras convertir un prospecto, "Crear orden ahora" deja el cliente en
+  // sessionStorage; aquí se carga una sola vez y se limpia.
+  useEffect(() => {
+    if (esEdicion) return;
+    try {
+      const raw = sessionStorage.getItem('c360_orden_prefill');
+      if (!raw) return;
+      sessionStorage.removeItem('c360_orden_prefill');
+      const cli = JSON.parse(raw);
+      if (cli && cli.id) {
+        setClienteSel({ id: cli.id, nombre: cli.nombre || '', nit: cli.nit || '', celular: cli.celular || '', empresaId: cli.empresaId || '' });
+      }
+    } catch { /* prefill inválido: se ignora */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cuando cargan las empresas, sincronizar la facturadora del prefill.
+  useEffect(() => {
+    if (esEdicion || !clienteSel?.empresaId || !empresas.length) return;
+    const emp = empresas.find(e => e.id === clienteSel.empresaId);
+    if (emp) setEmpresaSel(emp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [empresas]);
   const [sucursalSel, setSucursalSel]     = useState(null);
   const [empresaSel, setEmpresaSel]       = useState(null);
   const [tipoServicio, setTipoServicio]   = useState('oficina');

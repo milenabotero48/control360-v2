@@ -112,7 +112,7 @@ export const generarHTMLCuadreDiario = (cierre, empresa, empresas = []) => {
     </div>
   </div>
 
-  <div class="titulo">CUADRE DIARIO DE CAJA</div>
+  <div class="titulo">${c.modo === 'individual' ? `CUADRE DIARIO — ${(c.cajaNombre || 'CAJA').toUpperCase()}` : 'CUADRE DIARIO DE CAJA · CONSOLIDADO'}</div>
   <div class="subtitulo">${fechaLargaCO(c.fecha)}</div>
 
   <div class="tarjetas">
@@ -124,7 +124,7 @@ export const generarHTMLCuadreDiario = (cierre, empresa, empresas = []) => {
   ${c.totales?.saldosReservados ? `<div class="nota-reserva">🔒 Los saldos de cuentas bancarias están reservados al administrador. Los totales mostrados corresponden a las cajas visibles para quien genera este documento.</div>` : ''}
 
   <div class="seccion">
-    <div class="seccion-titulo">Saldos por caja — continuidad del día</div>
+    <div class="seccion-titulo">${c.modo === 'individual' ? 'Continuidad del día — ' + (c.cajaNombre || '') : 'Saldos por caja — continuidad del día'}</div>
     <table>
       <thead><tr><th>Caja</th><th class="num">Saldo inicial<br/><span style="font-weight:400;text-transform:none">(= saldo final día anterior)</span></th><th class="num">Ingresos</th><th class="num">Egresos</th><th class="num">Traslados (+/−)</th><th class="num">Saldo final</th></tr></thead>
       <tbody>${(c.cajas || []).map(filaCaja).join('')}</tbody>

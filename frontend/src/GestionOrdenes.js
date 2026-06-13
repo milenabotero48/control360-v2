@@ -44,7 +44,11 @@ const GestionOrdenes = ({ user }) => {
   const [filtroDesde, setFiltroDesde]   = useState('');
   const [filtroHasta, setFiltroHasta]   = useState('');
   const [filtroPendientesPago, setFiltroPendientesPago] = useState(false);  // Ola 2.5
-  const [vistaActual, setVistaActual]   = useState('lista'); // lista | nueva | detalle | editar
+  // Ola 3: si venimos de Telemercadeo con un cliente recién convertido,
+  // se abre directamente la creación de orden (el prefill lo lee NuevaOrden).
+  const [vistaActual, setVistaActual]   = useState(() =>
+    sessionStorage.getItem('c360_orden_prefill') ? 'nueva' : 'lista'
+  ); // lista | nueva | detalle | editar
   const [ordenSeleccionada, setOrdenSeleccionada] = useState(null);
   const [ordenEditar, setOrdenEditar]   = useState(null);
   const [error, setError]               = useState('');
