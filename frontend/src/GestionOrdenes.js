@@ -54,6 +54,7 @@ const GestionOrdenes = ({ user }) => {
   const [error, setError]               = useState('');
   const [exito, setExito]               = useState('');
 
+
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
   const isAdmin = user?.role === 'admin';
@@ -65,11 +66,14 @@ const GestionOrdenes = ({ user }) => {
       if (filtroEstado) url += `estado=${filtroEstado}&`;
       if (filtroTipo) url += `tipoOrden=${filtroTipo}&`;
       if (buscar) url += `buscar=${encodeURIComponent(buscar)}&`;
+      // Ola 3: pasar fechas al backend para que filtre ANTES del límite
+      if (filtroDesde) url += `fechaDesde=${filtroDesde}&`;
+      if (filtroHasta) url += `fechaHasta=${filtroHasta}&`;
       const res = await axios.get(url, { headers });
       setOrdenes(Array.isArray(res.data) ? res.data : []);
     } catch { setOrdenes([]); }
     finally { setLoading(false); }
-  }, [filtroEstado, filtroTipo, buscar, token]);
+  }, [filtroEstado, filtroTipo, buscar, filtroDesde, filtroHasta, token]);
 
   useEffect(() => { cargarOrdenes(); }, [cargarOrdenes]);
 
@@ -252,7 +256,19 @@ const GestionOrdenes = ({ user }) => {
         )}
       </div>
 
-      <p style={s.contador}>{ordenesFiltradas.length} orden{ordenesFiltradas.length !== 1 ? 'es' : ''}</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+        <p style={s.contador}>
+          {totalOrdenes > ordenes.length
+            ? `Mostrando ${ordenes.length} de ${totalOrdenes} órdenes`
+            : `${ordenesFiltradas.length} orden${ordenesFiltradas.length !== 1 ? 'es' : ''}`}
+        </p>
+        {hayMas && (
+          <button onClick={() => cargarOrdenes(offsetActual + LIMITE_PAGINA)} disabled={loading}
+            style={{ padding: '7px 18px', background: '#f5f3ff', color: '#7c3aed', border: '1px solid #c4b5fd', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 12 }}>
+            {loading ? 'Cargando...' : 'Ver más ↓'}
+          </button>
+        )}
+      </div>
 
       {/* TABLA */}
       {loading ? (

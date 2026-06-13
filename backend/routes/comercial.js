@@ -682,4 +682,186 @@ router.get('/metricas', async (req, res) => {
   }
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// GET /api/comercial/reporte-telemercadeo — Reporte completo para Reportes
+// ─────────────────────────────────────────────────────────────────────────────
+// Extiende /metricas con: ventas en COP, embudo completo, convertidos con
+// su orden, e inteligencia de motivos en el período (no solo los descartados
+// globales). Accesible por admin.
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/reporte-telemercadeo', async (req, res) => {
+  try {
+    if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador ve este reporte' });
+    const adminId = getAdminId(req);
+    const hoy = hoyColombia();
+    const desde = esFecha(req.query.desde) ? req.query.desde : hoy.slice(0, 8) + '01';
+    const hasta = esFecha(req.query.hasta) ? req.query.hasta : hoy;
+
+    // ── 1. Llamadas del período ───────────────────────────────────────────────
+    const snapLlamadas = await db.collection('comercial_llamadas')
+      .where('adminId', '==', adminId).limit(10000).get();
+    const llamadas = snapLlamadas.docs.map(d => d.data())
+      .filter(l => l.fecha >= desde && l.fecha <= hasta);
+
+    // ── 2. Prospectos del tenant (base del embudo) ────────────────────────────
+    const snapProspectos = await db.collection('prospectos')
+      .where('adminId', '==', adminId).limit(5000).get();
+    const todosProspectos = snapProspectos.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    // Prospectos activos en el período: creados o actualizados dentro del rango
+    const prospectosEnPeriodo = todosProspectos.filter(p => {
+      const creado = (p.createdAt?.toDate ? p.createdAt.toDate().toISOString() : String(p.createdAt || '')).slice(0, 10);
+      return creado >= desde && creado <= hasta;
+    });
+
+    // Convertidos en el período (fuente de verdad: fecha de conversión)
+    const convertidosPeriodo = todosProspectos.filter(p =>
+      p.estado === 'CONVERTIDO' && p.fechaConversion >= desde && p.fechaConversion <= hasta
+    );
+
+    // ── 3. Órdenes generadas desde telemercadeo en el período ─────────────────
+    // (las que tienen clienteId de algún convertido → ventas en COP)
+    const idsClientesConv = new Set(convertidosPeriodo.map(p => p.clienteId).filter(Boolean));
+    let ordenesTelemercadeo = [];
+    if (idsClientesConv.size > 0) {
+      const snapOrds = await db.collection('orders')
+        .where('adminId', '==', adminId).limit(3000).get();
+      const ini = new Date(`${desde}T05:00:00.000Z`).getTime();
+      const fin = new Date(`${hasta}T05:00:00.000Z`).getTime() + 86400000;
+      ordenesTelemercadeo = snapOrds.docs.map(d => ({ id: d.id, ...d.data() })).filter(o => {
+        if (!idsClientesConv.has(o.clienteId)) return false;
+        const s = o.createdAt?._seconds || o.createdAt?.seconds;
+        const ms = s ? s * 1000 : Date.parse(o.createdAt || 0);
+        return ms >= ini && ms < fin && o.estado !== 'anulada';
+      });
+    }
+
+    // ── 4. Metas y usuarios ────────────────────────────────────────────────────
+    const usersSnap = await db.collection('users').where('creadoPor', '==', adminId).get();
+    const metas = {};
+    const nombreUsuario = {};
+    usersSnap.docs.forEach(d => {
+      metas[d.id] = Number(d.data().metaLlamadasDiarias) || 0;
+      nombreUsuario[d.id] = d.data().nombre || d.data().email || d.id;
+    });
+
+    // ── 5. KPIs por asesora ───────────────────────────────────────────────────
+    const porAsesora = {};
+    llamadas.forEach(l => {
+      const v = porAsesora[l.vendedoraId] = porAsesora[l.vendedoraId] || {
+        id: l.vendedoraId,
+        nombre: l.vendedoraNombre || nombreUsuario[l.vendedoraId] || l.vendedoraId,
+        totalLlamadas: 0, contactadas: 0, noContestadas: 0, reprogramadas: 0,
+        conversiones: 0, descartadas: 0,
+        diasActivos: new Set(), metaDiaria: metas[l.vendedoraId] || 0,
+        ventasCOP: 0,
+      };
+      v.totalLlamadas++;
+      if (l.resultado === 'no_contesto') v.noContestadas++;
+      else if (l.resultado === 'reprogramar') v.reprogramadas++;
+      else if (l.resultado === 'no_interesa') { v.descartadas++; v.contactadas++; }
+      else v.contactadas++;
+      v.diasActivos.add(l.fecha);
+    });
+
+    convertidosPeriodo.forEach(p => {
+      if (p.convertidoPor) {
+        const v = porAsesora[p.convertidoPor];
+        if (v) v.conversiones++;
+      }
+    });
+
+    ordenesTelemercadeo.forEach(o => {
+      // Buscar la asesora que convirtió este cliente
+      const pConv = convertidosPeriodo.find(p => p.clienteId === o.clienteId);
+      if (pConv?.convertidoPor && porAsesora[pConv.convertidoPor]) {
+        porAsesora[pConv.convertidoPor].ventasCOP += Number(o.total) || 0;
+      }
+    });
+
+    const asesoras = Object.values(porAsesora).map(v => {
+      const dias = v.diasActivos.size || 1;
+      const promedioDiario = Math.round(v.totalLlamadas / dias);
+      return {
+        id: v.id, nombre: v.nombre,
+        totalLlamadas: v.totalLlamadas,
+        promedioDiario,
+        diasActivos: dias,
+        contactadas: v.contactadas,
+        noContestadas: v.noContestadas,
+        reprogramadas: v.reprogramadas,
+        descartadas: v.descartadas,
+        conversiones: v.conversiones,
+        tasaContacto: v.totalLlamadas ? Math.round((v.contactadas / v.totalLlamadas) * 100) : 0,
+        tasaConversion: v.contactadas ? Math.round((v.conversiones / v.contactadas) * 100) : 0,
+        ventasCOP: v.ventasCOP,
+        ticketPromedio: v.conversiones > 0 ? Math.round(v.ventasCOP / v.conversiones) : 0,
+        metaDiaria: v.metaDiaria,
+        cumplimientoMeta: v.metaDiaria ? Math.round((promedioDiario / v.metaDiaria) * 100) : null,
+      };
+    }).sort((a, b) => b.conversiones - a.conversiones);
+
+    // ── 6. Embudo del período ─────────────────────────────────────────────────
+    const totalAsignados = prospectosEnPeriodo.length;
+    const totalContactados = new Set(llamadas.map(l => l.prospectoId)).size;
+    const totalReprogramados = todosProspectos.filter(p =>
+      p.estado === 'REPROGRAMADO' &&
+      p.proximaLlamada?.fecha >= desde && p.proximaLlamada?.fecha <= hasta
+    ).length;
+    const embudo = {
+      asignados: totalAsignados,
+      contactados: totalContactados,
+      reprogramados: totalReprogramados,
+      convertidos: convertidosPeriodo.length,
+      descartados: todosProspectos.filter(p =>
+        p.estado === 'DESCARTADO' &&
+        (p.updatedAt?.toDate ? p.updatedAt.toDate().toISOString() : '').slice(0, 10) >= desde
+      ).length,
+      pctContacto: totalAsignados ? Math.round((totalContactados / totalAsignados) * 100) : 0,
+      pctConversion: totalContactados ? Math.round((convertidosPeriodo.length / totalContactados) * 100) : 0,
+    };
+
+    // ── 7. Motivos de descarte del período ────────────────────────────────────
+    const motivosSnap = await db.collection('comercial_llamadas')
+      .where('adminId', '==', adminId).where('resultado', '==', 'no_interesa').limit(5000).get();
+    const motivosCont = {};
+    motivosSnap.docs.map(d => d.data())
+      .filter(l => l.fecha >= desde && l.fecha <= hasta)
+      .forEach(l => {
+        const m = l.motivoDescarte || l.notas || 'Sin especificar';
+        motivosCont[m] = (motivosCont[m] || 0) + 1;
+      });
+    const motivos = Object.entries(motivosCont)
+      .map(([motivo, cantidad]) => ({ motivo, cantidad }))
+      .sort((a, b) => b.cantidad - a.cantidad);
+
+    // ── 8. Convertidos con estado de orden ────────────────────────────────────
+    const clientesConOrden = new Set(ordenesTelemercadeo.map(o => o.clienteId));
+    const convertidosDetalle = convertidosPeriodo.map(p => ({
+      id: p.id,
+      nombre: p.nombre,
+      telefono: p.telefono,
+      fechaConversion: p.fechaConversion,
+      convertidoPorNombre: p.convertidoPorNombre || nombreUsuario[p.convertidoPor] || '—',
+      clienteId: p.clienteId,
+      tieneOrden: clientesConOrden.has(p.clienteId),
+      totalOrden: ordenesTelemercadeo.filter(o => o.clienteId === p.clienteId).reduce((a, o) => a + (Number(o.total) || 0), 0),
+    })).sort((a, b) => (b.fechaConversion || '').localeCompare(a.fechaConversion || ''));
+
+    // ── 9. Totales globales ───────────────────────────────────────────────────
+    const totales = {
+      llamadas: llamadas.length,
+      conversiones: convertidosPeriodo.length,
+      ventasCOP: ordenesTelemercadeo.reduce((a, o) => a + (Number(o.total) || 0), 0),
+      ordenesGeneradas: ordenesTelemercadeo.length,
+      sinOrden: convertidosPeriodo.filter(p => !clientesConOrden.has(p.clienteId)).length,
+    };
+
+    return res.json({ desde, hasta, asesoras, embudo, motivos, convertidos: convertidosDetalle, totales });
+  } catch (err) {
+    console.error('GET /comercial/reporte-telemercadeo:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

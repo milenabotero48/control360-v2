@@ -120,9 +120,10 @@ const ModuloReportes = ({ user }) => {
       {/* TABS */}
       <div style={s.tabs}>
         {[
-          { v: 'mensajero', l: '🚚 Mensajeros' },
-          { v: 'comercial', l: '💼 Comerciales' },
-          { v: 'taller',    l: '🔧 Taller' },
+          { v: 'mensajero',      l: '🚚 Mensajeros' },
+          { v: 'comercial',      l: '💼 Comerciales' },
+          { v: 'telemercadeo',    l: '📞 Telemercadeo' },
+          { v: 'taller',          l: '🔧 Taller' },
           { v: 'general',   l: '🎯 Operación General' },
         ].map(t => (
           <button key={t.v} onClick={() => setTab(t.v)}
@@ -134,6 +135,7 @@ const ModuloReportes = ({ user }) => {
       {tab === 'mensajero' && <VistaMensajero desde={desde} hasta={hasta} empresaId={empresaId} headers={headers} />}
       {tab === 'comercial' && <VistaComercial desde={desde} hasta={hasta} empresaId={empresaId} headers={headers} />}
       {tab === 'taller'    && <VistaTaller    desde={desde} hasta={hasta} empresaId={empresaId} headers={headers} />}
+      {tab === 'telemercadeo' && <VistaTelemercadeo desde={desde} hasta={hasta} headers={headers} />}
       {tab === 'general'   && <VistaGeneral   desde={desde} hasta={hasta} empresaId={empresaId} headers={headers} />}
     </div>
   );

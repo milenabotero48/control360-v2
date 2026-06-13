@@ -503,7 +503,16 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
 // ══════════════════════════════════════════════════════════════════════════════
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { estado, clienteId, mensajeroId, tipoOrden, empresaId, buscar, limite = 50 } = req.query;
+    // Ola 3: paginación + búsqueda en todas las órdenes.
+    // - Sin filtros activos: 50 por página (offset configurable)
+    // - Con búsqueda por texto o número: sin límite — busca en todo el historial
+    // - Con filtros de fecha/estado/tipo: sin límite — el resultado es el correcto
+    // Así en 2 años "OS-0001" siempre aparece al buscarla, aunque haya OS-3000.
+    const { estado, clienteId, mensajeroId, tipoOrden, empresaId, buscar,
+            fechaDesde, fechaHasta, limite = 50, offset = 0 } = req.query;
+    const hayFiltroActivo = buscar || fechaDesde || fechaHasta || estado || tipoOrden || clienteId || mensajeroId;
+    const limiteReal = hayFiltroActivo ? 2000 : Math.min(parseInt(limite) || 50, 200);
+    const offsetReal = parseInt(offset) || 0;
     const adminId = req.adminId || req.user?.uid || req.user?.id;
 
     let query = db.collection('orders').where('adminId', '==', adminId);
@@ -529,8 +538,8 @@ router.get('/', authenticate, async (req, res) => {
       const fb = b.createdAt?._seconds || new Date(b.createdAt || 0).getTime() / 1000;
       return fb - fa;
     });
-    ordenes = ordenes.slice(0, parseInt(limite));
-
+    // Filtros ANTES del slice (Ola 3: antes el slice se aplicaba primero,
+    // dejando invisible cualquier orden fuera del top-50 más recientes).
     if (buscar) {
       const term = buscar.toUpperCase();
       ordenes = ordenes.filter(o =>
@@ -538,10 +547,38 @@ router.get('/', authenticate, async (req, res) => {
         o.clienteNombre?.toUpperCase().includes(term)
       );
     }
-    if (clienteId) ordenes = ordenes.filter(o => o.clienteId === clienteId);
-    if (mensajeroId) ordenes = ordenes.filter(o => o.mensajeroId === mensajeroId);
+    if (clienteId)    ordenes = ordenes.filter(o => o.clienteId === clienteId);
+    if (mensajeroId)  ordenes = ordenes.filter(o => o.mensajeroId === mensajeroId);
+    if (fechaDesde) {
+      const ms = Date.parse(`${fechaDesde}T05:00:00.000Z`);
+      if (!isNaN(ms)) {
+        ordenes = ordenes.filter(o => {
+          const s = o.createdAt?._seconds || o.createdAt?.seconds;
+          if (s) return s * 1000 >= ms;
+          return Date.parse(o.createdAt || 0) >= ms;
+        });
+      }
+    }
+    if (fechaHasta) {
+      const ms = Date.parse(`${fechaHasta}T05:00:00.000Z`) + 86400000; // fin del día
+      if (!isNaN(ms)) {
+        ordenes = ordenes.filter(o => {
+          const s = o.createdAt?._seconds || o.createdAt?.seconds;
+          if (s) return s * 1000 < ms;
+          return Date.parse(o.createdAt || 0) < ms;
+        });
+      }
+    }
+    const totalFiltrado = ordenes.length;
+    ordenes = ordenes.slice(offsetReal, offsetReal + limiteReal);
 
-    res.json(ordenes);
+    res.json({
+      ordenes,
+      total: totalFiltrado,
+      offset: offsetReal,
+      limite: limiteReal,
+      hayMas: offsetReal + limiteReal < totalFiltrado
+    });
   } catch (error) {
     console.error('Error listando órdenes:', error);
     res.status(500).json({ error: error.message });

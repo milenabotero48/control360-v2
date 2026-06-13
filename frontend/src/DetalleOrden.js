@@ -66,7 +66,9 @@ const [numeroFactura, setNumeroFactura] = useState('');
       fd.append('file', file);
       fd.append('upload_preset', 'control360');
       fd.append('folder', 'control360/facturas');
-      const up = await fetch('https://api.cloudinary.com/v1_1/dk8hposft/auto/upload', { method: 'POST', body: fd });
+      // raw/upload: Cloudinary almacena el PDF como archivo crudo (no como imagen).
+      // Con auto/upload lo guardaba como image/upload y el navegador no podía abrirlo.
+      const up = await fetch('https://api.cloudinary.com/v1_1/dk8hposft/raw/upload', { method: 'POST', body: fd });
       const upJson = await up.json();
       if (!upJson.secure_url) throw new Error(upJson.error?.message || 'Error subiendo el PDF');
       await axios.post(`${API}/orders/${ordenId}/factura-pdf`, { url: upJson.secure_url, nombre: file.name }, { headers });
