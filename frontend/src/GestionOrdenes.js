@@ -53,16 +53,20 @@ const GestionOrdenes = ({ user }) => {
   const [ordenEditar, setOrdenEditar]   = useState(null);
   const [error, setError]               = useState('');
   const [exito, setExito]               = useState('');
-
+  // Ola 3: paginación
+  const [hayMas, setHayMas]             = useState(false);
+  const [totalOrdenes, setTotalOrdenes] = useState(0);
+  const [offsetActual, setOffsetActual] = useState(0);
+  const LIMITE_PAGINA = 50;
 
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
   const isAdmin = user?.role === 'admin';
 
-  const cargarOrdenes = useCallback(async () => {
+  const cargarOrdenes = useCallback(async (offset = 0) => {
     try {
       setLoading(true);
-      let url = `${API}/orders?`;
+      let url = `${API}/orders?limite=${LIMITE_PAGINA}&offset=${offset}&`;
       if (filtroEstado) url += `estado=${filtroEstado}&`;
       if (filtroTipo) url += `tipoOrden=${filtroTipo}&`;
       if (buscar) url += `buscar=${encodeURIComponent(buscar)}&`;
@@ -70,12 +74,21 @@ const GestionOrdenes = ({ user }) => {
       if (filtroDesde) url += `fechaDesde=${filtroDesde}&`;
       if (filtroHasta) url += `fechaHasta=${filtroHasta}&`;
       const res = await axios.get(url, { headers });
-      setOrdenes(Array.isArray(res.data) ? res.data : []);
-    } catch { setOrdenes([]); }
+      const data = res.data;
+      const lista = Array.isArray(data) ? data : (data.ordenes || []);
+      if (offset === 0) {
+        setOrdenes(lista);
+      } else {
+        setOrdenes(prev => [...prev, ...lista]);
+      }
+      setHayMas(Array.isArray(data) ? false : (data.hayMas || false));
+      setTotalOrdenes(Array.isArray(data) ? lista.length : (data.total || lista.length));
+      setOffsetActual(offset);
+    } catch { if (offset === 0) setOrdenes([]); }
     finally { setLoading(false); }
   }, [filtroEstado, filtroTipo, buscar, filtroDesde, filtroHasta, token]);
 
-  useEffect(() => { cargarOrdenes(); }, [cargarOrdenes]);
+  useEffect(() => { cargarOrdenes(0); }, [cargarOrdenes]);
 
   const abrirDetalle = (orden) => {
     setOrdenSeleccionada(orden);
