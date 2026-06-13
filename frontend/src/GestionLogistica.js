@@ -3,7 +3,17 @@ import axios from 'axios';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
-const fmtFecha = f => f ? new Date(f + 'T00:00:00').toLocaleDateString('es-CO', { day: '2-digit', month: 'short' }) : '—';
+// Ola 3 fix: la fecha puede venir como plana "YYYY-MM-DD" o como ISO completo
+// "YYYY-MM-DDTHH:mm:ss.000Z". Detectar y parsear correctamente en ambos casos.
+const fmtFecha = (f) => {
+  if (!f) return '—';
+  try {
+    const esSoloFecha = /^\d{4}-\d{2}-\d{2}$/.test(String(f));
+    const d = new Date(esSoloFecha ? f + 'T05:00:00.000Z' : f);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', timeZone: 'America/Bogota' });
+  } catch { return '—'; }
+};
 const hoy = () => new Date().toISOString().split('T')[0];
 
 // ─── ESTADO BADGE ─────────────────────────────────────────────────────────────
@@ -1068,7 +1078,7 @@ const GestionLogistica = ({ user }) => {
 
       if (!isMensajero) {
         const [resMensajeros, resResumen, resExt] = await Promise.all([
-          axios.get(`${API}/users`, { headers }),
+          axios.get(`${API}/users/mensajeros`, { headers }), // solo mensajeros — accesible para comercial
           axios.get(`${API}/logistica/resumen-mensajeros`, { headers }),
           axios.get(`${API}/logistica/extintores-prestamo?estado=${filtroExtEstado}&buscar=${buscarExt}`, { headers })
         ]);
