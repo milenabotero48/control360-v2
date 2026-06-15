@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
+import NuevaOrden from './NuevaOrden';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
@@ -1038,6 +1039,18 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
   );
 };
 
+// Hook reactivo — detecta móvil y se actualiza al rotar o redimensionar.
+// Reemplaza el useState estático que se "congelaba" al montar el componente.
+const useIsMobile = () => {
+  const [mob, setMob] = useState(() => window.innerWidth < 1024);
+  useEffect(() => {
+    const h = () => setMob(window.innerWidth < 1024);
+    window.addEventListener('resize', h);
+    return () => window.removeEventListener('resize', h);
+  }, []);
+  return mob;
+};
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // COMPONENTE PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1050,8 +1063,9 @@ const GestionLogistica = ({ user }) => {
   const [loading, setLoading]           = useState(true);
   const [modalAsignar, setModalAsignar] = useState(false);
   const [modalAvanzar, setModalAvanzar] = useState(null);
-  const [isMobile] = useState(() => window.innerWidth < 1024);
+  const isMobile = useIsMobile(); // ← reactivo, nunca se congela
   const [modalCuadre, setModalCuadre]   = useState(null);
+  const [mostrarNuevaOrden, setMostrarNuevaOrden] = useState(false);
   const [buscarExt, setBuscarExt]       = useState('');
   const [filtroExtEstado, setFiltroExtEstado] = useState('prestado');
   const [exito, setExito]               = useState('');
@@ -1209,6 +1223,11 @@ const GestionLogistica = ({ user }) => {
         </div>
         {!isMensajero && (
           <button onClick={() => setModalAsignar(true)} style={s.btnPri}>+ Asignar Ruta</button>
+        )}
+        {isMensajero && (
+          <button onClick={() => setMostrarNuevaOrden(true)} style={{ ...s.btnPri, background: 'linear-gradient(135deg,#16a34a,#15803d)' }}>
+            + Nueva Orden
+          </button>
         )}
       </div>
 
@@ -1489,6 +1508,17 @@ const GestionLogistica = ({ user }) => {
       )}
 
       {/* Mini-Ola 2.6: Modal Reasignar (solo admin) */}
+      {/* NUEVA ORDEN desde Logística (mensajero o comercial en móvil) */}
+      {mostrarNuevaOrden && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 2000, background: 'rgba(0,0,0,0.5)', overflow: 'auto' }}>
+          <NuevaOrden
+            user={user}
+            onCreada={() => { setMostrarNuevaOrden(false); cargar(); }}
+            onCancelar={() => setMostrarNuevaOrden(false)}
+          />
+        </div>
+      )}
+
       {modalReasignar && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: 20 }}
              onClick={() => setModalReasignar(null)}>

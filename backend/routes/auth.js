@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto  = require('crypto'); // nativo Node.js — sin instalar nada
 const router  = express.Router();
 const { db }  = require('../config/firebase');
 const jwt     = require('jsonwebtoken');
@@ -194,7 +195,10 @@ router.post('/login', async (req, res) => {
     }
 
     // ── Login exitoso → resetear contador ────────────────────────────────────
-    const resetCampos = { intentosFallidos: 0 };
+    // Generar sessionToken único para esta sesión.
+    // Cualquier login posterior sobreescribe este token → sesión anterior invalidada.
+    const sessionToken = crypto.randomBytes(32).toString('hex');
+    const resetCampos = { intentosFallidos: 0, sessionToken };
     if (user.bloqueadoHasta) resetCampos.bloqueadoHasta = admin.firestore.FieldValue.delete();
     await userDoc.ref.update(resetCampos);
 
@@ -259,6 +263,7 @@ router.post('/login', async (req, res) => {
         role:  user.role,
         nombre: user.nombre || user.email,
         adminId,
+        sessionToken, // incluido en JWT para verificación en middleware
       },
       process.env.JWT_SECRET || 'control360secret',
       { expiresIn: '24h' }

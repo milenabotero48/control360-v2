@@ -304,11 +304,34 @@ export default function AppRoot() {
     setCurrentPage(DASHBOARD_INICIAL[userData.role] || 'admin');
   };
 
-  const handleLogout = () => {
+  const handleLogout = (motivo) => {
     ['token','user','empresaActiva'].forEach(k => localStorage.removeItem(k));
     setUser(null);
     setCurrentPage('admin');
+    if (motivo === 'SESION_DESPLAZADA') {
+      // Pequeño delay para que React desmonte antes de mostrar el alert
+      setTimeout(() => alert('⚠️ Tu sesión fue cerrada porque iniciaste sesión en otro dispositivo.'), 300);
+    }
   };
+
+  // Interceptor global: si cualquier request recibe 401 SESION_DESPLAZADA
+  // el frontend cierra sesión automáticamente sin importar en qué módulo esté.
+  useEffect(() => {
+    const interceptor = window._axiosInterceptor;
+    if (interceptor !== undefined) return; // ya instalado
+    const axios = window.axios || require('axios');
+    window._axiosInterceptor = axios.interceptors.response.use(
+      r => r,
+      err => {
+        if (err?.response?.status === 401 &&
+            err?.response?.data?.error === 'SESION_DESPLAZADA') {
+          handleLogout('SESION_DESPLAZADA');
+        }
+        return Promise.reject(err);
+      }
+    );
+  // eslint-disable-next-line
+  }, []);
 
   const navigate = (key) => {
     if (PAGINAS_PRONTO.includes(key)) return;
@@ -440,6 +463,11 @@ export default function AppRoot() {
           <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(167,139,250,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: '#c4b5fd' }}>
             {iniciales}
           </div>
+          {/* Botón Salir siempre visible en móvil — no depende de que el sidebar abra */}
+          <button onClick={() => { if (window.confirm('¿Cerrar sesión?')) handleLogout(); }}
+            style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', color: '#fff', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>
+            ⏏
+          </button>
         </header>
 
         {/* Header desktop — Ola 3 Bloque 3 (mejora UX) */}

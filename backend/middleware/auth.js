@@ -9,6 +9,28 @@ const authenticate = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'control360secret');
     req.user = decoded;
     req.adminId = decoded.adminId || decoded.uid || decoded.id;
+
+    // ── SESIÓN ÚNICA ─────────────────────────────────────────────────────
+    // Verifica que el sessionToken del JWT coincida con el activo en Firestore.
+    // Si el usuario inició sesión en otro dispositivo, este queda invalidado.
+    if (decoded.sessionToken) {
+      try {
+        const userDoc = await db.collection('users').doc(decoded.uid).get();
+        if (userDoc.exists) {
+          const activeToken = userDoc.data().sessionToken;
+          if (activeToken && activeToken !== decoded.sessionToken) {
+            return res.status(401).json({
+              error: 'SESION_DESPLAZADA',
+              mensaje: 'Tu sesión fue iniciada en otro dispositivo.'
+            });
+          }
+        }
+      } catch (e) {
+        // Si falla Firestore, dejamos pasar para no bloquear por error temporal
+        console.error('Error verificando sessionToken:', e.message);
+      }
+    }
+
     next();
   } catch (error) {
     res.status(401).json({ error: 'Token inválido' });
