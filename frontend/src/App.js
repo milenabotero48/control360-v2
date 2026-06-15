@@ -26,6 +26,7 @@ import GestionQR from './GestionQR';
 import GestionCompras from './GestionCompras';
 import PanelSuscriptores from './PanelSuscriptores'; // Panel Maestro (solo superAdmin)
 import ModuloComercial from './ModuloComercial'; // Fase 3: Telemercadeo
+import Registro from './Registro'; // Registro publico de suscriptores
 
 // ─── NAV POR GRUPOS Y ROL ────────────────────────────────────────────────────
 // ─── MAPA COMPLETO DE MÓDULOS ─────────────────────────────────────────────────
@@ -338,6 +339,14 @@ export default function AppRoot() {
     setCurrentPage(key);
     setSidebarOpen(false);
   };
+
+  // Ruta publica de registro — antes de verificar sesion
+  if (window.location.pathname === '/registro' && !user) {
+    return <Registro onRegistroExitoso={(userData) => {
+      localStorage.setItem('user', JSON.stringify(userData));
+      handleLoginSuccess(userData);
+    }} />;
+  }
 
   if (!user) return <Login onLoginSuccess={handleLoginSuccess} />;
 
