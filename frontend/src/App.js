@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import axios from 'axios';
 import Login from './Login';
 import Dashboard from './Dashboard';
 import DashboardComercial from './DashboardComercial';
@@ -319,7 +320,6 @@ export default function AppRoot() {
   useEffect(() => {
     const interceptor = window._axiosInterceptor;
     if (interceptor !== undefined) return; // ya instalado
-    const axios = window.axios || require('axios');
     window._axiosInterceptor = axios.interceptors.response.use(
       r => r,
       err => {
