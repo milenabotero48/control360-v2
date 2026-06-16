@@ -34,7 +34,10 @@ const PLANES = [
 ];
 
 export default function Registro({ onRegistroExitoso }) {
-  const [planSel, setPlanSel] = useState('empresa');
+  const planDesdeURL = new URLSearchParams(window.location.search).get('plan');
+  const [planSel, setPlanSel] = useState(
+    ['punto_venta','independiente','empresa'].includes(planDesdeURL) ? planDesdeURL : 'empresa'
+  );
   const [paso,    setPaso]    = useState(1); // 1=elegir plan · 2=datos
   const [form,    setForm]    = useState({ nombre:'', empresa:'', email:'', password:'', confirmar:'', nit:'', telefono:'', ciudad:'' });
   const [error,   setError]   = useState('');
