@@ -603,9 +603,47 @@ const cargarConfigCerts = async () => {
       })()}
 
       <div style={{ ...s.grid2, ...(esMovil ? { gridTemplateColumns: '1fr' } : {}) }}>
-        {/* COLUMNA IZQUIERDA */}
+        {/* COLUMNA IZQUIERDA — empieza con Cliente */}
         <div>
-          {/* Info básica */}
+          {/* Cliente info — PRIMERO para verlo rápido */}
+          <div style={s.card}>
+            <h3 style={s.cardTitulo}>👥 Cliente</h3>
+            <div style={{ ...s.infoGrid, ...(esMovil ? { gridTemplateColumns: '1fr' } : {}) }}>
+              <div style={s.infoItem}><span style={s.infoLabel}>Nombre</span><strong>{orden.clienteNombre}</strong></div>
+              {orden.clienteNit && <div style={s.infoItem}><span style={s.infoLabel}>NIT/CC</span><span>{orden.clienteNit}</span></div>}
+              {orden.clienteCelular && (
+                <div style={s.infoItem}>
+                  <span style={s.infoLabel}>Celular</span>
+                  <a href={`tel:${orden.clienteCelular}`} style={{ color: '#7c3aed', fontWeight: 600 }}>{orden.clienteCelular}</a>
+                </div>
+              )}
+              {(orden.clienteDireccionPrincipal || orden.clienteDireccion) && (
+                <div style={s.infoItem}>
+                  <span style={s.infoLabel}>Dirección</span>
+                  <a href={`https://maps.google.com/?q=${encodeURIComponent(orden.clienteDireccionPrincipal || orden.clienteDireccion)}`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontSize: 13 }}>
+                    📍 {orden.clienteDireccionPrincipal || orden.clienteDireccion}
+                  </a>
+                </div>
+              )}
+              {orden.sucursalDireccion && orden.sucursalDireccion !== (orden.clienteDireccionPrincipal || orden.clienteDireccion) && (
+                <div style={s.infoItem}>
+                  <span style={s.infoLabel}>Dir. sucursal</span>
+                  <a href={`https://maps.google.com/?q=${encodeURIComponent(orden.sucursalDireccion)}`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', fontSize: 13 }}>
+                    📍 {orden.sucursalDireccion}
+                  </a>
+                </div>
+              )}
+              {orden.ciudad && <div style={s.infoItem}><span style={s.infoLabel}>Ciudad</span><span>{orden.ciudad}</span></div>}
+              {orden.emailLegal && (
+                <div style={s.infoItem}>
+                  <span style={s.infoLabel}>Email</span>
+                  <a href={`mailto:${orden.emailLegal}`} style={{ color: '#7c3aed', fontSize: 13 }}>{orden.emailLegal}</a>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Info básica de la orden — SEGUNDO */}
           <div style={s.card}>
             <h3 style={s.cardTitulo}>📋 Información</h3>
             <div style={{ ...s.infoGrid, ...(esMovil ? { gridTemplateColumns: '1fr' } : {}) }}>
@@ -850,6 +888,57 @@ const cargarConfigCerts = async () => {
                       value={montoPago} onChange={e => setMontoPago(e.target.value)} />
                   </div>
 
+                  {/* Calculadora de vuelto — solo efectivo */}
+                  {formaPago === 'Efectivo' && (() => {
+                    const total = orden.total || 0;
+                    const BILLETES = [100000, 50000, 20000, 10000, 5000, 2000, 1000, 500, 200, 100, 50];
+                    const [pagaCon, setPagaCon] = [montoPago, setMontoPago];
+                    const monto = parseFloat(pagaCon) || 0;
+                    const vuelto = monto - total;
+                    return (
+                      <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 10, padding: 14, marginBottom: 14 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: '#166534', marginBottom: 10 }}>💵 Calculadora de vuelto</div>
+                        <div style={{ fontSize: 12, color: '#374151', marginBottom: 8 }}>¿Con cuánto paga el cliente?</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                          {BILLETES.filter(b => b >= total || b >= 1000).slice(0, 8).map(b => (
+                            <button key={b} type="button"
+                              onClick={() => setMontoPago(String(b))}
+                              style={{
+                                padding: '6px 12px', borderRadius: 8, border: '2px solid',
+                                borderColor: parseFloat(pagaCon) === b ? '#16a34a' : '#d1fae5',
+                                background: parseFloat(pagaCon) === b ? '#16a34a' : '#fff',
+                                color: parseFloat(pagaCon) === b ? '#fff' : '#166534',
+                                fontSize: 12, fontWeight: 700, cursor: 'pointer'
+                              }}>
+                              ${new Intl.NumberFormat('es-CO').format(b)}
+                            </button>
+                          ))}
+                        </div>
+                        {monto > 0 && monto >= total && (
+                          <div style={{ background: '#fff', borderRadius: 8, padding: '10px 14px', border: '1px solid #86efac' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+                              <span>Total orden:</span>
+                              <span style={{ fontWeight: 700 }}>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(total)}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#374151', marginBottom: 6 }}>
+                              <span>Paga con:</span>
+                              <span style={{ fontWeight: 700 }}>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(monto)}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 16, fontWeight: 800, color: '#16a34a', borderTop: '1px solid #bbf7d0', paddingTop: 6 }}>
+                              <span>Vuelto:</span>
+                              <span>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(vuelto)}</span>
+                            </div>
+                          </div>
+                        )}
+                        {monto > 0 && monto < total && (
+                          <div style={{ background: '#fef2f2', borderRadius: 8, padding: '10px 14px', border: '1px solid #fca5a5', fontSize: 13, color: '#dc2626', fontWeight: 700 }}>
+                            ⚠️ El monto ingresado es menor al total de la orden
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   {/* Aviso CxC */}
                   {(formaPago === 'A crédito (CxC)' || formaPago === 'A crédito') && (
                     <div style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 8, padding: 10, fontSize: 12, color: '#92400e', marginBottom: 12 }}>
@@ -971,21 +1060,7 @@ const cargarConfigCerts = async () => {
             )}
           </div>
 
-          {/* Cliente info */}
-          <div style={s.card}>
-            <h3 style={s.cardTitulo}>👥 Cliente</h3>
-            <div style={{ ...s.infoGrid, ...(esMovil ? { gridTemplateColumns: '1fr' } : {}) }}>
-              <div style={s.infoItem}><span style={s.infoLabel}>Nombre</span><strong>{orden.clienteNombre}</strong></div>
-              {orden.clienteNit && <div style={s.infoItem}><span style={s.infoLabel}>NIT/CC</span><span>{orden.clienteNit}</span></div>}
-              {orden.clienteCelular && (
-                <div style={s.infoItem}>
-                  <span style={s.infoLabel}>Celular</span>
-                  <a href={`tel:${orden.clienteCelular}`} style={{ color: '#7c3aed', fontWeight: 600 }}>{orden.clienteCelular}</a>
-                </div>
-              )}
-              {orden.sucursalDireccion && <div style={s.infoItem}><span style={s.infoLabel}>Dirección</span><span>{orden.sucursalDireccion}</span></div>}
-            </div>
-          </div>
+          {/* ── COLUMNA DERECHA: empieza con Info de la orden ── */}
         </div>
       </div>
 

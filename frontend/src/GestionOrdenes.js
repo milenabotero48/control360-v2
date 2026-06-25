@@ -159,10 +159,13 @@ const GestionOrdenes = ({ user }) => {
       const pend = esVirtual && o.pagado === true && o.pagoValidado !== true && !o.pagoRechazado;
       if (!pend) return false;
     }
+    // FIX: filtrar por estado y tipo en memoria (los badges y el select)
+    if (filtroEstado && o.estado !== filtroEstado) return false;
+    if (filtroTipo  && o.tipoOrden !== filtroTipo)  return false;
     if (!filtroDesde && !filtroHasta) return true;
     const raw = o.createdAt?._seconds ? new Date(o.createdAt._seconds * 1000) : o.createdAt ? new Date(o.createdAt) : null;
     if (!raw) return true;
-    const fecha = raw.toISOString().split('T')[0]; // 'YYYY-MM-DD' sin horas
+    const fecha = raw.toISOString().split('T')[0];
     if (filtroDesde && fecha < filtroDesde) return false;
     if (filtroHasta && fecha > filtroHasta) return false;
     return true;
