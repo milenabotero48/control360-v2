@@ -256,6 +256,11 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar }) {
               {(p.totalLlamadas || 0) > 0 && <span style={{ fontSize: 10, color: '#9ca3af' }}>({p.totalLlamadas} llamada{p.totalLlamadas > 1 ? 's' : ''} previas)</span>}
             </div>
             {p.notas && <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6, background: '#f9fafb', borderRadius: 6, padding: '5px 8px' }}>📝 {p.notas}</div>}
+            {p.notasUltimaLlamada && (
+              <div style={{ fontSize: 11, color: '#7c3aed', marginTop: 4, background: '#f5f3ff', borderRadius: 6, padding: '5px 8px', borderLeft: '3px solid #7c3aed' }}>
+                💬 Última llamada: {p.notasUltimaLlamada}
+              </div>
+            )}
             <button onClick={() => onLlamar(p)} style={{
               marginTop: 10, width: '100%', border: 'none', borderRadius: 9, padding: '9px 0',
               background: '#7c3aed', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer',
@@ -545,6 +550,8 @@ function Prospectos({ user }) {
   const [empresaImport, setEmpresaImport] = useState(null);
   const [importandoV, setImportandoV] = useState(false);
   const [msgImportV, setMsgImportV] = useState(null);
+  const [erroresImportV, setErroresImportV] = useState([]);
+  const [erroresImport, setErroresImport] = useState([]);
 
   useEffect(() => {
     fetch(`${API}/companies`, { headers: authHeaders() })
@@ -599,6 +606,7 @@ function Prospectos({ user }) {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Error al importar');
       setMsgImportV(`✓ ${json.vencimientosCreados} vencimientos · ${json.clientesNuevos} clientes nuevos · ${json.prospectosCreados} prospectos nuevos · ${json.prospectosActualizados || 0} actualizados${json.errores?.length ? ` · ${json.errores.length} filas con error` : ''}`);
+      setErroresImportV(json.errores || []);
       cargar();
     } catch (e) {
       setMsgImportV(`✗ ${e.message}`);
@@ -654,6 +662,7 @@ function Prospectos({ user }) {
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Error al importar');
       setMsgImport(`✓ ${json.creados} prospectos creados · ${json.duplicados} duplicados omitidos${json.errores?.length ? ` · ${json.errores.length} filas con error` : ''}`);
+      setErroresImport(json.errores || []);
       cargar();
     } catch (e) {
       setMsgImport(`✗ ${e.message}`);
@@ -677,8 +686,16 @@ function Prospectos({ user }) {
 
   const crearProspecto = async () => {
     if (!nuevo.nombre || !nuevo.telefono) return alert('Nombre y teléfono son requeridos');
+    // Normalizar teléfono: quitar +57, espacios, guiones
+    const telNorm = String(nuevo.telefono).replace(/[\s\-\(\)\+\.]/g, '').replace(/^57(\d{10})$/, '$1');
+    // Verificar duplicado por teléfono en la lista ya cargada
+    const duplicado = lista.find(p => String(p.telefono || '').replace(/[\s\-\(\)\+\.]/g, '').replace(/^57(\d{10})$/, '$1') === telNorm);
+    if (duplicado) {
+      const confirmar = window.confirm(`⚠️ Ya existe un prospecto con este teléfono:\n"${duplicado.nombre}" (${duplicado.estado})\n\n¿Deseas crear uno nuevo de todas formas?`);
+      if (!confirmar) return;
+    }
     const res = await fetch(`${API}/comercial/prospectos`, {
-      method: 'POST', headers: authHeaders(), body: JSON.stringify(nuevo),
+      method: 'POST', headers: authHeaders(), body: JSON.stringify({ ...nuevo, telefono: telNorm }),
     });
     const json = await res.json();
     if (!res.ok) return alert(json.error || 'Error');
@@ -734,7 +751,38 @@ function Prospectos({ user }) {
             ⬇ Plantilla vencimientos
           </button>
         </div>
-        {msgImportV && <div style={{ marginTop: 8, fontSize: 12, fontWeight: 700, color: msgImportV.startsWith('✓') ? '#15803d' : '#b91c1c' }}>{msgImportV}</div>}
+        {msgImportV && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: msgImportV.startsWith('✓') ? '#15803d' : '#b91c1c' }}>{msgImportV}</div>
+            {erroresImportV.length > 0 && (
+              <div style={{ marginTop: 6, background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 8, padding: '10px 12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontWeight: 700, fontSize: 11, color: '#c2410c' }}>⚠ {erroresImportV.length} filas con error:</span>
+                  <button onClick={() => {
+                    const csv = '\uFEFFfila;error\n' + erroresImportV.map(e => `${e.fila};"${(e.error||'').replace(/"/g,'""')}"`).join('\n');
+                    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+                    const a = document.createElement('a'); a.href = url;
+                    a.download = `errores_vencimientos_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+                  }} style={{ background: '#fff', border: '1px solid #fed7aa', color: '#92400e', borderRadius: 6, padding: '3px 8px', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}>
+                    ⬇ CSV errores
+                  </button>
+                </div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+                    <tbody>
+                      {erroresImportV.map((e, i) => (
+                        <tr key={i} style={{ borderTop: i > 0 ? '1px solid #fed7aa' : 'none' }}>
+                          <td style={{ padding: '3px 6px', color: '#92400e', fontWeight: 700, whiteSpace: 'nowrap' }}>Fila #{e.fila}</td>
+                          <td style={{ padding: '3px 6px', color: '#78350f' }}>{e.error}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Acciones */}
@@ -750,11 +798,59 @@ function Prospectos({ user }) {
         <button onClick={() => setMostrarNuevo(!mostrarNuevo)} style={{ background: '#fff', border: '1px solid #c4b5fd', color: '#7c3aed', borderRadius: 9, padding: '9px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
           + Nuevo prospecto
         </button>
+        {user?.role === 'admin' && lista.length > 0 && (
+          <button onClick={() => {
+            const cols = ['nombre','empresa','telefono','sucursal','estado','asignadoA','notas'];
+            const cab = cols.join(';');
+            const filas = lista.map(p => cols.map(c => `"${(p[c] || '').toString().replace(/"/g,'""')}"`).join(';'));
+            const csv = '\uFEFF' + [cab, ...filas].join('\n');
+            const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+            const a = document.createElement('a'); a.href = url;
+            a.download = `prospectos_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+          }} style={{ background: '#fff', border: '1px solid #d1d5db', color: '#374151', borderRadius: 9, padding: '9px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
+            ⬇ Exportar prospectos
+          </button>
+        )}
       </div>
 
       {msgImport && (
-        <div style={{ background: msgImport.startsWith('✓') ? '#dcfce7' : '#fee2e2', color: msgImport.startsWith('✓') ? '#15803d' : '#b91c1c', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 600, marginBottom: 12 }}>
-          {msgImport}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ background: msgImport.startsWith('✓') ? '#dcfce7' : '#fee2e2', color: msgImport.startsWith('✓') ? '#15803d' : '#b91c1c', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 600 }}>
+            {msgImport}
+          </div>
+          {erroresImport.length > 0 && (
+            <div style={{ marginTop: 8, background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 8, padding: '10px 12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontWeight: 700, fontSize: 12, color: '#c2410c' }}>⚠ {erroresImport.length} filas no importadas — revisa los errores:</span>
+                <button onClick={() => {
+                  const csv = '\uFEFFfila;error\n' + erroresImport.map(e => `${e.fila};"${(e.error||'').replace(/"/g,'""')}"`).join('\n');
+                  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+                  const a = document.createElement('a'); a.href = url;
+                  a.download = `errores_importacion_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+                }} style={{ background: '#fff', border: '1px solid #fed7aa', color: '#92400e', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                  ⬇ Exportar errores CSV
+                </button>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ background: '#fef3c7' }}>
+                      <th style={{ padding: '4px 8px', textAlign: 'left', fontWeight: 700, whiteSpace: 'nowrap' }}>Fila</th>
+                      <th style={{ padding: '4px 8px', textAlign: 'left', fontWeight: 700 }}>Motivo del error</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {erroresImport.map((e, i) => (
+                      <tr key={i} style={{ borderTop: '1px solid #fed7aa' }}>
+                        <td style={{ padding: '4px 8px', color: '#92400e', fontWeight: 700, whiteSpace: 'nowrap' }}>Fila #{e.fila}</td>
+                        <td style={{ padding: '4px 8px', color: '#78350f' }}>{e.error}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

@@ -6,6 +6,17 @@ import { exportarExcel } from './exportExcel';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
+// ─── HOOK RESPONSIVE ──────────────────────────────────────────────────────────
+const useIsMobile = () => {
+  const [mob, setMob] = useState(() => window.innerWidth < 768);
+  useEffect(() => {
+    const fn = () => setMob(window.innerWidth < 768);
+    window.addEventListener('resize', fn);
+    return () => window.removeEventListener('resize', fn);
+  }, []);
+  return mob;
+};
+
 const ESTADOS = {
   completada:         { label: 'Completada',           color: '#16a34a', bg: '#f0fdf4',  modulo: null },
   cxc:                { label: 'CXC',                  color: '#dc2626', bg: '#fef2f2',  modulo: 'cxc' },
@@ -33,9 +44,20 @@ const estadosVisibles = (userModulos) => {
 const PRIORIDAD_COLOR = { normal: '#6b7280', alta: '#f59e0b', urgente: '#dc2626' };
 
 const formatCOP = (v) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', minimumFractionDigits: 0 }).format(v || 0);
-const formatFecha = (f) => { if (!f) return '—'; try { return new Date(f).toLocaleDateString('es-CO'); } catch { return '—'; } };
+const formatFecha = (f) => {
+  if (!f) return '—';
+  try {
+    if (f && f._seconds) return new Date(f._seconds * 1000).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' });
+    if (f && f.seconds)  return new Date(f.seconds  * 1000).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' });
+    const s = String(f);
+    // Fecha plana YYYY-MM-DD → mediodía local evita el desfase UTC-5 que mostraba día anterior
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(s + 'T12:00:00').toLocaleDateString('es-CO', { timeZone: 'America/Bogota' });
+    return new Date(s).toLocaleDateString('es-CO', { timeZone: 'America/Bogota' });
+  } catch { return '—'; }
+};
 
 const GestionOrdenes = ({ user }) => {
+  const isMobile = useIsMobile();
   const [ordenes, setOrdenes]           = useState([]);
   const [loading, setLoading]           = useState(true);
   const [buscar, setBuscar]             = useState('');
@@ -123,8 +145,9 @@ const GestionOrdenes = ({ user }) => {
   const esPagoVirtualFn = (fp) => fp && fp !== 'Efectivo' && fp !== 'A crédito (CxC)' &&
     fp !== 'A crédito' && fp !== 'CXC' && fp !== 'Cuenta por Pagar';
 
-  // Contador global de pendientes (para el badge del botón)
+  // Contador global de pendientes — excluir anuladas (pueden tener pagado:true previo)
   const totalPendientesPago = ordenes.filter(o =>
+    o.estado !== 'anulada' &&
     esPagoVirtualFn(o.formaPago) && o.pagado === true &&
     o.pagoValidado !== true && !o.pagoRechazado
   ).length;
@@ -283,7 +306,7 @@ const GestionOrdenes = ({ user }) => {
         )}
       </div>
 
-      {/* TABLA */}
+      {/* TABLA / TARJETAS */}
       {loading ? (
         <div style={s.loadingBox}>Cargando órdenes...</div>
       ) : ordenesFiltradas.length === 0 ? (
@@ -292,7 +315,53 @@ const GestionOrdenes = ({ user }) => {
           <p>{ordenes.length === 0 ? 'No hay órdenes aún' : 'No hay órdenes con los filtros seleccionados'}</p>
           {ordenes.length === 0 && <button onClick={() => setVistaActual('nueva')} style={s.btnPrimario}>+ Crear primera orden</button>}
         </div>
+      ) : isMobile ? (
+        /* ── MÓVIL: tarjetas ── */
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {ordenesFiltradas.map(o => {
+            const esCxcSinPagar = o.estado === 'completada' && o.pagado === false &&
+              ['A crédito (CxC)', 'A crédito', 'CXC', 'Cuenta por Pagar'].includes(o.formaPago);
+            const est = esCxcSinPagar
+              ? { label: '💳 CxC', color: '#b45309', bg: '#fef3c7' }
+              : (ESTADOS[o.estado] || { label: o.estado, color: '#666', bg: '#f3f4f6' });
+            const pendienteValidar = o.estado !== 'anulada' &&
+              esPagoVirtualFn(o.formaPago) && o.pagado === true &&
+              o.pagoValidado !== true && !o.pagoRechazado;
+            return (
+              <div key={o.id} onClick={() => abrirDetalle(o)}
+                style={{ background: '#fff', borderRadius: 14, border: '1px solid #e5e7eb', padding: 14, borderLeft: `4px solid ${est.color}`, cursor: 'pointer' }}>
+                {/* Fila 1: número + estado + total */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <code style={{ fontSize: 13, fontWeight: 800, color: '#1e1b4b', background: '#f5f3ff', padding: '2px 8px', borderRadius: 6 }}>{o.numeroOrden}</code>
+                    <span style={{ ...s.estadoBadge, background: est.bg, color: est.color, fontSize: 11 }}>{est.label}</span>
+                    {pendienteValidar && <span style={{ fontSize: 10, fontWeight: 700, background: '#fef3c7', color: '#92400e', padding: '2px 7px', borderRadius: 10, border: '1px solid #fcd34d' }}>⏳ Validar pago</span>}
+                    {o.pagoRechazado && <span style={{ fontSize: 10, fontWeight: 700, background: '#fee2e2', color: '#991b1b', padding: '2px 7px', borderRadius: 10 }}>❌ Rechazado</span>}
+                  </div>
+                  <span style={{ fontSize: 15, fontWeight: 800, color: '#16a34a' }}>{formatCOP(o.total)}</span>
+                </div>
+                {/* Fila 2: cliente */}
+                <div style={{ fontSize: 14, fontWeight: 700, color: '#111', marginBottom: 2 }}>{o.clienteNombre}</div>
+                {o.sucursalNombre && <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>🏢 {o.sucursalNombre}</div>}
+                {/* Fila 3: tipo + fecha + mensajero */}
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 12, color: '#6b7280' }}>
+                  <span>{o.tipoOrden === 'servicio' ? '🛠️ Servicio' : o.tipoOrden === 'cxc' ? '💰 CxC' : '📋 Interna'}</span>
+                  <span>📅 {formatFecha(o.fechaProgramada)}</span>
+                  {o.mensajeroNombre && <span>🚚 {o.mensajeroNombre}</span>}
+                </div>
+                {/* Acciones */}
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }} onClick={e => e.stopPropagation()}>
+                  <button onClick={() => abrirDetalle(o)} style={{ flex: 1, padding: '9px', background: '#ede9fe', color: '#7c3aed', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}>👁 Ver</button>
+                  {(['programada', 'en_ruta_recogida'].includes(o.estado) || user.role === 'admin') && (
+                    <button onClick={() => abrirEdicion(o)} style={{ flex: 1, padding: '9px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}>✏️ Editar</button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       ) : (
+        /* ── DESKTOP: tabla ── */
         <div style={s.tableWrap}>
           <table style={s.tabla}>
             <thead>
@@ -304,7 +373,6 @@ const GestionOrdenes = ({ user }) => {
             </thead>
             <tbody>
               {ordenesFiltradas.map((o, i) => {
-                // ✅ FIX: si está completada pero sin pagar y es CxC → mostrar "Cuenta por Cobrar"
                 const esCxcSinPagar = o.estado === 'completada' && o.pagado === false &&
                   ['A crédito (CxC)', 'A crédito', 'CXC', 'Cuenta por Pagar'].includes(o.formaPago);
                 const est = esCxcSinPagar
@@ -332,36 +400,24 @@ const GestionOrdenes = ({ user }) => {
                     </td>
                     <td style={s.td}>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-                        <span style={{ ...s.estadoBadge, background: est.bg, color: est.color }}>
-                          {est.label}
-                        </span>
-                        {/* Ola 2.5: badge visible cuando hay pago electrónico pendiente de validar */}
+                        <span style={{ ...s.estadoBadge, background: est.bg, color: est.color }}>{est.label}</span>
                         {(() => {
                           const esVirtual = o.formaPago && o.formaPago !== 'Efectivo' &&
                             o.formaPago !== 'A crédito (CxC)' && o.formaPago !== 'A crédito' &&
                             o.formaPago !== 'CXC' && o.formaPago !== 'Cuenta por Pagar';
-                          const pendienteValidar = esVirtual && o.pagado === true &&
+                          const pendienteValidar = o.estado !== 'anulada' && esVirtual && o.pagado === true &&
                             o.pagoValidado !== true && !o.pagoRechazado;
                           if (!pendienteValidar) return null;
                           return (
-                            <span style={{
-                              padding: '3px 10px', borderRadius: 12,
-                              background: '#fef3c7', color: '#92400e',
-                              fontSize: 11, fontWeight: 700,
-                              border: '1px solid #fcd34d',
-                              animation: 'pulse 2s infinite'
-                            }} title="Pago electrónico pendiente de validación por Admin/Tesorería">
+                            <span style={{ padding: '3px 10px', borderRadius: 12, background: '#fef3c7', color: '#92400e', fontSize: 11, fontWeight: 700, border: '1px solid #fcd34d', animation: 'pulse 2s infinite' }}
+                              title="Pago electrónico pendiente de validación por Admin/Tesorería">
                               ⏳ Validar pago
                             </span>
                           );
                         })()}
-                        {/* Si ya fue rechazado */}
                         {o.pagoRechazado && (
-                          <span style={{
-                            padding: '3px 10px', borderRadius: 12,
-                            background: '#fee2e2', color: '#991b1b',
-                            fontSize: 11, fontWeight: 700, border: '1px solid #fca5a5'
-                          }} title={o.pagoValidacionMotivo || 'Pago rechazado'}>
+                          <span style={{ padding: '3px 10px', borderRadius: 12, background: '#fee2e2', color: '#991b1b', fontSize: 11, fontWeight: 700, border: '1px solid #fca5a5' }}
+                            title={o.pagoValidacionMotivo || 'Pago rechazado'}>
                             ❌ Pago rechazado
                           </span>
                         )}

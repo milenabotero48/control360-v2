@@ -64,6 +64,14 @@ const snap = { forEach: (fn) => {
 
     snap.forEach(doc => {
       const o = { id: doc.id, ...doc.data() };
+
+      // FIX: excluir órdenes anuladas (pueden tener formaPago CxC y pagado:false)
+      if (o.estado === 'anulada') return;
+
+      // FIX: excluir órdenes con saldo real cero o negativo (ya cobradas completamente)
+      const saldoReal = (o.total || 0) - (o.montoPagado || 0);
+      if (saldoReal <= 0) return;
+
       const clienteId = o.clienteId;
       if (!mapaClientes[clienteId]) {
         mapaClientes[clienteId] = {

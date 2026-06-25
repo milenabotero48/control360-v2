@@ -922,7 +922,11 @@ router.put('/:id', authenticate, async (req, res) => {
     const {
       items, fechaProgramada, horaProgramada, prioridad,
       mensajeroId, mensajeroNombre, notasOrden,
-      sucursalId, sucursalNombre, sucursalDireccion
+      sucursalId, sucursalNombre, sucursalDireccion,
+      // FIX: campos que faltaban en el PUT
+      formaPago,
+      clienteId, clienteNombre, clienteNit, clienteCelular, clienteDireccionPrincipal,
+      empresaId, empresaNombre,
     } = req.body;
 
     const estadosEditables = ['programada', 'en_ruta_recogida'];
@@ -965,6 +969,19 @@ router.put('/:id', authenticate, async (req, res) => {
       cambios.sucursalId = sucursalId;
       cambios.sucursalNombre = sucursalNombre || '';
       cambios.sucursalDireccion = sucursalDireccion || '';
+    }
+    // FIX: guardar formaPago, cliente y empresa al editar
+    if (formaPago !== undefined) cambios.formaPago = formaPago;
+    if (clienteId !== undefined) {
+      cambios.clienteId = clienteId;
+      cambios.clienteNombre = clienteNombre || '';
+      cambios.clienteNit = clienteNit || '';
+      cambios.clienteCelular = clienteCelular || '';
+      if (clienteDireccionPrincipal !== undefined) cambios.clienteDireccionPrincipal = clienteDireccionPrincipal;
+    }
+    if (empresaId !== undefined) {
+      cambios.empresaId = empresaId;
+      cambios.empresaNombre = empresaNombre || '';
     }
 
     await ordenRef.update(cambios);

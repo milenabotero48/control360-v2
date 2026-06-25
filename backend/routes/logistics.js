@@ -477,6 +477,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
       update.extintorPrestamo = extintorPrestamo;
       // Registrar en colección de préstamos
       await db.collection('extintores_prestamo').add({
+        adminId: req.adminId || req.user?.uid || req.user?.id, // FIX: multi-tenant isolation
         numeroExtintor: extintorPrestamo,
         clienteId: orden.clienteId,
         clienteNombre: orden.clienteNombre,
@@ -876,13 +877,21 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get('/extintores-prestamo', async (req, res) => {
   try {
+    const adminId = req.adminId || req.user?.uid || req.user?.id; // FIX: multi-tenant isolation
     const { estado, buscar } = req.query;
-    let query = db.collection('extintores_prestamo');
-    if (estado && estado !== 'todos') query = query.where('estado', '==', estado);
-    const snap = await query.get();
+
+    // Traer solo los préstamos del tenant activo
+    const snap = await db.collection('extintores_prestamo')
+      .where('adminId', '==', adminId)
+      .get();
+
     let lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    // Ordenar del lado del servidor
+    // Filtros en memoria (evita índice compuesto)
+    if (estado && estado !== 'todos') {
+      lista = lista.filter(e => e.estado === estado);
+    }
+
     lista.sort((a, b) => (b.fechaSalida || '').localeCompare(a.fechaSalida || ''));
 
     if (buscar) {

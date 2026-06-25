@@ -1,6 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
+// ─── HOOK RESPONSIVE ──────────────────────────────────────────────────────────
+const useIsMobile = () => {
+  const [mob, setMob] = useState(() => window.innerWidth < 768);
+  useEffect(() => {
+    const fn = () => setMob(window.innerWidth < 768);
+    window.addEventListener('resize', fn);
+    return () => window.removeEventListener('resize', fn);
+  }, []);
+  return mob;
+};
+
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 const aDate = ts => {
@@ -675,6 +686,7 @@ const ModalConfig = ({ config, onGuardar, onCerrar }) => {
 // COMPONENTE PRINCIPAL
 // ══════════════════════════════════════════════════════════════════════════════
 const GestionCxC = ({ user }) => {
+  const isMobile = useIsMobile();
   const [clientes, setClientes]       = useState([]);
   const [loading, setLoading]         = useState(true);
   const [diasBloqueo, setDiasBloqueo] = useState(30);
@@ -836,55 +848,121 @@ const GestionCxC = ({ user }) => {
         </div>
       ) : (
         <div style={s.tableWrap}>
-          <table style={s.tabla}>
-            <thead>
-              <tr style={s.theadRow}>
-                {['Cliente', 'NIT', 'Órdenes', 'Total pendiente', 'Días vencido', 'Estado', 'Acciones'].map(h => (
-                  <th key={h} style={s.th}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {clientesFiltrados.map((c, i) => {
+          {isMobile ? (
+            /* ── MÓVIL: tarjetas ── */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: 12 }}>
+              {clientesFiltrados.map((c) => {
                 const bloqueado = c.diasVencido >= diasBloqueo;
                 const alerta = c.diasVencido >= 30 && !bloqueado;
+                const estadoColor = bloqueado ? '#dc2626' : alerta ? '#d97706' : '#16a34a';
+                const estadoBg   = bloqueado ? '#fef2f2' : alerta ? '#fffbeb' : '#f0fdf4';
+                const estadoTxt  = bloqueado ? '🔴 BLOQUEADO' : alerta ? '⚠️ ALERTA' : '✅ VIGENTE';
                 return (
-                  <tr key={c.clienteId} style={{ background: bloqueado ? '#fff5f5' : alerta ? '#fffbeb' : i % 2 === 0 ? '#fff' : '#f9fafb' }}>
-                    <td style={s.td}>
-                      <strong style={{ color: '#111' }}>{c.clienteNombre}</strong>
-                      {c.clienteCelular && <div style={{ fontSize: 11, color: '#9ca3af' }}>📱 {c.clienteCelular}</div>}
-                    </td>
-                    <td style={s.td}><code style={{ fontSize: 12, color: '#6b7280' }}>{c.clienteNit || '—'}</code></td>
-                    <td style={s.td}>{c.ordenes?.length || 0}</td>
-                    <td style={{ ...s.td, fontWeight: 700, color: '#dc2626' }}>{fmt(c.totalPendiente)}</td>
-                    <td style={s.td}>
-                      <span style={{ padding: '3px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700,
-                        background: bloqueado ? '#fef2f2' : alerta ? '#fffbeb' : '#f0fdf4',
-                        color: bloqueado ? '#dc2626' : alerta ? '#d97706' : '#16a34a' }}>
-                        {c.diasVencido}d
-                      </span>
-                    </td>
-                    <td style={s.td}>
-                      {bloqueado
-                        ? <span style={{ background: '#fef2f2', color: '#dc2626', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>🔴 BLOQUEADO</span>
-                        : alerta
-                          ? <span style={{ background: '#fffbeb', color: '#d97706', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>⚠️ ALERTA</span>
-                          : <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>✅ VIGENTE</span>
-                      }
-                    </td>
-                    <td style={s.td}>
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        <button onClick={() => setModalDetalle(c)}
-                          style={{ ...s.btnAccion, background: '#ede9fe', color: '#7c3aed' }}>📋 Ver</button>
-                        <button onClick={() => abrirGestion(c)}
-                          style={{ ...s.btnAccion, background: '#dbeafe', color: '#1d4ed8' }}>📞 Gestión</button>
+                  <div key={c.clienteId} style={{
+                    background: bloqueado ? '#fff5f5' : alerta ? '#fffef0' : '#fff',
+                    border: `1px solid ${bloqueado ? '#fca5a5' : alerta ? '#fcd34d' : '#e5e7eb'}`,
+                    borderRadius: 14, padding: 16,
+                    borderLeft: `4px solid ${estadoColor}`
+                  }}>
+                    {/* Nombre + estado */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
+                      <div>
+                        <div style={{ fontSize: 15, fontWeight: 800, color: '#111' }}>{c.clienteNombre}</div>
+                        {c.clienteNit && <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>NIT: {c.clienteNit}</div>}
+                        {c.clienteCelular && (
+                          <a href={`tel:${c.clienteCelular}`} style={{ fontSize: 12, color: '#16a34a', textDecoration: 'none' }}>
+                            📞 {c.clienteCelular}
+                          </a>
+                        )}
                       </div>
-                    </td>
-                  </tr>
+                      <span style={{ background: estadoBg, color: estadoColor, padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                        {estadoTxt}
+                      </span>
+                    </div>
+
+                    {/* Métricas */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, margin: '10px 0' }}>
+                      <div style={{ background: '#f8fafc', borderRadius: 8, padding: '8px 10px' }}>
+                        <div style={{ fontSize: 10, color: '#9ca3af', fontWeight: 700, textTransform: 'uppercase' }}>Órdenes</div>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: '#374151' }}>{c.ordenes?.length || 0}</div>
+                      </div>
+                      <div style={{ background: '#fef2f2', borderRadius: 8, padding: '8px 10px' }}>
+                        <div style={{ fontSize: 10, color: '#9ca3af', fontWeight: 700, textTransform: 'uppercase' }}>Pendiente</div>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: '#dc2626' }}>{fmt(c.totalPendiente)}</div>
+                      </div>
+                      <div style={{ background: estadoBg, borderRadius: 8, padding: '8px 10px' }}>
+                        <div style={{ fontSize: 10, color: '#9ca3af', fontWeight: 700, textTransform: 'uppercase' }}>Días</div>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: estadoColor }}>{c.diasVencido}d</div>
+                      </div>
+                    </div>
+
+                    {/* Acciones */}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                      <button onClick={() => setModalDetalle(c)}
+                        style={{ flex: 1, padding: '10px', background: '#ede9fe', color: '#7c3aed', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}>
+                        📋 Ver estado
+                      </button>
+                      <button onClick={() => abrirGestion(c)}
+                        style={{ flex: 1, padding: '10px', background: '#dbeafe', color: '#1d4ed8', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}>
+                        📞 Gestión
+                      </button>
+                    </div>
+                  </div>
                 );
               })}
-            </tbody>
-          </table>
+            </div>
+          ) : (
+            /* ── DESKTOP: tabla ── */
+            <table style={s.tabla}>
+              <thead>
+                <tr style={s.theadRow}>
+                  {['Cliente', 'NIT', 'Órdenes', 'Total pendiente', 'Días vencido', 'Estado', 'Acciones'].map(h => (
+                    <th key={h} style={s.th}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {clientesFiltrados.map((c, i) => {
+                  const bloqueado = c.diasVencido >= diasBloqueo;
+                  const alerta = c.diasVencido >= 30 && !bloqueado;
+                  return (
+                    <tr key={c.clienteId} style={{ background: bloqueado ? '#fff5f5' : alerta ? '#fffbeb' : i % 2 === 0 ? '#fff' : '#f9fafb' }}>
+                      <td style={s.td}>
+                        <strong style={{ color: '#111' }}>{c.clienteNombre}</strong>
+                        {c.clienteCelular && <div style={{ fontSize: 11, color: '#9ca3af' }}>📱 {c.clienteCelular}</div>}
+                      </td>
+                      <td style={s.td}><code style={{ fontSize: 12, color: '#6b7280' }}>{c.clienteNit || '—'}</code></td>
+                      <td style={s.td}>{c.ordenes?.length || 0}</td>
+                      <td style={{ ...s.td, fontWeight: 700, color: '#dc2626' }}>{fmt(c.totalPendiente)}</td>
+                      <td style={s.td}>
+                        <span style={{ padding: '3px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700,
+                          background: bloqueado ? '#fef2f2' : alerta ? '#fffbeb' : '#f0fdf4',
+                          color: bloqueado ? '#dc2626' : alerta ? '#d97706' : '#16a34a' }}>
+                          {c.diasVencido}d
+                        </span>
+                      </td>
+                      <td style={s.td}>
+                        {bloqueado
+                          ? <span style={{ background: '#fef2f2', color: '#dc2626', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>🔴 BLOQUEADO</span>
+                          : alerta
+                            ? <span style={{ background: '#fffbeb', color: '#d97706', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>⚠️ ALERTA</span>
+                            : <span style={{ background: '#f0fdf4', color: '#16a34a', padding: '3px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>✅ VIGENTE</span>
+                        }
+                      </td>
+                      <td style={s.td}>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <button onClick={() => setModalDetalle(c)}
+                            style={{ ...s.btnAccion, background: '#ede9fe', color: '#7c3aed' }}>📋 Ver</button>
+                          <button onClick={() => abrirGestion(c)}
+                            style={{ ...s.btnAccion, background: '#dbeafe', color: '#1d4ed8' }}>📞 Gestión</button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
 

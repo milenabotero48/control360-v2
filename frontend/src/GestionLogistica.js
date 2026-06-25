@@ -1076,6 +1076,8 @@ const GestionLogistica = ({ user }) => {
   const [modalReasignar, setModalReasignar] = useState(null);
   // Mini-Ola 2.6: modal Asignar Sector (cuando llega orden sin sector)
   const [modalAsignarSector, setModalAsignarSector] = useState(null);
+  // Modal detalle orden (ver info completa desde logística)
+  const [modalDetalleOrden, setModalDetalleOrden] = useState(null);
 
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
@@ -1279,29 +1281,73 @@ const GestionLogistica = ({ user }) => {
 
                   {/* MÓVIL: tarjetas */}
                   {(isMobile || isMensajero) ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                       {ordsGrupo.map(o => (
-                        <div key={o.id} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 14, borderLeft: `4px solid ${sector.color || '#6b7280'}` }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-                            <div>
-                              <code style={{ fontSize: 13, fontWeight: 700, color: '#1e1b4b' }}>{o.numeroOrden}</code>
+                        <div key={o.id} style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 16, borderLeft: `4px solid ${sector.color || '#6b7280'}` }}>
+                          {/* Fila superior: orden + estado + total */}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                              <code style={{ fontSize: 13, fontWeight: 800, color: '#1e1b4b', background: '#f5f3ff', padding: '2px 8px', borderRadius: 6 }}>{o.numeroOrden}</code>
                               <EstadoBadge estado={o.estado} orden={o} />
                             </div>
                             <span style={{ fontSize: 16, fontWeight: 800, color: '#16a34a' }}>{fmt(o.total)}</span>
                           </div>
-                          <div style={{ fontSize: 14, fontWeight: 700, color: '#111', marginBottom: 4 }}>{o.clienteNombre}</div>
-                          {(o.sucursalDireccion || o.clienteDireccion) && (
-                            <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>📍 {o.sucursalDireccion || o.clienteDireccion}</div>
+
+                          {/* Empresa */}
+                          <div style={{ fontSize: 15, fontWeight: 800, color: '#111', marginBottom: 2 }}>{o.clienteNombre}</div>
+
+                          {/* Sucursal */}
+                          {o.sucursalNombre && (
+                            <div style={{ fontSize: 12, color: '#7c3aed', fontWeight: 600, marginBottom: 4 }}>🏢 {o.sucursalNombre}</div>
                           )}
-                          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10 }}>
-                            📅 {fmtFecha(o.fechaProgramada)} · {o.lugarAtencion || 'servicio'}
+
+                          {/* Dirección → abre Google Maps */}
+                          {(o.sucursalDireccion || o.clienteDireccion) && (
+                            <a href={`https://maps.google.com/?q=${encodeURIComponent(o.sucursalDireccion || o.clienteDireccion)}`}
+                              target="_blank" rel="noreferrer"
+                              style={{ display: 'block', fontSize: 13, color: '#2563eb', marginBottom: 4, textDecoration: 'none' }}>
+                              📍 {o.sucursalDireccion || o.clienteDireccion}
+                            </a>
+                          )}
+
+                          {/* Teléfono → llamada directa */}
+                          {o.clienteCelular && (
+                            <a href={`tel:${o.clienteCelular}`}
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 13, color: '#16a34a', fontWeight: 700, marginBottom: 6, textDecoration: 'none' }}>
+                              📞 {o.clienteCelular}
+                            </a>
+                          )}
+
+                          {/* Fecha y tipo de servicio */}
+                          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 8 }}>
+                            📅 {fmtFecha(o.fechaProgramada)} · <span style={{ textTransform: 'capitalize', fontWeight: 600 }}>{o.lugarAtencion || 'servicio'}</span>
                           </div>
+
+                          {/* Resumen de items */}
+                          {Array.isArray(o.items) && o.items.length > 0 && (
+                            <div style={{ background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px 10px', marginBottom: 10 }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', marginBottom: 4 }}>Servicios / Productos</div>
+                              {o.items.slice(0, 4).map((it, i) => (
+                                <div key={i} style={{ fontSize: 12, color: '#374151', marginBottom: 2 }}>
+                                  • {it.cantidad > 1 ? `${it.cantidad}x ` : ''}{it.nombre}
+                                </div>
+                              ))}
+                              {o.items.length > 4 && (
+                                <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>+{o.items.length - 4} más...</div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Botones */}
                           <div style={{ display: 'flex', gap: 8 }}>
+                            <button onClick={() => setModalDetalleOrden(o)}
+                              style={{ flex: '0 0 auto', padding: '12px 14px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 10, cursor: 'pointer', fontSize: 13, fontWeight: 700 }}>
+                              👁 Ver
+                            </button>
                             <button onClick={() => setModalAvanzar(o)}
                               style={{ flex: 1, padding: '12px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: 10, cursor: 'pointer', fontSize: 15, fontWeight: 800 }}>
                               ▶️ Avanzar
                             </button>
-
                           </div>
                         </div>
                       ))}
@@ -1325,9 +1371,20 @@ const GestionLogistica = ({ user }) => {
                             borderLeft: tieneAsignado ? `3px solid ${sector.color || '#6b7280'}` : 'none'
                           }}>
                             <td style={s.td}><code style={{ fontSize: 12 }}>{o.numeroOrden}</code></td>
-                            <td style={s.td}><strong style={{ fontSize: 13 }}>{o.clienteNombre}</strong></td>
-                            <td style={{ ...s.td, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: '#6b7280' }}>
-                              {o.sucursalDireccion || o.clienteDireccion || '—'}
+                            <td style={s.td}>
+                              <div>
+                                <strong style={{ fontSize: 13 }}>{o.clienteNombre}</strong>
+                                {o.sucursalNombre && <div style={{ fontSize: 11, color: '#7c3aed', marginTop: 1 }}>🏢 {o.sucursalNombre}</div>}
+                              </div>
+                            </td>
+                            <td style={{ ...s.td, fontSize: 12, color: '#374151' }}>
+                              {(o.sucursalDireccion || o.clienteDireccion)
+                                ? <a href={`https://maps.google.com/?q=${encodeURIComponent(o.sucursalDireccion || o.clienteDireccion)}`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', textDecoration: 'none' }}>
+                                    📍 {o.sucursalDireccion || o.clienteDireccion}
+                                  </a>
+                                : <span style={{ color: '#9ca3af' }}>—</span>
+                              }
+                              {o.clienteCelular && <div style={{ marginTop: 2 }}><a href={`tel:${o.clienteCelular}`} style={{ fontSize: 11, color: '#16a34a', textDecoration: 'none' }}>📞 {o.clienteCelular}</a></div>}
                             </td>
                             <td style={s.td}><span style={{ fontSize: 12 }}>{fmtFecha(o.fechaProgramada)}</span></td>
                             <td style={s.td}><span style={{ fontSize: 12, color: '#6b7280' }}>{o.lugarAtencion || 'servicio'}</span></td>
@@ -1344,6 +1401,10 @@ const GestionLogistica = ({ user }) => {
                             <td style={s.td}><EstadoBadge estado={o.estado} orden={o} /></td>
                             <td style={s.td}>
                               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                <button onClick={() => setModalDetalleOrden(o)}
+                                  style={{ padding: '5px 10px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
+                                  👁 Ver
+                                </button>
                                 <button onClick={() => setModalAvanzar(o)}
                                   style={{ padding: '5px 12px', background: '#ede9fe', color: '#7c3aed', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
                                   ▶️ Avanzar
@@ -1584,6 +1645,105 @@ const GestionLogistica = ({ user }) => {
               <button onClick={() => setModalAsignarSector(null)}
                 style={{ padding: '8px 16px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>
                 Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal detalle orden — vista completa desde Logística */}
+      {modalDetalleOrden && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 1100, padding: 0 }}
+             onClick={() => setModalDetalleOrden(null)}>
+          <div style={{ background: '#fff', borderRadius: '16px 16px 0 0', width: '100%', maxWidth: 640, maxHeight: '90vh', overflow: 'auto', boxShadow: '0 -8px 40px rgba(0,0,0,0.2)' }}
+               onClick={e => e.stopPropagation()}>
+            {/* Header */}
+            <div style={{ padding: '16px 16px 12px', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <code style={{ fontSize: 14, fontWeight: 800, color: '#7c3aed', background: '#f5f3ff', padding: '2px 10px', borderRadius: 6 }}>{modalDetalleOrden.numeroOrden}</code>
+                <span style={{ marginLeft: 10 }}><EstadoBadge estado={modalDetalleOrden.estado} orden={modalDetalleOrden} /></span>
+              </div>
+              <button onClick={() => setModalDetalleOrden(null)} style={s.btnCerrar}>✕</button>
+            </div>
+            {/* Body */}
+            <div style={{ padding: '16px' }}>
+              {/* Datos del cliente */}
+              <div style={{ background: '#f8fafc', borderRadius: 10, padding: '12px 14px', marginBottom: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', marginBottom: 8 }}>Datos del cliente</div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: '#111', marginBottom: 4 }}>{modalDetalleOrden.clienteNombre}</div>
+                {modalDetalleOrden.clienteNit && <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>NIT: {modalDetalleOrden.clienteNit}</div>}
+                {modalDetalleOrden.sucursalNombre && (
+                  <div style={{ fontSize: 13, color: '#7c3aed', fontWeight: 600, marginBottom: 4 }}>🏢 {modalDetalleOrden.sucursalNombre}</div>
+                )}
+                {(modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion) && (
+                  <a href={`https://maps.google.com/?q=${encodeURIComponent(modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion)}`}
+                     target="_blank" rel="noreferrer"
+                     style={{ display: 'block', fontSize: 13, color: '#2563eb', marginBottom: 4, textDecoration: 'none' }}>
+                    📍 {modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion}
+                  </a>
+                )}
+                {modalDetalleOrden.clienteCelular && (
+                  <a href={`tel:${modalDetalleOrden.clienteCelular}`}
+                     style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 14, color: '#16a34a', fontWeight: 700, textDecoration: 'none' }}>
+                    📞 {modalDetalleOrden.clienteCelular}
+                  </a>
+                )}
+              </div>
+
+              {/* Info de la orden */}
+              <div style={{ background: '#f8fafc', borderRadius: 10, padding: '12px 14px', marginBottom: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', marginBottom: 8 }}>Info de la orden</div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#9ca3af' }}>Fecha programada</div>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>📅 {fmtFecha(modalDetalleOrden.fechaProgramada)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#9ca3af' }}>Tipo de servicio</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, textTransform: 'capitalize' }}>{modalDetalleOrden.lugarAtencion || '—'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#9ca3af' }}>Mensajero</div>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>{modalDetalleOrden.mensajeroNombre || 'Sin asignar'}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, color: '#9ca3af' }}>Total</div>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: '#16a34a' }}>{fmt(modalDetalleOrden.total)}</div>
+                  </div>
+                </div>
+                {modalDetalleOrden.notas && (
+                  <div style={{ marginTop: 10, padding: '8px 10px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, fontSize: 12, color: '#92400e' }}>
+                    💬 {modalDetalleOrden.notas}
+                  </div>
+                )}
+              </div>
+
+              {/* Productos / Servicios */}
+              {Array.isArray(modalDetalleOrden.items) && modalDetalleOrden.items.length > 0 && (
+                <div style={{ background: '#f8fafc', borderRadius: 10, padding: '12px 14px', marginBottom: 14 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', marginBottom: 8 }}>Productos / Servicios</div>
+                  {modalDetalleOrden.items.map((it, i) => (
+                    <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', padding: '8px 0', borderBottom: i < modalDetalleOrden.items.length - 1 ? '1px solid #e5e7eb' : 'none' }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: '#111' }}>
+                          {it.cantidad > 1 ? <span style={{ background: '#ede9fe', color: '#7c3aed', borderRadius: 4, padding: '1px 6px', fontSize: 11, marginRight: 6 }}>{it.cantidad}x</span> : null}
+                          {it.nombre}
+                        </div>
+                        {it.notas && <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>📝 {it.notas}</div>}
+                      </div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: '#16a34a', marginLeft: 12 }}>{fmt((it.precioUnitario || 0) * (it.cantidad || 1))}</div>
+                    </div>
+                  ))}
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10, paddingTop: 10, borderTop: '2px solid #e5e7eb' }}>
+                    <span style={{ fontSize: 15, fontWeight: 800, color: '#16a34a' }}>Total: {fmt(modalDetalleOrden.total)}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Botón avanzar desde el modal de detalle */}
+              <button onClick={() => { setModalDetalleOrden(null); setModalAvanzar(modalDetalleOrden); }}
+                style={{ width: '100%', padding: '14px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: 12, cursor: 'pointer', fontSize: 15, fontWeight: 800 }}>
+                ▶️ Avanzar esta orden
               </button>
             </div>
           </div>

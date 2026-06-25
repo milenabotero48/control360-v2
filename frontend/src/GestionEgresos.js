@@ -2,9 +2,33 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { exportarExcel } from './exportExcel';
 
+// ─── HOOK RESPONSIVE ──────────────────────────────────────────────────────────
+const useIsMobile = () => {
+  const [mob, setMob] = useState(() => window.innerWidth < 768);
+  useEffect(() => {
+    const fn = () => setMob(window.innerWidth < 768);
+    window.addEventListener('resize', fn);
+    return () => window.removeEventListener('resize', fn);
+  }, []);
+  return mob;
+};
+
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const fmt = (n) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
-const fmtDate = (ts) => { if (!ts) return '—'; return new Date(ts).toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' }); };
+const fmtDate = (ts) => {
+  if (!ts) return '—';
+  // Si es timestamp Firestore { _seconds } o { seconds }
+  if (ts && ts._seconds) return new Date(ts._seconds * 1000).toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Bogota' });
+  if (ts && ts.seconds)  return new Date(ts.seconds  * 1000).toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Bogota' });
+  const s = String(ts);
+  // Si es solo fecha YYYY-MM-DD: agregar T05:00:00Z (mediodía Colombia = UTC-5)
+  // para que NO se interprete como UTC medianoche y quede el día anterior en CO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return new Date(s + 'T12:00:00').toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Bogota' });
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Bogota' });
+};
 const genId = (prefix) => `${prefix}-${String(Math.floor(Math.random() * 9000) + 1000)}`;
 
 const CATEGORIAS_DEFAULT = ['Insumos taller', 'Transporte / Combustible', 'Arriendo', 'Servicios públicos', 'Papelería', 'Mantenimiento', 'Nómina', 'Marketing', 'Impuestos', 'Compra de Mercancia', 'Otros'];
@@ -978,6 +1002,7 @@ const imprimirEgreso = (eg, empresa) => {
 
 // ─── Principal ────────────────────────────────────────────────────────────────
 export default function GestionEgresos({ user }) {
+  const isMobile = useIsMobile();
   const [egresos, setEgresos]     = useState([]);
   const [cajas, setCajas]         = useState([]);
   const [empresas, setEmpresas]   = useState([]);
@@ -1110,7 +1135,11 @@ export default function GestionEgresos({ user }) {
     return true;
   });
 
-  const totalPendiente = egresosFiltered.filter(e => e.estado === 'PENDIENTE').reduce((a, e) => a + (e.totalPagar || Number(e.monto) || 0), 0);
+  const totalPendiente = egresosFiltered.filter(e => e.estado === 'PENDIENTE').reduce((a, e) => {
+    const total = e.totalPagar || Number(e.monto) || 0;
+    const pagado = Number(e.montoPagado) || 0;
+    return a + Math.max(0, total - pagado);
+  }, 0);
   const totalPagado = egresosFiltered.filter(e => e.estado === 'PAGADO').reduce((a, e) => a + (e.totalPagar || Number(e.monto) || 0), 0);
   const totalIvaDescontable = egresosFiltered.filter(e => e.estado === 'PAGADO').reduce((a, e) => a + (Number(e.ivaVal) || 0), 0);
   const totalRetenciones = egresosFiltered.filter(e => e.estado === 'PAGADO').reduce((a, e) => a + (Number(e.retenVal) || 0), 0);
@@ -1234,7 +1263,7 @@ export default function GestionEgresos({ user }) {
       {/* ── VISTA NORMAL: TODOS LOS EGRESOS ──────────────────────────────────── */}
       {tab === 'todos' && <>
       {/* KPIs */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2,1fr)' : 'repeat(4,1fr)', gap: 14, marginBottom: 20 }}>
         <div style={{ ...S.kpiCard, borderLeft: '4px solid #f59e0b' }}>
           <div style={S.kpiLabel}>⏳ Pendiente pago</div>
           <div style={{ ...S.kpiValue, color: '#d97706' }}>{fmt(totalPendiente)}</div>
@@ -1277,80 +1306,137 @@ export default function GestionEgresos({ user }) {
         )}
       </div>
 
-      {/* Tabla */}
-      <div style={S.tableWrap}>
-        <table style={S.table}>
-          <thead>
-            <tr style={S.thead}>
-              {['N°', 'Concepto', 'Proveedor', 'Categoría', 'Fecha', 'Base', 'IVA', 'Retención', 'Total', 'Estado', 'Acciones'].map(h => (
-                <th key={h} style={S.th}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {egresosFiltered.length === 0 && (
-              <tr><td colSpan={11} style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>No hay egresos con los filtros seleccionados</td></tr>
-            )}
-            {egresosFiltered.map(eg => (
-              <tr key={eg.id} style={S.tr}>
-                <td style={S.td}><span style={S.badge}>{eg.numero || 'EGR-?'}</span></td>
-                <td style={S.td}><div style={{ fontWeight: 600, fontSize: 13, color: '#1e293b' }}>{eg.concepto}</div></td>
-                <td style={S.td}><span style={{ fontSize: 13, color: '#475569' }}>{eg.proveedor || '—'}</span></td>
-                <td style={S.td}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
-                    <span style={S.tag}>{eg.categoria}</span>
-                    {(() => {
-                      // Ola 3: badge del tipo contable
-                      const meta = categoriasMeta.find(c => c.nombre === eg.categoria);
-                      if (!meta) return null;
-                      const tipo = meta.tipoERI || 'gasto_operativo';
-                      const labels = {
-                        'costo_servicio':       { l: '💰 Costo servicio', bg: '#fef3c7', c: '#92400e' },
-                        'gasto_personal':       { l: '👥 Personal',        bg: '#fce7f3', c: '#9f1239' },
-                        'gasto_operativo':      { l: '⚙️ Operativo',       bg: '#e0e7ff', c: '#3730a3' },
-                        'gasto_fijo':           { l: '🏠 Fijo',            bg: '#dbeafe', c: '#1e40af' },
-                        'gasto_administrativo': { l: '📋 Administrativo',  bg: '#f3e8ff', c: '#6b21a8' },
-                        'gasto_financiero':     { l: '🏦 Financiero',      bg: '#fee2e2', c: '#991b1b' },
-                        'gasto_fiscal':         { l: '📑 Fiscal',          bg: '#fef2f2', c: '#dc2626' },
-                      };
-                      const cfg = labels[tipo] || labels['gasto_operativo'];
-                      return (
-                        <span style={{
-                          fontSize: 10, fontWeight: 600,
-                          padding: '2px 6px', borderRadius: 6,
-                          background: cfg.bg, color: cfg.c
-                        }}>
-                          {cfg.l}
-                        </span>
-                      );
-                    })()}
-                  </div>
-                </td>
-                <td style={S.td}><span style={{ fontSize: 12, color: '#64748b' }}>{fmtDate(eg.fecha || eg.createdAt)}</span></td>
-                <td style={S.td}><span style={{ fontSize: 13 }}>{fmt(eg.monto)}</span></td>
-                <td style={S.td}>{eg.ivaVal > 0 ? <span style={{ fontSize: 12, color: '#0284c7', fontWeight: 600 }}>{fmt(eg.ivaVal)}</span> : <span style={{ color: '#d1d5db' }}>—</span>}</td>
-                <td style={S.td}>{eg.retenVal > 0 ? <span style={{ fontSize: 12, color: '#7c3aed', fontWeight: 600 }}>{fmt(eg.retenVal)}</span> : <span style={{ color: '#d1d5db' }}>—</span>}</td>
-                <td style={{ ...S.td, fontWeight: 700, color: '#1e293b', fontSize: 14 }}>{fmt(eg.totalPagar || eg.monto)}</td>
-                <td style={S.td}>
-                  <span style={{ ...S.estadoBadge, background: eg.estado === 'PAGADO' ? '#dcfce7' : '#fef3c7', color: eg.estado === 'PAGADO' ? '#166534' : '#92400e', border: `1px solid ${eg.estado === 'PAGADO' ? '#bbf7d0' : '#fde68a'}` }}>
-                    {eg.estado === 'PAGADO' ? '✅ PAGADO' : '⏳ PENDIENTE'}
+      {/* Tabla / Tarjetas */}
+      {isMobile ? (
+        /* ── MÓVIL: tarjetas ── */
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {egresosFiltered.length === 0 && (
+            <div style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>No hay egresos con los filtros seleccionados</div>
+          )}
+          {egresosFiltered.map(eg => {
+            const esPagado = eg.estado === 'PAGADO';
+            return (
+              <div key={eg.id} style={{ background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 14, borderLeft: `4px solid ${esPagado ? '#22c55e' : '#f59e0b'}` }}>
+                {/* Cabecera: número + estado */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={S.badge}>{eg.numero || 'EGR-?'}</span>
+                  <span style={{ ...S.estadoBadge, background: esPagado ? '#dcfce7' : '#fef3c7', color: esPagado ? '#166534' : '#92400e', border: `1px solid ${esPagado ? '#bbf7d0' : '#fde68a'}` }}>
+                    {esPagado ? '✅ PAGADO' : '⏳ PENDIENTE'}
                   </span>
-                </td>
-                <td style={{ ...S.td, whiteSpace: 'nowrap' }}>
+                </div>
+                {/* Concepto */}
+                <div style={{ fontWeight: 700, fontSize: 14, color: '#1e293b', marginBottom: 2 }}>{eg.concepto}</div>
+                {eg.proveedor && <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>{eg.proveedor}</div>}
+                {/* Categoría + Fecha */}
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                  <span style={S.tag}>{eg.categoria}</span>
+                  <span style={{ fontSize: 11, color: '#94a3b8' }}>📅 {fmtDate(eg.fecha || eg.createdAt)}</span>
+                </div>
+                {/* Montos */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 10 }}>
+                  <div style={{ background: '#f8fafc', borderRadius: 6, padding: '6px 8px' }}>
+                    <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600 }}>BASE</div>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>{fmt(eg.monto)}</div>
+                  </div>
+                  <div style={{ background: '#f8fafc', borderRadius: 6, padding: '6px 8px' }}>
+                    <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600 }}>TOTAL</div>
+                    <div style={{ fontSize: 14, fontWeight: 800, color: '#1e293b' }}>{fmt(eg.totalPagar || eg.monto)}</div>
+                  </div>
+                  {eg.ivaVal > 0 && (
+                    <div style={{ background: '#eff6ff', borderRadius: 6, padding: '6px 8px' }}>
+                      <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600 }}>IVA</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#0284c7' }}>{fmt(eg.ivaVal)}</div>
+                    </div>
+                  )}
+                  {eg.retenVal > 0 && (
+                    <div style={{ background: '#faf5ff', borderRadius: 6, padding: '6px 8px' }}>
+                      <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600 }}>RETENCIÓN</div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#7c3aed' }}>{fmt(eg.retenVal)}</div>
+                    </div>
+                  )}
+                </div>
+                {/* Acciones */}
+                <div style={{ display: 'flex', gap: 8 }}>
                   {eg.estado === 'PENDIENTE' && <>
-                    <button onClick={() => { setSelected(eg); setModal('editar'); }} style={S.actionBtn}>✏️</button>
-                    <button onClick={() => { setSelected(eg); setModal('pagar'); }} style={{ ...S.actionBtn, background: '#dcfce7', color: '#166534' }}>💳 Pagar</button>
+                    <button onClick={() => { setSelected(eg); setModal('editar'); }} style={{ ...S.actionBtn, flex: 1 }}>✏️ Editar</button>
+                    <button onClick={() => { setSelected(eg); setModal('pagar'); }} style={{ ...S.actionBtn, flex: 1, background: '#dcfce7', color: '#166534' }}>💳 Pagar</button>
                   </>}
-                  {eg.estado === 'PAGADO' && user?.role === 'admin' && (
+                  {esPagado && user?.role === 'admin' && (
                     <button onClick={() => { setSelected(eg); setModal('editarPagado'); }} style={{ ...S.actionBtn, background: '#fee2e2', color: '#991b1b' }}>🔐 Editar</button>
                   )}
                   <button onClick={() => imprimirEgreso(eg, empresaDeCaja(eg.cajaId))} style={S.actionBtn} title="Imprimir">🖨️</button>
-                </td>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        /* ── DESKTOP: tabla ── */
+        <div style={S.tableWrap}>
+          <table style={S.table}>
+            <thead>
+              <tr style={S.thead}>
+                {['N°', 'Concepto', 'Proveedor', 'Categoría', 'Fecha', 'Base', 'IVA', 'Retención', 'Total', 'Estado', 'Acciones'].map(h => (
+                  <th key={h} style={S.th}>{h}</th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {egresosFiltered.length === 0 && (
+                <tr><td colSpan={11} style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>No hay egresos con los filtros seleccionados</td></tr>
+              )}
+              {egresosFiltered.map(eg => (
+                <tr key={eg.id} style={S.tr}>
+                  <td style={S.td}><span style={S.badge}>{eg.numero || 'EGR-?'}</span></td>
+                  <td style={S.td}><div style={{ fontWeight: 600, fontSize: 13, color: '#1e293b' }}>{eg.concepto}</div></td>
+                  <td style={S.td}><span style={{ fontSize: 13, color: '#475569' }}>{eg.proveedor || '—'}</span></td>
+                  <td style={S.td}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                      <span style={S.tag}>{eg.categoria}</span>
+                      {(() => {
+                        const meta = categoriasMeta.find(c => c.nombre === eg.categoria);
+                        if (!meta) return null;
+                        const tipo = meta.tipoERI || 'gasto_operativo';
+                        const labels = {
+                          'costo_servicio':       { l: '💰 Costo servicio', bg: '#fef3c7', c: '#92400e' },
+                          'gasto_personal':       { l: '👥 Personal',        bg: '#fce7f3', c: '#9f1239' },
+                          'gasto_operativo':      { l: '⚙️ Operativo',       bg: '#e0e7ff', c: '#3730a3' },
+                          'gasto_fijo':           { l: '🏠 Fijo',            bg: '#dbeafe', c: '#1e40af' },
+                          'gasto_administrativo': { l: '📋 Administrativo',  bg: '#f3e8ff', c: '#6b21a8' },
+                          'gasto_financiero':     { l: '🏦 Financiero',      bg: '#fee2e2', c: '#991b1b' },
+                          'gasto_fiscal':         { l: '📑 Fiscal',          bg: '#fef2f2', c: '#dc2626' },
+                        };
+                        const cfg = labels[tipo] || labels['gasto_operativo'];
+                        return <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 6px', borderRadius: 6, background: cfg.bg, color: cfg.c }}>{cfg.l}</span>;
+                      })()}
+                    </div>
+                  </td>
+                  <td style={S.td}><span style={{ fontSize: 12, color: '#64748b' }}>{fmtDate(eg.fecha || eg.createdAt)}</span></td>
+                  <td style={S.td}><span style={{ fontSize: 13 }}>{fmt(eg.monto)}</span></td>
+                  <td style={S.td}>{eg.ivaVal > 0 ? <span style={{ fontSize: 12, color: '#0284c7', fontWeight: 600 }}>{fmt(eg.ivaVal)}</span> : <span style={{ color: '#d1d5db' }}>—</span>}</td>
+                  <td style={S.td}>{eg.retenVal > 0 ? <span style={{ fontSize: 12, color: '#7c3aed', fontWeight: 600 }}>{fmt(eg.retenVal)}</span> : <span style={{ color: '#d1d5db' }}>—</span>}</td>
+                  <td style={{ ...S.td, fontWeight: 700, color: '#1e293b', fontSize: 14 }}>{fmt(eg.totalPagar || eg.monto)}</td>
+                  <td style={S.td}>
+                    <span style={{ ...S.estadoBadge, background: eg.estado === 'PAGADO' ? '#dcfce7' : '#fef3c7', color: eg.estado === 'PAGADO' ? '#166534' : '#92400e', border: `1px solid ${eg.estado === 'PAGADO' ? '#bbf7d0' : '#fde68a'}` }}>
+                      {eg.estado === 'PAGADO' ? '✅ PAGADO' : '⏳ PENDIENTE'}
+                    </span>
+                  </td>
+                  <td style={{ ...S.td, whiteSpace: 'nowrap' }}>
+                    {eg.estado === 'PENDIENTE' && <>
+                      <button onClick={() => { setSelected(eg); setModal('editar'); }} style={S.actionBtn}>✏️</button>
+                      <button onClick={() => { setSelected(eg); setModal('pagar'); }} style={{ ...S.actionBtn, background: '#dcfce7', color: '#166534' }}>💳 Pagar</button>
+                    </>}
+                    {eg.estado === 'PAGADO' && user?.role === 'admin' && (
+                      <button onClick={() => { setSelected(eg); setModal('editarPagado'); }} style={{ ...S.actionBtn, background: '#fee2e2', color: '#991b1b' }}>🔐 Editar</button>
+                    )}
+                    <button onClick={() => imprimirEgreso(eg, empresaDeCaja(eg.cajaId))} style={S.actionBtn} title="Imprimir">🖨️</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       </>}
       {/* ── Fin vista normal ─────────────────────────────────────────────── */}
 
