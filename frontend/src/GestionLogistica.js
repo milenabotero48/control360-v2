@@ -1302,11 +1302,11 @@ const GestionLogistica = ({ user }) => {
                           )}
 
                           {/* Dirección → abre Google Maps */}
-                          {(o.sucursalDireccion || o.clienteDireccion) && (
-                            <a href={`https://maps.google.com/?q=${encodeURIComponent(o.sucursalDireccion || o.clienteDireccion)}`}
+                          {(o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal) && (
+                            <a href={`https://maps.google.com/?q=${encodeURIComponent(o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)}`}
                               target="_blank" rel="noreferrer"
                               style={{ display: 'block', fontSize: 13, color: '#2563eb', marginBottom: 4, textDecoration: 'none' }}>
-                              📍 {o.sucursalDireccion || o.clienteDireccion}
+                              📍 {o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal}
                             </a>
                           )}
 
@@ -1378,9 +1378,9 @@ const GestionLogistica = ({ user }) => {
                               </div>
                             </td>
                             <td style={{ ...s.td, fontSize: 12, color: '#374151' }}>
-                              {(o.sucursalDireccion || o.clienteDireccion)
-                                ? <a href={`https://maps.google.com/?q=${encodeURIComponent(o.sucursalDireccion || o.clienteDireccion)}`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', textDecoration: 'none' }}>
-                                    📍 {o.sucursalDireccion || o.clienteDireccion}
+                              {(o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)
+                                ? <a href={`https://maps.google.com/?q=${encodeURIComponent(o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)}`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', textDecoration: 'none' }}>
+                                    📍 {o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal}
                                   </a>
                                 : <span style={{ color: '#9ca3af' }}>—</span>
                               }
@@ -1675,11 +1675,11 @@ const GestionLogistica = ({ user }) => {
                 {modalDetalleOrden.sucursalNombre && (
                   <div style={{ fontSize: 13, color: '#7c3aed', fontWeight: 600, marginBottom: 4 }}>🏢 {modalDetalleOrden.sucursalNombre}</div>
                 )}
-                {(modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion) && (
-                  <a href={`https://maps.google.com/?q=${encodeURIComponent(modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion)}`}
+                {(modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion || modalDetalleOrden.clienteDireccionPrincipal) && (
+                  <a href={`https://maps.google.com/?q=${encodeURIComponent(modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion || modalDetalleOrden.clienteDireccionPrincipal)}`}
                      target="_blank" rel="noreferrer"
                      style={{ display: 'block', fontSize: 13, color: '#2563eb', marginBottom: 4, textDecoration: 'none' }}>
-                    📍 {modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion}
+                    📍 {modalDetalleOrden.sucursalDireccion || modalDetalleOrden.clienteDireccion || modalDetalleOrden.clienteDireccionPrincipal}
                   </a>
                 )}
                 {modalDetalleOrden.clienteCelular && (
