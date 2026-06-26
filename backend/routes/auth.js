@@ -1,5 +1,5 @@
 const express = require('express');
-const crypto  = require('crypto'); // nativo Node.js — sin instalar nada
+const crypto  = require('crypto');
 const router  = express.Router();
 const { db }  = require('../config/firebase');
 const jwt     = require('jsonwebtoken');
@@ -9,22 +9,21 @@ const { Resend } = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// ─── Modulos por plan (tabla validada Jun 2026) ───────────────────────────────
-// QR · WhatsApp · IA = SOLO super_pro · nunca visible en registro publico
+// ─── Módulos por plan (tabla validada Jun 2026) ───────────────────────────────
 const MODULOS_POR_PLAN = {
   punto_venta: [
-    'dashboard','clientes','ordenes','cotizaciones',
+    'dashboard','clientes','ordenes','cotizaciones','productos',
     'caja','egresos','proveedores','mi_empresa'
   ],
   independiente: [
-    'dashboard','clientes','ordenes','cotizaciones',
+    'dashboard','clientes','ordenes','cotizaciones','productos',
     'caja','egresos','proveedores','mi_empresa',
-    'productos','cxc','cxp','usuarios'
+    'cxc','cxp','usuarios','reportes'
   ],
   empresa: [
-    'dashboard','clientes','ordenes','cotizaciones',
+    'dashboard','clientes','ordenes','cotizaciones','productos',
     'caja','egresos','proveedores','mi_empresa',
-    'productos','cxc','cxp','usuarios',
+    'cxc','cxp','usuarios','reportes',
     'logistica','taller','compras','eri',
     'comercial','vencimientos'
   ],
@@ -318,137 +317,102 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// POST /api/auth/registro — Registro publico de nuevos suscriptores
-// ─────────────────────────────────────────────────────────────────────────────
-// Crea en una sola operacion:
-//   1. Documento en `users`         (role:admin, modulos segun plan elegido)
-//   2. Documento en `suscripciones` (estado:trial, 14 dias)
-//   3. Email de bienvenida via Resend (falla en silencio — no revierte)
-//   4. JWT listo para login inmediato
-// ═════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// POST /api/auth/registro — Registro público suscriptores
+// ═══════════════════════════════════════════════════════
 router.post('/registro', async (req, res) => {
   try {
     const { nombre, empresa, email, password, plan, nit, telefono, ciudad } = req.body;
-
-    // Validaciones basicas
-    if (!nombre || !email || !password || !plan) {
-      return res.status(400).json({ error: 'Nombre, email, contrasena y plan son obligatorios' });
-    }
-    if (!PLANES_PUBLICOS.includes(plan)) {
-      return res.status(400).json({ error: 'Plan invalido' });
-    }
-    if (String(password).length < 8) {
-      return res.status(400).json({ error: 'La contrasena debe tener minimo 8 caracteres' });
-    }
+    if (!nombre || !email || !password || !plan)
+      return res.status(400).json({ error: 'Nombre, email, contraseña y plan son obligatorios' });
+    if (!PLANES_PUBLICOS.includes(plan))
+      return res.status(400).json({ error: 'Plan inválido' });
+    if (String(password).length < 8)
+      return res.status(400).json({ error: 'La contraseña debe tener mínimo 8 caracteres' });
     const emailLimpio = String(email).trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailLimpio)) {
-      return res.status(400).json({ error: 'Email invalido' });
-    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailLimpio))
+      return res.status(400).json({ error: 'Email inválido' });
 
-    // Email unico
-    const existe = await db.collection('users')
-      .where('email', '==', emailLimpio).limit(1).get();
-    if (!existe.empty) {
-      return res.status(409).json({ error: 'Ya existe una cuenta con ese email' });
-    }
+    const existe = await db.collection('users').where('email','==',emailLimpio).limit(1).get();
+    if (!existe.empty) return res.status(409).json({ error: 'Ya existe una cuenta con ese email' });
 
-    // Crear usuario admin del tenant
     const passwordHash = await bcrypt.hash(String(password), 12);
-    const hoy = new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
-    const vencimiento = new Date(Date.now() - 5 * 3600 * 1000 + 14 * 24 * 3600 * 1000)
-      .toISOString().slice(0, 10);
+    const hoy = new Date(Date.now() - 5*3600*1000).toISOString().slice(0,10);
+    const vencimiento = new Date(Date.now() - 5*3600*1000 + 14*24*3600*1000).toISOString().slice(0,10);
 
     const userRef = await db.collection('users').add({
-      nombre:           String(nombre).trim(),
-      empresa:          empresa ? String(empresa).trim() : null,
-      email:            emailLimpio,
-      password_hash:    passwordHash,
-      role:             'admin',
-      modulos:          MODULOS_POR_PLAN[plan],
-      activo:           true,
-      nit:              nit ? String(nit).trim() : null,
-      telefono:         telefono ? String(telefono).trim() : null,
-      ciudad:           ciudad ? String(ciudad).trim() : null,
-      superAdmin:       false,
-      intentosFallidos: 0,
-      origenRegistro:   'web_publica',
-      createdAt:        admin.firestore.FieldValue.serverTimestamp(),
+      nombre: String(nombre).trim(), empresa: empresa||null,
+      email: emailLimpio, password_hash: passwordHash,
+      role: 'admin', modulos: MODULOS_POR_PLAN[plan],
+      activo: true, nit: nit||null, telefono: telefono||null,
+      ciudad: ciudad||null, superAdmin: false,
+      intentosFallidos: 0, origenRegistro: 'web_publica',
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     const adminId = userRef.id;
 
-    // Crear suscripcion trial 14 dias
     await db.collection('suscripciones').doc(adminId).set({
-      plan,
-      estado:           'trial',
-      fechaInicio:      hoy,
+      plan, estado: 'trial', fechaInicio: hoy,
       fechaVencimiento: vencimiento,
-      notas:            'Registro web automatico',
-      actualizadoEn:    admin.firestore.FieldValue.serverTimestamp(),
-      actualizadoPor:   'sistema',
+      notas: 'Registro web automático',
+      actualizadoEn: admin.firestore.FieldValue.serverTimestamp(),
+      actualizadoPor: 'sistema',
     });
 
-    // Auditar
     await db.collection('audit_logs').add({
-      accion: 'REGISTRO', modulo: 'auth',
-      descripcion: `Nuevo suscriptor: ${nombre} (${emailLimpio}) — Plan ${plan}`,
+      accion:'REGISTRO', modulo:'auth',
+      descripcion:`Nuevo suscriptor: ${nombre} (${emailLimpio}) — Plan ${plan}`,
       usuarioId: adminId, usuarioNombre: String(nombre).trim(), adminId,
-      datos: { plan, empresa: empresa || null, ciudad: ciudad || null },
+      datos: { plan, empresa:empresa||null, ciudad:ciudad||null },
       fecha: new Date().toISOString(),
       timestamp: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // Email de bienvenida (falla en silencio)
     const NOMBRE_PLAN = { punto_venta:'Punto de Venta', independiente:'Independiente', empresa:'Empresa' };
     try {
       await resend.emails.send({
         from: 'Control360 <noreply@tucontrol360.com>',
-        to:   emailLimpio,
-        subject: 'Bienvenido a Control360 — Tu prueba de 14 dias comienza ahora',
+        to: emailLimpio,
+        subject: 'Bienvenido a Control360 — Tu prueba de 14 días comienza ahora',
         html: `
           <div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px;">
             <div style="text-align:center;margin-bottom:24px;">
               <span style="font-size:26px;font-weight:900;color:#0D1B2A;">Control<span style="color:#7c3aed;">360</span></span>
             </div>
             <h2 style="color:#1a1a2e;">Hola ${String(nombre).trim().split(' ')[0]}, bienvenido 🎉</h2>
-            <p style="color:#374151;line-height:1.6;">Tu cuenta esta lista. Tienes <strong>14 dias gratis</strong> para explorar el plan <strong>${NOMBRE_PLAN[plan]}</strong>.</p>
+            <p style="color:#374151;line-height:1.6;">Tu cuenta está lista. Tienes <strong>14 días gratis</strong> para explorar el plan <strong>${NOMBRE_PLAN[plan]}</strong>.</p>
             <div style="background:#f5f3ff;border-radius:10px;padding:16px 20px;margin:20px 0;">
               <div style="font-size:11px;color:#6b7280;margin-bottom:4px;">TU ACCESO</div>
               <div style="font-weight:700;color:#1a1a2e;">${emailLimpio}</div>
               <div style="font-size:11px;color:#6b7280;margin-top:6px;">Plan: ${NOMBRE_PLAN[plan]} · Trial hasta: ${vencimiento}</div>
             </div>
-            <a href="${process.env.FRONTEND_URL || 'https://app.tucontrol360.com'}"
+            <div style="background:#fff8e6;border-radius:10px;padding:14px 18px;margin:16px 0;border:1px solid #f3d98a;">
+              <div style="font-size:11px;font-weight:800;color:#8a6d1a;margin-bottom:6px;">¿NECESITAS AYUDA?</div>
+              <p style="font-size:13px;color:#374151;margin:0;">Escríbenos por WhatsApp: <a href="https://wa.me/573234152442" style="color:#7c3aed;font-weight:700;">+57 323 415 2442</a></p>
+            </div>
+            <a href="${process.env.FRONTEND_URL||'https://app.tucontrol360.com'}"
                style="display:block;text-align:center;background:#7c3aed;color:white;padding:14px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px;margin:20px 0;">
               Ingresar a Control360
             </a>
-            <p style="color:#9ca3af;font-size:12px;text-align:center;">
-              Preguntas: escribe a <a href="mailto:soporte@tucontrol360.com" style="color:#7c3aed;">soporte@tucontrol360.com</a>
-            </p>
           </div>`,
       });
-    } catch (emailErr) {
-      console.error('Email bienvenida error:', emailErr.message);
-    }
+    } catch(e) { console.error('Email bienvenida:', e.message); }
 
-    // JWT para login inmediato (mismo formato que /login)
     const token = jwt.sign(
-      { uid: adminId, email: emailLimpio, role: 'admin', nombre: String(nombre).trim(), adminId },
-      process.env.JWT_SECRET || 'control360secret',
-      { expiresIn: '24h' }
+      { uid:adminId, email:emailLimpio, role:'admin', nombre:String(nombre).trim(), adminId },
+      process.env.JWT_SECRET||'control360secret',
+      { expiresIn:'24h' }
     );
-
     const userData = {
-      id: adminId, email: emailLimpio, nombre: String(nombre).trim(),
-      role: 'admin', modulos: MODULOS_POR_PLAN[plan],
-      modulosTenant: MODULOS_POR_PLAN[plan], adminId, superAdmin: false,
+      id:adminId, email:emailLimpio, nombre:String(nombre).trim(),
+      role:'admin', modulos:MODULOS_POR_PLAN[plan],
+      modulosTenant:MODULOS_POR_PLAN[plan], adminId, superAdmin:false,
     };
-
-    return res.status(201).json({ token, user: userData,
-      suscripcion: { plan, estado: 'trial', fechaVencimiento: vencimiento } });
-
-  } catch (error) {
+    return res.status(201).json({ token, user:userData,
+      suscripcion:{ plan, estado:'trial', fechaVencimiento:vencimiento } });
+  } catch(error) {
     console.error('Error en registro:', error);
-    return res.status(500).json({ error: 'Error al crear la cuenta. Intentalo de nuevo.' });
+    return res.status(500).json({ error:'Error al crear la cuenta. Inténtalo de nuevo.' });
   }
 });
 

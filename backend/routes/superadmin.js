@@ -31,6 +31,27 @@ const PLANES = {
   super_pro:     { nombre: 'Super Pro',      precio: 200000 } // Solo por invitación — nunca aparece en la landing
 };
 
+// ─── MÓDULOS POR PLAN (tabla validada Jun 2026) ───────────────────────────────
+const MODULOS_POR_PLAN = {
+  punto_venta: [
+    'dashboard','clientes','ordenes','cotizaciones','productos',
+    'caja','egresos','proveedores','mi_empresa'
+  ],
+  independiente: [
+    'dashboard','clientes','ordenes','cotizaciones','productos',
+    'caja','egresos','proveedores','mi_empresa',
+    'cxc','cxp','usuarios','reportes'
+  ],
+  empresa: [
+    'dashboard','clientes','ordenes','cotizaciones','productos',
+    'caja','egresos','proveedores','mi_empresa',
+    'cxc','cxp','usuarios','reportes',
+    'logistica','taller','compras','eri',
+    'comercial','vencimientos'
+  ],
+  super_pro: [] // [] = todos los módulos incluido qr, whatsapp, ia_whatsapp
+};
+
 const ESTADOS = ['trial', 'activo', 'suspendido'];
 
 // ─── MIDDLEWARE: verificar token (mismo patrón del resto del sistema) ────────
