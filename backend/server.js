@@ -26,18 +26,14 @@ const { authenticate, validarTenant } = require('./middleware/auth.js');
 const rateLimit = require('express-rate-limit');
 
 const loginLimiter = rateLimit({
-  windowMs:         15 * 60 * 1000,   // ventana: 15 minutos
-  max:              20,                // máximo 20 intentos por IP por ventana
-  standardHeaders:  true,
-  legacyHeaders:    false,
+  windowMs:        15 * 60 * 1000,
+  max:             20,
+  standardHeaders: true,
+  legacyHeaders:   false,
   message: {
     error: 'Demasiados intentos de acceso desde esta dirección. Intenta de nuevo en 15 minutos.',
   },
-  // Railway pone la IP real en X-Forwarded-For
-  keyGenerator: (req) => {
-    const forwarded = req.headers['x-forwarded-for'];
-    return forwarded ? forwarded.split(',')[0].trim() : req.ip;
-  },
+  // Sin keyGenerator personalizado — express-rate-limit maneja IPv6 correctamente por defecto
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -77,7 +73,6 @@ app.use('/api/auditoria', authenticate, require('./routes/auditoria'));
 app.use('/api/compras',   authenticate, require('./routes/compras'));
 
 // WhatsApp: el webhook de Meta es público — el authenticate va POR RUTA
-// dentro del archivo (config, envío de prueba y log sí están protegidos)
 app.use('/api/whatsapp', require('./routes/whatsapp'));
 // Motor de Vencimientos (Fase 2)
 app.use('/api/vencimientos', authenticate, require('./routes/vencimientos'));
@@ -89,7 +84,7 @@ app.use('/api/superadmin', require('./routes/superadmin'));
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Backend corriendo en http://localhost:${PORT}`);
-  // Iniciar cron de recordatorios de suscripción
+  // Iniciar cron de recordatorios de suscripción (sin dependencias externas)
   const { iniciarCron } = require('./services/suscripcionCron');
   iniciarCron();
 });

@@ -2,20 +2,11 @@
 // Control360 — Cron de recordatorios de suscripción
 // Ubicación: backend/services/suscripcionCron.js
 // ------------------------------------------------------------
-// Se ejecuta diariamente a las 9:00 AM Colombia (UTC-5 = 14:00 UTC)
-// usando node-cron (ya disponible en el proyecto vía Railway).
-//
-// REGLAS:
-//   Día -4: email + el admin recibe aviso
-//   Día -1: email urgente
-//   Día  0: email último aviso
-//   Día +1 en adelante: solo la barra en app (sin email extra)
-//
-// R-COM-07 adaptado: máximo 1 email de recordatorio por
-// suscriptor cada 3 días (evita spam si el cron corre varias veces).
+// SIN dependencias externas — usa setInterval nativo de Node.js
+// Revisa cada 15 minutos si es hora de ejecutar (9 AM Colombia)
+// y garantiza una sola ejecución por día.
 // ============================================================
 
-const cron   = require('node-cron');
 const { db, admin } = require('../config/firebase');
 const { Resend }    = require('resend');
 
@@ -267,9 +258,27 @@ const ejecutarCron = async () => {
 };
 
 // ─── Inicializar el cron (llamar desde server.js) ────────────────────────────
-// 9:00 AM Colombia = 14:00 UTC
+// Sin node-cron: usa setInterval cada 15 min y rastrea la última ejecución.
+// 9:00 AM Colombia = hora UTC 14 (UTC-5).
+let ultimaEjecucion = null;
+
 const iniciarCron = () => {
-  cron.schedule('0 14 * * *', ejecutarCron, { timezone: 'UTC' });
+  const verificarYEjecutar = () => {
+    const ahoraCO  = new Date(Date.now() - 5 * 3600 * 1000);
+    const fechaHoy = ahoraCO.toISOString().slice(0, 10);
+    const hora     = ahoraCO.getUTCHours(); // ya ajustado a CO
+
+    // Ejecutar una vez al día entre las 9:00 y 9:14 AM Colombia
+    if (hora === 9 && ultimaEjecucion !== fechaHoy) {
+      ultimaEjecucion = fechaHoy;
+      ejecutarCron().catch(e => console.error('[CRON] Error:', e.message));
+    }
+  };
+
+  // Revisar cada 15 minutos
+  setInterval(verificarYEjecutar, 15 * 60 * 1000);
+  // También verificar al arrancar por si el servidor reinició cerca de las 9 AM
+  verificarYEjecutar();
   console.log('✅ Cron de suscripciones activo — corre diario a las 9:00 AM Colombia');
 };
 
