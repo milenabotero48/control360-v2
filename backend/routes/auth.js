@@ -18,7 +18,7 @@ const MODULOS_POR_PLAN = {
   independiente: [
     'dashboard','clientes','ordenes','cotizaciones','productos',
     'caja','egresos','proveedores','mi_empresa',
-    'cxc','cxp','usuarios','reportes'
+    'cxc','cxp','usuarios'
   ],
   empresa: [
     'dashboard','clientes','ordenes','cotizaciones','productos',

@@ -28,6 +28,9 @@ import PanelSuscriptores from './PanelSuscriptores'; // Panel Maestro (solo supe
 import ModuloComercial from './ModuloComercial'; // Fase 3: Telemercadeo
 import Registro from './Registro'; // Registro público de suscriptores
 import BannerSuscripcion from './BannerSuscripcion'; // Alerta de vencimiento
+import BtnWhatsApp from './BtnWhatsApp'; // Botón flotante de soporte
+import GestionVencimientos from './GestionVencimientos'; // Módulo vencimientos
+import Onboarding from './Onboarding'; // Bienvenida nuevos suscriptores
 
 // ─── NAV POR GRUPOS Y ROL ────────────────────────────────────────────────────
 // ─── MAPA COMPLETO DE MÓDULOS ─────────────────────────────────────────────────
@@ -38,6 +41,7 @@ const TODOS_LOS_MODULOS = [
   { key: 'cotizaciones',label: 'Cotizaciones',  icon: '💬', modulo: 'cotizaciones' },
   { key: 'clientes',    label: 'Clientes',      icon: '👥', modulo: 'clientes' },
   { key: 'comercial',   label: 'Telemercadeo',  icon: '📞', modulo: 'comercial' },
+  { key: 'vencimientos',label: 'Vencimientos',  icon: '⏰', modulo: 'vencimientos' },
   { key: 'productos',   label: 'Productos',     icon: '📦', modulo: 'productos' },
   { key: 'proveedores', label: 'Proveedores',   icon: '🏭', modulo: 'proveedores' },
   { key: 'logistica',   label: 'Logística',     icon: '🚚', modulo: 'logistica' },
@@ -58,7 +62,7 @@ const TODOS_LOS_MODULOS = [
 const NAV_GRUPOS = {
   admin: [
     { grupo: 'Principal',      modulos: ['admin'] },
-    { grupo: 'Operaciones',    modulos: ['ordenes', 'cotizaciones', 'clientes', 'comercial', 'productos', 'proveedores'] },
+    { grupo: 'Operaciones',    modulos: ['ordenes', 'cotizaciones', 'clientes', 'comercial', 'vencimientos', 'productos', 'proveedores'] },
     { grupo: 'Ejecución',      modulos: ['logistica', 'taller', 'qr'] },
     { grupo: 'Finanzas',       modulos: ['caja', 'egresos', 'compras', 'cxc', 'cxp', 'eri', 'reportes'] },
     { grupo: 'Configuración',  modulos: ['config', 'usuarios'] },
@@ -254,6 +258,7 @@ const GLOBAL_CSS = `
 // ─── COMPONENTE PRINCIPAL ─────────────────────────────────────────────────────
 export default function AppRoot() {
   const [user, setUser]                   = useState(null);
+  const [mostrarOnboarding, setMostrarOnboarding] = useState(false);
   const [currentPage, setCurrentPage]     = useState('admin');
   const [sidebarOpen, setSidebarOpen]     = useState(false);
   const [empresaActiva, setEmpresaActiva] = useState(null);
@@ -305,6 +310,11 @@ export default function AppRoot() {
   const handleLoginSuccess = (userData) => {
     setUser(userData);
     setCurrentPage(DASHBOARD_INICIAL[userData.role] || 'admin');
+    // Mostrar onboarding solo si es admin y nunca lo ha visto
+    if (userData.role === 'admin' && userData.origenRegistro === 'web_publica') {
+      const visto = localStorage.getItem(`c360_onboarding_${userData.id}`);
+      if (!visto) setMostrarOnboarding(true);
+    }
   };
 
   const handleLogout = (motivo) => {
@@ -539,6 +549,7 @@ export default function AppRoot() {
           {currentPage === 'ordenes'      && <GestionOrdenes user={user} />}
           {currentPage === 'cotizaciones' && <GestionCotizaciones user={user} />}
           {currentPage === 'comercial'    && <ModuloComercial user={user} onNavegar={(k) => setCurrentPage(k)} />}
+          {currentPage === 'vencimientos' && <GestionVencimientos user={user} />}
           {currentPage === 'egresos'      && <GestionEgresos user={user} />}
           {currentPage === 'compras'      && <GestionCompras user={user} />}
           {currentPage === 'caja'         && <GestionCaja user={user} />}
@@ -568,6 +579,14 @@ export default function AppRoot() {
           </button>
         </nav>
       </div>
+      {mostrarOnboarding && (
+        <Onboarding
+          user={user}
+          onTerminar={() => setMostrarOnboarding(false)}
+          onNavegar={(k) => { setMostrarOnboarding(false); setCurrentPage(k); }}
+        />
+      )}
+      <BtnWhatsApp />
     </div>
   );
 }

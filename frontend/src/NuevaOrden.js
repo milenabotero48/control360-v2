@@ -78,6 +78,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [empresaSel, setEmpresaSel]       = useState(null);
   const [tipoServicio, setTipoServicio]   = useState('oficina');
   const [formaPago, setFormaPago]         = useState('');
+  const [montoPagaCon, setMontoPagaCon]   = useState('');
   // Ola 2.5: Comprobante de pago adelantado (cliente ya pagó antes del servicio)
   const [pagoAdelantado, setPagoAdelantado] = useState(false);
   const [fotoComprobante, setFotoComprobante] = useState('');
@@ -294,7 +295,27 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
     if (items.length === 0) return setError('Agrega al menos un producto');
     setGuardando(true); setError('');
     try {
-      await axios.put(API + '/orders/' + ordenEditar.id, { items, fechaProgramada, mensajeroId, mensajeroNombre, notasOrden: notas, formaPago, numeroFactura, extintorPrestamo }, { headers });
+      await axios.put(API + '/orders/' + ordenEditar.id, {
+        items,
+        fechaProgramada,
+        mensajeroId,
+        mensajeroNombre,
+        notasOrden: notas,
+        formaPago,
+        numeroFactura,
+        extintorPrestamo,
+        // FIX: campos de cliente que faltaban en el PUT
+        clienteId:               clienteSel?.id || '',
+        clienteNombre:           clienteSel?.nombre || '',
+        clienteNit:              clienteSel?.nit || '',
+        clienteCelular:          clienteSel?.celular || '',
+        clienteDireccionPrincipal: clienteSel?.direccionPrincipal || '',
+        sucursalId:              sucursalSel?.id || null,
+        sucursalNombre:          sucursalSel?.nombre || '',
+        sucursalDireccion:       sucursalSel?.direccion || '',
+        empresaId:               empresaSel?.id || '',
+        empresaNombre:           empresaSel?.name || '',
+      }, { headers });
       if (onCreada) onCreada('edicion');
     } catch (e) { setError((e.response && e.response.data && e.response.data.error) ? e.response.data.error : 'Error actualizando orden'); }
     setGuardando(false);
@@ -671,9 +692,62 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                         // Reset comprobante al cambiar forma de pago
                         setPagoAdelantado(false);
                         setFotoComprobante('');
+                        setMontoPagaCon('');
                       }} style={{ padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: formaPago === f.nombre ? '#0284c7' : '#f3f4f6', color: formaPago === f.nombre ? '#fff' : '#374151', border: formaPago === f.nombre ? '2px solid #0284c7' : '2px solid transparent' }}>{f.nombre}</button>
                     ))}
                   </div>
+
+                  {/* Calculadora de vuelto — solo Efectivo */}
+                  {formaPago === 'Efectivo' && (() => {
+                    const totalOrden = Math.round(
+                      items.reduce((s, it) => {
+                        const base = (it.precioUnitario || 0) * (it.cantidad || 1) * (1 - (it.descuento || 0) / 100);
+                        return s + base;
+                      }, 0) * (1 + (ivaPct || 0) / 100)
+                    );
+                    const BILLETES = [100000, 50000, 20000, 10000, 5000, 2000, 1000];
+                    const monto = parseFloat(montoPagaCon) || 0;
+                    const vuelto = monto - totalOrden;
+                    return (
+                      <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 10, padding: 14, marginTop: 10, marginBottom: 4 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: '#166534', marginBottom: 8 }}>💵 Calculadora de vuelto</div>
+                        <div style={{ fontSize: 12, color: '#374151', marginBottom: 8 }}>Total a cobrar: <strong>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(totalOrden)}</strong></div>
+                        <div style={{ fontSize: 12, color: '#374151', marginBottom: 6 }}>¿Con cuánto paga?</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                          {BILLETES.map(b => (
+                            <button key={b} type="button"
+                              onClick={() => setMontoPagaCon(String(b))}
+                              style={{ padding: '6px 12px', borderRadius: 8, border: '2px solid', cursor: 'pointer', fontSize: 12, fontWeight: 700,
+                                borderColor: parseFloat(montoPagaCon) === b ? '#16a34a' : '#d1fae5',
+                                background: parseFloat(montoPagaCon) === b ? '#16a34a' : '#fff',
+                                color: parseFloat(montoPagaCon) === b ? '#fff' : '#166534' }}>
+                              ${new Intl.NumberFormat('es-CO').format(b)}
+                            </button>
+                          ))}
+                        </div>
+                        <input type="number" placeholder="O escribe el monto..." value={montoPagaCon}
+                          onChange={e => setMontoPagaCon(e.target.value)}
+                          style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid #86efac', fontSize: 13, marginBottom: 10, boxSizing: 'border-box' }} />
+                        {monto > 0 && monto >= totalOrden && (
+                          <div style={{ background: '#fff', borderRadius: 8, padding: '10px 14px', border: '1px solid #86efac' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: '#374151', marginBottom: 4 }}>
+                              <span>Paga con:</span>
+                              <span style={{ fontWeight: 700 }}>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(monto)}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 16, fontWeight: 800, color: '#16a34a', borderTop: '1px solid #bbf7d0', paddingTop: 6 }}>
+                              <span>Vuelto:</span>
+                              <span>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(vuelto)}</span>
+                            </div>
+                          </div>
+                        )}
+                        {monto > 0 && monto < totalOrden && (
+                          <div style={{ background: '#fef2f2', borderRadius: 8, padding: '10px 14px', border: '1px solid #fca5a5', fontSize: 13, color: '#dc2626', fontWeight: 700 }}>
+                            ⚠️ Monto insuficiente — faltan {new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(totalOrden - monto)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Ola 2.5: Aviso CxC */}
                   {esFormaPagoCxC(formaPago) && (() => {
