@@ -83,6 +83,8 @@ app.use('/api/whatsapp', require('./routes/whatsapp'));
 app.use('/api/vencimientos', authenticate, require('./routes/vencimientos'));
 // Módulo Comercial — pipeline de telemercadeo (Fase 3)
 app.use('/api/comercial', authenticate, require('./routes/comercial'));
+// Panel de Suscriptores — solo superAdmin
+app.use('/api/superadmin', require('./routes/superadmin'));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
