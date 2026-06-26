@@ -26,7 +26,8 @@ import GestionQR from './GestionQR';
 import GestionCompras from './GestionCompras';
 import PanelSuscriptores from './PanelSuscriptores'; // Panel Maestro (solo superAdmin)
 import ModuloComercial from './ModuloComercial'; // Fase 3: Telemercadeo
-import Registro from './Registro'; // Registro publico de suscriptores
+import Registro from './Registro'; // Registro público de suscriptores
+import BannerSuscripcion from './BannerSuscripcion'; // Alerta de vencimiento
 
 // ─── NAV POR GRUPOS Y ROL ────────────────────────────────────────────────────
 // ─── MAPA COMPLETO DE MÓDULOS ─────────────────────────────────────────────────
@@ -521,6 +522,7 @@ export default function AppRoot() {
         </header>
 
         {/* Módulo activo */}
+        <BannerSuscripcion user={user} />
         <main style={{ flex: 1 }}>
           {currentPage === 'admin' && user?.role === 'admin'      && <Dashboard user={user} />}
           {currentPage === 'admin' && user?.role === 'comercial'  && <DashboardComercial user={user} />}

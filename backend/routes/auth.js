@@ -318,7 +318,34 @@ router.post('/login', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-// POST /api/auth/registro — Registro público suscriptores
+// GET /api/auth/suscripcion-estado — Estado de suscripción
+// Usado por BannerSuscripcion.js para mostrar alerta
+// ═══════════════════════════════════════════════════════
+router.get('/suscripcion-estado', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) return res.status(401).json({ error: 'Token requerido' });
+    const jwt2   = require('jsonwebtoken');
+    const decoded = jwt2.verify(token, process.env.JWT_SECRET || 'control360secret');
+    const adminId = decoded.adminId || decoded.uid;
+
+    const susDoc = await db.collection('suscripciones').doc(adminId).get();
+    if (!susDoc.exists) return res.json({ dias: null, plan: null });
+
+    const sus = susDoc.data();
+    if (!sus.fechaVencimiento) return res.json({ dias: null, plan: sus.plan });
+
+    const fin  = new Date(`${sus.fechaVencimiento}T23:59:59-05:00`);
+    const dias = Math.ceil((fin - new Date()) / (1000 * 60 * 60 * 24));
+
+    return res.json({ dias, plan: sus.plan, fechaVencimiento: sus.fechaVencimiento, estado: sus.estado });
+  } catch (e) {
+    return res.status(401).json({ error: 'Token inválido' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// POST /api/auth/registro
 // ═══════════════════════════════════════════════════════
 router.post('/registro', async (req, res) => {
   try {
