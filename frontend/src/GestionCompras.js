@@ -799,6 +799,7 @@ export default function GestionCompras({ user }) {
                 <th style={S.th}>Cant.</th>
                 <th style={S.th}>P. Unitario</th>
                 <th style={S.th}>Subtotal</th>
+                {origen === 'manual' && <th style={S.th}>IVA ($)</th>}
                 <th style={S.th}>Asignado a</th>
                 <th style={S.th}></th>
               </tr>
@@ -819,6 +820,18 @@ export default function GestionCompras({ user }) {
                     <input style={{ ...S.input, width: 110 }} type="number" min="0" value={l.precioUnitario} onChange={e => actualizarLinea(i, 'precioUnitario', e.target.value)} />
                   </td>
                   <td style={{ ...S.td, fontWeight: 700 }}>{fmt(l.subtotal)}</td>
+                  {origen === 'manual' && (
+                    <td style={S.td}>
+                      <input
+                        style={{ ...S.input, width: 100 }}
+                        type="number" min="0" step="100"
+                        placeholder="0"
+                        value={l.ivaVal || ''}
+                        onChange={e => actualizarLinea(i, 'ivaVal', e.target.value)}
+                        title="Valor del IVA para esta línea"
+                      />
+                    </td>
+                  )}
                   <td style={S.td}>
                     {l.productoId
                       ? <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>

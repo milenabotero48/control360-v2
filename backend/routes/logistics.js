@@ -7,6 +7,9 @@ const { db, admin } = require('../config/firebase');
 const ordersRouter = require('./orders');
 const construirFlujo = ordersRouter.construirFlujo;
 const registrarIngresoEnCaja = ordersRouter.registrarIngresoEnCaja;
+
+// Servicio central de vencimientos (trigger por categoría)
+const { crearVencimientosDeOrden } = require('../services/vencimientosService');
 // Verificador de PIN por usuario (Ola 1 — sustituye al PIN de empresa).
 const verificarPinUsuario = ordersRouter.verificarPinUsuario;
 const { authenticate, validarTenant } = require('../middleware/auth');
@@ -808,7 +811,11 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
 
     await ordenRef.update(update);
 
-    // ── Ola 2.5: marcar préstamos devueltos en bulk ───────────────────────────
+    // ── Hook vencimientos: categorías RECARGA Y MANTENIMIENTO / EXTINTORES ────
+    if (update.estado === 'completada') {
+      const adminId = req.adminId || req.user?.adminId || req.user?.uid;
+      crearVencimientosDeOrden(adminId, { ...orden, id: ordenRef.id }).catch(() => {});
+    }
     // El mensajero marcó qué préstamos recogió en la entrega. Cambiamos cada
     // uno a estado "devuelto". Los que NO marcó quedan pendientes.
     if (Array.isArray(prestamosDevueltosIds) && prestamosDevueltosIds.length > 0) {

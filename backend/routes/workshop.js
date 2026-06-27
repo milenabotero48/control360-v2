@@ -7,6 +7,9 @@ const { db, admin } = require('../config/firebase');
 const ordersRouter = require('./orders');
 const construirFlujo = ordersRouter.construirFlujo;
 
+// Servicio central de vencimientos (trigger por categoría)
+const { crearVencimientosDeOrden } = require('../services/vencimientosService');
+
 // Filtro de taller: SOLO recarga, mantenimiento y prueba hidrostática cuentan
 // como equipo procesado. Un botiquín, chaleco o domicilio NO cuentan aunque
 // estén en la orden (son venta, no servicio de taller). Lista blanca.
@@ -744,6 +747,12 @@ if (tieneQR) {
       usuarioNombre: req.user.nombre || req.user.email,
       datos: { ordenId, tiempoEnTaller, tieneQR }
     });
+
+    // ── Hook vencimientos: categorías RECARGA Y MANTENIMIENTO / EXTINTORES ────
+    if (nuevoEstado === 'completada') {
+      const adminId = req.adminId || req.user?.adminId || req.user?.uid;
+      crearVencimientosDeOrden(adminId, { ...orden, id: ordenId }).catch(() => {});
+    }
 
     res.json({
       message: `Orden ${orden.numeroOrden} completada en taller`,
