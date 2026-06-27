@@ -85,6 +85,7 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`✅ Backend corriendo en http://localhost:${PORT}`);
   // Iniciar cron de recordatorios de suscripción (sin dependencias externas)
-  const { iniciarCron } = require('./services/suscripcionCron');
+  const { iniciarCron, iniciarCronWhatsapp } = require('./services/suscripcionCron');
   iniciarCron();
+  iniciarCronWhatsapp();
 });

@@ -80,6 +80,8 @@ function MiDia({ user, onNavegar }) {
   const [data, setData] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [prospectoActivo, setProspectoActivo] = useState(null); // abre modal
+  // Clientes que ya recargaron este mes — para mostrar alerta en la cola
+  const [clientesRecargados, setClientesRecargados] = useState(new Set());
   // Ola 3: el comercial también crea prospectos (quedan asignados a él)
   const [mostrarNuevoP, setMostrarNuevoP] = useState(false);
   const [nuevoP, setNuevoP] = useState({ nombre: '', empresa: '', telefono: '', sucursal: '', notas: '' });
@@ -99,9 +101,21 @@ function MiDia({ user, onNavegar }) {
 
   const cargar = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/comercial/mi-dia`, { headers: authHeaders() });
+      const mesActual = new Date(Date.now() - 5*3600*1000).toISOString().slice(0,7);
+      const [res, vencRes] = await Promise.all([
+        fetch(`${API}/comercial/mi-dia`, { headers: authHeaders() }),
+        fetch(`${API}/vencimientos?mesServicio=${mesActual}`, { headers: authHeaders() }),
+      ]);
       const json = await res.json();
       setData(json);
+      // Construir set de clienteIds que ya recargaron este mes
+      if (vencRes.ok) {
+        const venc = await vencRes.json();
+        const ids = new Set((Array.isArray(venc) ? venc : [])
+          .filter(v => v.origenDato === 'orden' || v.mesServicio === mesActual)
+          .map(v => v.clienteId).filter(Boolean));
+        setClientesRecargados(ids);
+      }
     } catch (e) { console.error(e); }
     setCargando(false);
   }, []);
@@ -162,11 +176,11 @@ function MiDia({ user, onNavegar }) {
       )}
 
       <Seccion titulo="⏰ Reprogramadas para hoy" sub="Te pidieron que llamaras — respeta la hora acordada" lista={cola.reprogramados} conHora
-        onLlamar={setProspectoActivo} />
+        onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
       <Seccion titulo="🔁 Reintentos" sub="No contestaron antes — nuevo intento hoy" lista={cola.reintentos}
-        onLlamar={setProspectoActivo} />
+        onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
       <Seccion titulo="🆕 Prospectos nuevos" sub="Primera llamada" lista={cola.nuevos}
-        onLlamar={setProspectoActivo} />
+        onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
 
       {/* Ola 3: agenda de llamadas futuras — para que "el martes 9am" no se
           sienta perdido: vive aquí hasta que llegue su día. */}
@@ -225,7 +239,7 @@ function MiDia({ user, onNavegar }) {
   );
 }
 
-function Seccion({ titulo, sub, lista = [], conHora, onLlamar }) {
+function Seccion({ titulo, sub, lista = [], conHora, onLlamar, clientesRecargados = new Set() }) {
   if (!lista.length) return null;
   return (
     <div style={{ marginBottom: 18 }}>
@@ -235,8 +249,16 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar }) {
         <div style={{ fontSize: 11, color: '#9ca3af' }}>{sub}</div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
-        {lista.map(p => (
-          <div key={p.id} style={{ background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: '12px 14px' }}>
+        {lista.map(p => {
+          const yaRecargo = p.clienteId && clientesRecargados.has(p.clienteId);
+          return (
+          <div key={p.id} style={{ background: '#fff', borderRadius: 12, border: `1px solid ${yaRecargo ? '#fbbf24' : '#e5e7eb'}`, padding: '12px 14px' }}>
+            {/* Alerta si ya recargó este mes */}
+            {yaRecargo && (
+              <div style={{ background: '#fef3c7', color: '#92400e', borderRadius: 8, padding: '6px 10px', fontSize: 11.5, fontWeight: 700, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                ⚠️ Este cliente ya realizó una recarga este mes — verifica antes de llamar
+              </div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontWeight: 700, fontSize: 14, color: '#1a1a2e', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.nombre}</div>
@@ -263,12 +285,13 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar }) {
             )}
             <button onClick={() => onLlamar(p)} style={{
               marginTop: 10, width: '100%', border: 'none', borderRadius: 9, padding: '9px 0',
-              background: '#7c3aed', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer',
+              background: yaRecargo ? '#f59e0b' : '#7c3aed', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer',
             }}>
               ☎ Registrar llamada
             </button>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

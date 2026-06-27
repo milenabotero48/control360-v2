@@ -283,3 +283,213 @@ const iniciarCron = () => {
 };
 
 module.exports = { iniciarCron, ejecutarCron };
+
+// ═════════════════════════════════════════════════════════════════════════════
+// CRON WHATSAPP — Recordatorios de vencimiento por mes
+// ─────────────────────────────────────────────────────────────────────────────
+// Reglas validadas con Sandra (Jun 2026):
+//   · Solo aplica cuando WhatsApp está activo para el tenant
+//   · Envía en los ÚLTIMOS 5 DÍAS HÁBILES del mes ANTERIOR al vencimiento
+//   · Distribuye la base entre los días disponibles (ej: 2000 / 5 = 400/día)
+//   · No envía sábados ni domingos
+//   · Un solo mensaje por cliente por ciclo (candado wa_mensajes)
+//   · Se activa automáticamente cuando Meta apruebe la cuenta
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Festivos Colombia 2026 (formato YYYY-MM-DD)
+const FESTIVOS_CO_2026 = new Set([
+  '2026-01-01','2026-01-12','2026-03-23','2026-04-02','2026-04-03',
+  '2026-05-01','2026-05-18','2026-06-08','2026-06-15','2026-06-29',
+  '2026-07-20','2026-08-07','2026-08-17','2026-10-12','2026-11-02',
+  '2026-11-16','2026-12-08','2026-12-25',
+]);
+
+const esDiaHabil = (fechaStr) => {
+  const d = new Date(`${fechaStr}T12:00:00-05:00`);
+  const dia = d.getDay(); // 0=dom, 6=sab
+  return dia !== 0 && dia !== 6 && !FESTIVOS_CO_2026.has(fechaStr);
+};
+
+// Contar días hábiles restantes en el mes actual (desde hoy hasta fin de mes)
+const diasHabilesRestantesMes = (hoy) => {
+  const [y, m] = hoy.split('-').map(Number);
+  const ultimoDia = new Date(Date.UTC(y, m, 0)).getDate(); // último día del mes
+  let count = 0;
+  for (let d = parseInt(hoy.slice(8), 10); d <= ultimoDia; d++) {
+    const fecha = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    if (esDiaHabil(fecha)) count++;
+  }
+  return count;
+};
+
+// Mes siguiente al actual → es el mes de vencimiento a recordar
+const mesSiguiente = (yyyymm) => {
+  const [y, m] = yyyymm.split('-').map(Number);
+  const nm = m === 12 ? 1 : m + 1;
+  const ny = m === 12 ? y + 1 : y;
+  return `${ny}-${String(nm).padStart(2,'0')}`;
+};
+
+const ejecutarCronWhatsapp = async () => {
+  const ahoraCO  = new Date(Date.now() - 5 * 3600 * 1000);
+  const hoy      = ahoraCO.toISOString().slice(0, 10);
+  const mesActual = hoy.slice(0, 7);
+
+  // Solo ejecutar en días hábiles
+  if (!esDiaHabil(hoy)) {
+    console.log('[WA-CRON] Día no hábil — sin envíos');
+    return;
+  }
+
+  // Días hábiles restantes en el mes (incluyendo hoy)
+  const diasHabiles = diasHabilesRestantesMes(hoy);
+
+  // Solo enviar en los últimos 5 días hábiles del mes
+  if (diasHabiles > 5) {
+    console.log(`[WA-CRON] Faltan ${diasHabiles} días hábiles — aún no es momento de enviar`);
+    return;
+  }
+
+  console.log(`[WA-CRON] Iniciando — ${diasHabiles} día(s) hábil(es) restantes en el mes`);
+
+  // Mes de vencimiento a notificar = mes siguiente
+  const mesVencimiento = mesSiguiente(mesActual);
+
+  try {
+    // Obtener todos los vencimientos del mes siguiente (de todos los tenants)
+    const snap = await db.collection('vencimientos')
+      .where('fechaVencimiento', '>=', `${mesVencimiento}-01`)
+      .where('fechaVencimiento', '<=', `${mesVencimiento}-31`)
+      .where('gestionado', '==', false)
+      .get();
+
+    if (snap.empty) {
+      console.log('[WA-CRON] Sin vencimientos para el mes siguiente');
+      return;
+    }
+
+    // Agrupar por tenant (adminId)
+    const porTenant = {};
+    snap.docs.forEach(doc => {
+      const d = doc.data();
+      if (!d.adminId || !d.clienteId) return;
+      if (!porTenant[d.adminId]) porTenant[d.adminId] = {};
+      const cKey = d.clienteId;
+      if (!porTenant[d.adminId][cKey]) porTenant[d.adminId][cKey] = { clienteId: d.clienteId, telefono: d.telefono, equipos: [] };
+      porTenant[d.adminId][cKey].equipos.push(d.descripcionEquipo + (d.cantidad > 1 ? ` ×${d.cantidad}` : ''));
+    });
+
+    for (const [adminId, clientes] of Object.entries(porTenant)) {
+      // Verificar que el tenant tiene WhatsApp activo
+      const cfgDoc = await db.collection('whatsapp_config').doc(adminId).get();
+      if (!cfgDoc.exists || !cfgDoc.data().activo) continue;
+
+      const totalClientes = Object.keys(clientes).length;
+      // Distribuir: cuántos enviar hoy
+      const porDia = Math.ceil(totalClientes / Math.max(diasHabiles, 1));
+
+      // Ver cuántos ya se enviaron hoy para este tenant
+      const yaEnviadosHoy = await db.collection('wa_mensajes')
+        .where('adminId', '==', adminId)
+        .where('contexto', '==', `vencimiento:${mesVencimiento}`)
+        .where('fechaEnvio', '==', hoy)
+        .get();
+
+      const enviadosHoy = yaEnviadosHoy.size;
+      const pendienteHoy = Math.max(porDia - enviadosHoy, 0);
+
+      if (pendienteHoy === 0) {
+        console.log(`[WA-CRON] Tenant ${adminId}: cuota del día cumplida`);
+        continue;
+      }
+
+      // Ver cuáles ya recibieron mensaje este ciclo
+      const yaContactados = new Set();
+      const contactadosSnap = await db.collection('wa_mensajes')
+        .where('adminId', '==', adminId)
+        .where('contexto', '==', `vencimiento:${mesVencimiento}`)
+        .get();
+      contactadosSnap.docs.forEach(d => yaContactados.add(d.data().telefono));
+
+      // Seleccionar los pendientes de este ciclo
+      const pendientes = Object.values(clientes)
+        .filter(c => c.telefono && !yaContactados.has(c.telefono))
+        .slice(0, pendienteHoy);
+
+      console.log(`[WA-CRON] Tenant ${adminId}: enviando ${pendientes.length}/${totalClientes} mensajes hoy`);
+
+      // Obtener datos del tenant para el mensaje
+      const userDoc = await db.collection('users').doc(adminId).get();
+      const empresaNombre = userDoc.exists ? (userDoc.data().empresa || 'Control360') : 'Control360';
+
+      for (const cliente of pendientes) {
+        // Obtener teléfono del cliente si no está en el vencimiento
+        let telefono = cliente.telefono;
+        if (!telefono && cliente.clienteId) {
+          const cliDoc = await db.collection('clients').doc(cliente.clienteId).get();
+          if (cliDoc.exists) telefono = cliDoc.data().celular || cliDoc.data().telefono;
+        }
+        if (!telefono) continue;
+
+        const listaEquipos = cliente.equipos.join(', ');
+        const variables = [
+          userDoc.exists ? (userDoc.data().nombre || empresaNombre) : empresaNombre,
+          listaEquipos,
+          mesVencimiento,
+        ];
+
+        try {
+          const { enviarPlantilla } = require('./services/whatsappService');
+          await enviarPlantilla({
+            adminId,
+            telefono,
+            plantilla: 'recordatorio_vencimiento',
+            variables,
+            contexto: `vencimiento:${mesVencimiento}`,
+            ordenId: null,
+          });
+          // Registrar fecha de envío para el control de cuota diaria
+          await db.collection('wa_mensajes')
+            .where('adminId', '==', adminId)
+            .where('telefono', '==', telefono)
+            .where('contexto', '==', `vencimiento:${mesVencimiento}`)
+            .limit(1).get().then(s => {
+              if (!s.empty) s.docs[0].ref.update({ fechaEnvio: hoy });
+            });
+        } catch (e) {
+          console.error(`[WA-CRON] Error enviando a ${telefono}:`, e.message);
+        }
+
+        // Pausa entre mensajes para no saturar la API
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    console.log('[WA-CRON] Ciclo completado');
+  } catch (e) {
+    console.error('[WA-CRON] Error general:', e.message);
+  }
+};
+
+// Iniciar cron de WhatsApp — se activa desde iniciarCron()
+// Separado del cron de suscripciones para no mezclar responsabilidades
+let ultimaEjecucionWA = null;
+
+const iniciarCronWhatsapp = () => {
+  const verificar = () => {
+    const ahoraCO  = new Date(Date.now() - 5 * 3600 * 1000);
+    const fechaHoy = ahoraCO.toISOString().slice(0, 10);
+    const hora     = ahoraCO.getUTCHours();
+    // Correr a las 9:30 AM Colombia (distinto al cron de suscripciones)
+    if (hora === 9 && ahoraCO.getMinutes() >= 30 && ultimaEjecucionWA !== fechaHoy) {
+      ultimaEjecucionWA = fechaHoy;
+      ejecutarCronWhatsapp().catch(e => console.error('[WA-CRON]', e.message));
+    }
+  };
+  setInterval(verificar, 15 * 60 * 1000);
+  verificar();
+  console.log('✅ Cron WhatsApp vencimientos activo — corre en días hábiles a las 9:30 AM Colombia');
+};
+
+module.exports = { iniciarCron, ejecutarCron, iniciarCronWhatsapp, ejecutarCronWhatsapp };
+
