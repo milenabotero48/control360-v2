@@ -185,15 +185,20 @@
     .error-sub { font-size: 14px; color: var(--texto2); }
 
     @media print {
-      @page { size: A4 landscape; margin: 10mm; }
-      body { background: #fff; padding: 0; }
-      #modal-lista { position: static; opacity: 1; pointer-events: all; display: block; }
-      .modal-sheet { max-height: none; transform: none; border-radius: 0; box-shadow: none; }
-      .modal-handle, .modal-cerrar, .modal-acciones, #app { display: none !important; }
-      .modal-header { padding: 0 0 12px; }
-      .rpt-tabla { font-size: 8px; }
-      .rpt-tabla thead tr:first-child th, .rpt-tabla thead tr:last-child th { font-size: 7px; padding: 4px 3px; }
-      .rpt-tabla td { padding: 3px; font-size: 8px; }
+      @page { size: A4 landscape; margin: 8mm; }
+      body { background: #fff; padding: 0; margin: 0; }
+      #modal-lista { position: static !important; opacity: 1 !important; pointer-events: all !important; display: block !important; background: none !important; }
+      .modal-sheet { max-height: none !important; max-width: 100% !important; width: 100% !important; transform: none !important; border-radius: 0 !important; box-shadow: none !important; display: block !important; }
+      .modal-handle, .modal-cerrar, .modal-acciones, #app, #splash { display: none !important; }
+      .modal-header { padding: 0 0 8px !important; border-bottom: none !important; }
+      .modal-titulo, .modal-sub { display: none !important; }
+      .modal-body { overflow: visible !important; padding: 0 !important; }
+      .rpt-tabla { font-size: 7.5px !important; }
+      .rpt-tabla thead tr:first-child th { font-size: 7px !important; padding: 3px 2px !important; }
+      .rpt-tabla thead tr:last-child th { font-size: 6.5px !important; padding: 3px 2px !important; }
+      .rpt-tabla td { padding: 3px 2px !important; font-size: 7.5px !important; }
+      .membrete { padding: 6px 0 10px !important; }
+      .rpt-cliente-bar { padding: 6px 10px !important; margin-bottom: 8px !important; }
     }
   </style>
 </head>
@@ -465,7 +470,7 @@
         <div style="font-weight:800;font-size:18px;margin-bottom:8px">¡Inspección registrada!</div>
         <div id="exito-msg" style="font-size:13px;color:#374151"></div>
       </div>
-      <button class="btn-guardar" style="background:linear-gradient(135deg,#2d6a4f,#1b4332);margin-top:8px" onclick="cerrarModal('modal-inspeccion');cargarDatos()">Ver equipo actualizado</button>`;
+      <button class="btn-guardar" style="background:linear-gradient(135deg,#2d6a4f,#1b4332);margin-top:8px" onclick="window.location.reload()">Ver equipo actualizado</button>`;
       return;
     }
 

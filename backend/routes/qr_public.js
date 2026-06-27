@@ -95,13 +95,18 @@ router.get('/:codigo', async (req, res) => {
     try {
       const inspSnap = await db.collection('qr_inspecciones')
         .where('equipoId', '==', doc.id)
-        .orderBy('createdAt', 'desc')
-        .limit(1).get();
+        .get();
       if (!inspSnap.empty) {
-        const id = inspSnap.docs[0];
-        const d = id.data();
+        const docs = inspSnap.docs
+          .map(d => ({ id: d.id, ...d.data() }))
+          .sort((a, b) => {
+            const ta = a.createdAt && a.createdAt.toMillis ? a.createdAt.toMillis() : 0;
+            const tb = b.createdAt && b.createdAt.toMillis ? b.createdAt.toMillis() : 0;
+            return tb - ta;
+          });
+        const d = docs[0];
         ultimaInspeccion = {
-          id: id.id,
+          id: d.id,
           fecha: d.fecha || null,
           hora: d.hora || null,
           inspectorNombre: d.inspectorNombre || '',
@@ -109,7 +114,7 @@ router.get('/:codigo', async (req, res) => {
           createdAt: d.createdAt || null
         };
       }
-    } catch (e) { /* indice aun no listo, ignorar */ }
+    } catch (e) { console.error('ultimaInspeccion individual:', e); }
 
     res.json({
       id: doc.id,
@@ -160,10 +165,16 @@ router.get('/cliente/:clienteId', async (req, res) => {
       try {
         const inspSnap = await db.collection('qr_inspecciones')
           .where('equipoId', '==', doc.id)
-          .orderBy('createdAt', 'desc')
-          .limit(1).get();
+          .get();
         if (!inspSnap.empty) {
-          const d = inspSnap.docs[0].data();
+          const docs = inspSnap.docs
+            .map(d => ({ id: d.id, ...d.data() }))
+            .sort((a, b) => {
+              const ta = a.createdAt && a.createdAt.toMillis ? a.createdAt.toMillis() : 0;
+              const tb = b.createdAt && b.createdAt.toMillis ? b.createdAt.toMillis() : 0;
+              return tb - ta;
+            });
+          const d = docs[0];
           ultimaInspeccion = {
             fecha: d.fecha || null,
             hora: d.hora || null,
@@ -174,7 +185,7 @@ router.get('/cliente/:clienteId', async (req, res) => {
             observaciones: d.observaciones || ''
           };
         }
-      } catch (e) { /* ignorar si no hay indice */ }
+      } catch (e) { console.error('ultimaInspeccion lista:', e); }
 
       equipos.push({
         id: doc.id,
