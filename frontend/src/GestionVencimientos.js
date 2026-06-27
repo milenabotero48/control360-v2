@@ -109,9 +109,9 @@ export default function GestionVencimientos({ user }) {
         meses[mk].clientes[cKey] = {
           cKey, clienteId: v.clienteId,
           nombre: cli?.nombre || cli?.empresa || 'Sin nombre',
-          telefono: cli?.telefono || v.telefono || null,
-          direccion: cli?.direccion || cli?.clienteDireccion || null,
-          email: cli?.email || null,
+          telefono: cli?.celular || cli?.telefono || v.telefono || null,
+          direccion: cli?.direccionPrincipal || cli?.direccion || null,
+          email: cli?.emailLegal || cli?.email || null,
           equipos: [],
         };
       }
