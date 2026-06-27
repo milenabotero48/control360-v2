@@ -110,6 +110,7 @@ router.get('/:codigo', async (req, res) => {
           fecha: d.fecha || null,
           hora: d.hora || null,
           inspectorNombre: d.inspectorNombre || '',
+          inspectorApellido: d.inspectorApellido || '',
           resultado: d.resultado || 'aprobado',
           createdAt: d.createdAt || null
         };
