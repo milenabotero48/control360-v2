@@ -4,6 +4,9 @@ const { db, admin } = require('../config/firebase');
 const jwt = require('jsonwebtoken');
 const { authenticate, validarTenant } = require('../middleware/auth');
 
+// Servicio de vencimientos — hook por categoría (RECARGA Y MANTENIMIENTO / EXTINTORES)
+const { crearVencimientosDeOrden } = require('../services/vencimientosService');
+
 // ─── ESTADOS VÁLIDOS ──────────────────────────────────────────────────────────
 const ESTADOS = [
   'programada', 'en_ruta_recogida', 'en_taller', 'listo_entregar', 'facturado',
@@ -900,6 +903,18 @@ router.post('/', authenticate, async (req, res) => {
       ordenId: ref.id,
       datos: { numeroOrden, clienteNombre, total, tipoOrden: tipoFinal, pagadoAlCrear, esCxc }
     });
+
+    // ── Hook vencimientos: órdenes que nacen completadas (oficina/cambio) ────
+    // Las de domicilio y taller se cubren en logistics.js y workshop.js.
+    // Aquí aplica solo si estadoInicial === 'completada' Y tiene items de recarga.
+    if (estadoInicial === 'completada' && !esProduccion && !esInterna) {
+      const adminId = req.adminId || req.user?.uid;
+      crearVencimientosDeOrden(adminId, {
+        ...nuevaOrden,
+        id: ref.id,
+        clienteTelefono: nuevaOrden.clienteCelular || null,
+      }).catch(() => {});
+    }
 
     res.status(201).json({ id: ref.id, ...nuevaOrden });
   } catch (error) {
