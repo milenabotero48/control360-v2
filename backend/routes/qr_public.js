@@ -164,7 +164,15 @@ router.get('/cliente/:clienteId', async (req, res) => {
           .limit(1).get();
         if (!inspSnap.empty) {
           const d = inspSnap.docs[0].data();
-          ultimaInspeccion = { fecha: d.fecha || null, resultado: d.resultado || 'aprobado', inspectorNombre: d.inspectorNombre || '' };
+          ultimaInspeccion = {
+            fecha: d.fecha || null,
+            hora: d.hora || null,
+            resultado: d.resultado || 'aprobado',
+            inspectorNombre: d.inspectorNombre || '',
+            inspectorApellido: d.inspectorApellido || '',
+            checklist: d.checklist || null,
+            observaciones: d.observaciones || ''
+          };
         }
       } catch (e) { /* ignorar si no hay indice */ }
 

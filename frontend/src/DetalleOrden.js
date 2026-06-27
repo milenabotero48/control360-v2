@@ -186,7 +186,7 @@ const cargarConfigCerts = async () => {
     if (!formaPago) return setError('Selecciona la forma de pago');
     try {
       setRegPago(true);
-      const monto = parseFloat(montoPago) || orden.total;
+      const monto = orden.total;
       const res = await axios.post(`${API}/orders/${ordenId}/pago`, {
         montoPagado: monto,
         formaPago,

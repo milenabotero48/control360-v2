@@ -793,9 +793,9 @@ const GestionCxC = ({ user }) => {
   const clientesAlerta = clientes.filter(c => c.diasVencido >= 30 && c.diasVencido < diasBloqueo).length;
 
   return (
-    <div style={s.wrapper}>
+    <div style={{ ...s.wrapper, padding: isMobile ? '16px 12px' : '32px' }}>
       {/* HEADER */}
-      <div style={s.pageHeader}>
+      <div style={{ ...s.pageHeader, flexWrap: 'wrap', gap: 10 }}>
         <div>
           <h2 style={s.pageTitle}>💳 Cuentas por Cobrar</h2>
           <p style={s.pageSubtitle}>Cartera activa · ordenada por antigüedad</p>
@@ -809,7 +809,7 @@ const GestionCxC = ({ user }) => {
       {error && <div style={s.alertError}>{error}</div>}
 
       {/* KPIs */}
-      <div style={s.kpiRow}>
+      <div style={{ ...s.kpiRow, gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)' }}>
         <div style={s.kpiCard}>
           <span style={s.kpiLabel}>Total cartera</span>
           <span style={{ ...s.kpiValor, color: '#dc2626', fontSize: 22 }}>{fmt(totalCartera)}</span>
@@ -1036,7 +1036,7 @@ const s = {
   btnAccion:    { padding: '5px 12px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 },
 
   overlay:      { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 },
-  modal:        { background: '#fff', borderRadius: 16, width: '100%', maxWidth: 780, maxHeight: '92vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' },
+  modal:        { background: '#fff', borderRadius: 16, width: '100%', maxWidth: 780, maxHeight: '92vh', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)', margin: '0 8px' },
   modalHeader:  { padding: '20px 24px 16px', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexShrink: 0 },
   modalTitulo:  { margin: 0, fontSize: 18, fontWeight: 700, color: '#111' },
   btnCerrar:    { background: '#f3f4f6', border: 'none', borderRadius: '50%', width: 32, height: 32, cursor: 'pointer', fontSize: 16, color: '#6b7280', flexShrink: 0 },
