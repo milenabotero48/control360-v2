@@ -144,14 +144,25 @@
     .msg-exito  { background: var(--verde-light); border: 1px solid #95d5b2; border-radius: 10px; padding: 16px 14px; font-size: 14px; color: var(--verde); margin-bottom: 12px; text-align: center; }
 
     /* MEMBRETE Y TABLA REPORTE IMPRIMIBLE */
-    .membrete { display: flex; align-items: center; gap: 12px; padding: 12px 0 16px; border-bottom: 2px solid var(--gris2); margin-bottom: 12px; }
-    .membrete img { width: 48px; height: 48px; object-fit: contain; border-radius: 8px; }
-    .membrete-nombre { font-size: 14px; font-weight: 800; }
-    .membrete-sub { font-size: 11px; color: var(--texto2); }
+    .rpt-header { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border-radius: 12px 12px 0 0; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0; }
+    .rpt-header-left { display: flex; align-items: center; gap: 14px; }
+    .rpt-logo { width: 52px; height: 52px; object-fit: contain; border-radius: 8px; background: #fff; padding: 4px; flex-shrink: 0; }
+    .rpt-logo-inicial { width: 52px; height: 52px; border-radius: 8px; background: linear-gradient(135deg, #e63946, #c1121f); display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 800; color: #fff; flex-shrink: 0; }
+    .rpt-empresa-nombre { font-size: 14px; font-weight: 800; color: #fff; }
+    .rpt-empresa-sub { font-size: 10px; color: rgba(255,255,255,0.55); margin-top: 2px; }
+    .rpt-header-right { text-align: right; }
+    .rpt-doc-titulo { font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.85); text-transform: uppercase; letter-spacing: 1px; }
+    .rpt-doc-fecha { font-size: 10px; color: rgba(255,255,255,0.45); margin-top: 3px; }
 
-    .rpt-cliente-bar { background: #f0f7ff; border: 1px solid #dbeafe; border-radius: 8px; padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 12px; }
+    .rpt-cliente-strip { background: #f0f7ff; border: 1px solid #dbeafe; border-top: none; padding: 10px 20px; display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 12px; border-radius: 0 0 8px 8px; }
     .rpt-meta-label { font-size: 9px; font-weight: 700; color: #9ca3af; text-transform: uppercase; }
     .rpt-meta-valor { font-size: 12px; font-weight: 700; color: #1a1a2e; margin-top: 1px; }
+
+    /* legacy — mantener por si acaso */
+    .membrete { display: none; }
+    .membrete-nombre { font-size: 14px; font-weight: 800; }
+    .membrete-sub { font-size: 11px; color: var(--texto2); }
+    .rpt-cliente-bar { display: none; }
 
     .rpt-tabla-wrap { overflow-x: auto; margin-bottom: 12px; }
     .rpt-tabla { width: 100%; border-collapse: collapse; font-size: 10px; }
@@ -185,20 +196,20 @@
     .error-sub { font-size: 14px; color: var(--texto2); }
 
     @media print {
-      @page { size: A4 landscape; margin: 8mm; }
+      @page { size: A4 landscape; margin: 6mm; }
       body { background: #fff; padding: 0; margin: 0; }
       #modal-lista { position: static !important; opacity: 1 !important; pointer-events: all !important; display: block !important; background: none !important; }
       .modal-sheet { max-height: none !important; max-width: 100% !important; width: 100% !important; transform: none !important; border-radius: 0 !important; box-shadow: none !important; display: block !important; }
       .modal-handle, .modal-cerrar, .modal-acciones, #app, #splash { display: none !important; }
-      .modal-header { padding: 0 0 8px !important; border-bottom: none !important; }
-      .modal-titulo, .modal-sub { display: none !important; }
+      .modal-header { display: none !important; }
       .modal-body { overflow: visible !important; padding: 0 !important; }
+      .rpt-header { border-radius: 0 !important; padding: 10px 14px !important; }
+      .rpt-cliente-strip { border-radius: 0 !important; }
       .rpt-tabla { font-size: 7.5px !important; }
       .rpt-tabla thead tr:first-child th { font-size: 7px !important; padding: 3px 2px !important; }
       .rpt-tabla thead tr:last-child th { font-size: 6.5px !important; padding: 3px 2px !important; }
       .rpt-tabla td { padding: 3px 2px !important; font-size: 7.5px !important; }
-      .membrete { padding: 6px 0 10px !important; }
-      .rpt-cliente-bar { padding: 6px 10px !important; margin-bottom: 8px !important; }
+      .rpt-footer { margin-top: 6px !important; }
     }
   </style>
 </head>
@@ -661,14 +672,24 @@
 
       document.getElementById('lista-sub').textContent = `${data.totalEquipos} equipo(s)${data.equiposVencidos > 0 ? ` · ${data.equiposVencidos} vencido(s)` : ''}`;
 
-      let html = `<div class="membrete">
-        ${empresa.logo
-          ? `<img src="${empresa.logo}" alt="${empresa.nombre}" />`
-          : `<div style="width:48px;height:48px;border-radius:8px;background:linear-gradient(135deg,#e63946,#c1121f);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:#fff;flex-shrink:0">${(empresa.nombre||'E')[0]}</div>`}
-        <div><div class="membrete-nombre">${empresa.nombre || ''}</div>
-        <div class="membrete-sub">Reporte de inspección mensual — ${propietario} · ${new Date().toLocaleDateString('es-CO')}</div></div></div>`;
+      let html = `<div class="rpt-header">
+        <div class="rpt-header-left">
+          ${empresa.logo
+            ? `<img class="rpt-logo" src="${empresa.logo}" alt="${empresa.nombre}" />`
+            : `<div class="rpt-logo-inicial">${(empresa.nombre||'E')[0]}</div>`}
+          <div>
+            <div class="rpt-empresa-nombre">${empresa.nombre || 'Servicio de Extintores'}</div>
+            <div class="rpt-empresa-sub">${empresa.address || ''} ${empresa.phone || empresa.cellphone ? '· ' + (empresa.phone || empresa.cellphone) : ''}</div>
+          </div>
+        </div>
+        <div class="rpt-header-right">
+          <div class="rpt-doc-titulo">Reporte de inspección mensual</div>
+          <div class="rpt-doc-fecha">${new Date().toLocaleDateString('es-CO', {day:'2-digit',month:'long',year:'numeric'})} · Control360</div>
+        </div>
+      </div>`;
 
-      html += `<div class="rpt-cliente-bar">
+      html += `<div class="rpt-cliente-strip">
+        <div><div class="rpt-meta-label">Cliente</div><div class="rpt-meta-valor">${propietario}</div></div>
         <div><div class="rpt-meta-label">Total equipos</div><div class="rpt-meta-valor">${data.totalEquipos}</div></div>
         <div><div class="rpt-meta-label">Inspeccionados</div><div class="rpt-meta-valor" style="color:#16a34a">${totalInsp}</div></div>
         <div><div class="rpt-meta-label">Sin inspección</div><div class="rpt-meta-valor" style="color:#d97706">${sinInsp}</div></div>
