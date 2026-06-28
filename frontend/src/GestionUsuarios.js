@@ -86,6 +86,14 @@ const GestionUsuarios = ({ user }) => {
   const [verPin, setVerPin]             = useState(false);
   const [tabActiva, setTabActiva]       = useState('usuarios'); // 'usuarios' | 'auditoria'
   const [mostrarInactivos, setMostrarInactivos] = useState(false); // PAQUETE B: ocultar inactivos por defecto
+  
+  // ── Mi PIN (admin propio) ──────────────────────────────────────────────────
+  const [modalMiPin, setModalMiPin]     = useState(false);
+  const [miPin, setMiPin]               = useState('');
+  const [miPinVer, setMiPinVer]         = useState(false);
+  const [miPinGuardando, setMiPinGuardando] = useState(false);
+  const [miPinError, setMiPinError]     = useState('');
+  const [miPinExito, setMiPinExito]     = useState('');
 
   // Auditoría
   const [auditoria, setAuditoria]       = useState([]);
@@ -259,6 +267,32 @@ const GestionUsuarios = ({ user }) => {
 
   const rolActualUsaPin = ROLES_CON_PIN.includes(form.role);
 
+  // ── Abrir modal Mi PIN con carga del PIN actual ─────────────────────────
+  const abrirMiPin = async () => {
+    setMiPinError('');
+    setMiPinExito('');
+    setMiPin('');
+    setModalMiPin(true);
+    try {
+      const r = await axios.get(`${API}/users/${user.id}/pin`, { headers });
+      setMiPin(r.data?.pin || '');
+    } catch { setMiPin(''); }
+  };
+
+  const guardarMiPin = async () => {
+    if (!/^\d{4}$/.test(miPin)) { setMiPinError('El PIN debe ser exactamente 4 dígitos numéricos'); return; }
+    setMiPinGuardando(true);
+    setMiPinError('');
+    try {
+      await axios.put(`${API}/users/${user.id}`, { pin: miPin }, { headers });
+      setMiPinExito('✓ PIN actualizado correctamente');
+      setTimeout(() => { setModalMiPin(false); setMiPinExito(''); }, 1500);
+    } catch (e) {
+      setMiPinError(e.response?.data?.error || 'Error al guardar el PIN');
+    }
+    setMiPinGuardando(false);
+  };
+
   return (
     <div style={s.wrapper}>
 
@@ -268,7 +302,12 @@ const GestionUsuarios = ({ user }) => {
           <h2 style={s.pageTitle}>👥 Gestión de Usuarios</h2>
           <p style={s.pageSubtitle}>Administra el equipo y sus permisos de acceso</p>
         </div>
-        <button onClick={abrirNuevo} style={s.btnPrimario}>+ Nuevo Usuario</button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          {user?.role === 'admin' && (
+            <button onClick={abrirMiPin} style={{ ...s.btnPrimario, background: 'linear-gradient(135deg,#0369a1,#0284c7)' }}>🔐 Mi PIN</button>
+          )}
+          <button onClick={abrirNuevo} style={s.btnPrimario}>+ Nuevo Usuario</button>
+        </div>
       </div>
 
       {error  && <div style={s.alertError}>{error}</div>}
@@ -474,6 +513,55 @@ const GestionUsuarios = ({ user }) => {
             )}
           </div>
         </>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════════════════
+          MODAL: MI PIN (admin configura su propio PIN)
+      ══════════════════════════════════════════════════════════════════════ */}
+      {modalMiPin && (
+        <div style={s.overlay}>
+          <div style={{ ...s.modal, maxWidth: 400 }}>
+            <div style={s.modalHeader}>
+              <h3 style={s.modalTitulo}>🔐 Mi PIN de autorización</h3>
+              <button onClick={() => setModalMiPin(false)} style={s.btnCerrar}>✕</button>
+            </div>
+            <div style={s.modalBody}>
+              <p style={{ fontSize: 13, color: '#64748b', marginBottom: 20, lineHeight: 1.5 }}>
+                Este PIN de 4 dígitos te permite autorizar acciones sensibles como anular órdenes, realizar cuadres de caja y desbloquear cartera.
+              </p>
+              {miPinError && <div style={s.alertError}>{miPinError}</div>}
+              {miPinExito && <div style={s.alertExito}>{miPinExito}</div>}
+              <div style={s.campo}>
+                <label style={s.label}>PIN (4 dígitos)</label>
+                <div style={s.passWrap}>
+                  <input
+                    style={{ ...s.input, paddingRight: '44px', letterSpacing: '10px', fontSize: '22px', textAlign: 'center', fontFamily: 'monospace' }}
+                    type={miPinVer ? 'text' : 'password'}
+                    placeholder="••••"
+                    maxLength={4}
+                    inputMode="numeric"
+                    value={miPin}
+                    onChange={e => { setMiPin(e.target.value.replace(/\D/g, '').slice(0, 4)); setMiPinError(''); }}
+                  />
+                  <button type="button" onClick={() => setMiPinVer(!miPinVer)} style={s.eyeBtn}>
+                    {miPinVer ? '🙈' : '👁️'}
+                  </button>
+                </div>
+                {miPin && (
+                  <small style={{ ...s.hint, color: miPin.length === 4 ? '#16a34a' : '#b45309', marginTop: 6 }}>
+                    {miPin.length === 4 ? '✓ Listo para guardar' : `Faltan ${4 - miPin.length} dígito(s)`}
+                  </small>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
+                <button onClick={() => setModalMiPin(false)} style={s.btnCancelar}>Cancelar</button>
+                <button onClick={guardarMiPin} disabled={miPinGuardando || miPin.length !== 4} style={{ ...s.btnGuardar, opacity: miPin.length !== 4 ? 0.5 : 1 }}>
+                  {miPinGuardando ? 'Guardando...' : '💾 Guardar PIN'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* ══════════════════════════════════════════════════════════════════════

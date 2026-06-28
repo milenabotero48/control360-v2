@@ -177,7 +177,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
               {logoPreview && <button type="button" onClick={() => { setLogoPreview(null); setLogoFile(null); }} style={{ padding: '6px 12px', background: '#fff0f0', color: '#dc3545', border: '1px solid #dc3545', borderRadius: 6, cursor: 'pointer', fontSize: 12 }}>Quitar logo</button>}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 18 }}>
-              {campo('Nombre Empresa', 'name')}{campo('NIT', 'nit', 'text', '88273572')}{campo('Dirección', 'address')}{campo('Ciudad', 'ciudad', 'text', 'Cali')}{campo('Teléfono', 'phone', 'text', '6022226686')}{campo('Celular', 'cellphone', 'text', '3148361622')}{campo('Email', 'email', 'email', 'empresa@correo.com')}{campo('IVA (%)', 'iva', 'text', '19')}
+              {campo('Nombre Empresa', 'name')}{campo('NIT', 'nit', 'text', '901123456')}{campo('Dirección', 'address')}{campo('Ciudad', 'ciudad', 'text', 'Cali')}{campo('Teléfono', 'phone', 'text', '6011234567')}{campo('Celular', 'cellphone', 'text', '3001234567')}{campo('Email', 'email', 'email', 'empresa@correo.com')}{campo('IVA (%)', 'iva', 'text', '19')}
                 {campo('WhatsApp', 'whatsapp', 'text', '3148361622')}
                 {campo('Página Web', 'web', 'text', 'www.miempresa.com')}
             </div>

@@ -34,7 +34,7 @@ function ModalCaja({ caja, empresas, onSave, onClose }) {
 
   const handleSave = async () => {
     if (!form.nombre.trim()) return alert('El nombre de la caja es requerido');
-    if (!form.empresaId) return alert('Selecciona la empresa');
+    // empresaId es opcional
     setSaving(true);
     await onSave(form);
     setSaving(false);
@@ -58,6 +58,16 @@ function ModalCaja({ caja, empresas, onSave, onClose }) {
                 {TIPOS_CAJA.map(t => <option key={t} value={t}>{t}</option>)}
               </select>
             </div>
+
+          {empresas && empresas.length > 0 && (
+            <div style={S.field}>
+              <label style={S.label}>Empresa asociada</label>
+              <select style={S.select} value={form.empresaId || ''} onChange={e => set('empresaId', e.target.value)}>
+                <option value="">— Seleccionar empresa —</option>
+                {empresas.map(e => <option key={e.id} value={e.id}>{e.name || e.nombre}</option>)}
+              </select>
+            </div>
+          )}
 
           {form.tipo === 'Banco' && (
             <div style={S.row2}>
@@ -361,6 +371,7 @@ export default function GestionCaja({ user }) {
   const [cajas, setCajas] = useState([]);
   const [movimientos, setMovimientos] = useState([]);
   const [ordenesPendientes, setOrdenesPendientes] = useState([]);
+  const [empresas, setEmpresas] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -418,12 +429,14 @@ export default function GestionCaja({ user }) {
     setLoading(true);
     try {
       const h = getHeaders();
-      const [cRes, mRes] = await Promise.all([
+      const [cRes, mRes, empRes] = await Promise.all([
         axios.get(`${API}/cajas`, { headers: h }),
         axios.get(`${API}/cajas/movimientos/todos`, { headers: h }),
+        axios.get(`${API}/companies`, { headers: h }),
       ]);
       setCajas(cRes.data || []);
       setMovimientos(mRes.data || []);
+      setEmpresas(empRes.data || []);
     } catch (e) {
       console.error('Error cargando caja:', e);
     }
@@ -750,6 +763,14 @@ export default function GestionCaja({ user }) {
 
       {/* Modales */}
       {modal === 'traslado' && <ModalTraslado cajas={cajas} onTraslado={hacerTraslado} onClose={() => setModal(null)} />}
+      {(modal === 'nueva-caja' || modal === 'editar-caja') && (
+        <ModalCaja
+          caja={modal === 'editar-caja' ? selected : null}
+          empresas={empresas}
+          onSave={guardarCaja}
+          onClose={() => { setModal(null); setSelected(null); }}
+        />
+      )}
       {modal === 'movimiento' && (
         <ModalMovimiento 
           cajas={cajas} 
