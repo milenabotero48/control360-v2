@@ -228,8 +228,15 @@ const ModalProcesoEquipo = ({ equipo, ordenId, numeroOrden, procesos, insumos, o
 // MODAL — RECIBIR EQUIPOS
 // ═══════════════════════════════════════════════════════════════════════════════
 const ModalRecibir = ({ orden, onGuardar, onCerrar }) => {
+  // Solo mostrar items que van al taller (recargas/mantenimiento).
+  // Extintores nuevos (ventas) NO se reciben físicamente en taller.
+  const esTaller = (item = {}) => {
+    const cat = (item.categoria || '').toLowerCase();
+    return ['recarga', 'mantenimiento', 'prueba hidrostatica', 'prueba hidrostática',
+            'hidrostatica', 'hidrostática'].some(c => cat.includes(c));
+  };
   const [equipos, setEquipos] = useState(
-    (orden.items || []).map(i => ({ nombre: i.nombre, cantidadEsperada: i.cantidad || 1, cantidad: i.cantidad || 1 }))
+    (orden.items || []).filter(esTaller).map(i => ({ nombre: i.nombre, cantidadEsperada: i.cantidad || 1, cantidad: i.cantidad || 1 }))
   );
   const [obs, setObs] = useState('');
   const [guardando, setGuardando] = useState(false);
@@ -986,7 +993,15 @@ export default function GestionTaller({ user }) {
     // 3. Si NO es manual: verificar si todos los equipos de la orden están listos
     if (!esOrdenManual) {
       const equipos = equiposOrden[ordenId] || [];
-      const updatedEquipos = equipos.map(e => e.codigoQR === codigoQR ? { ...e, procesado: true } : e);
+      // Cuando es sin_qr (codigoQR === ''), identificar el equipo por _itemIdx + _unidad
+      // para marcarlo procesado correctamente. Con QR se busca por código como antes.
+      const equipoActualIdx = modalProcesoEquipo?.equipo?._itemIdx;
+      const equipoActualUnidad = modalProcesoEquipo?.equipo?._unidad;
+      const updatedEquipos = equipos.map(e => {
+        if (codigoQR && e.codigoQR === codigoQR) return { ...e, procesado: true };
+        if (!codigoQR && e._itemIdx === equipoActualIdx && e._unidad === equipoActualUnidad) return { ...e, procesado: true };
+        return e;
+      });
       setEquiposOrden(prev => ({ ...prev, [ordenId]: updatedEquipos }));
 
       const todosListos = updatedEquipos.length > 0 && updatedEquipos.every(e => e.procesado);
