@@ -54,6 +54,59 @@ const hoyColombia = () => {
 
 const esFechaValida = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 
+// ─── HELPER: parseo flexible de fecha SOLO para el importador masivo ─────────
+// El formulario manual y el resto del sistema siguen exigiendo 'YYYY-MM-DD'
+// estricto (esFechaValida). Esta función existe porque los archivos que las
+// suscriptoras exportan desde Excel/su sistema anterior traen fechas en
+// formatos variados (ej: "26-Jul-25") y antes se descartaban silenciosamente,
+// mandando esas filas a Prospectos en vez de crear el vencimiento.
+const pad2 = (n) => String(n).padStart(2, '0');
+const MESES_ABREV = {
+  ene:1, jan:1, feb:2, mar:3, abr:4, apr:4, may:5, jun:6, jul:7,
+  ago:8, aug:8, sep:9, sept:9, oct:10, nov:11, dic:12, dec:12,
+};
+const parsearFechaFlexible = (raw) => {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+
+  // YYYY-MM-DD (ya válido)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // YYYY-MM (se asume día 01)
+  if (/^\d{4}-\d{2}$/.test(s)) return s + '-01';
+
+  // YYYY/MM/DD
+  let m = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+  if (m) return `${m[1]}-${pad2(m[2])}-${pad2(m[3])}`;
+
+  // DD-MMM-YY o DD-MMM-YYYY (ej: 26-Jul-25, 26-Jul-2025, 26 Jul 25)
+  m = s.match(/^(\d{1,2})[\-\/\s]+([a-zA-ZñÑ]{3,9})[\-\/\s]+(\d{2,4})$/);
+  if (m) {
+    const mesNum = MESES_ABREV[m[2].toLowerCase().slice(0, 3)];
+    if (mesNum) {
+      let year = m[3];
+      if (year.length === 2) year = (Number(year) <= 30 ? '20' : '19') + year;
+      const dia = Number(m[1]);
+      if (dia >= 1 && dia <= 31) return `${year}-${pad2(mesNum)}-${pad2(dia)}`;
+    }
+  }
+
+  // DD/MM/YYYY o DD-MM-YYYY (numérico, día primero — convención colombiana)
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  if (m) {
+    let year = m[3];
+    if (year.length === 2) year = (Number(year) <= 30 ? '20' : '19') + year;
+    let dia = Number(m[1]), mes = Number(m[2]);
+    if (mes > 12 && dia <= 12) { const t = dia; dia = mes; mes = t; } // invertir si el "mes" no es válido
+    if (mes >= 1 && mes <= 12 && dia >= 1 && dia <= 31) return `${year}-${pad2(mes)}-${pad2(dia)}`;
+  }
+
+  // MM/YYYY o MM-YYYY (solo mes y año)
+  m = s.match(/^(\d{1,2})[\/\-](\d{4})$/);
+  if (m) return `${m[2]}-${pad2(m[1])}-01`;
+
+  return null;
+};
+
 // Estado calculado dinámicamente (no se "pudre" en la base):
 // GESTIONADO se respeta si está marcado; el resto se deriva de la fecha.
 const calcularEstado = (venc, hoy) => {
@@ -254,11 +307,9 @@ router.post('/importar', async (req, res) => {
           continue;
         }
 
-        // Normalizar fecha: acepta 'YYYY-MM-DD' o 'YYYY-MM' (se asume día 01)
-        let fRecarga = null;
-        const rawFecha = String(f.fechaUltimaRecarga || '').trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(rawFecha)) fRecarga = rawFecha;
-        else if (/^\d{4}-\d{2}$/.test(rawFecha)) fRecarga = rawFecha + '-01';
+        // ✅ FIX: antes solo aceptaba 'YYYY-MM-DD'/'YYYY-MM'; formatos como
+        // "26-Jul-25" se descartaban silenciosamente y la fila caía a Prospectos.
+        const fRecarga = parsearFechaFlexible(f.fechaUltimaRecarga);
 
         if (!fRecarga) {
           // ─── SIN FECHA → prospecto para la vendedora (R-COM-03 / sección 06)
