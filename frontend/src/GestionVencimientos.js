@@ -62,6 +62,14 @@ export default function GestionVencimientos({ user, onNavegar }) {
   const [form, setForm] = useState({ clienteId:'', sucursal:'', descripcionEquipo:'', cantidad:1, mesServicio:'' });
   const [vista, setVista] = useState('vencimientos'); // 'vencimientos' | 'llamadas_ia'
 
+  // ✅ NUEVO: el backend exige una empresa facturadora para cada importación
+  // (asigna empresaId a los clientes nuevos que se crean). Antes no existía
+  // selector en pantalla y por eso siempre fallaba con "Selecciona la empresa...".
+  const [empresasDisponibles, setEmpresasDisponibles] = useState([]);
+  const [mostrarImportVenc, setMostrarImportVenc] = useState(false);
+  const [empresaImportSel, setEmpresaImportSel] = useState('');
+  const [archivoImportSel, setArchivoImportSel] = useState(null);
+
   const cargar = useCallback(async () => {
     setCargando(true);
     try {
@@ -81,6 +89,14 @@ export default function GestionVencimientos({ user, onNavegar }) {
   }, [filtroEstado]);
 
   useEffect(() => { cargar(); }, [cargar]);
+
+  // ✅ NUEVO: cargar empresas del tenant para el selector de importación
+  useEffect(() => {
+    fetch(`${API}/companies`, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(d => setEmpresasDisponibles(Array.isArray(d) ? d : []))
+      .catch(() => setEmpresasDisponibles([]));
+  }, []);
 
   const buscarCliente = (id) => clientes.find(c => (c.id||c.uid) === id);
 
@@ -189,7 +205,7 @@ export default function GestionVencimientos({ user, onNavegar }) {
     setMostrarForm(false); cargar();
   };
 
-  const importarCSV = async (file) => {
+  const importarCSV = async (file, empresaId, empresaNombre) => {
     setImportando(true); setMsgImport(null);
     try {
       const texto = (await file.text()).replace(/^\uFEFF/,'');
@@ -207,11 +223,12 @@ export default function GestionVencimientos({ user, onNavegar }) {
           cantidad:iC>=0?Number(c[iC]):1, fechaUltimaRecarga:iF>=0?c[iF]?.trim():null };
       }).filter(f => f.nombre||f.telefono);
       const r = await fetch(`${API}/vencimientos/importar`, {
-        method:'POST', headers:authHeaders(), body:JSON.stringify({ filas }),
+        method:'POST', headers:authHeaders(), body:JSON.stringify({ filas, empresaId, empresaNombre }),
       });
       const json = await r.json();
       if (!r.ok) throw new Error(json.error||'Error');
       setMsgImport(`✓ ${json.vencimientosCreados} vencimientos · ${json.clientesNuevos} clientes · ${json.prospectosCreados} prospectos sin fecha`);
+      setMostrarImportVenc(false); setEmpresaImportSel(''); setArchivoImportSel(null);
       cargar();
     } catch(e) { setMsgImport(`✗ ${e.message}`); }
     setImportando(false);
@@ -258,11 +275,9 @@ export default function GestionVencimientos({ user, onNavegar }) {
         </div>
         <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
           <button onClick={descargarPlantilla} style={{ background:'#fff', border:'1.5px solid #e5e7eb', color:'#374151', borderRadius:8, padding:'7px 12px', fontWeight:700, fontSize:11, cursor:'pointer' }}>⬇ Plantilla</button>
-          <label style={{ background:'#7c3aed', color:'#fff', borderRadius:8, padding:'8px 12px', fontWeight:700, fontSize:11, cursor:'pointer' }}>
+          <button onClick={() => setMostrarImportVenc(true)} disabled={importando} style={{ background:'#7c3aed', color:'#fff', border:'none', borderRadius:8, padding:'8px 12px', fontWeight:700, fontSize:11, cursor:'pointer' }}>
             {importando?'Importando...':'⬆ Importar'}
-            <input type="file" accept=".csv" hidden disabled={importando}
-              onChange={e => { if(e.target.files[0]) importarCSV(e.target.files[0]); e.target.value=''; }} />
-          </label>
+          </button>
           <button onClick={() => exportarCSV(grupos)} style={{ background:'#15803d', color:'#fff', border:'none', borderRadius:8, padding:'8px 12px', fontWeight:700, fontSize:11, cursor:'pointer' }}>
             📥 Exportar
           </button>
@@ -413,6 +428,71 @@ export default function GestionVencimientos({ user, onNavegar }) {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* ✅ NUEVO: Modal importar vencimientos — Paso 1 empresa facturadora, Paso 2 archivo */}
+      {mostrarImportVenc && (
+        <div onClick={() => { if(!importando){ setMostrarImportVenc(false); setEmpresaImportSel(''); setArchivoImportSel(null); } }}
+          style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.55)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background:'#fff', borderRadius:16, width:'100%', maxWidth:480, maxHeight:'92vh', overflowY:'auto', padding:20 }}>
+
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+              <div style={{ fontWeight:800, fontSize:15, color:'#1a1a2e' }}>⬆ Importar Vencimientos</div>
+              <button onClick={() => { setMostrarImportVenc(false); setEmpresaImportSel(''); setArchivoImportSel(null); }} disabled={importando}
+                style={{ border:'none', background:'#f3f4f6', borderRadius:8, width:30, height:30, cursor:'pointer' }}>✕</button>
+            </div>
+
+            {/* Paso 1 — Empresa facturadora */}
+            <div style={{ marginBottom:14 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Paso 1 — ¿Qué empresa factura estos vencimientos? *</div>
+              <select value={empresaImportSel} onChange={e => setEmpresaImportSel(e.target.value)} style={inp}>
+                <option value="">— Selecciona la empresa —</option>
+                {empresasDisponibles.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+              <div style={{ fontSize:11, color:'#9ca3af', marginTop:4 }}>
+                Los clientes nuevos que se creen desde este archivo quedarán asignados a esta empresa.
+              </div>
+            </div>
+
+            {/* Paso 2 — Archivo CSV */}
+            <div style={{ marginBottom:6 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Paso 2 — Sube tu archivo CSV</div>
+              <div style={{ background:'#f9fafb', border:'2px dashed #e5e7eb', borderRadius:10, padding:18, textAlign:'center' }}>
+                <input type="file" accept=".csv" id="fileImportVenc" hidden disabled={!empresaImportSel || importando}
+                  onChange={e => { const f = e.target.files && e.target.files[0]; if (f) setArchivoImportSel(f); e.target.value=''; }} />
+                <label htmlFor="fileImportVenc" style={{
+                  display:'inline-block', padding:'10px 20px', borderRadius:8, fontWeight:700, fontSize:13,
+                  background: empresaImportSel ? '#7c3aed' : '#e5e7eb',
+                  color: empresaImportSel ? '#fff' : '#9ca3af',
+                  cursor: empresaImportSel ? 'pointer' : 'not-allowed',
+                }}>
+                  📂 {archivoImportSel ? archivoImportSel.name : 'Seleccionar CSV'}
+                </label>
+                {!empresaImportSel && (
+                  <div style={{ fontSize:11, color:'#dc2626', marginTop:8 }}>Primero selecciona la empresa facturadora</div>
+                )}
+              </div>
+            </div>
+
+            {msgImport && (
+              <div style={{ marginTop:12, background:msgImport.startsWith('✓')?'#dcfce7':'#fee2e2', color:msgImport.startsWith('✓')?'#15803d':'#b91c1c', borderRadius:8, padding:'9px 12px', fontSize:12, fontWeight:600 }}>
+                {msgImport}
+              </div>
+            )}
+
+            <button
+              onClick={() => archivoImportSel && empresaImportSel && importarCSV(archivoImportSel, empresaImportSel, empresasDisponibles.find(e => e.id===empresaImportSel)?.name || '')}
+              disabled={!archivoImportSel || !empresaImportSel || importando}
+              style={{
+                width:'100%', marginTop:14, border:'none', borderRadius:10, padding:'12px 0', fontWeight:700, fontSize:13,
+                background: (archivoImportSel && empresaImportSel && !importando) ? '#1a1a2e' : '#e5e7eb',
+                color: (archivoImportSel && empresaImportSel && !importando) ? '#fff' : '#9ca3af',
+                cursor: (archivoImportSel && empresaImportSel && !importando) ? 'pointer' : 'not-allowed',
+              }}>
+              {importando ? 'Importando...' : 'Importar archivo'}
+            </button>
+          </div>
         </div>
       )}
 
