@@ -201,7 +201,6 @@ export default function LlamadasIA({ user, onNavegar }) {
                 </div>
                 {esCierre && (
                   <button onClick={(e) => { e.stopPropagation(); crearOrdenDesdeCierre(reg); }}
-                    disabled={navegando}
                     style={{ background: '#15803d', color: '#fff', border: 'none', borderRadius: 8, padding: '9px 16px', fontWeight: 700, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' }}>
                     + Crear orden
                   </button>
