@@ -128,6 +128,14 @@ const GestionProductos = ({ user }) => {
   const [compuestosAfectados, setCompuestosAfectados] = useState([]);
   const [mostrarAlertaCompuestos, setMostrarAlertaCompuestos] = useState(false);
 
+  // ─── Selección múltiple y borrado en lote ─────────────────────────────────
+  const [seleccionados, setSeleccionados] = useState(new Set());
+  const [mostrarModalLote, setMostrarModalLote] = useState(false);
+  const [pinLote, setPinLote] = useState('');
+  const [eliminandoLote, setEliminandoLote] = useState(false);
+  const [errorLote, setErrorLote] = useState('');
+  const [resultadoLote, setResultadoLote] = useState(null);
+
   // Ajuste masivo
   const [ajustePct, setAjustePct]       = useState('');
   const [ajusteCategoria, setAjusteCategoria] = useState('');
@@ -334,6 +342,60 @@ const GestionProductos = ({ user }) => {
     } catch (err) {
       setError(err.response?.data?.error || 'Error al eliminar');
     }
+  };
+
+  // ─── Selección múltiple ────────────────────────────────────────────────────
+  const toggleSeleccion = (id) => {
+    setSeleccionados(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSeleccionarTodos = (idsVisibles) => {
+    setSeleccionados(prev => {
+      const todosSeleccionados = idsVisibles.length > 0 && idsVisibles.every(id => prev.has(id));
+      if (todosSeleccionados) {
+        const next = new Set(prev);
+        idsVisibles.forEach(id => next.delete(id));
+        return next;
+      }
+      return new Set([...prev, ...idsVisibles]);
+    });
+  };
+
+  const abrirModalLote = () => {
+    setPinLote('');
+    setErrorLote('');
+    setResultadoLote(null);
+    setMostrarModalLote(true);
+  };
+
+  const confirmarEliminarLote = async () => {
+    if (!/^\d{4}$/.test(pinLote)) { setErrorLote('El PIN debe ser de 4 dígitos'); return; }
+    setEliminandoLote(true);
+    setErrorLote('');
+    try {
+      const res = await axios.post(`${API}/products/eliminar-lote`, {
+        ids: Array.from(seleccionados),
+        pin: pinLote
+      }, { headers });
+      setResultadoLote(res.data);
+      setSeleccionados(new Set());
+      await cargarProductos();
+    } catch (err) {
+      setErrorLote(err.response?.data?.error || 'Error al eliminar productos');
+    } finally {
+      setEliminandoLote(false);
+    }
+  };
+
+  const cerrarModalLote = () => {
+    setMostrarModalLote(false);
+    setPinLote('');
+    setErrorLote('');
+    setResultadoLote(null);
   };
 
   const tipoInfo = (tipo) => TIPOS.find(t => t.value === tipo) || TIPOS[0];
@@ -627,6 +689,16 @@ const GestionProductos = ({ user }) => {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ background: '#f8fafc', borderBottom: '2px solid #e5e7eb' }}>
+                    {isAdmin && (
+                      <th style={{ padding: '12px 10px', width: 36 }}>
+                        <input
+                          type="checkbox"
+                          checked={productosMostrados.length > 0 && productosMostrados.every(p => seleccionados.has(p.id))}
+                          onChange={() => toggleSeleccionarTodos(productosMostrados.map(p => p.id))}
+                          style={{ width: 16, height: 16, cursor: 'pointer' }}
+                        />
+                      </th>
+                    )}
                     {(isAdmin
                       ? ['Código', 'Nombre', 'Tipo', 'Categoría', 'Costo', 'Precio venta', 'Margen', 'Stock', 'Acciones']
                       : ['Código', 'Nombre', 'Tipo', 'Categoría', 'Precio venta']
@@ -641,6 +713,16 @@ const GestionProductos = ({ user }) => {
                     const stockBajo = p.tieneStock && p.stock <= p.stockMinimo;
                     return (
                       <tr key={p.id} style={{ background: i % 2 === 0 ? '#fff' : '#f9fafb', opacity: p.activo === false ? 0.5 : 1, borderBottom: '1px solid #f3f4f6' }}>
+                        {isAdmin && (
+                          <td style={{ padding: '11px 10px' }}>
+                            <input
+                              type="checkbox"
+                              checked={seleccionados.has(p.id)}
+                              onChange={() => toggleSeleccion(p.id)}
+                              style={{ width: 16, height: 16, cursor: 'pointer' }}
+                            />
+                          </td>
+                        )}
                         <td style={{ padding: '11px 14px' }}>
                           <code style={{ background: '#f3f4f6', padding: '3px 8px', borderRadius: 5, fontSize: 12, fontWeight: 700, color: '#374151' }}>{p.codigo}</code>
                         </td>
@@ -680,6 +762,39 @@ const GestionProductos = ({ user }) => {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* Barra flotante de acción — solo aparece con selección activa.
+              position: fixed no afecta el flujo normal del layout ni el
+              scroll horizontal existente de la tabla. */}
+          {isAdmin && seleccionados.size > 0 && (
+            <div style={{
+              position: 'fixed', left: 0, right: 0, bottom: 0, zIndex: 500,
+              display: 'flex', justifyContent: 'center', padding: '0 12px 16px'
+            }}>
+              <div style={{
+                background: '#111', color: '#fff', borderRadius: 14,
+                padding: '12px 16px', display: 'flex', alignItems: 'center',
+                gap: 14, boxShadow: '0 10px 30px rgba(0,0,0,0.35)',
+                maxWidth: '100%', flexWrap: 'wrap', justifyContent: 'center'
+              }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>
+                  {seleccionados.size} producto{seleccionados.size !== 1 ? 's' : ''} seleccionado{seleccionados.size !== 1 ? 's' : ''}
+                </span>
+                <button
+                  onClick={() => setSeleccionados(new Set())}
+                  style={{ padding: '8px 14px', background: 'transparent', color: '#9ca3af', border: '1px solid #374151', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={abrirModalLote}
+                  style={{ padding: '8px 16px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}
+                >
+                  🗑️ Eliminar seleccionados
+                </button>
+              </div>
             </div>
           )}
         </>
@@ -1077,6 +1192,73 @@ const GestionProductos = ({ user }) => {
             <div style={s.modalFooter}>
               <button onClick={() => { setMostrarAlertaCompuestos(false); setCompuestosAfectados([]); }} style={s.btnCancelar}>Cerrar</button>
               <button onClick={() => { setMostrarAlertaCompuestos(false); setCompuestosAfectados([]); setVista('productos'); cargarProductos(); }} style={s.btnGuardar}>✅ Entendido, revisar precios</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ════════════════════════════════════════════
+          MODAL: CONFIRMAR BORRADO EN LOTE (PIN admin)
+          ════════════════════════════════════════════ */}
+      {mostrarModalLote && (
+        <div style={s.overlay} onClick={(e) => { if (e.target === e.currentTarget && !eliminandoLote) cerrarModalLote(); }}>
+          <div style={{ ...s.modal, maxWidth: 440 }}>
+            <div style={s.modalHeader}>
+              <h3 style={s.modalTitulo}>🗑️ Eliminar productos seleccionados</h3>
+              {!eliminandoLote && <button onClick={cerrarModalLote} style={s.btnCerrar}>✕</button>}
+            </div>
+            <div style={s.modalBody}>
+              {resultadoLote ? (
+                <div style={{ textAlign: 'center', padding: '8px 0' }}>
+                  <p style={{ fontSize: 40, margin: '0 0 8px' }}>✅</p>
+                  <p style={{ fontWeight: 700, fontSize: 15, margin: '0 0 6px' }}>{resultadoLote.mensaje}</p>
+                  <p style={{ fontSize: 12, color: '#9ca3af', margin: 0 }}>
+                    {resultadoLote.desactivados > 0 && 'Los desactivados tienen historial de ventas y se conservan para reportes.'}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>
+                    Vas a eliminar <strong>{seleccionados.size} producto{seleccionados.size !== 1 ? 's' : ''}</strong>.
+                    Los productos sin historial de ventas se eliminan permanentemente; los que ya tengan
+                    órdenes asociadas se desactivarán automáticamente para no perder el historial.
+                  </p>
+                  <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '10px 14px', fontSize: 12, color: '#dc2626' }}>
+                    Esta acción no se puede deshacer para los productos eliminados.
+                  </div>
+                  <div style={s.campo}>
+                    <label style={s.label}>PIN de autorización <span style={{ color: '#dc2626' }}>*</span></label>
+                    <small style={s.hint}>Solo el administrador puede confirmar esta acción.</small>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      maxLength={4}
+                      value={pinLote}
+                      onChange={e => setPinLote(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                      style={{ ...s.input, letterSpacing: '6px', fontSize: 18, textAlign: 'center' }}
+                      placeholder="••••"
+                      autoFocus
+                    />
+                  </div>
+                  {errorLote && <div style={s.alertError}>{errorLote}</div>}
+                </>
+              )}
+            </div>
+            <div style={s.modalFooter}>
+              {resultadoLote ? (
+                <button onClick={cerrarModalLote} style={s.btnGuardar}>Cerrar</button>
+              ) : (
+                <>
+                  <button onClick={cerrarModalLote} disabled={eliminandoLote} style={s.btnCancelar}>Cancelar</button>
+                  <button
+                    onClick={confirmarEliminarLote}
+                    disabled={eliminandoLote || pinLote.length !== 4}
+                    style={{ padding: '10px 24px', background: eliminandoLote || pinLote.length !== 4 ? '#fca5a5' : '#dc2626', color: '#fff', border: 'none', borderRadius: 8, cursor: eliminandoLote || pinLote.length !== 4 ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 14 }}
+                  >
+                    {eliminandoLote ? 'Eliminando...' : `Eliminar ${seleccionados.size}`}
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

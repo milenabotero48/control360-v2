@@ -19,19 +19,40 @@ const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = 
 // ─── HELPER: generar código automático ───────────────────────────────────────
 // ✅ FIX: filtra por adminId para que el consecutivo sea por tenant
 const generarCodigo = async (prefijo, adminId) => {
+  const ultimo = await obtenerUltimoConsecutivo(prefijo, adminId);
+  return `${prefijo}-${String(ultimo + 1).padStart(3, '0')}`;
+};
+
+// ─── HELPER: obtener el último número usado para un prefijo (consulta) ──────
+const obtenerUltimoConsecutivo = async (prefijo, adminId) => {
   const snap = await db.collection('products')
     .where('creadoPor', '==', adminId)
     .where('codigo', '>=', prefijo + '-')
     .where('codigo', '<=', prefijo + '-\uf8ff')
     .get();
-  const numeros = [];
+  let max = 0;
   snap.forEach(doc => {
     const cod = doc.data().codigo || '';
     const num = parseInt(cod.split('-')[1]);
-    if (!isNaN(num)) numeros.push(num);
+    if (!isNaN(num) && num > max) max = num;
   });
-  const siguiente = numeros.length > 0 ? Math.max(...numeros) + 1 : 1;
-  return `${prefijo}-${String(siguiente).padStart(3, '0')}`;
+  return max;
+};
+
+// ─── HELPER: verificar PIN del usuario para acciones sensibles ──────────────
+// Mismo patrón usado en egresos.js y logistics.js — mantiene consistencia.
+const verificarPinUsuario = async (uid, pin) => {
+  if (!pin) return { ok: false, error: 'PIN requerido' };
+  if (!uid) return { ok: false, error: 'Sesión inválida' };
+  const doc = await db.collection('users').doc(uid).get();
+  if (!doc.exists) return { ok: false, error: 'Usuario no encontrado' };
+  const u = doc.data();
+  if (u.role !== 'admin') {
+    return { ok: false, error: 'Solo el administrador puede autorizar esta acción' };
+  }
+  if (!u.pin) return { ok: false, error: 'No tienes PIN configurado' };
+  if (String(u.pin) !== String(pin)) return { ok: false, error: 'PIN incorrecto' };
+  return { ok: true };
 };
 
 // ─── HELPER: redondeo inteligente ────────────────────────────────────────────
@@ -510,6 +531,15 @@ router.post('/importar', authenticate, async (req, res) => {
     let creados = 0, errores = [];
     const batch = db.batch();
 
+    // ✅ FIX CONSECUTIVO: antes se llamaba a generarCodigo() (consulta a
+    // Firestore) DENTRO del for, por cada fila. Como el batch.commit() solo
+    // ocurre al final del loop, Firestore todavía no veía los productos
+    // recién agregados en esta misma importación — por eso todos calculaban
+    // "siguiente = 1" y terminaban con el mismo código (ej. EXT-001 repetido
+    // 50 veces). Ahora se consulta UNA sola vez por prefijo antes del loop,
+    // y el consecutivo se lleva en memoria incrementando con cada fila.
+    const contadores = {}; // { EXT: 12, BOT: 4, ... } → último número usado
+
     for (const p of productos) {
       // ✅ FIX: limpiar espacios de encabezados del CSV
       const nombreProducto = (p.Nombre || p['Nombre '] || '').trim();
@@ -541,9 +571,19 @@ router.post('/importar', authenticate, async (req, res) => {
         errores.push(`Categoría "${categoriaCSV}" no encontrada — "${nombreProducto}" asignado a PRD`);
       }
 
-      // ✅ FIX: pasar adminId a generarCodigo para consecutivo por tenant
       const codigoCSV = (p.Codigo || p['Codigo '] || '').trim().toUpperCase();
-      const codigoFinal = codigoCSV || await generarCodigo(prefijo, adminId);
+      let codigoFinal;
+      if (codigoCSV) {
+        codigoFinal = codigoCSV;
+      } else {
+        // Primera vez que aparece este prefijo en la importación: consultar
+        // Firestore una sola vez para saber dónde va el consecutivo.
+        if (!(prefijo in contadores)) {
+          contadores[prefijo] = await obtenerUltimoConsecutivo(prefijo, adminId);
+        }
+        contadores[prefijo] += 1;
+        codigoFinal = `${prefijo}-${String(contadores[prefijo]).padStart(3, '0')}`;
+      }
 
       // Verificar duplicado en el mismo tenant
       const codigoExiste = await db.collection('products')
@@ -640,6 +680,85 @@ router.delete('/:id', authenticate, async (req, res) => {
     }
   } catch (error) {
     console.error('Error eliminando producto:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// POST /api/products/eliminar-lote — Borrado masivo seleccionado (con PIN)
+// Body: { ids: [...], pin: '1234' }
+// Reutiliza la misma lógica del DELETE individual: si el producto tiene
+// historial en órdenes se desactiva (no se pierde el dato histórico), si no
+// tiene historial se elimina permanentemente. Solo admin, requiere PIN.
+// ══════════════════════════════════════════════════════════════════════════════
+router.post('/eliminar-lote', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Solo admin' });
+
+    const { ids, pin } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ error: 'No se enviaron productos para eliminar' });
+    }
+
+    const verif = await verificarPinUsuario(req.user.uid || req.user.id, pin);
+    if (!verif.ok) return res.status(403).json({ error: verif.error });
+
+    // Cargar todas las órdenes una sola vez (igual que el DELETE individual)
+    // para no repetir esta consulta pesada por cada producto del lote.
+    const todasOrdenes = await db.collection('orders').limit(500).get();
+    const idsConHistorial = new Set();
+    todasOrdenes.forEach(doc => {
+      const items = doc.data().items || [];
+      items.forEach(i => { if (i.productoId) idsConHistorial.add(i.productoId); });
+    });
+
+    let eliminados = 0, desactivados = 0, noEncontrados = 0;
+    const nombresEliminados = [], nombresDesactivados = [];
+
+    // Firestore batch soporta máximo 500 operaciones — se procesa en bloques.
+    const lotes = [];
+    for (let i = 0; i < ids.length; i += 450) lotes.push(ids.slice(i, i + 450));
+
+    for (const loteIds of lotes) {
+      const batch = db.batch();
+      for (const id of loteIds) {
+        const ref = db.collection('products').doc(id);
+        const doc = await ref.get();
+        if (!doc.exists) { noEncontrados++; continue; }
+        const prod = doc.data();
+
+        // Solo tocar productos del propio tenant (aislamiento multi-tenant)
+        if (prod.creadoPor && prod.creadoPor !== (req.adminId || req.user.uid || req.user.id)) {
+          noEncontrados++; continue;
+        }
+
+        if (idsConHistorial.has(id)) {
+          batch.update(ref, { activo: false, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+          desactivados++;
+          nombresDesactivados.push(prod.nombre);
+        } else {
+          batch.delete(ref);
+          eliminados++;
+          nombresEliminados.push(prod.nombre);
+        }
+      }
+      await batch.commit();
+    }
+
+    await auditar({
+      accion: 'ELIMINAR_LOTE_PRODUCTOS',
+      descripcion: `Admin eliminó/desactivó lote de ${ids.length} productos (${eliminados} eliminados, ${desactivados} desactivados)`,
+      usuarioId: req.user.uid || req.user.id,
+      usuarioNombre: req.user.nombre || req.user.email,
+      datos: { totalSolicitados: ids.length, eliminados, desactivados, noEncontrados, nombresEliminados, nombresDesactivados }
+    });
+
+    res.json({
+      mensaje: `${eliminados} eliminados, ${desactivados} desactivados (tenían historial de ventas)${noEncontrados ? `, ${noEncontrados} no encontrados` : ''}`,
+      eliminados, desactivados, noEncontrados
+    });
+  } catch (error) {
+    console.error('Error en borrado masivo de productos:', error);
     res.status(500).json({ error: error.message });
   }
 });
