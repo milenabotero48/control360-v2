@@ -232,14 +232,18 @@ router.get('/:codigo/inspecciones', async (req, res) => {
     if (snap.empty) return res.status(404).json({ error: 'Equipo no encontrado' });
     const equipoId = snap.docs[0].id;
 
-    // Traer inspecciones paginadas
-    const inspSnap = await db.collection('qr_inspecciones')
-      .where('equipoId', '==', equipoId)
-      .orderBy('createdAt', 'desc')
-      .limit(limite * pagina)
-      .get();
+   // Traer inspecciones — sort en memoria para evitar índice compuesto
+const inspSnap = await db.collection('qr_inspecciones')
+  .where('equipoId', '==', equipoId)
+  .get();
 
-    const todas = inspSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+const todas = inspSnap.docs
+  .map(d => ({ id: d.id, ...d.data() }))
+  .sort((a, b) => {
+    const ta = a.createdAt?.toMillis ? a.createdAt.toMillis() : 0;
+    const tb = b.createdAt?.toMillis ? b.createdAt.toMillis() : 0;
+    return tb - ta;
+  });
     const inicio = (pagina - 1) * limite;
     const inspecciones = todas.slice(inicio, inicio + limite);
     const hayMas = todas.length >= limite * pagina;

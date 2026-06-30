@@ -549,7 +549,7 @@ export default function AppRoot() {
           {currentPage === 'ordenes'      && <GestionOrdenes user={user} />}
           {currentPage === 'cotizaciones' && <GestionCotizaciones user={user} />}
           {currentPage === 'comercial'    && <ModuloComercial user={user} onNavegar={(k) => setCurrentPage(k)} />}
-          {currentPage === 'vencimientos' && <GestionVencimientos user={user} />}
+          {currentPage === 'vencimientos' && <GestionVencimientos user={user} onNavegar={(k) => setCurrentPage(k)} />}
           {currentPage === 'egresos'      && <GestionEgresos user={user} />}
           {currentPage === 'compras'      && <GestionCompras user={user} />}
           {currentPage === 'caja'         && <GestionCaja user={user} />}

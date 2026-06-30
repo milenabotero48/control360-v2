@@ -78,6 +78,12 @@ app.use('/api/whatsapp', require('./routes/whatsapp'));
 app.use('/api/vencimientos', authenticate, require('./routes/vencimientos'));
 // Módulo Comercial — pipeline de telemercadeo (Fase 3)
 app.use('/api/comercial', authenticate, require('./routes/comercial'));
+
+// Llamadas IA (Lucy) — extensión de Vencimientos (Fase 2.5)
+const { router: llamadasIARouter, routerPublico: llamadasIAPublico } = require('./routes/llamadasIA');
+app.use('/api/llamadas-ia/publico', llamadasIAPublico);
+app.use('/api/llamadas-ia', authenticate, llamadasIARouter);
+
 // Panel de Suscriptores — solo superAdmin
 app.use('/api/superadmin', require('./routes/superadmin'));
 
@@ -88,4 +94,6 @@ app.listen(PORT, () => {
   const { iniciarCron, iniciarCronWhatsapp } = require('./services/suscripcionCron');
   iniciarCron();
   iniciarCronWhatsapp();
+  const { iniciarCronLlamadasIA } = require('./services/llamadasIAService');
+  iniciarCronLlamadasIA();
 });

@@ -5,6 +5,7 @@
 // ============================================================
 
 import React, { useState, useEffect, useCallback } from 'react';
+import LlamadasIA from './LlamadasIA';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -46,7 +47,7 @@ const estadoMasUrgente = (equipos) => {
   return 'VIGENTE';
 };
 
-export default function GestionVencimientos({ user }) {
+export default function GestionVencimientos({ user, onNavegar }) {
   const [lista,        setLista]        = useState([]);
   const [resumen,      setResumen]      = useState(null);
   const [clientes,     setClientes]     = useState([]);
@@ -59,6 +60,7 @@ export default function GestionVencimientos({ user }) {
   const [importando,   setImportando]   = useState(false);
   const [msgImport,    setMsgImport]    = useState(null);
   const [form, setForm] = useState({ clienteId:'', sucursal:'', descripcionEquipo:'', cantidad:1, mesServicio:'' });
+  const [vista, setVista] = useState('vencimientos'); // 'vencimientos' | 'llamadas_ia'
 
   const cargar = useCallback(async () => {
     setCargando(true);
@@ -226,6 +228,27 @@ export default function GestionVencimientos({ user }) {
 
   return (
     <div style={{ padding:'12px 12px 80px', maxWidth:1100, margin:'0 auto' }}>
+
+      {/* Selector de vista — Vencimientos / Llamadas IA (Lucy) */}
+      <div style={{ display:'flex', gap:6, marginBottom:14, background:'#f3f4f6', borderRadius:10, padding:4, maxWidth:360 }}>
+        <button onClick={() => setVista('vencimientos')} style={{
+          flex:1, border:'none', borderRadius:8, padding:'8px 10px', fontWeight:700, fontSize:12, cursor:'pointer',
+          background: vista==='vencimientos' ? '#fff' : 'transparent',
+          color: vista==='vencimientos' ? '#1a1a2e' : '#6b7280',
+          boxShadow: vista==='vencimientos' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+        }}>⏰ Vencimientos</button>
+        <button onClick={() => setVista('llamadas_ia')} style={{
+          flex:1, border:'none', borderRadius:8, padding:'8px 10px', fontWeight:700, fontSize:12, cursor:'pointer',
+          background: vista==='llamadas_ia' ? '#fff' : 'transparent',
+          color: vista==='llamadas_ia' ? '#1a1a2e' : '#6b7280',
+          boxShadow: vista==='llamadas_ia' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+        }}>☎️ Llamadas IA</button>
+      </div>
+
+      {vista === 'llamadas_ia' ? (
+        <LlamadasIA user={user} onNavegar={onNavegar} />
+      ) : (
+      <>
 
       {/* Header */}
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', flexWrap:'wrap', gap:10, marginBottom:14 }}>
@@ -451,6 +474,8 @@ export default function GestionVencimientos({ user }) {
             </div>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   );

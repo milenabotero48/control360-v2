@@ -36,6 +36,7 @@ const CATALOGO_MODULOS = [
   { key: 'eri',          label: 'ERI' },
   { key: 'reportes',     label: 'Reportes' },
   { key: 'qr',           label: 'QR Activos ⭐ (solo invitados)' },
+  { key: 'llamadas_ia',  label: 'Llamadas IA — Lucy ⭐ (solo invitados)' },
 ];
 
 const ESTADO_UI = {
