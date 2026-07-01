@@ -60,6 +60,23 @@ const MODULOS_POR_ROL = {
   visor:      ['dashboard', 'reportes'],
 };
 
+// ✅ FIX USUARIOS-001 (2026-06-30): módulos premium que SuperAdmin activa
+// manualmente por tenant (ventaja competitiva — QR, y a futuro whatsapp/
+// ia_whatsapp). Sin este filtro, el formulario de crear/editar sub-usuario
+// mostraba el checkbox de QR aunque el tenant no lo tenga contratado,
+// permitiendo activarlo por error a un sub-usuario.
+const MODULOS_PREMIUM = ['qr'];
+
+// Un módulo premium solo es seleccionable si el tenant lo tiene activado.
+// Los módulos base NO se tocan (se mantiene el comportamiento actual).
+// Convención existente del sistema: modulosTenant vacío = tenant sin
+// restricción (ve/tiene todo) — se respeta igual aquí.
+const moduloVisibleParaTenant = (key, modulosTenant) => {
+  if (!MODULOS_PREMIUM.includes(key)) return true;
+  if (!modulosTenant || modulosTenant.length === 0) return true;
+  return modulosTenant.includes(key);
+};
+
 const FORM_VACIO = {
   nombre: '', email: '', codigo: '', password: '', pin: '',
   role: 'comercial', modulos: MODULOS_POR_ROL['comercial'], activo: true
@@ -154,8 +171,11 @@ const GestionUsuarios = ({ user }) => {
   }, [tabActiva]);
 
   // ─── CAMBIO DE ROL → precargar módulos ─────────────────────────────────────
+  const modulosTenant = user?.modulosTenant || user?.modulos || [];
   const handleRolChange = (nuevoRol) => {
-    setForm(prev => ({ ...prev, role: nuevoRol, modulos: MODULOS_POR_ROL[nuevoRol] || ['dashboard'] }));
+    const defaultMods = MODULOS_POR_ROL[nuevoRol] || ['dashboard'];
+    const modsPermitidos = defaultMods.filter(k => moduloVisibleParaTenant(k, modulosTenant));
+    setForm(prev => ({ ...prev, role: nuevoRol, modulos: modsPermitidos }));
   };
 
   // ─── TOGGLE MÓDULO ──────────────────────────────────────────────────────────
@@ -688,7 +708,7 @@ const GestionUsuarios = ({ user }) => {
               <div style={s.campo}>
                 <label style={s.label}>Módulos activos ({form.modulos.length} seleccionados)</label>
                 <div style={s.modulosGrid}>
-                  {MODULOS_DISPONIBLES.map(m => {
+                  {MODULOS_DISPONIBLES.filter(m => moduloVisibleParaTenant(m.key, modulosTenant)).map(m => {
                     const activo = form.modulos.includes(m.key);
                     return (
                       <button key={m.key} type="button"

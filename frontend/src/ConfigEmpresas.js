@@ -1347,6 +1347,111 @@ const TabSectores = ({ token }) => {
 };
 
 // ════════════════════════════════════════════════════════════════════════════════
+// PESTAÑA: NUMERACIÓN DE ÓRDENES DE SERVICIO
+// ─────────────────────────────────────────────────────────────────────────────
+// El suscriptor define su propio prefijo y número inicial para las Órdenes
+// de Servicio (OS). Solo afecta órdenes nuevas — las ya creadas no cambian.
+// ════════════════════════════════════════════════════════════════════════════════
+const TabNumeracion = ({ token }) => {
+  const [actual, setActual] = useState(null); // { prefijo, siguienteNumero } vigente
+  const [prefijo, setPrefijo] = useState('');
+  const [siguienteNumero, setSiguienteNumero] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [guardando, setGuardando] = useState(false);
+  const [mensaje, setMensaje] = useState(null);
+
+  useEffect(() => { cargar(); /* eslint-disable-next-line */ }, []);
+
+  const cargar = async () => {
+    setLoading(true);
+    try {
+      const r = await axios.get(`${API}/configuracion/numeracion`, { headers: { Authorization: `Bearer ${token}` } });
+      setActual(r.data);
+      setPrefijo(r.data.prefijo);
+      setSiguienteNumero(String(r.data.siguienteNumero));
+    } catch { }
+    setLoading(false);
+  };
+
+  const mostrarMsg = (texto, tipo = 'success') => {
+    setMensaje({ texto, tipo });
+    setTimeout(() => setMensaje(null), 4000);
+  };
+
+  const guardar = async () => {
+    setGuardando(true);
+    try {
+      const r = await axios.put(`${API}/configuracion/numeracion`,
+        { prefijo, siguienteNumero: Number(siguienteNumero) },
+        { headers: { Authorization: `Bearer ${token}` } });
+      setActual(r.data);
+      setPrefijo(r.data.prefijo);
+      setSiguienteNumero(String(r.data.siguienteNumero));
+      mostrarMsg('✅ Numeración guardada. Las próximas Órdenes de Servicio ya la usarán.');
+    } catch (e) {
+      mostrarMsg('❌ ' + (e.response?.data?.error || 'Error al guardar'), 'error');
+    }
+    setGuardando(false);
+  };
+
+  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#667eea' }}>Cargando numeración...</div>;
+
+  const prefijoPreview = String(prefijo || '').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'OS';
+  const numeroPreview = String(parseInt(siguienteNumero, 10) || 1).padStart(4, '0');
+
+  return (
+    <div>
+      {mensaje && (
+        <div style={{ ...S.msg, background: mensaje.tipo === 'error' ? '#fff0f0' : '#f0fff4', borderColor: mensaje.tipo === 'error' ? '#dc3545' : '#28a745', color: mensaje.tipo === 'error' ? '#dc3545' : '#28a745' }}>
+          {mensaje.texto}
+        </div>
+      )}
+
+      <div style={S.card}>
+        <h3 style={S.cardTitulo}>🔢 Numeración de Órdenes de Servicio</h3>
+        <p style={{ margin: '-12px 0 20px', fontSize: 13, color: '#888' }}>
+          Elige con qué prefijo y número quieres que empiecen tus próximas Órdenes de Servicio.
+        </p>
+
+        {actual && (
+          <div style={{ background: '#eff6ff', border: '1px solid #93c5fd', borderRadius: 8, padding: '10px 14px', marginBottom: 20, fontSize: 12, color: '#1e3a8a' }}>
+            💡 Ahora mismo tus órdenes salen como <strong>{actual.prefijo}-{String(actual.siguienteNumero).padStart(4, '0')}</strong> en adelante.
+            Este cambio solo afecta órdenes <strong>nuevas</strong> — las que ya creaste conservan su número.
+          </div>
+        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 8 }}>
+          <div style={S.campo}>
+            <label style={S.label}>Prefijo</label>
+            <input style={S.input}
+              value={prefijo}
+              onChange={e => setPrefijo(e.target.value.toUpperCase())}
+              placeholder="OS"
+              maxLength={10} />
+          </div>
+          <div style={S.campo}>
+            <label style={S.label}>Número inicial</label>
+            <input style={S.input}
+              type="number" min={1} max={999999}
+              value={siguienteNumero}
+              onChange={e => setSiguienteNumero(e.target.value)}
+              placeholder="1" />
+          </div>
+        </div>
+
+        <div style={{ fontSize: 13, color: '#555', marginBottom: 20 }}>
+          Tu próxima orden se verá así: <strong style={{ color: '#667eea' }}>{prefijoPreview}-{numeroPreview}</strong>
+        </div>
+
+        <button onClick={guardar} style={S.btnPrimario} disabled={guardando || !prefijo || !siguienteNumero}>
+          {guardando ? 'Guardando...' : 'Guardar numeración'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
 // PESTAÑA 8: LÍNEAS DE SERVICIO (Ola 3)
 // ─────────────────────────────────────────────────────────────────────────────
 // Agrupan los servicios (mano de obra) que vende la empresa. Cada línea suma
@@ -1577,6 +1682,7 @@ const ConfigEmpresas = ({ user }) => {
     { key: 'lineas',        label: '🎯 Líneas de servicio' },
     { key: 'retenciones',   label: '🧾 Retenciones' },
     { key: 'sectores',      label: '📍 Sectores' },
+    { key: 'numeracion',    label: '🔢 Numeración' },
     { key: 'cajas',         label: '🏦 Cajas' },
     { key: 'certificados',  label: '📜 Certificados' },
   ];
@@ -1608,6 +1714,7 @@ const ConfigEmpresas = ({ user }) => {
       {tab === 'lineas'     && <TabLineasServicio token={token} />}
       {tab === 'retenciones'   && <TabRetenciones token={token} />}
       {tab === 'sectores'      && <TabSectores token={token} />}
+      {tab === 'numeracion'    && <TabNumeracion token={token} />}
     {tab === 'cajas'         && <TabCajas token={token} onCajasChange={setCajas} empresas={empresas} />}
       {tab === 'certificados'  && <TabCertificados token={token} empresas={empresas} />}
     </div>

@@ -268,7 +268,7 @@ const verificarPinUsuario = async (uid, pin) => {
 const generarNumeroOrden = async (tipo, adminId) => {
   if (!adminId) throw new Error('generarNumeroOrden requiere adminId');
 
-  const prefijo = tipo === 'interna' ? 'OI'
+  const prefijoDefault = tipo === 'interna' ? 'OI'
     : tipo === 'produccion' ? 'OP'
     : tipo === 'cxc' ? 'OCX' : 'OS';
 
@@ -278,8 +278,13 @@ const generarNumeroOrden = async (tipo, adminId) => {
     const counterDoc = await tx.get(counterRef);
 
     let valorActual;
+    // ✅ FIX NUMERACION-001 (2026-06-30): si el tenant personalizó el
+    // prefijo desde Mi Empresa → Numeración (hoy solo aplica a tipo
+    // 'servicio' → OS), se respeta. Si no, se usa el prefijo de siempre.
+    let prefijo = prefijoDefault;
     if (counterDoc.exists) {
       valorActual = Number(counterDoc.data().value) || 0;
+      if (counterDoc.data().prefijo) prefijo = counterDoc.data().prefijo;
     } else {
       // Primera vez: calcular el máximo histórico de ese tipo+admin
       // (fuera de la transacción no — Firestore obliga a leer todo dentro,
@@ -297,12 +302,13 @@ const generarNumeroOrden = async (tipo, adminId) => {
       value: nuevo,
       tipo,
       adminId,
+      prefijo,
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
-    return nuevo;
+    return { nuevo, prefijo };
   });
 
-  return `${prefijo}-${String(siguiente).padStart(4, '0')}`;
+  return `${siguiente.prefijo}-${String(siguiente.nuevo).padStart(4, '0')}`;
 };
 
 // ─── HELPER: inicializar contador desde el máximo histórico (1 sola vez) ────
@@ -2420,5 +2426,8 @@ router.esItemTaller = esItemTaller;
 router.contarEquiposTaller = contarEquiposTaller;
 router.registrarIngresoEnCaja = registrarIngresoEnCaja;
 router.verificarPinUsuario = verificarPinUsuario;
+// ✅ FIX NUMERACION-001: expuesto para que configuracion.js pueda mostrar
+// el estado real del contador (incluye el histórico) antes de editarlo.
+router.asegurarContadorInicializado = asegurarContadorInicializado;
 
 module.exports = router;

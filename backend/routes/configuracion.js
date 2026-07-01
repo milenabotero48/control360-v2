@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const { db, admin } = require('../config/firebase');
 const { authenticate } = require('../middleware/auth');
+// ✅ FIX NUMERACION-001: reutiliza el MISMO helper de orders.js — evita
+// duplicar la lógica de inicialización del contador atómico.
+const ordersRouter = require('./orders');
+const asegurarContadorInicializado = ordersRouter.asegurarContadorInicializado;
 
 // Configuración por defecto para nuevos suscriptores
 const FORMAS_PAGO_DEFAULT = [
@@ -466,6 +470,109 @@ router.put('/metas', authenticate, async (req, res) => {
     res.json({ ok: true, metas });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NUMERACIÓN DE ÓRDENES DE SERVICIO — el suscriptor elige prefijo y número
+// inicial de sus propias Órdenes de Servicio (tipo 'servicio' → prefijo OS
+// por defecto). Vive sobre el MISMO contador atómico que usa orders.js
+// (counters/{adminId}_orders_servicio) — una sola fuente de verdad, sin
+// riesgo de que este ajuste quede desincronizado del contador real.
+//
+// Reglas:
+//   - Solo afecta órdenes NUEVAS. Las ya creadas conservan su número.
+//   - No se permite un número inicial que choque con órdenes ya existentes
+//     que usen el mismo prefijo (evita duplicados).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/configuracion/numeracion
+router.get('/numeracion', async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user.uid || req.user.id;
+
+    // Garantiza que el contador exista y refleje el histórico real antes
+    // de mostrarlo (mismo helper que usa la creación de órdenes).
+    await asegurarContadorInicializado('servicio', adminId);
+
+    const counterRef = db.collection('counters').doc(`${adminId}_orders_servicio`);
+    const doc = await counterRef.get();
+    const data = doc.exists ? doc.data() : {};
+
+    const prefijo = data.prefijo || 'OS';
+    const siguienteNumero = (Number(data.value) || 0) + 1;
+
+    res.json({ prefijo, siguienteNumero });
+  } catch (e) {
+    console.error('GET numeracion:', e);
+    res.status(500).json({ error: 'Error al consultar la numeración' });
+  }
+});
+
+// PUT /api/configuracion/numeracion — body: { prefijo, siguienteNumero }
+router.put('/numeracion', async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user.uid || req.user.id;
+    let { prefijo, siguienteNumero } = req.body;
+
+    // Sanitizar: solo letras y números, mayúsculas (el guion va aparte,
+    // fijo, entre prefijo y consecutivo — igual que hoy: OS-0001).
+    prefijo = String(prefijo || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!prefijo) {
+      return res.status(400).json({ error: 'El prefijo es obligatorio (solo letras y números, sin espacios ni símbolos)' });
+    }
+    if (prefijo.length > 10) {
+      return res.status(400).json({ error: 'El prefijo no puede tener más de 10 caracteres' });
+    }
+
+    siguienteNumero = parseInt(siguienteNumero, 10);
+    if (!Number.isInteger(siguienteNumero) || siguienteNumero < 1 || siguienteNumero > 999999) {
+      return res.status(400).json({ error: 'El número inicial debe ser un entero entre 1 y 999999' });
+    }
+
+    // ✅ FIX NUMERACION-001: evitar choques con Órdenes de Servicio ya
+    // existentes que usen ese mismo prefijo.
+    const snap = await db.collection('orders')
+      .where('adminId', '==', adminId)
+      .where('tipoOrden', '==', 'servicio')
+      .get();
+
+    let maximoConEsePrefijo = 0;
+    snap.forEach(doc => {
+      const partes = String(doc.data().numeroOrden || '').split('-');
+      if (partes.length === 2 && partes[0] === prefijo) {
+        const n = parseInt(partes[1], 10);
+        if (!isNaN(n) && n > maximoConEsePrefijo) maximoConEsePrefijo = n;
+      }
+    });
+
+    if (siguienteNumero <= maximoConEsePrefijo) {
+      return res.status(400).json({
+        error: `Ya existe ${prefijo}-${String(maximoConEsePrefijo).padStart(4, '0')}. El número inicial debe ser mayor a ${maximoConEsePrefijo}.`
+      });
+    }
+
+    const counterRef = db.collection('counters').doc(`${adminId}_orders_servicio`);
+    await counterRef.set({
+      value: siguienteNumero - 1,
+      tipo: 'servicio',
+      adminId,
+      prefijo,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    await db.collection('audit_logs').add({
+      accion: 'NUMERACION_OS_ACTUALIZADA', modulo: 'configuracion',
+      descripcion: `Numeración de Órdenes de Servicio actualizada: próxima orden será ${prefijo}-${String(siguienteNumero).padStart(4, '0')}`,
+      usuarioId: adminId, usuarioNombre: req.user.email,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      fecha: new Date().toISOString()
+    });
+
+    res.json({ ok: true, prefijo, siguienteNumero });
+  } catch (e) {
+    console.error('PUT numeracion:', e);
+    res.status(500).json({ error: 'Error al guardar la numeración' });
   }
 });
 

@@ -7,14 +7,27 @@ const { db, admin } = require('../config/firebase');
 const ordersRouter = require('./orders');
 const construirFlujo = ordersRouter.construirFlujo;
 const registrarIngresoEnCaja = ordersRouter.registrarIngresoEnCaja;
-
-// Servicio central de vencimientos (trigger por categoría)
-const { crearVencimientosDeOrden } = require('../services/vencimientosService');
 // Verificador de PIN por usuario (Ola 1 — sustituye al PIN de empresa).
 const verificarPinUsuario = ordersRouter.verificarPinUsuario;
 const { authenticate, validarTenant } = require('../middleware/auth');
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
+// ✅ FIX LOGISTICA-004 (2026-06-30): valida que un mensajeroId pertenezca al
+// tenant del admin autenticado antes de leer o escribir su cuadre. Sin esto,
+// cualquier usuario autenticado podía pasar el mensajeroId de OTRO suscriptor
+// por la URL y ver — o incluso cuadrar/corromper — su información financiera.
+const validarMensajeroDelTenant = async (adminId, mensajeroId) => {
+  try {
+    const snap = await db.collection('users').doc(mensajeroId).get();
+    if (!snap.exists) return false;
+    const u = snap.data();
+    // Compatibilidad: usuarios antiguos guardados con adminId en vez de creadoPor.
+    return u.creadoPor === adminId || u.adminId === adminId;
+  } catch (e) {
+    return false;
+  }
+};
+
 const auditar = async ({ accion, descripcion, usuarioId, usuarioEmail }) => {
   try {
     await db.collection('audit_logs').add({
@@ -811,11 +824,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
 
     await ordenRef.update(update);
 
-    // ── Hook vencimientos: categorías RECARGA Y MANTENIMIENTO / EXTINTORES ────
-    if (update.estado === 'completada') {
-      const adminId = req.adminId || req.user?.adminId || req.user?.uid;
-      crearVencimientosDeOrden(adminId, { ...orden, id: ordenRef.id }).catch(() => {});
-    }
+    // ── Ola 2.5: marcar préstamos devueltos en bulk ───────────────────────────
     // El mensajero marcó qué préstamos recogió en la entrega. Cambiamos cada
     // uno a estado "devuelto". Los que NO marcó quedan pendientes.
     if (Array.isArray(prestamosDevueltosIds) && prestamosDevueltosIds.length > 0) {
@@ -940,6 +949,13 @@ router.put('/extintores-prestamo/:id/devolver', async (req, res) => {
 router.get('/cuadre/:mensajeroId', async (req, res) => {
   try {
     const { mensajeroId } = req.params;
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+
+    // ✅ FIX LOGISTICA-004: el mensajeroId debe pertenecer al tenant autenticado
+    const perteneceAlTenant = await validarMensajeroDelTenant(adminId, mensajeroId);
+    if (!perteneceAlTenant) {
+      return res.status(403).json({ error: 'No autorizado para consultar este mensajero' });
+    }
 
     const snapOrdenes = await db.collection('orders')
       .where('mensajeroId', '==', mensajeroId)
@@ -1056,6 +1072,18 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
 router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
   try {
     const { pin, montoRecibido, extintoresDevueltos } = req.body;
+    const { mensajeroId } = req.params;
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+
+    // ✅ FIX LOGISTICA-004: validar tenant ANTES de tocar cualquier dato.
+    // Este es el punto más crítico — sin esto, un usuario podía confirmar
+    // el cuadre de un mensajero de OTRO suscriptor: se marcaban como
+    // cuadradas sus órdenes/egresos/extintores, pero el dinero entraba
+    // en la caja de quien confirma. Es decir, corrompía el cuadre ajeno.
+    const perteneceAlTenant = await validarMensajeroDelTenant(adminId, mensajeroId);
+    if (!perteneceAlTenant) {
+      return res.status(403).json({ error: 'No autorizado para cuadrar este mensajero' });
+    }
 
     const verificacion = await verificarPinUsuario(req.user.uid || req.user.id, pin);
     if (!verificacion.ok) {
@@ -1064,7 +1092,7 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
         await db.collection('audit_logs').add({
           accion: 'CUADRE_PIN_FALLIDO',
           modulo: 'logistica',
-          descripcion: `${req.user.email} falló PIN al cuadrar mensajero ${req.params.mensajeroId}`,
+          descripcion: `${req.user.email} falló PIN al cuadrar mensajero ${mensajeroId}`,
           usuarioId: req.user.uid || req.user.id,
           usuarioEmail: req.user.email,
           fecha: new Date().toISOString()
@@ -1073,7 +1101,6 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       return res.status(403).json({ error: verificacion.error });
     }
 
-    const { mensajeroId } = req.params;
     const batch = db.batch();
 
     // Marcar egresos provisionales como cuadrados
@@ -1249,13 +1276,22 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.get('/resumen-mensajeros', async (req, res) => {
   try {
+    // ✅ FIX LOGISTICA-004 (2026-06-30): aislamiento multi-tenant — sin esto
+    // se traían órdenes de TODOS los suscriptores y se mezclaban por
+    // mensajeroId, exponiendo mensajeros y montos recaudados de otras
+    // empresas. Se filtra por adminId primero y el estado en memoria
+    // (mismo patrón que /ordenes, evita índice compuesto).
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const estadosResumen = ['en_ruta_recogida', 'en_ruta_entrega', 'entrega_cobranza', 'en_taller'];
+
     const snap = await db.collection('orders')
-      .where('estado', 'in', ['en_ruta_recogida', 'en_ruta_entrega', 'entrega_cobranza', 'en_taller'])
+      .where('adminId', '==', adminId)
       .get();
 
     const porMensajero = {};
     snap.forEach(doc => {
       const o = doc.data();
+      if (!estadosResumen.includes(o.estado)) return;
       if (!o.mensajeroId) return;
       if (!porMensajero[o.mensajeroId]) {
         porMensajero[o.mensajeroId] = {

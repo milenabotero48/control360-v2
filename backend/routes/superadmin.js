@@ -40,7 +40,7 @@ const MODULOS_POR_PLAN = {
   independiente: [
     'dashboard','clientes','ordenes','cotizaciones','productos',
     'caja','egresos','proveedores','mi_empresa',
-    'cxc','cxp','usuarios','reportes'
+    'cxc','cxp','usuarios'
   ],
   empresa: [
     'dashboard','clientes','ordenes','cotizaciones','productos',
@@ -215,6 +215,20 @@ router.put('/suscriptores/:adminId/plan', authenticate, soloSuperAdmin, async (r
 
     const anterior = (await db.collection('suscripciones').doc(adminId).get()).data() || null;
 
+    // ✅ FIX USUARIOS-001 (2026-06-30): al asignar plan por PRIMERA VEZ a un
+    // suscriptor que aún no tiene módulos restringidos (modulos vacío =
+    // "ve todo", convención existente del sistema), se auto-pobla su
+    // catálogo de módulos según el plan elegido. Evita que un suscriptor
+    // quede con acceso a TODO — incluido QR — mientras nadie use el botón
+    // "Módulos" por separado. Si ya tiene módulos personalizados (editados
+    // por ti vía "Módulos"), esto NO los toca.
+    let modulosAutoAsignados = null;
+    const modulosActuales = userDoc.data().modulos || [];
+    if (!anterior && modulosActuales.length === 0) {
+      modulosAutoAsignados = MODULOS_POR_PLAN[plan] || [];
+      await userDoc.ref.update({ modulos: modulosAutoAsignados });
+    }
+
     const datos = {
       plan,
       estado,
@@ -229,14 +243,20 @@ router.put('/suscriptores/:adminId/plan', authenticate, soloSuperAdmin, async (r
 
     await registrarAuditoria({
       accion: anterior ? 'editar_suscripcion' : 'crear_suscripcion',
-      descripcion: `Suscripción de ${userDoc.data().nombre || userDoc.data().email}: plan ${PLANES[plan].nombre}, estado ${estado}, vence ${datos.fechaVencimiento}`,
+      descripcion: `Suscripción de ${userDoc.data().nombre || userDoc.data().email}: plan ${PLANES[plan].nombre}, estado ${estado}, vence ${datos.fechaVencimiento}`
+        + (modulosAutoAsignados ? ` — módulos auto-asignados: [${modulosAutoAsignados.join(', ') || 'ninguno'}]` : ''),
       usuarioId: req.user.uid,
       usuarioNombre: req.superAdminNombre,
       documento: adminId,
-      datos: { anterior, nuevo: datos }
+      datos: { anterior, nuevo: datos, modulosAutoAsignados }
     });
 
-    res.json({ success: true, suscripcion: datos, diasRestantes: diasRestantes(datos.fechaVencimiento) });
+    res.json({
+      success: true,
+      suscripcion: datos,
+      diasRestantes: diasRestantes(datos.fechaVencimiento),
+      modulosAutoAsignados
+    });
   } catch (err) {
     console.error('PUT plan:', err);
     res.status(500).json({ error: 'Error al guardar la suscripción' });
