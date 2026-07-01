@@ -82,9 +82,14 @@ router.get('/admin', async (req, res) => {
   const mes = rangoMesCO();
 
   // ── 1) Órdenes (todo lo que necesitamos para 5 KPIs) ──────────────────────
+  // .select() excluye campos pesados (historialEstados, fotos, etc.)
   let ordenes = [];
   try {
-    const snap = await db.collection('orders').where('adminId', '==', adminId).get();
+    const snap = await db.collection('orders').where('adminId', '==', adminId)
+      .select('estado', 'createdAt', 'total', 'subtotal', 'lugarAtencion',
+              'mensajeroId', 'montoPagado', 'clienteId', 'clienteNombre',
+              'numeroOrden', 'fechaCompletada', 'completadaEn', 'items')
+      .get();
     ordenes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (e) { warnings.push('orders: ' + e.message); }
 
@@ -127,6 +132,7 @@ router.get('/admin', async (req, res) => {
     const movsSnap = await db.collection('movimientos')
       .where('userId', '==', adminId)
       .where('tipo', '==', 'ingreso')
+      .select('monto', 'createdAt')
       .get();
     movsSnap.forEach(d => {
       const m = d.data();
@@ -136,18 +142,15 @@ router.get('/admin', async (req, res) => {
     });
   } catch (e) { warnings.push('cajas: ' + e.message); }
 
-  // ── 3) CxC pendiente ───────────────────────────────────────────────────────
+  // ── 3) CxC pendiente (reusar ordenes ya cargadas — NO duplicar query) ────
   let cxcPendiente = 0;
   let clientesConMora = 0;
   try {
-    const cxcSnap = await db.collection('orders').where('adminId', '==', adminId).get();
     const clientesMora = new Set();
-    cxcSnap.forEach(d => {
-      const o = d.data();
+    ordenes.forEach(o => {
       const saldo = (Number(o.total) || 0) - (Number(o.montoPagado) || 0);
       if (saldo > 0 && ['completada', 'cuadre_dinero', 'cxc'].includes(o.estado) && o.estado !== 'anulada') {
         cxcPendiente += saldo;
-        // Si la orden tiene más de 30 días, es mora (asumiendo política estándar)
         const t = aTime(o.fechaCompletada || o.completadaEn || o.createdAt);
         if (t && (Date.now() - t.getTime()) > 30 * 24 * 3600 * 1000) {
           clientesMora.add(o.clienteId || o.clienteNombre);
@@ -161,7 +164,9 @@ router.get('/admin', async (req, res) => {
   let egresosMes = 0;
   let provisionalesPendientes = 0;
   try {
-    const egSnap = await db.collection('egresos').where('userId', '==', adminId).get();
+    const egSnap = await db.collection('egresos').where('userId', '==', adminId)
+      .select('estado', 'totalPagar', 'monto', 'tipo', 'cuadrado', 'pagadoEn', 'createdAt')
+      .get();
     egSnap.forEach(d => {
       const e = d.data();
       if (e.estado === 'PAGADO' && dentroDeRango(e.pagadoEn || e.createdAt, mes.inicioISO, mes.finISO)) {
@@ -186,7 +191,9 @@ router.get('/admin', async (req, res) => {
   let stockCritico = 0;
   let productosStockCritico = [];
   try {
-    const prodSnap = await db.collection('products').where('adminId', '==', adminId).get();
+    const prodSnap = await db.collection('products').where('adminId', '==', adminId)
+      .select('nombre', 'stock', 'stockMinimo')
+      .get();
     prodSnap.forEach(d => {
       const p = d.data();
       const min = Number(p.stockMinimo) || 0;
@@ -196,21 +203,7 @@ router.get('/admin', async (req, res) => {
         productosStockCritico.push({ id: d.id, nombre: p.nombre, stock, stockMinimo: min });
       }
     });
-  } catch (e) {
-    // Si no hay adminId en products (BD vieja), fallback sin filtro
-    try {
-      const prodSnap = await db.collection('products').get();
-      prodSnap.forEach(d => {
-        const p = d.data();
-        const min = Number(p.stockMinimo) || 0;
-        const stock = Number(p.stock) || 0;
-        if (min > 0 && stock <= min) {
-          stockCritico++;
-          productosStockCritico.push({ id: d.id, nombre: p.nombre, stock, stockMinimo: min });
-        }
-      });
-    } catch (e2) { warnings.push('productos: ' + e2.message); }
-  }
+  } catch (e) { warnings.push('productos: ' + e.message); }
   productosStockCritico = productosStockCritico.slice(0, 5);
 
   // ── 7) Utilidad del mes (ventas − egresos del mes) ────────────────────────
@@ -287,7 +280,9 @@ router.get('/tesoreria', async (req, res) => {
   // Movimientos del mes (ingresos / egresos)
   let ingresosMes = 0, egresosMesMovs = 0;
   try {
-    const snap = await db.collection('movimientos').where('userId', '==', adminId).get();
+    const snap = await db.collection('movimientos').where('userId', '==', adminId)
+      .select('tipo', 'monto', 'createdAt')
+      .get();
     snap.forEach(d => {
       const m = d.data();
       if (dentroDeRango(m.createdAt, mes.inicioISO, mes.finISO)) {
@@ -298,12 +293,16 @@ router.get('/tesoreria', async (req, res) => {
   } catch (e) { warnings.push('movimientos: ' + e.message); }
   const utilidadMes = ingresosMes - egresosMesMovs;
 
-  // CxC pendiente (agrupado por cliente)
+  // CxC pendiente (agrupado por cliente) + pendientes de facturar (una sola query)
   let cxcPendiente = 0;
   let clientesConDeuda = 0;
   let topDeudores = [];
+  let pendientesFacturar = 0;
+  let pagosElectronicosSinValidar = 0;
   try {
-    const snap = await db.collection('orders').where('adminId', '==', adminId).get();
+    const snap = await db.collection('orders').where('adminId', '==', adminId)
+      .select('estado', 'total', 'montoPagado', 'clienteNombre', 'formaPago', 'pagoValidado')
+      .get();
     const deudaPorCliente = {};
     snap.forEach(d => {
       const o = d.data();
@@ -313,20 +312,27 @@ router.get('/tesoreria', async (req, res) => {
         const k = o.clienteNombre || 'Sin nombre';
         deudaPorCliente[k] = (deudaPorCliente[k] || 0) + saldo;
       }
+      if (['facturado', 'entrega_cobranza'].includes(o.estado)) pendientesFacturar++;
+      if (o.formaPago && o.formaPago !== 'Efectivo' && !o.pagoValidado &&
+          (o.estado === 'cuadre_dinero' || o.estado === 'entrega_cobranza')) {
+        pagosElectronicosSinValidar++;
+      }
     });
     clientesConDeuda = Object.keys(deudaPorCliente).length;
     topDeudores = Object.entries(deudaPorCliente)
       .map(([nombre, saldo]) => ({ nombre, saldo }))
       .sort((a, b) => b.saldo - a.saldo)
       .slice(0, 5);
-  } catch (e) { warnings.push('cxc: ' + e.message); }
+  } catch (e) { warnings.push('orders: ' + e.message); }
 
   // Egresos pendientes (por pagar)
   let egresosPorPagar = 0;
   let countEgresosPendientes = 0;
   let provisionalesPendientes = 0;
   try {
-    const snap = await db.collection('egresos').where('userId', '==', adminId).get();
+    const snap = await db.collection('egresos').where('userId', '==', adminId)
+      .select('estado', 'totalPagar', 'monto', 'tipo', 'cuadrado')
+      .get();
     snap.forEach(d => {
       const e = d.data();
       if (e.estado === 'PENDIENTE') {
@@ -339,20 +345,7 @@ router.get('/tesoreria', async (req, res) => {
     });
   } catch (e) { warnings.push('egresos: ' + e.message); }
 
-  // Órdenes pendientes de facturar (estado facturado, en cobranza, etc.)
-  let pendientesFacturar = 0;
-  let pagosElectronicosSinValidar = 0;
-  try {
-    const snap = await db.collection('orders').where('adminId', '==', adminId).get();
-    snap.forEach(d => {
-      const o = d.data();
-      if (['facturado', 'entrega_cobranza'].includes(o.estado)) pendientesFacturar++;
-      if (o.formaPago && o.formaPago !== 'Efectivo' && !o.pagoValidado &&
-          (o.estado === 'cuadre_dinero' || o.estado === 'entrega_cobranza')) {
-        pagosElectronicosSinValidar++;
-      }
-    });
-  } catch (e) { warnings.push('orders: ' + e.message); }
+  // (pendientesFacturar y pagosElectronicosSinValidar ya calculados arriba)
 
   res.json({
     fechaCO: hoy.fechaCO,
@@ -554,7 +547,10 @@ router.get('/comercial/:comercialId', async (req, res) => {
 
   let ordenes = [];
   try {
-    const snap = await db.collection('orders').where('adminId', '==', adminId).get();
+    const snap = await db.collection('orders').where('adminId', '==', adminId)
+      .select('estado', 'creadoPorId', 'comercialId', 'total', 'subtotal',
+              'montoPagado', 'createdAt', 'fechaCompletada', 'completadaEn')
+      .get();
     ordenes = snap.docs.map(d => ({ id: d.id, ...d.data() }))
       .filter(o => o.creadoPorId === comercialId || o.comercialId === comercialId);
   } catch (e) { warnings.push('orders: ' + e.message); }
@@ -566,12 +562,14 @@ router.get('/comercial/:comercialId', async (req, res) => {
   );
   const vendidoMes = completadasMes.reduce((s, o) => s + (Number(o.subtotal) || Number(o.total) || 0), 0);
 
-  // Cotizaciones del mes
+  // Cotizaciones del mes — FILTRADO POR adminId (seguridad multi-tenant)
   let cotizacionesMes = [];
   let cotizadoMes = 0;
   let cotizacionesAprobadas = 0;
   try {
-    const snap = await db.collection('cotizaciones').get();
+    const snap = await db.collection('cotizaciones').where('adminId', '==', adminId)
+      .select('creadoPorId', 'comercialId', 'createdAt', 'estado', 'totales')
+      .get();
     cotizacionesMes = snap.docs.map(d => ({ id: d.id, ...d.data() }))
       .filter(c => (c.creadoPorId === comercialId || c.comercialId === comercialId) &&
         dentroDeRango(c.createdAt, mes.inicioISO, mes.finISO));

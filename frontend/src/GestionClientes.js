@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { exportarExcel } from './exportExcel';
 
@@ -220,6 +220,7 @@ const GestionClientes = ({ user, empresas = [] }) => {
   const [clientes, setClientes]           = useState([]);
   const [loading, setLoading]             = useState(true);
   const [buscar, setBuscar]               = useState('');
+  const [buscarDebounced, setBuscarDebounced] = useState('');
   const [filtroEmpresa, setFiltroEmpresa] = useState('');
   const [mostrarForm, setMostrarForm]     = useState(false);
   const [editandoId, setEditandoId]       = useState(null);
@@ -232,6 +233,10 @@ const GestionClientes = ({ user, empresas = [] }) => {
   const [emailNuevo, setEmailNuevo]       = useState('');
   const [verDetalle, setVerDetalle]       = useState(null);
   const [verInactivos, setVerInactivos]   = useState(false);
+  const [limiteActual, setLimiteActual]   = useState(100);
+  const [hayMas, setHayMas]               = useState(false);
+  const [cargandoMas, setCargandoMas]     = useState(false);
+  const debounceRef = useRef(null);
 
   // Ola 2: pestañas en el modal de detalle (datos | historial)
   const [tabDetalle, setTabDetalle]       = useState('datos');
@@ -241,7 +246,6 @@ const GestionClientes = ({ user, empresas = [] }) => {
   const isAdmin = user?.role === 'admin';
   const [mostrarImportCli, setMostrarImportCli] = useState(false);
   const [previstaImportCli, setPrevistaImportCli] = useState([]);
-  const [previstaImportCliErrores, setPrevistaImportCliErrores] = useState([]); // ✅ filas excluidas antes de importar, con motivo
   const [importandoCli, setImportandoCli] = useState(false);
   const [resultadoCli, setResultadoCli] = useState(null);
   const token = localStorage.getItem('token');
@@ -286,23 +290,46 @@ const GestionClientes = ({ user, empresas = [] }) => {
   }, [verDetalle]);
 
   // ─── CARGAR CLIENTES ──────────────────────────────────────────────────────
-  const cargarClientes = useCallback(async () => {
+  const cargarClientes = useCallback(async (limiteOverride) => {
     try {
       setLoading(true);
-      let url = `${API}/clients?`;
+      const lim = limiteOverride || limiteActual;
+      let url = `${API}/clients?limite=${lim}&`;
       if (filtroEmpresa) url += `empresaId=${filtroEmpresa}&`;
-      if (buscar) url += `buscar=${encodeURIComponent(buscar)}&`;
+      if (buscarDebounced) url += `buscar=${encodeURIComponent(buscarDebounced)}&`;
       if (isAdmin && verInactivos) url += `activo=todos&`;
       const res = await axios.get(url, { headers });
-      setClientes(Array.isArray(res.data) ? res.data : []);
+      const data = Array.isArray(res.data) ? res.data : [];
+      setClientes(data);
+      // Si recibimos exactamente el límite, probablemente hay más
+      setHayMas(!buscarDebounced && data.length >= lim);
     } catch {
       setError('Error al cargar clientes');
     } finally {
       setLoading(false);
     }
-  }, [filtroEmpresa, buscar, verInactivos]);
+  }, [filtroEmpresa, buscarDebounced, verInactivos, limiteActual]);
 
   useEffect(() => { cargarClientes(); }, [cargarClientes]);
+
+  // Debounce: espera 500ms después de que el usuario deja de escribir
+  const handleBuscar = (valor) => {
+    setBuscar(valor);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      setBuscarDebounced(valor);
+      setLimiteActual(100); // reset límite al buscar
+    }, 500);
+  };
+
+  // Cargar más: incrementar límite
+  const cargarMas = async () => {
+    const nuevoLimite = limiteActual + 100;
+    setLimiteActual(nuevoLimite);
+    setCargandoMas(true);
+    await cargarClientes(nuevoLimite);
+    setCargandoMas(false);
+  };
 
   // ─── VERIFICAR DUPLICADOS ─────────────────────────────────────────────────
   const verificarDuplicados = async () => {
@@ -496,52 +523,17 @@ const GestionClientes = ({ user, empresas = [] }) => {
     }
   };
 
-  // ✅ FIX DEFINITIVO: normaliza cualquier variante de encabezado (con/sin asterisco,
-  // con/sin tildes, mayúsculas/minúsculas, espacios) a una llave canónica fija.
-  // Esto evita que un cambio futuro en la plantilla (ej: agregar " *" a un campo
-  // obligatorio) vuelva a romper la importación silenciosamente como ocurrió aquí.
-  const normalizarHeaderCSV = (h) => h
-    .replace(/\uFEFF/g, '')
-    .replace(/"/g, '')
-    .replace(/\*/g, '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // quita tildes
-
-  const MAPA_CAMPOS_CSV = {
-    'nombre': 'nombre',
-    'tipodocumento': 'tipoDocumento',
-    'tipo documento': 'tipoDocumento',
-    'nit': 'nit',
-    'celular': 'celular',
-    'telefono': 'telefono',
-    'emaillegal': 'emailLegal',
-    'email': 'emailLegal',
-    'direccionprincipal': 'direccionPrincipal',
-    'direccion': 'direccionPrincipal',
-    'ciudad': 'ciudad',
-    'departamento': 'departamento',
-    'empresa': 'empresaNombre',
-    'notas': 'notas',
-  };
-
   const leerCSVClientes = (file) => {
     const reader = new FileReader();
     reader.onload = ev => {
       const text = ev.target.result;
       const nl = String.fromCharCode(10);
       const lineas = text.split(nl).filter(l => l.trim());
-      if (lineas.length < 2) {
-        setPrevistaImportCli([]);
-        setPrevistaImportCliErrores([{ fila: '—', nombre: '—', motivo: 'El archivo está vacío o no tiene filas de datos (solo encabezado).' }]);
-        return;
-      }
-      // detectar separador (coma o punto y coma)
+      if (lineas.length < 2) return;
+      // ✅ FIX: detectar separador (coma o punto y coma)
       const sep = lineas[0].includes(';') ? ';' : ',';
-      const hdrsRaw = lineas[0].split(sep).map(normalizarHeaderCSV);
-      const hdrs = hdrsRaw.map(h => MAPA_CAMPOS_CSV[h] || h);
-
-      const filasCrudas = lineas.slice(1).map((linea, idx) => {
+      const hdrs = lineas[0].split(sep).map(h => h.replace(/"/g, '').replace(/\uFEFF/g, '').trim());
+      const datos = lineas.slice(1).map(linea => {
         const vals = [];
         let inside = false, cur = '';
         for (let ch of linea + sep) {
@@ -549,54 +541,11 @@ const GestionClientes = ({ user, empresas = [] }) => {
           else if (ch === sep && !inside) { vals.push(cur.trim()); cur = ''; }
           else { cur += ch; }
         }
-        const obj = { _fila: idx + 2 }; // +2: fila 1 es encabezado, base 1 para el usuario
+        const obj = {};
         hdrs.forEach((h, i) => { obj[h] = (vals[i] || '').replace(/^"|"$/g, '').trim(); });
         return obj;
-      });
-
-      const validos = [];
-      const errores = [];
-      const nitsVistos = {}; // dedup por nit+empresa dentro del mismo archivo
-
-      filasCrudas.forEach(c => {
-        const nombre = (c.nombre || '').trim();
-        const empresaTexto = (c.empresaNombre || '').trim();
-
-        if (!nombre) {
-          errores.push({ fila: c._fila, nombre: '(sin nombre)', motivo: 'Falta el nombre del cliente.' });
-          return;
-        }
-        if (!empresaTexto) {
-          errores.push({ fila: c._fila, nombre, motivo: 'No se indicó la empresa.' });
-          return;
-        }
-        const empresaMatch = empresasDisponibles.find(e =>
-          (e.name || '').toUpperCase().trim() === empresaTexto.toUpperCase().trim()
-        );
-        if (!empresaMatch) {
-          errores.push({ fila: c._fila, nombre, motivo: `La empresa "${empresaTexto}" no coincide exactamente con ninguna empresa registrada en el sistema. Revisa el nombre exacto.` });
-          return;
-        }
-        if (c.celular && !/^\d{10}$/.test(c.celular)) {
-          errores.push({ fila: c._fila, nombre, motivo: `El celular "${c.celular}" debe tener exactamente 10 dígitos.` });
-          return;
-        }
-        if (c.nit && !/^\d+$/.test(c.nit)) {
-          errores.push({ fila: c._fila, nombre, motivo: `El NIT "${c.nit}" debe contener solo números.` });
-          return;
-        }
-        const claveDedup = (c.nit || nombre.toUpperCase()) + '|' + empresaMatch.id;
-        if (c.nit && nitsVistos[claveDedup]) {
-          errores.push({ fila: c._fila, nombre, motivo: `NIT "${c.nit}" repetido en el archivo (ya aparece en la fila ${nitsVistos[claveDedup]} para la misma empresa).` });
-          return;
-        }
-        if (c.nit) nitsVistos[claveDedup] = c._fila;
-
-        validos.push({ ...c, empresaId: empresaMatch.id });
-      });
-
-      setPrevistaImportCli(validos);
-      setPrevistaImportCliErrores(errores);
+      }).filter(d => (d.Nombre || d.nombre || '').trim());
+      setPrevistaImportCli(datos);
     };
     reader.readAsText(file, 'UTF-8');
   };
@@ -609,25 +558,25 @@ const GestionClientes = ({ user, empresas = [] }) => {
       for (const c of previstaImportCli) {
         try {
           await axios.post(API + '/clients', {
-            nombre: (c.nombre || '').toUpperCase().trim(),
-            nit: c.nit || '',
-            tipoDocumento: c.tipoDocumento || 'NIT',
-            celular: c.celular || '',
-            telefono: c.telefono || '',
-            emailLegal: c.emailLegal || '',
-            direccionPrincipal: c.direccionPrincipal || '',
-            ciudad: c.ciudad || '',
-            departamento: c.departamento || '',
-            empresaId: c.empresaId || '',
-            empresaNombre: c.empresaNombre || '',
-            notas: c.notas || '',
+            // ✅ FIX: soportar campos con mayúscula (del CSV) y minúscula
+            nombre: (c.Nombre || c.nombre || '').toUpperCase().trim(),
+            nit: c.NIT || c.nit || '',
+            tipoDocumento: c.TipoDocumento || c.tipoDocumento || 'NIT',
+            celular: c.Celular || c.celular || '',
+            telefono: c.Telefono || c.telefono || '',
+            emailLegal: c.EmailLegal || c.emailLegal || '',
+            direccionPrincipal: c.DireccionPrincipal || c.direccionPrincipal || '',
+            ciudad: c.Ciudad || c.ciudad || '',
+            departamento: c.Departamento || c.departamento || '',
+            empresaId: empresasDisponibles.find(e => 
+              e.name?.toUpperCase().trim() === (c.Empresa || c.empresaNombre || '').toUpperCase().trim()
+            )?.id || '',
+            empresaNombre: c.Empresa || c.empresaNombre || '',
+            notas: c.Notas || c.notas || '',
             confirmarDuplicado: true
           }, { headers });
           creados++;
-        } catch (e) {
-          // ✅ FIX: guardar el motivo real (antes solo decía "duplicados", ahora se ve la causa exacta)
-          errores.push({ fila: c._fila, nombre: c.nombre, motivo: e.response?.data?.error || e.message || 'Error desconocido' });
-        }
+        } catch(e) { errores.push(c.nombre); }
       }
       setResultadoCli({ creados, errores });
       await cargarClientes();
@@ -684,11 +633,11 @@ const GestionClientes = ({ user, empresas = [] }) => {
           <span style={s.searchIcon}>🔍</span>
           <input
             style={s.searchInput}
-            placeholder="Buscar por nombre, NIT o email..."
+            placeholder="Buscar por nombre, NIT, celular o email..."
             value={buscar}
-            onChange={e => setBuscar(e.target.value)}
+            onChange={e => handleBuscar(e.target.value)}
           />
-          {buscar && <button onClick={() => setBuscar('')} style={s.clearBtn}>✕</button>}
+          {buscar && <button onClick={() => { setBuscar(''); setBuscarDebounced(''); setLimiteActual(100); }} style={s.clearBtn}>✕</button>}
         </div>
         <select
           style={s.select}
@@ -704,7 +653,11 @@ const GestionClientes = ({ user, empresas = [] }) => {
 
       {/* ── CONTADOR ── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-        <p style={{ ...s.contador, margin: 0 }}>{clientesMostrados.length} cliente{clientesMostrados.length !== 1 ? 's' : ''} encontrado{clientesMostrados.length !== 1 ? 's' : ''}</p>
+        <p style={{ ...s.contador, margin: 0 }}>
+          {clientesMostrados.length} cliente{clientesMostrados.length !== 1 ? 's' : ''}
+          {buscar ? ' encontrado' + (clientesMostrados.length !== 1 ? 's' : '') : ''}
+          {hayMas && !buscar ? ' · Busca para encontrar más' : ''}
+        </p>
         {isAdmin && (
           <button onClick={() => setVerInactivos(v => !v)}
             style={{ fontSize: 12, background: 'none', border: 'none', cursor: 'pointer', color: verInactivos ? '#dc2626' : '#9ca3af', fontWeight: 600 }}>
@@ -724,8 +677,7 @@ const GestionClientes = ({ user, empresas = [] }) => {
         </div>
       ) : (
         <div style={s.tableWrap}>
-          <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
-          <table style={{ ...s.tabla, minWidth: '760px' }}>
+          <table style={s.tabla}>
             <thead>
               <tr style={s.theadRow}>
                 {['NIT', 'Nombre', 'Teléfono', 'Dirección', 'Empresa', 'Acciones'].map(h => (
@@ -773,8 +725,16 @@ const GestionClientes = ({ user, empresas = [] }) => {
               ))}
             </tbody>
           </table>
-          </div>
         </div>
+        {/* Botón "Cargar más" si hay más clientes */}
+        {hayMas && !buscar && (
+          <div style={{ textAlign: 'center', padding: '20px 0' }}>
+            <button onClick={cargarMas} disabled={cargandoMas}
+              style={{ padding: '10px 32px', background: '#f3f4f6', color: '#374151', border: '1px solid #e5e7eb', borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: 13 }}>
+              {cargandoMas ? '⏳ Cargando...' : `📥 Cargar más clientes`}
+            </button>
+          </div>
+        )}
       )}
 
       {/* ══════════════════════════════════════════════════════════════════════
@@ -1336,16 +1296,16 @@ const GestionClientes = ({ user, empresas = [] }) => {
           <div style={{ ...s.modal, maxWidth: '700px' }}>
             <div style={s.modalHeader}>
               <h3 style={s.modalTitulo}>📥 Importar Clientes desde CSV</h3>
-              <button onClick={() => { setMostrarImportCli(false); setPrevistaImportCli([]); setPrevistaImportCliErrores([]); setResultadoCli(null); }} style={s.btnCerrar}>✕</button>
+              <button onClick={() => { setMostrarImportCli(false); setPrevistaImportCli([]); setResultadoCli(null); }} style={s.btnCerrar}>✕</button>
             </div>
             <div style={s.modalBody}>
               {/* Descargar plantilla */}
-              <div style={{ background: '#ede9fe', borderRadius: '10px', padding: '16px', marginBottom: '16px', display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ minWidth: '200px' }}>
+              <div style={{ background: '#ede9fe', borderRadius: '10px', padding: '16px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
                   <strong style={{ color: '#7c3aed' }}>Paso 1 — Descarga la plantilla Excel</strong>
                   <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#6b7280' }}>Llena la hoja "MIS CLIENTES" y guarda como CSV UTF-8</p>
                 </div>
-                <a href="/plantilla_clientes.xlsx" download="plantilla_clientes_control360.xlsx" style={{ padding: '10px 20px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', borderRadius: '8px', textDecoration: 'none', fontWeight: 700, fontSize: '13px', whiteSpace: 'nowrap' }}>
+                <a href="/plantilla_clientes.xlsx" download="plantilla_clientes_control360.xlsx" style={{ padding: '10px 20px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', borderRadius: '8px', textDecoration: 'none', fontWeight: 700, fontSize: '13px' }}>
                   ⬇️ Descargar plantilla
                 </a>
               </div>
@@ -1364,56 +1324,28 @@ const GestionClientes = ({ user, empresas = [] }) => {
 
               {/* Vista previa */}
               {previstaImportCli.length > 0 && !resultadoCli && (
-                <div style={{ marginBottom: '16px' }}>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                     <strong>{previstaImportCli.length} clientes listos para importar</strong>
                     <button onClick={importarClientes} disabled={importandoCli} style={{ padding: '10px 20px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>
                       {importandoCli ? 'Importando...' : 'Importar ' + previstaImportCli.length + ' clientes'}
                     </button>
                   </div>
-                  <div style={{ maxHeight: '250px', overflowY: 'auto', overflowX: 'auto', WebkitOverflowScrolling: 'touch', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
-                    <table style={{ width: '100%', minWidth: '520px', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <div style={{ maxHeight: '250px', overflowY: 'auto', border: '1px solid #e5e7eb', borderRadius: '8px' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                       <thead><tr style={{ background: '#f9fafb' }}>
                         {['Nombre','NIT','Celular','Ciudad','Empresa'].map(h => (
-                          <th key={h} style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 700, color: '#6b7280', fontSize: '11px', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{h}</th>
+                          <th key={h} style={{ padding: '8px 12px', textAlign: 'left', fontWeight: 700, color: '#6b7280', fontSize: '11px', textTransform: 'uppercase' }}>{h}</th>
                         ))}
                       </tr></thead>
                       <tbody>
                         {previstaImportCli.map((c, i) => (
                           <tr key={i} style={{ borderBottom: '1px solid #f3f4f6', background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
-                            <td style={{ padding: '8px 12px', fontWeight: 600, whiteSpace: 'nowrap' }}>{c.nombre}</td>
-                            <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{c.nit}</td>
-                            <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{c.celular}</td>
-                            <td style={{ padding: '8px 12px', whiteSpace: 'nowrap' }}>{c.ciudad}</td>
-                            <td style={{ padding: '8px 12px', fontSize: '11px', color: '#7c3aed', whiteSpace: 'nowrap' }}>{c.empresaNombre}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* ✅ NUEVO: listado de filas que NO se van a importar y por qué — visible siempre que el archivo se haya leído */}
-              {previstaImportCliErrores.length > 0 && !resultadoCli && (
-                <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '10px', padding: '14px 16px', marginBottom: '16px' }}>
-                  <strong style={{ color: '#dc2626', fontSize: '14px' }}>
-                    ⚠️ {previstaImportCliErrores.length} fila{previstaImportCliErrores.length !== 1 ? 's' : ''} del archivo NO se va{previstaImportCliErrores.length !== 1 ? 'n' : ''} a importar
-                  </strong>
-                  <p style={{ margin: '4px 0 10px', fontSize: '12px', color: '#7f1d1d' }}>Corrige el archivo y vuelve a subirlo, o continúa e impórtalas manualmente después.</p>
-                  <div style={{ maxHeight: '200px', overflowY: 'auto', overflowX: 'auto', WebkitOverflowScrolling: 'touch', border: '1px solid #fecaca', borderRadius: '8px', background: '#fff' }}>
-                    <table style={{ width: '100%', minWidth: '460px', borderCollapse: 'collapse', fontSize: '12px' }}>
-                      <thead><tr style={{ background: '#fef2f2' }}>
-                        {['Fila','Nombre','Motivo'].map(h => (
-                          <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 700, color: '#991b1b', fontSize: '10px', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{h}</th>
-                        ))}
-                      </tr></thead>
-                      <tbody>
-                        {previstaImportCliErrores.map((e, i) => (
-                          <tr key={i} style={{ borderBottom: '1px solid #fee2e2' }}>
-                            <td style={{ padding: '6px 10px', color: '#9ca3af', whiteSpace: 'nowrap' }}>{e.fila}</td>
-                            <td style={{ padding: '6px 10px', fontWeight: 600, whiteSpace: 'nowrap' }}>{e.nombre}</td>
-                            <td style={{ padding: '6px 10px', color: '#7f1d1d' }}>{e.motivo}</td>
+                            <td style={{ padding: '8px 12px', fontWeight: 600 }}>{c.nombre}</td>
+                            <td style={{ padding: '8px 12px' }}>{c.nit}</td>
+                            <td style={{ padding: '8px 12px' }}>{c.celular}</td>
+                            <td style={{ padding: '8px 12px' }}>{c.ciudad}</td>
+                            <td style={{ padding: '8px 12px', fontSize: '11px', color: '#7c3aed' }}>{c.empresaNombre}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1429,33 +1361,10 @@ const GestionClientes = ({ user, empresas = [] }) => {
                   <div style={{ fontSize: '14px' }}>
                     <strong style={{ fontSize: '28px', color: '#16a34a' }}>{resultadoCli.creados}</strong> clientes creados
                     {resultadoCli.errores?.length > 0 && (
-                      <span style={{ marginLeft: '16px', color: '#dc2626' }}> | {resultadoCli.errores.length} con error</span>
+                      <span style={{ marginLeft: '16px', color: '#dc2626' }}> | {resultadoCli.errores.length} con errores (duplicados)</span>
                     )}
                   </div>
-
-                  {/* ✅ NUEVO: listado con el motivo real de cada error al importar (antes solo decía "duplicados") */}
-                  {resultadoCli.errores?.length > 0 && (
-                    <div style={{ marginTop: '14px', maxHeight: '200px', overflowY: 'auto', overflowX: 'auto', WebkitOverflowScrolling: 'touch', border: '1px solid #fecaca', borderRadius: '8px', background: '#fff' }}>
-                      <table style={{ width: '100%', minWidth: '460px', borderCollapse: 'collapse', fontSize: '12px' }}>
-                        <thead><tr style={{ background: '#fef2f2' }}>
-                          {['Fila','Nombre','Motivo'].map(h => (
-                            <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 700, color: '#991b1b', fontSize: '10px', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>{h}</th>
-                          ))}
-                        </tr></thead>
-                        <tbody>
-                          {resultadoCli.errores.map((e, i) => (
-                            <tr key={i} style={{ borderBottom: '1px solid #fee2e2' }}>
-                              <td style={{ padding: '6px 10px', color: '#9ca3af', whiteSpace: 'nowrap' }}>{e.fila}</td>
-                              <td style={{ padding: '6px 10px', fontWeight: 600, whiteSpace: 'nowrap' }}>{e.nombre}</td>
-                              <td style={{ padding: '6px 10px', color: '#7f1d1d' }}>{e.motivo}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-
-                  <button onClick={() => { setMostrarImportCli(false); setPrevistaImportCli([]); setPrevistaImportCliErrores([]); setResultadoCli(null); }} style={{ marginTop: '16px', padding: '10px 20px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>
+                  <button onClick={() => { setMostrarImportCli(false); setPrevistaImportCli([]); setResultadoCli(null); }} style={{ marginTop: '16px', padding: '10px 20px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 700 }}>
                     Ver lista de clientes
                   </button>
                 </div>
@@ -1471,7 +1380,7 @@ const GestionClientes = ({ user, empresas = [] }) => {
 // ─── ESTILOS ──────────────────────────────────────────────────────────────────
 const s = {
   wrapper:      { padding: '32px', maxWidth: '1400px', margin: '0 auto', fontFamily: "'Segoe UI', sans-serif" },
-  pageHeader:   { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '24px' },
+  pageHeader:   { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' },
   pageTitle:    { margin: 0, fontSize: '26px', fontWeight: 700, color: '#111' },
   pageSubtitle: { margin: '4px 0 0', color: '#6b7280', fontSize: '14px' },
   btnPrimario:  { padding: '12px 24px', background: 'linear-gradient(135deg,#667eea,#764ba2)', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 700, fontSize: '14px' },

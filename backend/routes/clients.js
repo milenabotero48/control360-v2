@@ -34,11 +34,11 @@ const nombreSimilar = (n1, n2) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /api/clients — Listar clientes (filtro por empresa opcional)
+// GET /api/clients — Listar clientes (paginado + búsqueda server-side)
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { empresaId, buscar, activo } = req.query;
+    const { empresaId, buscar, activo, limite = 100 } = req.query;
     // AISLAMIENTO SAAS: cada admin solo ve sus propios clientes
     const adminId = req.adminId || req.user?.uid || req.user?.id;
     let query = db.collection('clients').where('adminId', '==', adminId);
@@ -52,20 +52,28 @@ router.get('/', authenticate, async (req, res) => {
       query = query.where('activo', '==', true);
     }
 
-    const snapshot = await query.get();
-
-    let clientes = [];
-    snapshot.forEach(doc => clientes.push({ id: doc.id, ...doc.data() }));
-
-    // Filtro de búsqueda por texto
+    // Si hay búsqueda: cargar todos, filtrar en servidor, devolver max 100
     if (buscar) {
+      const snapshot = await query.get();
+      let clientes = [];
+      snapshot.forEach(doc => clientes.push({ id: doc.id, ...doc.data() }));
       const term = buscar.toUpperCase();
       clientes = clientes.filter(c =>
         c.nombre?.includes(term) ||
         c.nit?.includes(term) ||
-        c.email?.includes(buscar.toLowerCase())
+        c.celular?.includes(term) ||
+        c.email?.includes(buscar.toLowerCase()) ||
+        c.emailLegal?.includes(buscar.toLowerCase())
       );
+      return res.json(clientes.slice(0, Number(limite)));
     }
+
+    // Sin búsqueda: limitar la carga (evita traer 10,000 de golpe)
+    const limiteNum = Math.min(Number(limite) || 100, 500);
+    const snapshot = await query.limit(limiteNum).get();
+
+    let clientes = [];
+    snapshot.forEach(doc => clientes.push({ id: doc.id, ...doc.data() }));
 
     res.json(clientes);
   } catch (error) {

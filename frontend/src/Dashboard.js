@@ -4,6 +4,17 @@ import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloq
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
+// ─── HOOK RESPONSIVE ──────────────────────────────────────────────────────────
+const useIsMobile = () => {
+  const [mob, setMob] = useState(() => window.innerWidth < 768);
+  useEffect(() => {
+    const fn = () => setMob(window.innerWidth < 768);
+    window.addEventListener('resize', fn);
+    return () => window.removeEventListener('resize', fn);
+  }, []);
+  return mob;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard del Admin (Control360 v2 — Ola 2)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,6 +138,7 @@ const Dashboard = ({ user }) => {
   const [error, setError]     = useState('');
   const [mostrarMetas, setMostrarMetas] = useState(false);
   const [metas, setMetas] = useState({ metaVentas: 25000000, metaDomicilios: 80, metaExtintores: 50 });
+  const isMobile = useIsMobile();
 
   const token = localStorage.getItem('token');
   const isAdmin = user?.role === 'admin';
@@ -153,7 +165,7 @@ const Dashboard = ({ user }) => {
 
   useEffect(() => {
     cargar();
-    const t = setInterval(cargar, 30000); // refresco cada 30s
+    const t = setInterval(cargar, 60000); // refresco cada 60s (antes 30s)
     return () => clearInterval(t);
   }, [cargar]);
 
@@ -173,16 +185,16 @@ const Dashboard = ({ user }) => {
   const mesLabel = new Date().toLocaleDateString('es-CO', { month: 'long', year: 'numeric', timeZone: 'America/Bogota' });
 
   return (
-    <div style={{ padding: 28, maxWidth: 1400, margin: '0 auto', fontFamily: "'Segoe UI', sans-serif" }}>
+    <div style={{ padding: isMobile ? '16px 12px' : '28px 28px', maxWidth: 1400, margin: '0 auto', fontFamily: "'Segoe UI', sans-serif" }}>
 
       {/* ── HEADER ────────────────────────────────────────────────────────── */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 }}>
+      <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'flex-start', gap: isMobile ? 12 : 0, marginBottom: 24 }}>
         <div>
-          <h2 style={{ fontSize: 26, fontWeight: 700, margin: '0 0 4px', color: '#111' }}>
-            📊 Dashboard — Control360
+          <h2 style={{ fontSize: isMobile ? 20 : 26, fontWeight: 700, margin: '0 0 4px', color: '#111' }}>
+            📊 Dashboard
           </h2>
           <p style={{ margin: 0, color: '#6b7280', fontSize: 13 }}>
-            {new Date().toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Bogota' })} · Actualizado en tiempo real
+            {new Date().toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Bogota' })}
           </p>
         </div>
         {isAdmin && (
@@ -229,7 +241,7 @@ const Dashboard = ({ user }) => {
         const sinFiltro = mods.length === 0;
         const tiene = (m) => sinFiltro || mods.includes(m);
         return (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 14, marginBottom: 24 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(auto-fit, minmax(190px, 1fr))', gap: isMobile ? 10 : 14, marginBottom: 24 }}>
             <KpiCard icon="📋" label="Órdenes hoy"        value={fmtNum(k.ordenesHoy)}        sub="Creadas hoy"               color="#7c3aed" />
             <KpiCard icon="💵" label="Recaudo hoy"        value={fmtCop(k.recaudoHoy)}        sub="Ingresos en caja"          color="#16a34a" />
             {tiene('taller')    && <KpiCard icon="🔧" label="En taller"          value={fmtNum(k.enTaller)}          sub="Activas ahora"             color="#8b5cf6" alerta={k.enTaller > 10} />}
@@ -242,8 +254,8 @@ const Dashboard = ({ user }) => {
         );
       })()}
 
-      {/* ── BARRAS DE META + STOCK CRÍTICO (lado a lado) ───────────────────── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 16, marginBottom: 24 }}>
+      {/* ── BARRAS DE META + STOCK CRÍTICO (lado a lado en desktop, apilados en móvil) ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.5fr 1fr', gap: 16, marginBottom: 24 }}>
         {/* Metas */}
         <div style={{ background: '#fff', borderRadius: 12, padding: 18, boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
           <h3 style={{ margin: '0 0 14px', fontSize: 16, fontWeight: 700, color: '#111' }}>
@@ -290,7 +302,8 @@ const Dashboard = ({ user }) => {
         {data.ordenesRecientes.length === 0 ? (
           <div style={{ textAlign: 'center', padding: 30, color: '#9ca3af', fontSize: 13 }}>Sin órdenes recientes</div>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 520 }}>
             <thead>
               <tr style={{ background: '#f9fafb' }}>
                 {['N°', 'Cliente', 'Estado', 'Tipo', 'Total'].map(h => (
@@ -315,6 +328,7 @@ const Dashboard = ({ user }) => {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 
