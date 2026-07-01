@@ -584,4 +584,75 @@ router.post('/:id/editar-pagado', async (req, res) => {
   }
 });
 
+// ─── POST /api/egresos/:id/anular ─────────────────────────────────────────────────
+// Anula un egreso PAGADO: requiere PIN admin + motivo.
+// Revierte dinero a caja automáticamente.
+router.post('/:id/anular', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Solo el admin puede anular egresos' });
+
+    const { pin, motivo } = req.body;
+    if (!motivo?.trim()) return res.status(400).json({ error: 'Motivo de anulación requerido' });
+    if (motivo.trim().length < 10) return res.status(400).json({ error: 'El motivo debe tener al menos 10 caracteres' });
+
+    // Exigir PIN — acción sensible
+    const verif = await verificarPinUsuario(req.user.uid || req.user.id, pin);
+    if (!verif.ok) return res.status(403).json({ error: verif.error });
+
+    const ref = db.collection('egresos').doc(req.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Egreso no encontrado' });
+
+    const egreso = doc.data();
+    if (egreso.estado !== 'PAGADO') return res.status(400).json({ error: 'Solo se pueden anular egresos PAGADOS' });
+
+    const montoTotal = Number(egreso.totalPagar) || Number(egreso.monto) || 0;
+    const cajaId = egreso.cajaId;
+
+    // Transacción atómica: anular egreso + reversar dinero a caja
+    const batch = db.batch();
+
+    batch.update(ref, {
+      estado: 'ANULADO',
+      motvoAnulacion: motivo,
+      anuladoPor: req.user.email,
+      anuladoEn: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // Reversar dinero a la caja original
+    if (cajaId) {
+      const cajaRef = db.collection('cajas').doc(cajaId);
+      batch.update(cajaRef, {
+        saldo: admin.firestore.FieldValue.increment(montoTotal),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+
+    await batch.commit();
+
+    // Registrar en auditoría
+    await registrarAuditoria({
+      accion: 'EGRESO_ANULADO_CRITICO',
+      modulo: 'egresos',
+      descripcion: `ANULACIÓN CRÍTICA: ${egreso.numero} anulado por ${req.user.email}. Motivo: ${motivo}`,
+      usuarioId: req.adminId || req.user.uid,
+      usuarioNombre: req.user.email,
+      documento: egreso.numero,
+      datos: {
+        egresoId: req.params.id,
+        numero: egreso.numero,
+        monto: montoTotal,
+        cajaId,
+        motvoAnulacion: motivo
+      }
+    });
+
+    res.json({ ok: true, id: req.params.id, estado: 'ANULADO', dineroReversado: montoTotal });
+  } catch (e) {
+    console.error('POST anular:', e);
+    res.status(500).json({ error: 'Error al anular egreso' });
+  }
+});
+
 module.exports = router;

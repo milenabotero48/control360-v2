@@ -852,6 +852,87 @@ function ModalPagar({ egreso, cajas, formasPago, formasPagoConfig, onPagar, onCl
   );
 }
 
+// ─── Modal Anular Egreso Pagado ──────────────────────────────────────────────────
+// Permite anular egresos PAGADOS: requiere PIN admin + motivo.
+// Revierte el dinero a la caja automáticamente.
+function ModalAnularEgreso({ egreso, onAnular, onClose }) {
+  const [paso, setPaso]     = useState('auth');
+  const [pin, setPin]       = useState('');
+  const [motivo, setMotivo] = useState('');
+  const [anulando, setAnulando] = useState(false);
+  const [errorAuth, setErrorAuth] = useState('');
+
+  const verificarPin = async () => {
+    if (!pin.trim()) { setErrorAuth('Ingresa tu PIN'); return; }
+    if (!motivo.trim()) { setErrorAuth('El motivo es obligatorio'); return; }
+    if (motivo.trim().length < 10) { setErrorAuth('Describe más el motivo (mínimo 10 caracteres)'); return; }
+    setAnulando(true); setErrorAuth('');
+    try {
+      await onAnular(pin, motivo);
+      setPaso('confirmado');
+    } catch (e) {
+      setErrorAuth(e.response?.data?.error || e.message || 'Error al anular');
+    }
+    setAnulando(false);
+  };
+
+  return (
+    <div style={S.overlay}>
+      <div style={{ ...S.modal, maxWidth: paso === 'confirmado' ? 460 : 520 }}>
+        <div style={S.modalHeader}>
+          <h3 style={S.modalTitle}>🚨 Anular Egreso Pagado</h3>
+          <button onClick={onClose} style={S.closeBtn}>✕</button>
+        </div>
+        <div style={S.modalBody}>
+          {paso === 'auth' ? (
+            <>
+              <div style={{ background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 10, padding: 14, marginBottom: 16, fontSize: 13, color: '#991b1b' }}>
+                🚨 <strong>ACCIÓN CRÍTICA:</strong> Al anular este egreso, se reversa el dinero a la caja {egreso.cajaId}. Esta acción queda en auditoría permanente.
+              </div>
+              <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 10, padding: 14, marginBottom: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#64748b', marginBottom: 6 }}>EGRESO A ANULAR:</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#1e293b' }}>{egreso.numero} · {egreso.concepto}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#dc2626', marginTop: 4 }}>Monto: {fmt(egreso.totalPagar || egreso.monto)}</div>
+              </div>
+              {errorAuth && <div style={{ background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#991b1b', marginBottom: 12 }}>{errorAuth}</div>}
+              <div style={S.field}>
+                <label style={S.label}>PIN admin *</label>
+                <input type="password" style={S.input} value={pin} onChange={e => setPin(e.target.value)} placeholder="0000" maxLength="4" onKeyDown={e => e.key === 'Enter' && verificarPin()} />
+              </div>
+              <div style={S.field}>
+                <label style={S.label}>Motivo de anulación *</label>
+                <textarea style={{ ...S.input, height: 80, resize: 'vertical' }} value={motivo} onChange={e => setMotivo(e.target.value)} placeholder="Explica por qué se anula este egreso (mínimo 10 caracteres)..." />
+                <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>{motivo.length} caracteres</div>
+              </div>
+              <div style={S.modalFooter}>
+                <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
+                <button onClick={verificarPin} disabled={anulando}
+                  style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#dc2626,#b91c1c)' }}>
+                  {anulando ? 'Verificando...' : '🔐 Continuar →'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ background: '#dcfce7', border: '1px solid #bbf7d0', borderRadius: 10, padding: 16, textAlign: 'center', marginBottom: 20 }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>✅</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: '#166534' }}>Egreso anulado correctamente</div>
+                <div style={{ fontSize: 12, color: '#4b5563', marginTop: 6 }}>
+                  El monto {fmt(egreso.totalPagar || egreso.monto)} ha sido reversado a la caja.<br/>
+                  La acción está registrada en auditoría.
+                </div>
+              </div>
+              <div style={S.modalFooter}>
+                <button onClick={onClose} style={S.btnPrimary}>Cerrar</button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Modal Editar Pagado ──────────────────────────────────────────────────────
 function ModalEditarPagado({ egreso, onSave, onClose }) {
   const [paso, setPaso]     = useState('auth');
@@ -1126,6 +1207,19 @@ export default function GestionEgresos({ user }) {
     }
   };
 
+  const anularEgreso = async (pin, motivo) => {
+    try {
+      const totalMonto = selected.totalPagar || selected.monto;
+      await axios.post(`${API}/egresos/${selected.id}/anular`, { pin, motivo }, { headers: getHeaders() });
+      // Actualizar estado a ANULADO y reversar dinero a caja
+      setEgresos(p => p.map(e => e.id === selected.id ? { ...e, estado: 'ANULADO', motvoAnulacion: motivo, anuladoEn: new Date().toISOString() } : e));
+      setCajas(p => p.map(c => c.id === selected.cajaId ? { ...c, saldo: (c.saldo || 0) + Number(totalMonto) } : c));
+      setModal(null); setSelected(null);
+    } catch (e) {
+      throw e; // Propagar error para que el modal lo muestre
+    }
+  };
+
   const egresosFiltered = egresos.filter(e => {
     if (filtros.estado !== 'todos' && e.estado !== filtros.estado) return false;
     if (filtros.categoria !== 'todos' && e.categoria !== filtros.categoria) return false;
@@ -1167,7 +1261,7 @@ export default function GestionEgresos({ user }) {
           ], 'egresos')} style={{ ...S.btnSecondary, fontSize: 12 }}>
             📥 Exportar Excel
           </button>
-          {user?.role === 'admin' && mensajeros.length > 0 && (
+          {mensajeros.length > 0 && (
             <button onClick={() => setModalProvisional(true)} style={{ ...S.btnSecondary, fontSize: 12, background: '#fffbeb', color: '#d97706', border: '1px solid #fcd34d' }}>
               💵 Egreso provisional
             </button>
@@ -1417,8 +1511,8 @@ export default function GestionEgresos({ user }) {
                   <td style={S.td}>{eg.retenVal > 0 ? <span style={{ fontSize: 12, color: '#7c3aed', fontWeight: 600 }}>{fmt(eg.retenVal)}</span> : <span style={{ color: '#d1d5db' }}>—</span>}</td>
                   <td style={{ ...S.td, fontWeight: 700, color: '#1e293b', fontSize: 14 }}>{fmt(eg.totalPagar || eg.monto)}</td>
                   <td style={S.td}>
-                    <span style={{ ...S.estadoBadge, background: eg.estado === 'PAGADO' ? '#dcfce7' : '#fef3c7', color: eg.estado === 'PAGADO' ? '#166534' : '#92400e', border: `1px solid ${eg.estado === 'PAGADO' ? '#bbf7d0' : '#fde68a'}` }}>
-                      {eg.estado === 'PAGADO' ? '✅ PAGADO' : '⏳ PENDIENTE'}
+                    <span style={{ ...S.estadoBadge, background: eg.estado === 'PAGADO' ? '#dcfce7' : eg.estado === 'ANULADO' ? '#f3f4f6' : '#fef3c7', color: eg.estado === 'PAGADO' ? '#166534' : eg.estado === 'ANULADO' ? '#6b7280' : '#92400e', border: `1px solid ${eg.estado === 'PAGADO' ? '#bbf7d0' : eg.estado === 'ANULADO' ? '#d1d5db' : '#fde68a'}` }}>
+                      {eg.estado === 'PAGADO' ? '✅ PAGADO' : eg.estado === 'ANULADO' ? '❌ ANULADO' : '⏳ PENDIENTE'}
                     </span>
                   </td>
                   <td style={{ ...S.td, whiteSpace: 'nowrap' }}>
@@ -1427,7 +1521,10 @@ export default function GestionEgresos({ user }) {
                       <button onClick={() => { setSelected(eg); setModal('pagar'); }} style={{ ...S.actionBtn, background: '#dcfce7', color: '#166534' }}>💳 Pagar</button>
                     </>}
                     {eg.estado === 'PAGADO' && user?.role === 'admin' && (
-                      <button onClick={() => { setSelected(eg); setModal('editarPagado'); }} style={{ ...S.actionBtn, background: '#fee2e2', color: '#991b1b' }}>🔐 Editar</button>
+                      <>
+                        <button onClick={() => { setSelected(eg); setModal('editarPagado'); }} style={{ ...S.actionBtn, background: '#fee2e2', color: '#991b1b' }}>✏️ Editar</button>
+                        <button onClick={() => { setSelected(eg); setModal('anular'); }} style={{ ...S.actionBtn, background: '#fecaca', color: '#7f1d1d', fontWeight: 700 }}>🚨 Anular</button>
+                      </>
                     )}
                     <button onClick={() => imprimirEgreso(eg, empresaDeCaja(eg.cajaId))} style={S.actionBtn} title="Imprimir">🖨️</button>
                   </td>
@@ -1444,6 +1541,7 @@ export default function GestionEgresos({ user }) {
       {modal === 'editar' && selected && <ModalEgreso egreso={{ ...selected, _categorias: categorias }} empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias} onSave={editarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'pagar' && selected && <ModalPagar egreso={selected} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} onPagar={pagarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'editarPagado' && selected && <ModalEditarPagado egreso={selected} onSave={editarPagado} onClose={() => { setModal(null); setSelected(null); }} />}
+      {modal === 'anular' && selected && <ModalAnularEgreso egreso={selected} onAnular={anularEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modalProvisional && <EgresoProvisional mensajeros={mensajeros} cajas={cajas} formasPagoConfig={formasPagoConfig} onCrear={async (data) => { await crearEgreso(data); setModalProvisional(false); }} onCerrar={() => setModalProvisional(false)} />}
 
       {/* Ola 2: modal de cuadre provisional → definitivo */}
