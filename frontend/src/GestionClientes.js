@@ -676,6 +676,7 @@ const GestionClientes = ({ user, empresas = [] }) => {
           <button onClick={abrirNuevo} style={s.btnPrimario}>+ Crear primer cliente</button>
         </div>
       ) : (
+        <>
         <div style={s.tableWrap}>
           <table style={s.tabla}>
             <thead>
@@ -735,6 +736,7 @@ const GestionClientes = ({ user, empresas = [] }) => {
             </button>
           </div>
         )}
+        </>
       )}
 
       {/* ══════════════════════════════════════════════════════════════════════
