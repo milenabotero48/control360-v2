@@ -673,6 +673,12 @@ const ConfigTaller = () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function GestionTaller({ user }) {
   const esAdmin = user?.role === 'admin';
+  // ✅ FIX TALLER-003 (2026-07-01): QR es un módulo premium que Sandra activa
+  // por tenant. Si el suscriptor no lo tiene, TODO el flujo de taller debe
+  // ser directo (recibir → procesar), sin botones ni textos de QR.
+  // Misma convención usada en el resto del sistema: módulos vacío = todos.
+  const modulosTenant = user?.modulosTenant || user?.modulos || [];
+  const tieneQR = modulosTenant.length === 0 || modulosTenant.includes('qr');
   const [tab, setTab] = useState('dashboard');
   const [dashboard, setDashboard] = useState(null);
   const [ordenes, setOrdenes] = useState([]);
@@ -776,6 +782,10 @@ export default function GestionTaller({ user }) {
       //    sin haber recargado los otros 9.
       const ord = ordenes.find(o => o.id === ordenId);
       const items = (ord?.items || []).filter(esItemTallerFront);
+      // ✅ FIX TALLER-002: historial persistido en la orden — de aquí se
+      // recupera el estado "procesado" de los equipos SIN QR (para QR, ese
+      // estado ya se recupera de qrsExistentes más abajo).
+      const tallerPasos = ord?.tallerPasos || [];
       const equiposExpandidos = [];
       const separarTipoCap = (nombre) => {
         // Primero quitar prefijos operativos del inicio del nombre del producto.
@@ -806,7 +816,14 @@ export default function GestionTaller({ user }) {
         const { tipo: tipoEq, capacidad: capEq } = separarTipoCap(it.nombre);
         for (let n = 0; n < cant; n++) {
           // ✅ TALLER-001: si el producto no requiere QR, no crear slot de QR
-          const necesitaQR = it.requiereQR !== false;
+          // ✅ FIX TALLER-003: si el tenant no tiene el módulo QR activo,
+          // NINGÚN equipo pide QR, sin importar la configuración del producto.
+          const necesitaQR = tieneQR && (it.requiereQR !== false);
+          // ✅ FIX TALLER-002: id determinístico y único por posición del
+          // equipo en la orden — se usa para buscar si ya quedó registrado
+          // en tallerPasos (equipo sin QR ya procesado antes de este reload).
+          const pasoIdSinQR = `equipo_sinqr_${idx}_${n + 1}`;
+          const yaProcesadoSinQR = !necesitaQR && tallerPasos.some(p => p.pasoId === pasoIdSinQR);
           equiposExpandidos.push({
             codigoQR: null,
             qrPendiente: necesitaQR, // false = no pedirá QR
@@ -817,7 +834,7 @@ export default function GestionTaller({ user }) {
             esCambio: !!it.esCambio,
             codigoQRsugerido: it.codigoQR || '',
             requiereQR: necesitaQR,
-            procesado: false,
+            procesado: yaProcesadoSinQR,
             _itemIdx: idx, _unidad: n + 1, _totalUnidad: cant
           });
         }
@@ -958,11 +975,25 @@ export default function GestionTaller({ user }) {
     // En este caso solo actualizamos el QR y descontamos insumos.
     const esOrdenManual = !ordenId || ordenId === 'manual';
 
+    // ✅ FIX TALLER-002 (2026-07-01): identificador determinístico y único
+    // para equipos SIN QR, basado en su posición dentro de la orden
+    // (_itemIdx + _unidad). Antes se usaba `equipo_${codigoQR || equipoId}`
+    // y `equipoId` siempre llegaba undefined (ese campo nunca se llenaba),
+    // así que TODO equipo sin QR de CUALQUIER orden se guardaba con el
+    // mismo pasoId "equipo_undefined". Como cargarEquiposDeOrden nunca leía
+    // ese historial, el estado "procesado" de un equipo sin QR se perdía en
+    // cada recarga de pantalla y la orden nunca llegaba a "todos listos".
+    const equipoActualIdx = modalProcesoEquipo?.equipo?._itemIdx;
+    const equipoActualUnidad = modalProcesoEquipo?.equipo?._unidad;
+    const pasoId = codigoQR
+      ? `equipo_${codigoQR}`
+      : `equipo_sinqr_${equipoActualIdx}_${equipoActualUnidad}`;
+
     if (!esOrdenManual) {
       // 1. Registrar paso en la orden
       await axios.post(`${API}/workshop/ordenes/${ordenId}/paso`, {
-        pasoId: `equipo_${codigoQR || equipoId}`,
-        pasoNombre: `${codigoQR} — ${procesoNombre}`,
+        pasoId,
+        pasoNombre: `${codigoQR || 'Sin QR'} — ${procesoNombre}`,
         insumosUsados,
         observaciones
       }, auth());
@@ -995,8 +1026,6 @@ export default function GestionTaller({ user }) {
       const equipos = equiposOrden[ordenId] || [];
       // Cuando es sin_qr (codigoQR === ''), identificar el equipo por _itemIdx + _unidad
       // para marcarlo procesado correctamente. Con QR se busca por código como antes.
-      const equipoActualIdx = modalProcesoEquipo?.equipo?._itemIdx;
-      const equipoActualUnidad = modalProcesoEquipo?.equipo?._unidad;
       const updatedEquipos = equipos.map(e => {
         if (codigoQR && e.codigoQR === codigoQR) return { ...e, procesado: true };
         if (!codigoQR && e._itemIdx === equipoActualIdx && e._unidad === equipoActualUnidad) return { ...e, procesado: true };
@@ -1063,7 +1092,11 @@ export default function GestionTaller({ user }) {
     { key: 'insumos', label: '🧪 Insumos', roles: ['admin', 'taller'] },
     { key: 'alertas', label: `🔔 Alertas${alertas.length > 0 ? ` (${alertas.length})` : ''}`, roles: ['admin', 'taller'] },
     { key: 'config', label: '⚙️ Configuración', roles: ['admin'] },
-  ].filter(t => t.roles.includes(user?.role));
+  ]
+    .filter(t => t.roles.includes(user?.role))
+    // ✅ FIX TALLER-003: "Sin Proceso" solo lista equipos que YA tienen QR
+    // (stock/vitrina). Sin el módulo QR, esta pestaña no aplica.
+    .filter(t => t.key !== 'equipos_pendientes' || tieneQR);
 
   return (
     <div style={s.page}>
@@ -1241,25 +1274,29 @@ export default function GestionTaller({ user }) {
                         )}
                         {equipos.map((eq, i) => (
                           <div key={eq.codigoQR || `pend-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: eq.procesado ? '#f0fdf4' : '#fafafa', border: `1px solid ${eq.procesado ? '#bbf7d0' : '#e5e7eb'}`, marginBottom: 6 }}>
-                            <span style={{ fontSize: 18 }}>{eq.procesado ? '✅' : (eq.codigoQR ? '⏳' : '🏷️')}</span>
+                            {/* ✅ FIX TALLER-003: sin módulo QR, ícono neutro (nunca 🏷️) */}
+                            <span style={{ fontSize: 18 }}>{eq.procesado ? '✅' : (tieneQR ? (eq.codigoQR ? '⏳' : '🏷️') : '⏳')}</span>
                             <div style={{ flex: 1 }}>
                               {eq.codigoQR
                                 ? <span style={{ fontSize: 12, fontWeight: 700, color: '#1e1b4b' }}>{eq.codigoQR}</span>
                                 : <span style={{ fontSize: 12, fontWeight: 700, color: '#d97706' }}>
-                                    {eq._totalUnidad > 1 ? `Equipo ${eq._unidad}/${eq._totalUnidad} — ` : ''}QR pendiente
+                                    {eq._totalUnidad > 1 ? `Equipo ${eq._unidad}/${eq._totalUnidad} — ` : ''}{tieneQR ? 'QR pendiente' : 'Pendiente de proceso'}
                                   </span>}
                               <span style={{ fontSize: 12, color: '#6b7280', marginLeft: 8 }}>{eq.tipo} — {eq.capacidad}</span>
                             </div>
-                            {!eq.codigoQR && !orden.tallerCompletado && (
+                            {/* ✅ FIX TALLER-003: el paso de QR solo aplica si el tenant tiene el módulo */}
+                            {tieneQR && !eq.codigoQR && !orden.tallerCompletado && (
                               <button
                                 onClick={() => setModalQR({ orden, equipo: eq })}
                                 style={s.btnSm('#7c3aed')}>
                                 🏷️ Generar / Escanear QR
                               </button>
                             )}
-                            {eq.codigoQR && !eq.procesado && !orden.tallerCompletado && procesos.length > 0 && (
+                            {/* Con QR: procesar solo cuando ya tiene código asignado.
+                                Sin módulo QR: procesar directo, sin paso intermedio. */}
+                            {((tieneQR && eq.codigoQR) || !tieneQR) && !eq.procesado && !orden.tallerCompletado && procesos.length > 0 && (
                               <div style={{ display: 'flex', gap: 6 }}>
-                                <button onClick={() => setModalProcesoEquipo({ orden, equipo: eq })} style={s.btnSm()}>⚙️ Procesar</button>
+                                <button onClick={() => setModalProcesoEquipo({ orden, equipo: tieneQR ? eq : { ...eq, codigoQR: '', sinQR: true } })} style={s.btnSm()}>⚙️ Procesar</button>
                                 <button onClick={() => setModalDefecto({ orden, equipo: eq })} style={s.btnSm('#e11d48')}>🔧 Defecto</button>
                               </div>
                             )}
