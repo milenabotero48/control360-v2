@@ -242,9 +242,12 @@ const ejecutarMotorLlamadas = async () => {
           }
 
           // 6) Construir variables dinámicas y lanzar la llamada
+          // registroRef se crea PRIMERO (solo genera el ID, no escribe nada
+          // en Firestore todavía) porque las variables que viajan a Vapi
+          // necesitan registroRef.id — el .set() real sigue más abajo.
+          const registroRef = db.collection('llamadas_ia').doc();
           const variables = construirVariablesLlamada({ adminId, registroId: registroRef.id, cliente, vencimiento: venc, tenantInfo });
 
-          const registroRef = db.collection('llamadas_ia').doc();
           const resultadoVapi = await lanzarLlamadaVapi({
             telefono,
             variables,
