@@ -96,12 +96,14 @@ const tenantTieneLucyActiva = async (adminId) => {
 // Lucy solo REGISTRA EL CIERRE; un humano revisa y crea la orden desde
 // la pestaña Llamadas IA, igual patrón que Telemercadeo → NuevaOrden.js.
 // ═════════════════════════════════════════════════════════════════════════════
-const construirVariablesLlamada = ({ cliente, vencimiento, tenantInfo }) => {
+const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, tenantInfo }) => {
   return {
+    adminId,                                                          // para que las Tools sepan de qué tenant es
+    registroId,                                                       // para que registrar_cierre sepa qué doc actualizar
     nombre_empresa:     tenantInfo.nombre || 'nuestra empresa',
     nombre_cliente:     primerNombre(cliente.nombre),
     equipos:            vencimiento.descripcionEquipo || 'su extintor',
-    tipo_servicio:      cliente.tipoServicioHistorico || 'oficina', // 'domicilio' | 'oficina'
+    tipo_servicio:      cliente.tipoServicioHistorico || 'oficina',
     valor_domicilio:    tenantInfo.valorDomicilio || 'según su sector',
     mes_vencimiento:    vencimiento.fechaVencimiento || '',
     medios_pago:        tenantInfo.mediosPago || 'efectivo, transferencia y Nequi',
@@ -240,7 +242,7 @@ const ejecutarMotorLlamadas = async () => {
           }
 
           // 6) Construir variables dinámicas y lanzar la llamada
-          const variables = construirVariablesLlamada({ cliente, vencimiento: venc, tenantInfo });
+          const variables = construirVariablesLlamada({ adminId, registroId: registroRef.id, cliente, vencimiento: venc, tenantInfo });
 
           const registroRef = db.collection('llamadas_ia').doc();
           const resultadoVapi = await lanzarLlamadaVapi({
