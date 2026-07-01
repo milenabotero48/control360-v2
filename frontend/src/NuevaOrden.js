@@ -877,9 +877,11 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                               {(() => {
                                 const cat = (item.categoria || '').toLowerCase();
                                 const esRecarga = cat.includes('recarga') || cat.includes('mantenimiento');
-                                // ✅ FIX: solo mostrar si tiene módulo qr activo
-                                const tieneQR = (user?.modulos || []).length === 0 || (user?.modulos || []).includes('qr');
-                                if (!esRecarga || !tieneQR) return null;
+                                // ✅ FIX NUEVAORDEN-001 (2026-07-01): "Cambio" ya no depende del
+                                // módulo QR. Solo afecta el flujo de la orden (entrega inmediata
+                                // sin esperar taller) — el enlace con QR en orders.js es opcional
+                                // y no rompe nada si el equipo no tiene código QR.
+                                if (!esRecarga) return null;
                                 const activo = !!item.esCambio;
                                 return (
                                   <div style={{ marginTop: 6 }}>
