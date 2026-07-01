@@ -205,8 +205,9 @@ router.post('/', async (req, res) => {
 
     const ref = await db.collection('egresos').add(nuevo);
 
-    // Si paga ahora → descontar de caja
-    if (pagarAhora && cajaId) {
+    // Si paga ahora O es provisional → descontar de caja
+    // Provisionales: el dinero sale físicamente de caja al dárselo al mensajero
+    if ((pagarAhora || esProvisional) && cajaId) {
       const totalAPagar = Number(totalPagar) || Number(monto);
       const cajaRef = db.collection('cajas').doc(cajaId);
       await cajaRef.update({
@@ -216,7 +217,7 @@ router.post('/', async (req, res) => {
       await db.collection('movimientos').add({
         userId: req.adminId || req.user.uid, cajaId,
         tipo: 'egreso',
-        concepto: `${numero} — ${concepto}`,
+        concepto: esProvisional ? `Provisional ${numero} — ${concepto}` : `${numero} — ${concepto}`,
         monto: totalAPagar,
         referencia: numeroOrdenInterna ? `${numero} · ${numeroOrdenInterna}` : numero,
         formaPago: formaPago || '',
@@ -630,6 +631,21 @@ router.post('/:id/anular', async (req, res) => {
     }
 
     await batch.commit();
+
+    // Movimiento de reversión en caja (visible en Caja → Movimientos)
+    if (cajaId) {
+      await db.collection('movimientos').add({
+        userId: req.adminId || req.user.uid,
+        cajaId,
+        tipo: 'ingreso',
+        concepto: `Anulación ${egreso.numero}: ${egreso.concepto}`,
+        monto: montoTotal,
+        referencia: egreso.numero,
+        egresoId: req.params.id,
+        creadoPor: req.user.email,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
 
     // Registrar en auditoría
     await registrarAuditoria({
