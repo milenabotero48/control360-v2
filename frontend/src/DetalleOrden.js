@@ -24,7 +24,8 @@ const ESTADOS = {
   en_ruta_recogida: { label: 'En Ruta Recogida', color: '#f59e0b', bg: '#fffbeb' },
   en_taller:        { label: 'En Taller',         color: '#8b5cf6', bg: '#f5f3ff' },
   listo_entregar:   { label: 'Listo para Entregar', color: '#0891b2', bg: '#ecfeff' },
-  facturado:        { label: 'Facturado',          color: '#0284c7', bg: '#e0f2fe' },
+  // ✅ FIX ORDEN-CAMBIO-004: etiqueta corregida — el estado es PENDIENTE de facturar
+  facturado:        { label: 'Por facturar',       color: '#0284c7', bg: '#e0f2fe' },
   despacho:         { label: 'Despacho',           color: '#d97706', bg: '#fef3c7' },
   en_ruta_entrega:  { label: 'En Ruta Entrega',   color: '#059669', bg: '#ecfdf5' },
   entrega_cobranza: { label: 'Entrega Cobranza',  color: '#dc2626', bg: '#fef2f2' },

@@ -73,9 +73,20 @@ const construirFlujo = (lugarAtencion, requiereFactura, tieneEquipoTaller = true
   const flujos = {
     // FLUJO 1 — OFICINA: cliente presente. Sin factura: nace 'completada'.
     // Con factura: espera N° y se completa SOLA al digitarlo.
-    oficina: F ? {
+    // ✅ FIX ORDEN-CAMBIO-002 (2026-07-01): si la orden de oficina lleva equipo
+    // de taller (recarga sin "cambio"), nace en 'en_taller' (Ola 2.5 Bloque 1)
+    // pero este flujo NO definía salida para ese estado → al completar taller
+    // caía al default 'facturado' y quedaba ATASCADA (sin factura el flujo
+    // era {} vacío: sin salida posible). Ahora oficina+taller tiene sus
+    // transiciones completas y ninguna orden puede quedar sin camino.
+    oficina: T ? (F ? {
+      en_taller: { siguiente: 'facturado',  auto: false, accion: 'taller' },
+      facturado: { siguiente: 'completada', auto: true,  requiereFacturaAntes: true }
+    } : {
+      en_taller: { siguiente: 'completada', auto: false, accion: 'taller' }
+    }) : (F ? {
       facturado: { siguiente: 'completada', auto: true, requiereFacturaAntes: true }
-    } : {},
+    } : {}),
 
     // FLUJO 2 — TALLER: entra equipo, se trabaja, queda listo para que el
     // cliente lo recoja (a veces se va y vuelve después).

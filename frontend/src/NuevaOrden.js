@@ -33,6 +33,14 @@ const TIPOS = [
   { value: 'produccion', label: 'Producción', estado: 'programada', color: '#0891b2' },
 ];
 
+// ✅ FIX ORDEN-CAMBIO-001 (2026-07-01): ¿el producto es trabajo de taller?
+// (recarga, mantenimiento o prueba hidrostática). Misma regla que esItemTaller
+// del backend (orders.js) — se usa para auto-marcar "cambio" en Oficina.
+const esCategoriaRecarga = (categoria) => {
+  const cat = (categoria || '').toLowerCase();
+  return cat.includes('recarga') || cat.includes('mantenimiento') || cat.includes('hidrost');
+};
+
 
 const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const esEdicion = !!ordenEditar;
@@ -86,6 +94,9 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const fotoComprobanteRef = useRef(null);
   const [items, setItems]                 = useState([]);
   const [alertaTaller, setAlertaTaller]   = useState(false);
+  // ✅ FIX ORDEN-CAMBIO-001: aviso flotante cuando el sistema cambia el tipo
+  // de servicio automáticamente (Oficina → Taller al desmarcar "cambio").
+  const [avisoCambio, setAvisoCambio]     = useState('');
   const [buscarCliente, setBuscarCliente] = useState('');
   const [buscarProd, setBuscarProd]       = useState('');
   const [notas, setNotas]                 = useState('');
@@ -131,6 +142,13 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   useEffect(() => {
     cargarClientes(); cargarProductos(); cargarEmpresas(); cargarMensajeros(); cargarFormasPago();
   }, []);
+
+  // ✅ FIX ORDEN-CAMBIO-001: el aviso flotante se oculta solo a los 6 segundos
+  useEffect(() => {
+    if (!avisoCambio) return;
+    const t = setTimeout(() => setAvisoCambio(''), 6000);
+    return () => clearTimeout(t);
+  }, [avisoCambio]);
 
   useEffect(() => {
     if (!ordenEditar || empresas.length === 0) return;
@@ -202,11 +220,23 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const agregarProducto = (prod) => {
     const yaExiste = items.find(i => i.productoId === prod.id);
     if (yaExiste) { setItems(prev => prev.map(i => i.productoId === prod.id ? { ...i, cantidad: i.cantidad + 1 } : i)); }
-    else { setItems(prev => [...prev, { productoId: prod.id, nombre: prod.nombre, codigo: prod.codigo, categoria: prod.categoria || '', cantidad: 1, precioUnitario: prod.precioVenta || 0, descuento: 0, notas: '', codigoQR: '' }]); }
+    // ✅ FIX ORDEN-CAMBIO-001: en OFICINA una recarga nace marcada como CAMBIO
+    // (caso dominante: trueque inmediato en mostrador). Si el cliente deja su
+    // equipo para recargarlo, el usuario desmarca el cambio y la orden pasa
+    // sola a tipo TALLER (ver editarItem).
+    else { setItems(prev => [...prev, { productoId: prod.id, nombre: prod.nombre, codigo: prod.codigo, categoria: prod.categoria || '', cantidad: 1, precioUnitario: prod.precioVenta || 0, descuento: 0, notas: '', codigoQR: '', esCambio: tipoServicio === 'oficina' && esCategoriaRecarga(prod.categoria) }]); }
     setBuscarProd('');
   };
 
   const editarItem = (idx, campo, valor) => {
+    // ✅ FIX ORDEN-CAMBIO-001: si en OFICINA desmarcan "cambio" a una recarga,
+    // ese equipo SÍ pasa por taller → la orden cambia sola a tipo TALLER para
+    // viajar por un flujo con salida (evita el atasco en "por facturar").
+    // Solo aplica al CREAR — en edición el tipo de servicio no se persiste.
+    if (!esEdicion && campo === 'esCambio' && valor === false && tipoServicio === 'oficina') {
+      setTipoServicio('taller');
+      setAvisoCambio('Este extintor pasará por taller: la orden cambió a tipo TALLER automáticamente.');
+    }
     setItems(prev => prev.map((item, i) => {
       if (i !== idx) return item;
       if (campo === 'precioUnitario' || campo === 'descuento') return { ...item, [campo]: valor === '' ? '' : Number(valor) };
@@ -676,7 +706,15 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                     if (t.value === 'interna')    return mods.includes('logistica') || mods.includes('taller');
                     return true; // oficina siempre visible
                   }).map(t => (
-                    <button key={t.value} type="button" onClick={() => { setTipoServicio(t.value); if (t.value === 'cobranza' && clienteSel) cargarCxcCliente(clienteSel.id); }} style={{ padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: tipoServicio === t.value ? t.color : '#f3f4f6', color: tipoServicio === t.value ? '#fff' : '#374151', border: tipoServicio === t.value ? '2px solid ' + t.color : '2px solid transparent', transition: 'all 0.15s' }}>{t.label}</button>
+                    <button key={t.value} type="button" onClick={() => {
+                      setTipoServicio(t.value);
+                      // ✅ FIX ORDEN-CAMBIO-001: al pasar a OFICINA, toda recarga
+                      // ya agregada queda marcada como CAMBIO automáticamente.
+                      if (t.value === 'oficina') {
+                        setItems(prev => prev.map(it => esCategoriaRecarga(it.categoria) && !it.esCambio ? { ...it, esCambio: true } : it));
+                      }
+                      if (t.value === 'cobranza' && clienteSel) cargarCxcCliente(clienteSel.id);
+                    }} style={{ padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600, background: tipoServicio === t.value ? t.color : '#f3f4f6', color: tipoServicio === t.value ? '#fff' : '#374151', border: tipoServicio === t.value ? '2px solid ' + t.color : '2px solid transparent', transition: 'all 0.15s' }}>{t.label}</button>
                   ))}
                 </div>
                 <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>Estado inicial: <strong style={{ color: tipoInfo.color }}>{tipoInfo.estado.replace('_', ' ')}</strong></div>
@@ -875,8 +913,9 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                             <td style={{ padding: '8px 4px' }}>
                               <input type="text" value={item.notas} placeholder="Detalle..." onChange={e => editarItem(idx, 'notas', e.target.value)} style={{ ...s.inputPeq, width: 100 }} />
                               {(() => {
-                                const cat = (item.categoria || '').toLowerCase();
-                                const esRecarga = cat.includes('recarga') || cat.includes('mantenimiento');
+                                // ✅ FIX ORDEN-CAMBIO-001: misma regla que backend
+                                // (incluye prueba hidrostática, antes no mostraba el toggle)
+                                const esRecarga = esCategoriaRecarga(item.categoria);
                                 // ✅ FIX NUEVAORDEN-001 (2026-07-01): "Cambio" ya no depende del
                                 // módulo QR. Solo afecta el flujo de la orden (entrega inmediata
                                 // sin esperar taller) — el enlace con QR en orders.js es opcional
@@ -943,6 +982,12 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
 
         <div style={{ ...s.modalFooter, ...(esMovil ? { flexDirection: 'column-reverse', gap: 8 } : {}) }}>
           <button onClick={onCancelar} style={s.btnCancelar}>Cancelar</button>
+          {/* ✅ FIX ORDEN-CAMBIO-001: aviso flotante (no bloquea, apto móvil) */}
+          {avisoCambio && (
+            <div style={{ position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)', background: '#7c3aed', color: '#fff', padding: '12px 18px', borderRadius: 12, fontSize: 13, fontWeight: 700, zIndex: 10000, boxShadow: '0 8px 24px rgba(0,0,0,0.25)', maxWidth: 'calc(100vw - 32px)', textAlign: 'center', lineHeight: 1.4 }}>
+              🔧 {avisoCambio}
+            </div>
+          )}
           {alertaTaller && (
             <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
               <div style={{ background: '#fff', borderRadius: 16, padding: 24, maxWidth: 400, width: '100%', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>

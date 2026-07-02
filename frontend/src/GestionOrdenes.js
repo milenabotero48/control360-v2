@@ -6,6 +6,14 @@ import { exportarExcel } from './exportExcel';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
+// ✅ FIX ORDEN-NOTAS-001 (2026-07-01): notas visibles sin abrir la orden.
+// Una orden "tiene notas" si trae nota general (notasOrden) o notas por producto.
+const tieneNotas = (o) => !!(o.notasOrden || (o.items || []).some(it => it.notas));
+const resumenNotas = (o) => [
+  o.notasOrden,
+  ...(o.items || []).filter(it => it.notas).map(it => `${it.cantidad || 1}x ${it.nombre}: ${it.notas}`)
+].filter(Boolean).join(' · ');
+
 // ─── HOOK RESPONSIVE ──────────────────────────────────────────────────────────
 const useIsMobile = () => {
   const [mob, setMob] = useState(() => window.innerWidth < 768);
@@ -23,7 +31,8 @@ const ESTADOS = {
   programada:         { label: 'Programada',           color: '#6366f1', bg: '#eef2ff',  modulo: null },
   en_ruta_recogida:   { label: 'En Ruta Recogida',     color: '#f59e0b', bg: '#fffbeb',  modulo: 'logistica' },
   en_taller:          { label: 'En Taller',            color: '#8b5cf6', bg: '#f5f3ff',  modulo: 'taller' },
-  facturado:          { label: 'Facturado',            color: '#0284c7', bg: '#e0f2fe',  modulo: null },
+  // ✅ FIX ORDEN-CAMBIO-004: 'Facturado' confundía — el estado significa PENDIENTE de facturar
+  facturado:          { label: 'Por facturar',         color: '#0284c7', bg: '#e0f2fe',  modulo: null },
   despacho:           { label: 'Despacho',             color: '#d97706', bg: '#fef3c7',  modulo: 'logistica' },
   en_ruta_entrega:    { label: 'En Ruta Entrega',      color: '#059669', bg: '#ecfdf5',  modulo: 'logistica' },
   entrega_cobranza:   { label: 'Entrega Cobranza',     color: '#ea580c', bg: '#fff7ed',  modulo: 'logistica' },
@@ -209,6 +218,9 @@ const GestionOrdenes = ({ user }) => {
                   { key: 'formaPago',     label: 'Forma Pago' },
                   { key: 'total',         label: 'Total' },
                   { key: 'pagado',        label: 'Pagado', getValue: o => o.pagado ? 'Sí' : 'No' },
+                  // ✅ FIX ORDEN-NOTAS-001: las notas ahora salen en el export
+                  { key: 'notasOrden',    label: 'Notas Orden', getValue: o => o.notasOrden || '' },
+                  { key: 'notasProductos', label: 'Notas Productos', getValue: o => (o.items || []).filter(it => it.notas).map(it => `${it.cantidad || 1}x ${it.nombre}: ${it.notas}`).join(' | ') },
                 ], 'ordenes');
               } catch (e) {
                 alert('No se pudo exportar: ' + (e.response?.data?.error || e.message));
@@ -346,6 +358,12 @@ const GestionOrdenes = ({ user }) => {
                 {/* Fila 2: cliente */}
                 <div style={{ fontSize: 14, fontWeight: 700, color: '#111', marginBottom: 2 }}>{o.clienteNombre}</div>
                 {o.sucursalNombre && <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>🏢 {o.sucursalNombre}</div>}
+                {/* ✅ FIX ORDEN-NOTAS-001: notas visibles sin abrir la orden */}
+                {tieneNotas(o) && (
+                  <div style={{ fontSize: 11, color: '#92400e', background: '#fef9c3', border: '1px solid #fde68a', borderRadius: 8, padding: '5px 8px', marginBottom: 4, lineHeight: 1.4, wordBreak: 'break-word' }}>
+                    📝 {resumenNotas(o)}
+                  </div>
+                )}
                 {/* Fila 3: tipo + fecha + mensajero */}
                 <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 12, color: '#6b7280' }}>
                   <span>{o.tipoOrden === 'servicio' ? '🛠️ Servicio' : o.tipoOrden === 'cxc' ? '💰 CxC' : '📋 Interna'}</span>
@@ -395,6 +413,12 @@ const GestionOrdenes = ({ user }) => {
                     <td style={s.td}>
                       <div style={{ fontWeight: 600, color: '#111' }}>{o.clienteNombre}</div>
                       {o.sucursalNombre && <div style={{ fontSize: '11px', color: '#9ca3af' }}>{o.sucursalNombre}</div>}
+                      {/* ✅ FIX ORDEN-NOTAS-001: nota visible en la lista (tooltip con texto completo) */}
+                      {tieneNotas(o) && (
+                        <div style={{ fontSize: 11, color: '#92400e', marginTop: 2, maxWidth: 260, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={resumenNotas(o)}>
+                          📝 {resumenNotas(o)}
+                        </div>
+                      )}
                     </td>
                     <td style={s.td}>
                       <span style={s.tipoBadge}>

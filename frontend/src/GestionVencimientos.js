@@ -109,8 +109,11 @@ export default function GestionVencimientos({ user, onNavegar }) {
       return (
         (v.descripcionEquipo||'').toLowerCase().includes(q) ||
         (v.sucursal||'').toLowerCase().includes(q) ||
+        (v.clienteNombre||'').toLowerCase().includes(q) ||
+        (v.clienteContacto||'').toLowerCase().includes(q) ||
         (cli?.nombre||'').toLowerCase().includes(q) ||
         (cli?.empresa||'').toLowerCase().includes(q) ||
+        (v.clienteTelefono||'').includes(q) ||
         (v.telefono||'').includes(q)
       );
     });
@@ -126,10 +129,15 @@ export default function GestionVencimientos({ user, onNavegar }) {
       if (!meses[mk].clientes[cKey]) {
         meses[mk].clientes[cKey] = {
           cKey, clienteId: v.clienteId,
-          nombre: cli?.nombre || cli?.empresa || 'Sin nombre',
-          telefono: cli?.celular || cli?.telefono || v.telefono || null,
-          direccion: cli?.direccionPrincipal || cli?.direccion || null,
-          email: cli?.emailLegal || cli?.email || null,
+          // ✅ FIX VENC-NOMBRE-001: el backend ya envía los datos del cliente
+          // (el cruce local contra /clients fallaba: viene paginado a 100).
+          // Se mantiene el fallback local por si llega un registro antiguo.
+          nombre: v.clienteNombre || cli?.nombre || cli?.empresa || 'Sin nombre',
+          contacto: v.clienteContacto || cli?.contacto || null,
+          telefono: v.clienteTelefono || cli?.celular || cli?.telefono || v.telefono || null,
+          direccion: v.clienteDireccion || cli?.direccionPrincipal || cli?.direccion || null,
+          barrio: v.clienteBarrio || cli?.barrio || null,
+          email: v.clienteEmail || cli?.emailLegal || cli?.email || null,
           equipos: [],
         };
       }
@@ -214,11 +222,19 @@ export default function GestionVencimientos({ user, onNavegar }) {
       const sep = lineas[0].includes(';') ? ';' : ',';
       const headers = lineas[0].split(sep).map(h => h.trim().toLowerCase());
       const idx = n => headers.findIndex(h => h.includes(n));
+      // ✅ FIX VENC-PLANTILLA-002: columnas nuevas — contacto, nit, direccion,
+      // barrio y email ahora sí se leen y viajan al importador (antes el
+      // backend ya sabía guardarlas pero el parser las ignoraba).
       const iN=idx('nombre'),iT=idx('tel'),iE=idx('equipo'),iS=idx('sucursal'),iC=idx('cant'),iF=idx('fecha');
+      const iCo=idx('contacto'),iNit=idx('nit'),iD=idx('direc'),iB=idx('barrio');
+      const iEm=headers.findIndex(h => h.includes('mail') || h.includes('correo'));
       if (iN<0||iT<0) throw new Error('El archivo debe tener columnas nombre y telefono');
       const filas = lineas.slice(1).map(l => {
         const c = l.split(sep);
         return { nombre:c[iN]?.trim()||'', telefono:c[iT]?.trim()||'',
+          contacto:iCo>=0?c[iCo]?.trim():null, nit:iNit>=0?c[iNit]?.trim():null,
+          direccion:iD>=0?c[iD]?.trim():null, barrio:iB>=0?c[iB]?.trim():null,
+          email:iEm>=0?c[iEm]?.trim():null,
           equipo:iE>=0?c[iE]?.trim():'Extintor', sucursal:iS>=0?c[iS]?.trim():null,
           cantidad:iC>=0?Number(c[iC]):1, fechaUltimaRecarga:iF>=0?c[iF]?.trim():null };
       }).filter(f => f.nombre||f.telefono);
@@ -235,7 +251,12 @@ export default function GestionVencimientos({ user, onNavegar }) {
   };
 
   const descargarPlantilla = () => {
-    const csv = '\uFEFFnombre;telefono;equipo;sucursal;cantidad;fechaUltimaRecarga\nCarlos Pérez;3101234567;Extintor ABC 10 lbs;Sede Norte;2;2024-06\n';
+    // ✅ FIX VENC-PLANTILLA-002: plantilla con los datos que se piden para
+    // programar un pedido (contacto, nit, dirección, barrio, email).
+    // Varios equipos en una celda: separar con " | " y cantidad con "5x".
+    const csv = '\uFEFFnombre;contacto;nit;telefono;direccion;barrio;email;equipo;sucursal;cantidad;fechaUltimaRecarga\n' +
+      'LA MONUMENTAL;Milena Botero;901443552;3101234567;AV 1 # 34-30;Los Patios;factura@lamonumental.com;5x Recarga ABC 10 lb | Extintor CO2 5 lbs;Sede Norte;;2024-06\n' +
+      'Carlos Pérez;;;3109876543;CLL 10 # 3-51;Centro;;Recarga ABC 20 lbs;;2;2025-01\n';
     const url = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));
     const a = document.createElement('a'); a.href=url; a.download='plantilla_vencimientos.csv'; a.click();
   };

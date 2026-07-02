@@ -101,7 +101,12 @@ const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, 
     adminId,                                                          // para que las Tools sepan de qué tenant es
     registroId,                                                       // para que registrar_cierre sepa qué doc actualizar
     nombre_empresa:     tenantInfo.nombre || 'nuestra empresa',
-    nombre_cliente:     primerNombre(cliente.nombre),
+    // ✅ FIX LUCY-CONTACTO-001 (2026-07-01): si el cliente tiene persona de
+    // contacto, Lucy saluda por nombre propio ("¿hablo con Milena Botero de
+    // la empresa La Monumental?") en vez de "hola La Monumental". La razón
+    // social viaja aparte en empresa_cliente para usarla en el guión de Vapi.
+    nombre_cliente:     cliente.contacto ? String(cliente.contacto).trim() : primerNombre(cliente.nombre),
+    empresa_cliente:    cliente.nombre || '',
     equipos:            vencimiento.descripcionEquipo || 'su extintor',
     tipo_servicio:      cliente.tipoServicioHistorico || 'oficina',
     valor_domicilio:    tenantInfo.valorDomicilio || 'según su sector',
@@ -242,12 +247,9 @@ const ejecutarMotorLlamadas = async () => {
           }
 
           // 6) Construir variables dinámicas y lanzar la llamada
-          // registroRef se crea PRIMERO (solo genera el ID, no escribe nada
-          // en Firestore todavía) porque las variables que viajan a Vapi
-          // necesitan registroRef.id — el .set() real sigue más abajo.
-          const registroRef = db.collection('llamadas_ia').doc();
           const variables = construirVariablesLlamada({ adminId, registroId: registroRef.id, cliente, vencimiento: venc, tenantInfo });
 
+          const registroRef = db.collection('llamadas_ia').doc();
           const resultadoVapi = await lanzarLlamadaVapi({
             telefono,
             variables,

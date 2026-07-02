@@ -340,7 +340,11 @@ router.get('/ordenes', async (req, res) => {
       // adminId ya filtrado en el query — no necesitamos filtrar aquí
 
       // ✅ NUEVO: Filtrar items SOLO de taller (recarga, mantenimiento, prueba hidrostática)
-      const itemsTaller = (data.items || []).filter(item => esItemTaller(item));
+      // ✅ FIX ORDEN-CAMBIO-003 (2026-07-01): un item marcado como CAMBIO se
+      // entrega listo — NO se procesa en taller. En órdenes mixtas (ej: 2
+      // recargas con cambio + 1 sin cambio) Pedro solo debe ver el equipo
+      // que realmente se queda a trabajar.
+      const itemsTaller = (data.items || []).filter(item => esItemTaller(item) && !item.esCambio);
       
       // ✅ NUEVO: Si no hay items de taller, NO incluir la orden
       if (itemsTaller.length === 0) return;
@@ -357,7 +361,9 @@ router.get('/ordenes', async (req, res) => {
         ...data,
         items: itemsTaller,  // ✅ SOLO items de taller
         itemsTotal: data.items?.length || 0,  // Info: total items en orden
-        itemsOtros: (data.items || []).filter(item => !esItemTaller(item)).length,  // Info: otros items
+        // ✅ FIX ORDEN-CAMBIO-003: "otros" = lo que NO se trabaja en taller
+        // (ventas + recargas marcadas como cambio, que se entregan listas)
+        itemsOtros: (data.items || []).filter(item => !esItemTaller(item) || item.esCambio).length,
         horasEnTaller,
         alertaTiempo: horasEnTaller >= 48 // Alerta si lleva más de 48h
       });
@@ -629,9 +635,12 @@ router.post('/ordenes/:ordenId/completar', async (req, res) => {
     if (typeof construirFlujo === 'function') {
       const tieneTaller = typeof orden.tieneEquipoTaller === 'boolean'
         ? orden.tieneEquipoTaller
+        // ✅ FIX ORDEN-CAMBIO-003: mismo criterio que la creación en orders.js
+        // (un item de CAMBIO no cuenta como equipo de taller)
         : (orden.items || []).some(it => {
             const c = (it.categoria || '').toLowerCase();
-            return ['recarga','mantenimiento','hidrostatica','hidrostática'].some(k => c.includes(k));
+            const esTaller = ['recarga','mantenimiento','hidrostatica','hidrostática'].some(k => c.includes(k));
+            return esTaller && !it.esCambio;
           });
       const flujo = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller);
       const paso = flujo[orden.estado];
@@ -801,7 +810,9 @@ router.get('/dashboard', async (req, res) => {
     snapHoy.forEach(doc => {
       const data = doc.data();
       if (!data.tallerCompletadoEn || data.tallerCompletadoEn < inicioHoy) return;
-      const items = (data.items || []).filter(esItemTaller);
+      // ✅ FIX ORDEN-CAMBIO-003: los cambios NO se recargaron en esta orden
+      // (salieron listos de producción) — no inflan la meta diaria de Pedro
+      const items = (data.items || []).filter(it => esItemTaller(it) && !it.esCambio);
       equiposHoy += items.reduce((sum, item) => sum + (item.cantidad || 1), 0);
     });
 
@@ -811,7 +822,8 @@ router.get('/dashboard', async (req, res) => {
     snapMes.forEach(doc => {
       const data = doc.data();
       if (!data.tallerCompletadoEn || data.tallerCompletadoEn < inicioMes) return;
-      const items = (data.items || []).filter(esItemTaller);
+      // ✅ FIX ORDEN-CAMBIO-003: mismo criterio que el conteo de HOY
+      const items = (data.items || []).filter(it => esItemTaller(it) && !it.esCambio);
       items.forEach(item => {
         equiposMes += item.cantidad || 1;
         const tipo = item.nombre || 'Sin tipo';

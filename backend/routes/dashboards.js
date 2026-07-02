@@ -369,12 +369,20 @@ router.get('/tesoreria', async (req, res) => {
 router.get('/mensajero/:mensajeroId', async (req, res) => {
   const warnings = [];
   const { mensajeroId } = req.params;
+  // ✅ FIX TENANT-ADMINID-001 (2026-07-01): la query filtraba SOLO por
+  // mensajeroId (UID). Aunque los UID son únicos, el invariante multi-tenant
+  // exige adminId en toda query — así un usuario de un tenant jamás puede
+  // consultar órdenes de otro pasando un mensajeroId ajeno en la URL.
+  const adminId = req.adminId || req.user.uid || req.user.id;
   const hoy = rangoHoyCO();
   const mes = rangoMesCO();
 
   let ordenes = [];
   try {
-    const snap = await db.collection('orders').where('mensajeroId', '==', mensajeroId).get();
+    const snap = await db.collection('orders')
+      .where('adminId', '==', adminId)
+      .where('mensajeroId', '==', mensajeroId)
+      .get();
     ordenes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (e) { warnings.push('orders: ' + e.message); }
 
@@ -444,7 +452,13 @@ router.get('/mensajero/:mensajeroId', async (req, res) => {
     rutaHoy: rutaHoy.map(o => ({
       id: o.id, numeroOrden: o.numeroOrden, clienteNombre: o.clienteNombre,
       estado: o.estado, lugarAtencion: o.lugarAtencion, total: o.total,
-      direccion: o.sucursalDireccion || o.clienteDireccion
+      direccion: o.sucursalDireccion || o.clienteDireccion,
+      // ✅ FIX ORDEN-NOTAS-002: las notas se perdían aquí — el mapper
+      // recortaba los campos y las observaciones nunca llegaban al mensajero
+      notasOrden: o.notasOrden || '',
+      itemsNotas: (o.items || []).filter(it => it.notas).map(it => ({
+        cantidad: it.cantidad || 1, nombre: it.nombre || '', notas: it.notas
+      }))
     })),
     cuadresRecientes,
     warnings

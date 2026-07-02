@@ -89,7 +89,10 @@ export const generarHTMLImpresionOrden = (orden, empresa, formato = 'carta') => 
   <title>${orden.numeroOrden || 'Orden de Servicio'}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Courier New', monospace; font-size: ${isPos ? px(14) : '11px'}; color: ${isPos ? '#000' : '#333'}; width: ${ancho}; margin: 0; padding: ${isPos ? '2mm 2mm' : '8mm'}; font-weight: ${isPos ? '600' : '400'}; }
+    /* ✅ FIX PRINT-POS-001 (2026-07-01): la tirilla salía pegada al borde
+       izquierdo (zona no imprimible de la térmica) y a veces cortada.
+       Se corre el contenido: padding izquierdo 5mm, derecho 2mm. */
+    body { font-family: 'Courier New', monospace; font-size: ${isPos ? px(14) : '11px'}; color: ${isPos ? '#000' : '#333'}; width: ${ancho}; margin: 0; padding: ${isPos ? '2mm 2mm 2mm 5mm' : '8mm'}; font-weight: ${isPos ? '600' : '400'}; }
     .header { text-align: center; border-bottom: ${isPos ? '3px solid #000' : '2px solid #333'}; padding-bottom: 6px; margin-bottom: 6px; }
     .empresa-logo { font-size: ${isPos ? px(15) : '18px'}; font-weight: 900; color: #000; }
     .empresa-datos { font-size: ${isPos ? px(12) : '10px'}; color: ${isPos ? '#000' : '#444'}; margin-top: 3px; line-height: 1.4; }
@@ -105,7 +108,8 @@ export const generarHTMLImpresionOrden = (orden, empresa, formato = 'carta') => 
     .pago-box { border: ${isPos ? '3px solid #000' : '1px solid #333'}; padding: ${isPos ? '6px' : '4px'}; margin-top: 4px; font-size: ${isPos ? px(14) : '10px'}; font-weight: 900; color: #000; }
     @media print {
       * { margin: 0 !important; }
-      body { width: ${ancho} !important; margin: 0 !important; padding: ${isPos ? '0 2mm' : '8mm'} !important; }
+      /* ✅ FIX PRINT-POS-001: mismo corrimiento a la derecha al imprimir */
+      body { width: ${ancho} !important; margin: 0 !important; padding: ${isPos ? '0 2mm 0 5mm' : '8mm'} !important; }
       @page { margin: 0; size: ${isPos ? `${anchoPosNum}mm auto` : 'auto'}; }
     }
   </style></head><body>

@@ -333,6 +333,20 @@ const DashboardMensajero = ({ user }) => {
                     </div>
                     <div style={{ fontSize: 13, color: '#111', fontWeight: 600 }}>{o.clienteNombre}</div>
                     {o.direccion && <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>📍 {o.direccion}</div>}
+                    {/* ✅ FIX ORDEN-NOTAS-002: observaciones de la orden — solo lectura,
+                        no toca botones ni flujo de avance de la vista del mensajero */}
+                    {o.notasOrden && (
+                      <div style={{ marginTop: 6, padding: '6px 10px', background: '#fef9c3', border: '1px solid #fde047', borderRadius: 8, fontSize: 12, color: '#713f12', fontWeight: 600, lineHeight: 1.4, wordBreak: 'break-word' }}>
+                        📝 {o.notasOrden}
+                      </div>
+                    )}
+                    {(o.itemsNotas || []).length > 0 && (
+                      <div style={{ marginTop: 4 }}>
+                        {o.itemsNotas.map((it, i) => (
+                          <div key={i} style={{ fontSize: 11, color: '#92400e', marginTop: 2, wordBreak: 'break-word' }}>• {it.cantidad}x {it.nombre}: {it.notas}</div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ fontSize: 14, fontWeight: 700, color: '#16a34a' }}>{fmtCop(o.total)}</div>

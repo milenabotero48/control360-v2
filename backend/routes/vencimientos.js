@@ -127,6 +127,27 @@ const normalizarTelefono = (telefono) => {
   return t.length >= 10 ? t : null;
 };
 
+// ✅ FIX VENC-EQUIPOS-003 (2026-07-01): una fila puede traer VARIOS equipos
+// separados por "|" o por coma+espacio, cada uno con prefijo de cantidad "5x".
+// Ej: "5x Recarga ABC 10 lb | Extintor CO2 5 lbs, 3x Recarga BC 20 lb"
+//   → 3 vencimientos individuales con cantidades 5, 1 y 3.
+// OJO: la coma SIN espacio no separa — protege decimales colombianos
+// como "Recarga Agua 2,5 GLS" (por eso el separador recomendado es "|").
+const partirEquipos = (equipoStr, cantidadFila) => {
+  const partes = String(equipoStr || '').split(/\s*\|\s*|;\s*|,\s+/).map(p => p.trim()).filter(Boolean);
+  if (!partes.length) return [{ descripcion: 'Extintor', cantidad: Number(cantidadFila) || 1 }];
+  const leerParte = (p, cantDefault) => {
+    const m = p.match(/^(\d+)\s*[xX×]\s*(.+)$/);
+    return m
+      ? { descripcion: m[2].trim(), cantidad: Number(m[1]) || 1 }
+      : { descripcion: p, cantidad: cantDefault };
+  };
+  // Con UN solo equipo, la columna "cantidad" de la fila sigue mandando;
+  // con VARIOS, cada uno usa su prefijo "Nx" (o 1 si no lo trae).
+  if (partes.length === 1) return [leerParte(partes[0], Number(cantidadFila) || 1)];
+  return partes.map(p => leerParte(p, 1));
+};
+
 // ═════════════════════════════════════════════════════════════════════════════
 // GET /api/vencimientos — Listar con filtros (estado, clienteId, mes)
 // Orden en memoria por fechaVencimiento (regla: sin orderBy/índices compuestos)
@@ -150,6 +171,36 @@ router.get('/', async (req, res) => {
 
     if (estado) lista = lista.filter(v => v.estado === estado);
     if (mes) lista = lista.filter(v => (v.fechaVencimiento || '').startsWith(mes));
+
+    // ✅ FIX VENC-NOMBRE-001 (2026-07-01): el vencimiento solo guarda clienteId;
+    // el nombre lo resolvía el FRONTEND cruzando contra /clients — pero /clients
+    // quedó paginado a 100 en Ola 3 y todo cliente fuera de esa ventana salía
+    // "Sin nombre". Ahora el cruce se hace AQUÍ con getAll por lotes: funciona
+    // con bases de cualquier tamaño (Luz Marina 1,000+) y sin migrar datos.
+    const idsUnicos = [...new Set(lista.map(v => v.clienteId).filter(Boolean))];
+    const clientesMap = new Map();
+    for (let i = 0; i < idsUnicos.length; i += 300) {
+      const refs = idsUnicos.slice(i, i + 300).map(id => db.collection('clients').doc(id));
+      if (!refs.length) break;
+      const docs = await db.getAll(...refs);
+      docs.forEach(d => {
+        // Defensa multi-tenant: solo clientes del mismo tenant
+        if (d.exists && d.data().adminId === adminId) clientesMap.set(d.id, d.data());
+      });
+    }
+    lista = lista.map(v => {
+      const c = clientesMap.get(v.clienteId);
+      if (!c) return v;
+      return {
+        ...v,
+        clienteNombre:    c.nombre || c.empresa || '',
+        clienteContacto:  c.contacto || '',
+        clienteTelefono:  c.celular || c.telefono || '',
+        clienteDireccion: c.direccionPrincipal || c.direccion || '',
+        clienteBarrio:    c.barrio || '',
+        clienteEmail:     c.emailLegal || c.email || ''
+      };
+    });
 
     lista.sort((a, b) => (a.fechaVencimiento || '9999').localeCompare(b.fechaVencimiento || '9999'));
 
@@ -199,6 +250,14 @@ router.post('/', async (req, res) => {
 
     if (!clienteId || !descripcionEquipo) {
       return res.status(400).json({ error: 'clienteId y descripcionEquipo son requeridos' });
+    }
+
+    // ✅ FIX TENANT-ADMINID-002 (2026-07-01): el clienteId llega del cliente
+    // HTTP — se valida propiedad contra Firestore para que nadie pueda crear
+    // vencimientos apuntando a clientes de otro tenant.
+    const cliDoc = await db.collection('clients').doc(clienteId).get();
+    if (!cliDoc.exists || cliDoc.data().adminId !== adminId) {
+      return res.status(403).json({ error: 'El cliente no pertenece a tu cuenta' });
     }
 
     let fVenc = esFechaValida(fechaVencimiento) ? fechaVencimiento : null;
@@ -360,6 +419,10 @@ router.post('/importar', async (req, res) => {
           batch.set(refC, {
             adminId,
             nombre: nombre.toUpperCase(),
+            // ✅ FIX VENC-PLANTILLA-002 (2026-07-01): persona de contacto —
+            // Lucy (llamadas IA) la usa para saludar por nombre propio:
+            // "¿hablo con Milena de la empresa La Monumental?"
+            contacto: String(f.contacto || '').trim() || null,
             tipoDocumento: 'NIT',
             nit: nitFila,
             celular: telefono,
@@ -367,6 +430,7 @@ router.post('/importar', async (req, res) => {
             emailLegal: f.email || null,
             emailsAdicionales: [],
             direccionPrincipal: f.direccion || null,
+            barrio: String(f.barrio || '').trim() || null,
             ciudad: f.ciudad || null,
             empresaId,
             empresaNombre,
@@ -391,22 +455,28 @@ router.post('/importar', async (req, res) => {
           ops++; resultadoExtra.prospectosActualizados++;
         }
 
-        const refV = db.collection('vencimientos').doc();
-        batch.set(refV, {
-          adminId,
-          clienteId,
-          sucursal: f.sucursal || null,
-          descripcionEquipo: f.equipo || 'Extintor',
-          cantidad: Number(f.cantidad) || 1,
-          fechaUltimaRecarga: fRecarga,
-          fechaVencimiento: sumarMeses(fRecarga, 12),
-          gestionado: false,
-          origenDato: 'importacion',
-          ordenId: null,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        ops++; resultado.vencimientosCreados++;
-        await commitSiLleno();
+        // ✅ FIX VENC-EQUIPOS-003: la fila puede traer varios equipos —
+        // cada uno genera SU PROPIO vencimiento con su propia cantidad,
+        // para que la gestión y las alertas sean individuales por equipo.
+        const equiposFila = partirEquipos(f.equipo, f.cantidad);
+        for (const eq of equiposFila) {
+          const refV = db.collection('vencimientos').doc();
+          batch.set(refV, {
+            adminId,
+            clienteId,
+            sucursal: f.sucursal || null,
+            descripcionEquipo: eq.descripcion || 'Extintor',
+            cantidad: eq.cantidad,
+            fechaUltimaRecarga: fRecarga,
+            fechaVencimiento: sumarMeses(fRecarga, 12),
+            gestionado: false,
+            origenDato: 'importacion',
+            ordenId: null,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+          ops++; resultado.vencimientosCreados++;
+          await commitSiLleno();
+        }
 
       } catch (errFila) {
         resultado.errores.push({ fila, error: errFila.message });
