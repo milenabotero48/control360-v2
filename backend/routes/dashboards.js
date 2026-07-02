@@ -379,9 +379,15 @@ router.get('/mensajero/:mensajeroId', async (req, res) => {
 
   let ordenes = [];
   try {
+    // ✅ FIX PERF-DASH-002: sin .select() se traían documentos completos
+    // (historialEstados, fotos) cada 15 segundos por cada mensajero activo.
     const snap = await db.collection('orders')
       .where('adminId', '==', adminId)
       .where('mensajeroId', '==', mensajeroId)
+      .select('estado', 'fechaCompletada', 'completadaEn', 'updatedAt',
+              'total', 'montoPagado', 'fotoEntrega', 'numeroOrden',
+              'clienteNombre', 'lugarAtencion', 'sucursalDireccion',
+              'clienteDireccion', 'notasOrden', 'items')
       .get();
     ordenes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (e) { warnings.push('orders: ' + e.message); }
@@ -475,7 +481,13 @@ router.get('/taller', async (req, res) => {
 
   let ordenes = [];
   try {
-    const snap = await db.collection('orders').where('adminId', '==', adminId).get();
+    // ✅ FIX PERF-DASH-002: este endpoint traía TODOS los campos de TODAS las
+    // órdenes del tenant (historialEstados, fotos, etc.) cada 20 segundos.
+    // .select() reduce el payload a solo los campos que usan los KPIs.
+    const snap = await db.collection('orders').where('adminId', '==', adminId)
+      .select('estado', 'fechaCompletada', 'completadaEn', 'updatedAt',
+              'createdAt', 'fechaEnTaller', 'items', 'numeroOrden', 'clienteNombre')
+      .get();
     ordenes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (e) { warnings.push('orders: ' + e.message); }
 

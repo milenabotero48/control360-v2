@@ -250,15 +250,16 @@ const DashboardMensajero = ({ user }) => {
   const token = localStorage.getItem('token');
   const mensajeroId = user?.id || user?.uid;
 
+  // ✅ FIX PERF-DASH-002: el catálogo de productos se recargaba COMPLETO cada
+  // 15 segundos (600+ productos en tenants grandes). Los productos no cambian
+  // durante la ruta: se cargan UNA vez al abrir la vista. El polling de 15s
+  // solo refresca el dashboard. CERO cambios visuales ni de flujo — la vista
+  // móvil del mensajero queda intacta.
   const cargar = useCallback(async () => {
     if (!mensajeroId) return;
     try {
-      const [d, p] = await Promise.all([
-        axios.get(`${API}/dashboards/mensajero/${mensajeroId}`, { headers: { Authorization: `Bearer ${token}` } }),
-        axios.get(`${API}/products`, { headers: { Authorization: `Bearer ${token}` } }).catch(() => ({ data: [] }))
-      ]);
+      const d = await axios.get(`${API}/dashboards/mensajero/${mensajeroId}`, { headers: { Authorization: `Bearer ${token}` } });
       setData(d.data);
-      setProductos(Array.isArray(p.data) ? p.data : []);
       setError('');
     } catch {
       setError('No se pudo cargar el dashboard');
@@ -267,11 +268,19 @@ const DashboardMensajero = ({ user }) => {
     }
   }, [token, mensajeroId]);
 
+  const cargarProductos = useCallback(async () => {
+    try {
+      const p = await axios.get(`${API}/products`, { headers: { Authorization: `Bearer ${token}` } });
+      setProductos(Array.isArray(p.data) ? p.data : []);
+    } catch { setProductos([]); }
+  }, [token]);
+
   useEffect(() => {
     cargar();
+    cargarProductos(); // una sola vez al montar
     const t = setInterval(cargar, 15000);
     return () => clearInterval(t);
-  }, [cargar]);
+  }, [cargar, cargarProductos]);
 
   if (loading) return <div style={{ textAlign: 'center', padding: 60, color: '#9ca3af' }}>Cargando ruta del día...</div>;
   if (error)   return <div style={{ textAlign: 'center', padding: 60, color: '#dc2626' }}>{error}</div>;

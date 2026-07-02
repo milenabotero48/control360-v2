@@ -786,49 +786,53 @@ router.get('/dashboard', async (req, res) => {
     const inicioHoy = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate()).toISOString();
     const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1).toISOString();
 
-    // Órdenes completadas hoy
-    const snapHoy = await db.collection('orders')
+    // ✅ FIX PERF-DASH-002: antes se ejecutaba DOS VECES la misma query
+    // (snapHoy y snapMes eran idénticas: todo el histórico de completadas,
+    // con documentos completos). Ahora es UNA sola lectura con .select()
+    // y el filtro por fecha se hace en memoria — mitad de lecturas y
+    // payload mínimo (sin historialEstados ni fotos).
+    const snapCompletadas = await db.collection('orders')
       .where('adminId', '==', adminId)
       .where('tallerCompletado', '==', true)
+      .select('tallerCompletadoEn', 'items')
       .get();
 
-    // Órdenes completadas este mes
-    const snapMes = await db.collection('orders')
-      .where('adminId', '==', adminId)
-      .where('tallerCompletado', '==', true)
-      .get();
-
-    // Órdenes actualmente en taller
+    // Órdenes actualmente en taller (solo campos necesarios)
     const snapEnTaller = await db.collection('orders')
       .where('adminId', '==', adminId)
       .where('estado', '==', 'en_taller')
+      .select('numeroOrden', 'clienteNombre', 'historialEstados')
       .get();
 
-    // Calcular equipos recargados HOY (solo recarga/mantenimiento/PH).
-    // Un botiquín o domicilio NO cuenta aunque esté en la orden.
+    // ✅ FIX PERF-DASH-002 (bug de datos): ordenesCompletadas de hoy/mes usaba
+    // snapHoy.size / snapMes.size, que contaban TODO el histórico del tenant.
+    // Ahora se cuentan solo las órdenes dentro del rango real.
     let equiposHoy = 0;
-    snapHoy.forEach(doc => {
+    let equiposMes = 0;
+    let ordenesCompletadasHoy = 0;
+    let ordenesCompletadasMes = 0;
+    const porCapacidad = {}; // { '5 LBS': 12, '10 LBS': 8 }
+
+    snapCompletadas.forEach(doc => {
       const data = doc.data();
-      if (!data.tallerCompletadoEn || data.tallerCompletadoEn < inicioHoy) return;
+      if (!data.tallerCompletadoEn || data.tallerCompletadoEn < inicioMes) return;
       // ✅ FIX ORDEN-CAMBIO-003: los cambios NO se recargaron en esta orden
       // (salieron listos de producción) — no inflan la meta diaria de Pedro
       const items = (data.items || []).filter(it => esItemTaller(it) && !it.esCambio);
-      equiposHoy += items.reduce((sum, item) => sum + (item.cantidad || 1), 0);
-    });
 
-    // Calcular equipos recargados este MES (mismo filtro)
-    let equiposMes = 0;
-    const porCapacidad = {}; // { '5 LBS': 12, '10 LBS': 8 }
-    snapMes.forEach(doc => {
-      const data = doc.data();
-      if (!data.tallerCompletadoEn || data.tallerCompletadoEn < inicioMes) return;
-      // ✅ FIX ORDEN-CAMBIO-003: mismo criterio que el conteo de HOY
-      const items = (data.items || []).filter(it => esItemTaller(it) && !it.esCambio);
+      // Acumular MES
+      ordenesCompletadasMes++;
       items.forEach(item => {
         equiposMes += item.cantidad || 1;
         const tipo = item.nombre || 'Sin tipo';
         porCapacidad[tipo] = (porCapacidad[tipo] || 0) + (item.cantidad || 1);
       });
+
+      // Acumular HOY (subconjunto del mes)
+      if (data.tallerCompletadoEn >= inicioHoy) {
+        ordenesCompletadasHoy++;
+        equiposHoy += items.reduce((sum, item) => sum + (item.cantidad || 1), 0);
+      }
     });
 
     // Órdenes con alerta de tiempo (>48h en taller)
@@ -879,11 +883,13 @@ router.get('/dashboard', async (req, res) => {
         equiposCompletados: equiposHoy,
         metaDiaria,
         porcentajeMeta: Math.min(100, Math.round((equiposHoy / metaDiaria) * 100)),
-        ordenesCompletadas: snapHoy.size
+        // ✅ FIX PERF-DASH-002: antes reportaba snapHoy.size (histórico completo)
+        ordenesCompletadas: ordenesCompletadasHoy
       },
       mes: {
         equiposCompletados: equiposMes,
-        ordenesCompletadas: snapMes.size,
+        // ✅ FIX PERF-DASH-002: antes reportaba snapMes.size (histórico completo)
+        ordenesCompletadas: ordenesCompletadasMes,
         porCapacidad // { 'RECARGA 5 LBS': 12, 'RECARGA CO2 10 LBS': 8 }
       },
       enTaller: {

@@ -57,13 +57,16 @@ router.get('/', authenticate, async (req, res) => {
       const snapshot = await query.get();
       let clientes = [];
       snapshot.forEach(doc => clientes.push({ id: doc.id, ...doc.data() }));
+      // ✅ FIX CLIENTES-SEARCH-001: comparación case-insensitive en nombre.
+      // Antes c.nombre?.includes(term) fallaba si el nombre estaba guardado en
+      // minúsculas (ej. clientes importados por CSV), aunque el cliente existiera.
       const term = buscar.toUpperCase();
       clientes = clientes.filter(c =>
-        c.nombre?.includes(term) ||
-        c.nit?.includes(term) ||
-        c.celular?.includes(term) ||
-        c.email?.includes(buscar.toLowerCase()) ||
-        c.emailLegal?.includes(buscar.toLowerCase())
+        c.nombre?.toUpperCase().includes(term) ||
+        c.nit?.toString().includes(buscar) ||
+        c.celular?.toString().includes(buscar) ||
+        c.email?.toLowerCase().includes(buscar.toLowerCase()) ||
+        c.emailLegal?.toLowerCase().includes(buscar.toLowerCase())
       );
       return res.json(clientes.slice(0, Number(limite)));
     }

@@ -166,8 +166,23 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
     setMensajeroNombre(ordenEditar.mensajeroNombre || '');
   }, [ordenEditar, empresas]);
 
-  const cargarClientes = async () => {
-    try { const r = await axios.get(API + '/clients', { headers }); setClientes((Array.isArray(r.data) ? r.data : []).filter(c => c.activo !== false)); } catch { setClientes([]); }
+  // ✅ FIX CLIENTES-SEARCH-001: la búsqueda ahora se envía al backend con ?buscar=
+  // Antes solo se cargaban los primeros 100 clientes y se filtraba localmente,
+  // ocultando clientes existentes en tenants con más de 100 clientes.
+  const cargarClientes = async (termino = '') => {
+    try {
+      const t = (termino || '').trim();
+      const url = t.length >= 2 ? API + '/clients?buscar=' + encodeURIComponent(t) : API + '/clients';
+      const r = await axios.get(url, { headers });
+      setClientes((Array.isArray(r.data) ? r.data : []).filter(c => c.activo !== false));
+    } catch { setClientes([]); }
+  };
+  // ✅ FIX CLIENTES-SEARCH-001: debounce 400ms para no consultar el backend en cada tecla
+  const debounceCliRef = useRef(null);
+  const handleBuscarCliente = (valor) => {
+    setBuscarCliente(valor);
+    if (debounceCliRef.current) clearTimeout(debounceCliRef.current);
+    debounceCliRef.current = setTimeout(() => cargarClientes(valor), 400);
   };
   const cargarProductos = async () => {
     try { const r = await axios.get(API + '/products', { headers }); setProductos((Array.isArray(r.data) ? r.data : []).filter(p => p.activo !== false)); } catch { setProductos([]); }
@@ -254,6 +269,21 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const tipoInfo = TIPOS.find(t => t.value === tipoServicio) || TIPOS[0];
   const necesitaLogistica = ['domicilio', 'taller', 'despacho', 'cobranza'].includes(tipoServicio);
 
+  // ✅ FIX ORDEN-EDIT-INTERNA-001: validación única compartida por crearOrden y
+  // guardarEdicion. Antes guardarEdicion exigía cliente + items sin excepciones,
+  // lo que hacía imposible editar órdenes internas, de producción o de cobranza.
+  // Una sola fuente de verdad evita que las reglas vuelvan a divergir.
+  const validarOrden = () => {
+    const esInternaOProd = tipoServicio === 'interna' || tipoServicio === 'produccion';
+    if (!esInternaOProd && !clienteSel) return 'Selecciona un cliente';
+    if (!esInternaOProd && tipoServicio !== 'cobranza' && !empresaSel) return 'Selecciona la empresa que factura';
+    if (esInternaOProd && !mensajeroId) return 'Selecciona el trabajador a asignar';
+    if (tipoServicio !== 'interna' && tipoServicio !== 'cobranza' && items.length === 0) return 'Agrega al menos un producto';
+    if (tipoServicio === 'interna' && !notas.trim()) return 'Describe qué debe hacer el mensajero en el campo "¿Qué debe hacer?"';
+    if (tipoServicio === 'produccion' && items.length === 0) return 'Agrega al menos un equipo a producir';
+    return null;
+  };
+
   const crearOrden = async (forzar = false) => {
     const esInternaOProd = tipoServicio === 'interna' || tipoServicio === 'produccion';
 
@@ -273,12 +303,9 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
       }
     }
 
-    if (!esInternaOProd && !clienteSel) return setError('Selecciona un cliente');
-    if (!esInternaOProd && tipoServicio !== 'cobranza' && !empresaSel) return setError('Selecciona la empresa que factura');
-    if (esInternaOProd && !mensajeroId) return setError('Selecciona el trabajador a asignar');
-    if (tipoServicio !== 'interna' && tipoServicio !== 'cobranza' && items.length === 0) return setError('Agrega al menos un producto');
-    if (tipoServicio === 'interna' && !notas.trim()) return setError('Describe qué debe hacer el mensajero en el campo "¿Qué debe hacer?"');
-    if (tipoServicio === 'produccion' && items.length === 0) return setError('Agrega al menos un equipo a producir');
+    // ✅ FIX ORDEN-EDIT-INTERNA-001: reglas centralizadas en validarOrden()
+    const errorValidacion = validarOrden();
+    if (errorValidacion) return setError(errorValidacion);
     if (!esInternaOProd && tipoServicio !== 'cobranza' && !formaPago) return setError('Selecciona la forma de pago');
     // Ola 2.5: si marcó "cliente ya pagó" exige el comprobante
     if (pagoAdelantado && !fotoComprobante) {
@@ -321,8 +348,10 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   };
 
   const guardarEdicion = async () => {
-    if (!clienteSel) return setError('Selecciona un cliente');
-    if (items.length === 0) return setError('Agrega al menos un producto');
+    // ✅ FIX ORDEN-EDIT-INTERNA-001: mismas reglas que crearOrden — las órdenes
+    // internas, de producción y de cobranza ya no exigen productos al editar.
+    const errorValidacion = validarOrden();
+    if (errorValidacion) return setError(errorValidacion);
     setGuardando(true); setError('');
     try {
       await axios.put(API + '/orders/' + ordenEditar.id, {
@@ -515,7 +544,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                       <div style={{ position: 'relative' }}>
                         <div style={s.searchWrap}>
                           <span style={{ color: '#9ca3af' }}>🔍</span>
-                          <input style={s.searchInput} placeholder="Nombre, NIT o celular..." value={buscarCliente} onChange={e => { setBuscarCliente(e.target.value); cargarClientes(e.target.value); }} autoFocus />
+                          <input style={s.searchInput} placeholder="Nombre, NIT o celular..." value={buscarCliente} onChange={e => handleBuscarCliente(e.target.value)} autoFocus />
                         </div>
                         {buscarCliente && (
                           <div style={s.dropdown}>

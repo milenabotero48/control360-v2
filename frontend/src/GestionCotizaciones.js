@@ -109,12 +109,32 @@ const GestionCotizaciones = ({ user }) => {
       ]);
       setCotizaciones(Array.isArray(rCot.data) ? rCot.data : []);
       setClientes(Array.isArray(rCli.data) ? rCli.data : []);
+      // ✅ FIX CLIENTES-SEARCH-001: la carga inicial trae máximo 100 clientes;
+      // la búsqueda completa se hace contra el backend (ver buscarClientesRemoto)
       setProductos(Array.isArray(rPro.data) ? rPro.data : []);
       setEmpresas(Array.isArray(rEmp.data) ? rEmp.data : []);
     } catch (e) {
       setError('Error cargando datos');
     }
     setLoading(false);
+  };
+
+  // ✅ FIX CLIENTES-SEARCH-001: búsqueda de clientes contra el backend con debounce.
+  // Antes el buscador solo filtraba los primeros 100 clientes cargados en memoria,
+  // ocultando clientes existentes en tenants con más de 100 clientes.
+  const debounceCliRef = useRef(null);
+  const buscarClientesRemoto = (termino) => {
+    if (debounceCliRef.current) clearTimeout(debounceCliRef.current);
+    debounceCliRef.current = setTimeout(async () => {
+      try {
+        const t = (termino || '').trim();
+        const url = t.length >= 2
+          ? `${API}/clients?buscar=${encodeURIComponent(t)}`
+          : `${API}/clients`;
+        const r = await axios.get(url, { headers });
+        setClientes(Array.isArray(r.data) ? r.data : []);
+      } catch { /* conservar la lista actual si falla la búsqueda */ }
+    }, 400);
   };
 
   // ─── HELPERS FORM ──────────────────────────────────────────────────────────
@@ -410,6 +430,7 @@ const GestionCotizaciones = ({ user }) => {
 
       {vista === 'form'    && <VistaForm form={form} setForm={setForm} cotActual={cotActual}
                                 clientes={clientes} productos={productos} totales={totales}
+                                onBuscarRemoto={buscarClientesRemoto}
                                 onSelCliente={seleccionarCliente} onAgregarItem={agregarItem}
                                 onEliminarItem={eliminarItem} onActualizarItem={actualizarItem}
                                 onToggleNota={toggleNota} onEditarNota={editarNota}
@@ -561,7 +582,8 @@ const VistaLista = ({ cotizaciones, buscar, setBuscar, filtroEstado, setFiltroEs
 };
 
 // ─── BUSCADOR CLIENTE ─────────────────────────────────────────────────────────
-const BuscadorCliente = ({ clientes, clienteId, onSeleccionar }) => {
+// ✅ FIX CLIENTES-SEARCH-001: onBuscarRemoto consulta el backend al escribir
+const BuscadorCliente = ({ clientes, clienteId, onSeleccionar, onBuscarRemoto }) => {
   const [query, setQuery]     = useState('');
   const [abierto, setAbierto] = useState(false);
   const ref                   = useRef();
@@ -586,7 +608,7 @@ const BuscadorCliente = ({ clientes, clienteId, onSeleccionar }) => {
       <div style={{ position: 'relative' }}>
         <input
           value={abierto ? query : (clienteActual ? clienteActual.nombre : '')}
-          onChange={e => { setQuery(e.target.value); setAbierto(true); }}
+          onChange={e => { setQuery(e.target.value); setAbierto(true); if (onBuscarRemoto) onBuscarRemoto(e.target.value); }}
           onFocus={() => setAbierto(true)}
           placeholder="🔍 Buscar cliente por nombre o NIT..."
           style={{ ...s.input, paddingRight: clienteActual ? 36 : 12 }}
@@ -624,7 +646,7 @@ const BuscadorCliente = ({ clientes, clienteId, onSeleccionar }) => {
 // VISTA FORM
 // ═══════════════════════════════════════════════════════════════════════════════
 const VistaForm = ({ form, setForm, cotActual, clientes, productos, totales, onSelCliente,
-  onAgregarItem, onEliminarItem, onActualizarItem, onToggleNota, onEditarNota,
+  onBuscarRemoto, onAgregarItem, onEliminarItem, onActualizarItem, onToggleNota, onEditarNota,
   onGuardar, guardando, onCancelar, user }) => {
 
   const [tabActiva, setTabActiva] = useState('datos'); // datos | items | notas
@@ -669,6 +691,7 @@ const VistaForm = ({ form, setForm, cotActual, clientes, productos, totales, onS
                   clientes={clientes}
                   clienteId={form.clienteId}
                   onSeleccionar={onSelCliente}
+                  onBuscarRemoto={onBuscarRemoto}
                 />
               </div>
               <div>
