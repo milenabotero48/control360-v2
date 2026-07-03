@@ -100,6 +100,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [buscarCliente, setBuscarCliente] = useState('');
   const [buscarProd, setBuscarProd]       = useState('');
   const [notas, setNotas]                 = useState('');
+  const [direccionInterna, setDireccionInterna] = useState(''); // ✅ INTERNA-DIR-001
   const [numeroFactura, setNumeroFactura] = useState('');
   const [clientePideFactura, setClientePideFactura] = useState(false);
   const [extintorPrestamo, setExtintor]   = useState('');
@@ -157,7 +158,19 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
     if (emp) setEmpresaSel(emp);
     setItems((ordenEditar.items || []).map(it => ({ ...it, precioUnitario: it.precioUnitario ?? it.precioUnit ?? 0 })));
     setFormaPago(ordenEditar.formaPago || '');
-    setNotas(ordenEditar.notasOrden || '');
+    // ✅ INTERNA-DIR-001: cargar dirección; internas viejas la traían como
+    // "DIR: x" en la primera línea de notas — se migra al campo real al editar.
+    const notasRaw = ordenEditar.notasOrden || '';
+    if (ordenEditar.direccionTarea) {
+      setDireccionInterna(ordenEditar.direccionTarea);
+      setNotas(notasRaw);
+    } else if (notasRaw.startsWith('DIR:')) {
+      setDireccionInterna(notasRaw.split('\n')[0].replace('DIR:', '').trim());
+      setNotas(notasRaw.includes('\n') ? notasRaw.split('\n').slice(1).join('\n') : '');
+    } else {
+      setDireccionInterna('');
+      setNotas(notasRaw);
+    }
     setNumeroFactura(ordenEditar.numeroFactura || '');
     setExtintor(ordenEditar.extintorPrestamo || '');
     setTipoServicio(ordenEditar.lugarAtencion || 'oficina');
@@ -281,6 +294,9 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
     if (tipoServicio !== 'interna' && tipoServicio !== 'cobranza' && items.length === 0) return 'Agrega al menos un producto';
     if (tipoServicio === 'interna' && !notas.trim()) return 'Describe qué debe hacer el mensajero en el campo "¿Qué debe hacer?"';
     if (tipoServicio === 'produccion' && items.length === 0) return 'Agrega al menos un equipo a producir';
+    // ✅ PRECIO-CERO-001: ningún producto puede quedar en $0 — cortesías = descuento
+    const itemCero = items.find(it => !(Number(it.precioUnitario) > 0));
+    if (itemCero) return `El producto "${itemCero.nombre}" no puede quedar con precio $0. Usa el descuento para cortesías.`;
     return null;
   };
 
@@ -332,6 +348,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
         ordenesACobrar: tipoServicio === 'cobranza' ? cxcCliente.map(o => ({ ordenId: o.id, numeroOrden: o.numeroOrden, saldo: o.saldoPendiente })) : undefined,
         montoCobrar: tipoServicio === 'cobranza' ? cxcCliente.reduce((s, o) => s + o.saldoPendiente, 0) : 0,
         notasOrden: notas, formaPago: esInternaOProd ? '' : formaPago,
+        direccionTarea: tipoServicio === 'interna' ? direccionInterna.trim() : '', // ✅ INTERNA-DIR-001
         numeroFactura, extintorPrestamo, total,
         requiereFactura: esInternaOProd ? false : ((empresaSel?.iva > 0) || clientePideFactura),
         clienteDireccionPrincipal: esInternaOProd ? '' : (clienteSel?.direccionPrincipal || ''),
@@ -360,6 +377,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
         mensajeroId,
         mensajeroNombre,
         notasOrden: notas,
+        direccionTarea: tipoServicio === 'interna' ? direccionInterna.trim() : undefined, // ✅ INTERNA-DIR-001
         formaPago,
         numeroFactura,
         extintorPrestamo,
@@ -494,27 +512,23 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                   </div>
                   {tipoServicio === 'interna' && (
                     <div style={{ marginTop: 10 }}>
-                      <label style={s.label}>Dirección <span style={{ fontWeight: 400, color: '#9ca3af' }}>(opcional)</span></label>
+                      {/* ✅ INTERNA-DIR-001: campo REAL de dirección (direccionTarea).
+                          Antes se incrustaba como "DIR: x" en las notas y logística
+                          nunca la veía como dirección — ahora tiene su propio campo
+                          y aparece con enlace a Maps en logística y en el móvil. */}
+                      <label style={s.label}>📍 Dirección <span style={{ fontWeight: 400, color: '#9ca3af' }}>(opcional)</span></label>
                       <input
                         style={{ ...s.input, marginBottom: 8 }}
                         placeholder="Ej: Calle 5 # 23-10, Centro Comercial Unicentro..."
-                        value={notas.startsWith('DIR:') ? notas.split('\n')[0].replace('DIR:', '').trim() : ''}
-                        onChange={e => {
-                          const dir = e.target.value;
-                          const resto = notas.includes('\n') ? notas.split('\n').slice(1).join('\n') : (notas.startsWith('DIR:') ? '' : notas);
-                          setNotas(dir ? `DIR: ${dir}\n${resto}` : resto);
-                        }}
+                        value={direccionInterna}
+                        onChange={e => setDireccionInterna(e.target.value)}
                       />
                       <label style={s.label}>¿Qué debe hacer? *</label>
                       <textarea
                         style={{ ...s.input, height: 70, resize: 'vertical', fontFamily: 'inherit' }}
                         placeholder="Ej: Recoger vinilo de Jhonny Publicidad, comprar resma de papel carta..."
-                        value={notas.includes('\n') ? notas.split('\n').slice(1).join('\n') : (notas.startsWith('DIR:') ? '' : notas)}
-                        onChange={e => {
-                          const tarea = e.target.value;
-                          const dir = notas.startsWith('DIR:') ? notas.split('\n')[0] : '';
-                          setNotas(dir ? `${dir}\n${tarea}` : tarea);
-                        }}
+                        value={notas}
+                        onChange={e => setNotas(e.target.value)}
                       />
                     </div>
                   )}

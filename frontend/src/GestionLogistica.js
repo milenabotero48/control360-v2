@@ -121,7 +121,7 @@ const ModalAsignar = ({ ordenes, mensajeros, onAsignar, onCerrar }) => {
                     <td style={s.td}><code style={{ fontSize: 12 }}>{o.numeroOrden}</code></td>
                     <td style={s.td}><strong style={{ fontSize: 13 }}>{o.clienteNombre}</strong></td>
                     <td style={{ ...s.td, fontSize: 12, color: '#6b7280', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {o.sucursalDireccion || o.clienteDireccion || '—'}
+                      {/* ✅ INTERNA-DIR-001 */}{o.direccionTarea || o.sucursalDireccion || o.clienteDireccion || '—'}
                     </td>
                     <td style={s.td}><span style={{ fontSize: 12 }}>{fmtFecha(o.fechaProgramada)}</span></td>
                     <td style={{ ...s.td, fontWeight: 700, color: '#16a34a' }}>{fmt(o.total)}</td>
@@ -1304,8 +1304,8 @@ const GestionLogistica = ({ user }) => {
                           )}
 
                           {/* Dirección → abre Google Maps */}
-                          {(o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal) && (
-                            <a href={`https://maps.google.com/?q=${encodeURIComponent(o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)}`}
+                          {(o.direccionTarea || o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal) && (
+                            <a href={`https://maps.google.com/?q=${encodeURIComponent(o.direccionTarea || o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)}`}
                               target="_blank" rel="noreferrer"
                               style={{ display: 'block', fontSize: 13, color: '#2563eb', marginBottom: 4, textDecoration: 'none' }}>
                               📍 {o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal}
@@ -1380,8 +1380,8 @@ const GestionLogistica = ({ user }) => {
                               </div>
                             </td>
                             <td style={{ ...s.td, fontSize: 12, color: '#374151' }}>
-                              {(o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)
-                                ? <a href={`https://maps.google.com/?q=${encodeURIComponent(o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)}`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', textDecoration: 'none' }}>
+                              {(o.direccionTarea || o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)
+                                ? <a href={`https://maps.google.com/?q=${encodeURIComponent(o.direccionTarea || o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal)}`} target="_blank" rel="noreferrer" style={{ color: '#2563eb', textDecoration: 'none' }}>
                                     📍 {o.sucursalDireccion || o.clienteDireccion || o.clienteDireccionPrincipal}
                                   </a>
                                 : <span style={{ color: '#9ca3af' }}>—</span>

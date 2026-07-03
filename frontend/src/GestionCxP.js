@@ -23,11 +23,33 @@ const GestionCxP = ({ user }) => {
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
 
+  // ✅ CXP-IVA-001: selector de período fiscal (cuatrimestre por defecto —
+  // la declaración de IVA de estas empresas es cuatrimestral)
+  const cuatrimestres = (() => {
+    const hoy = new Date(Date.now() - 5 * 3600 * 1000);
+    const anio = hoy.getUTCFullYear();
+    const actual = Math.floor(hoy.getUTCMonth() / 4);
+    const lista = [];
+    for (const a of [anio, anio - 1]) {
+      for (let c = 2; c >= 0; c--) {
+        if (a === anio && c > actual) continue;
+        lista.push({
+          key: `${a}-${c}`,
+          label: `${['Ene–Abr', 'May–Ago', 'Sep–Dic'][c]} ${a}`,
+          desde: `${a}-${String(c * 4 + 1).padStart(2, '0')}-01`,
+          hasta: `${a}-${String(c * 4 + 4).padStart(2, '0')}-31`,
+        });
+      }
+    }
+    return lista;
+  })();
+  const [periodo, setPeriodo] = useState(cuatrimestres[0]);
+
   const cargar = useCallback(async () => {
     try {
       setLoading(true);
       const [resCxp, resCajas, resConf] = await Promise.all([
-        axios.get(`${API}/cxp`, { headers }),
+        axios.get(`${API}/cxp?desde=${periodo.desde}&hasta=${periodo.hasta}`, { headers }),
         axios.get(`${API}/cajas`, { headers }),
         axios.get(`${API}/configuracion`, { headers }),
       ]);
@@ -38,7 +60,7 @@ const GestionCxP = ({ user }) => {
       setFormasPagoConfig(resConf.data?.formasPago || []);
     } catch (e) { setError('Error al cargar CxP'); }
     finally { setLoading(false); }
-  }, [token]);
+  }, [token, periodo]);
 
   useEffect(() => { cargar(); }, [cargar]);
 
@@ -218,6 +240,20 @@ const GestionCxP = ({ user }) => {
       )}
 
       {/* TAB IMPUESTOS */}
+      {/* ✅ CXP-IVA-001: período fiscal — IVA causado por factura registrada */}
+      {tab === 'impuestos' && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#6b7280' }}>📅 Período de declaración:</span>
+          {cuatrimestres.map(c => (
+            <button key={c.key} onClick={() => setPeriodo(c)} style={{
+              border: periodo.key === c.key ? '2px solid #7c3aed' : '1px solid #d1d5db',
+              background: periodo.key === c.key ? '#f5f3ff' : '#fff',
+              color: periodo.key === c.key ? '#5b21b6' : '#374151',
+              borderRadius: 99, padding: '5px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+            }}>{c.label}</button>
+          ))}
+        </div>
+      )}
       {tab === 'impuestos' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* IVA */}

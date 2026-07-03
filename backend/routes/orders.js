@@ -639,6 +639,7 @@ router.post('/', authenticate, async (req, res) => {
       prioridad = 'normal',
       mensajeroId, mensajeroNombre,
       notasOrden,
+      direccionTarea = '', // ✅ INTERNA-DIR-001: dirección de la tarea interna
       lugarAtencion = 'domicilio',
       formaPago = '',
       requiereFactura = false,
@@ -688,6 +689,12 @@ router.post('/', authenticate, async (req, res) => {
 
     const numeroOrden = await generarNumeroOrden(tipoFinal, adminId);
 
+    // ✅ PRECIO-CERO-001: ningún item puede quedar en $0 — los servicios no
+    // tienen costo, así que la regla es precio > 0. Cortesías = descuento.
+    const itemCeroCrear = (items || []).find(it => !(Number(it.precioUnitario) > 0));
+    if (itemCeroCrear) {
+      return res.status(400).json({ error: `El producto "${itemCeroCrear.nombre || 'sin nombre'}" no puede quedar con precio $0. Usa el campo descuento para cortesías.` });
+    }
     const subtotal = items.reduce((sum, item) => {
       const precio = item.precioUnitario || 0;
       const cant = item.cantidad || 1;
@@ -806,6 +813,7 @@ router.post('/', authenticate, async (req, res) => {
       mensajeroId: mensajeroId || null,
       mensajeroNombre: mensajeroNombre || '',
       notasOrden: notasOrden || '',
+      direccionTarea: direccionTarea || '', // ✅ INTERNA-DIR-001
       facturaReferencia: facturaReferencia || null,
       montoCobrar: montoCobrar || 0,
       generaCertificado,
@@ -969,6 +977,11 @@ router.put('/:id', authenticate, async (req, res) => {
     const cambios = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
 
     if (items) {
+      // ✅ PRECIO-CERO-001: misma regla que en creación
+      const itemCeroEdit = items.find(it => !(Number(it.precioUnitario) > 0));
+      if (itemCeroEdit) {
+        return res.status(400).json({ error: `El producto "${itemCeroEdit.nombre || 'sin nombre'}" no puede quedar con precio $0. Usa el campo descuento para cortesías.` });
+      }
       const subtotal = items.reduce((sum, item) => {
         return sum + ((item.precioUnitario || 0) * (item.cantidad || 1) * (1 - (item.descuento || 0) / 100));
       }, 0);
@@ -997,6 +1010,7 @@ router.put('/:id', authenticate, async (req, res) => {
     if (prioridad) cambios.prioridad = prioridad;
     if (mensajeroId !== undefined) { cambios.mensajeroId = mensajeroId; cambios.mensajeroNombre = mensajeroNombre || ''; }
     if (notasOrden !== undefined) cambios.notasOrden = notasOrden;
+    if (req.body.direccionTarea !== undefined) cambios.direccionTarea = req.body.direccionTarea; // ✅ INTERNA-DIR-001
     if (sucursalId !== undefined) {
       cambios.sucursalId = sucursalId;
       cambios.sucursalNombre = sucursalNombre || '';
@@ -2368,7 +2382,8 @@ const agregarItemsAOrden = async ({
     const cant = Number(it.cantidad);
     const precio = Number(it.precioUnitario);
     if (!cant || cant <= 0) throw err400(`Cantidad inválida para ${it.nombre}`);
-    if (isNaN(precio) || precio < 0) throw err400(`Precio inválido para ${it.nombre}`);
+    // ✅ PRECIO-CERO-001: precio debe ser mayor a cero (cortesías = descuento)
+    if (isNaN(precio) || precio <= 0) throw err400(`El producto "${it.nombre}" no puede quedar con precio $0. Usa el campo descuento para cortesías.`);
 
     // Verificar stock real del producto (preventivo, no bloquea si falla lectura)
     try {

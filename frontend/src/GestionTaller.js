@@ -934,17 +934,21 @@ export default function GestionTaller({ user }) {
           // equipo en la orden — se usa para buscar si ya quedó registrado
           // en tallerPasos (equipo sin QR ya procesado antes de este reload).
           const pasoIdSinQR = `equipo_sinqr_${idx}_${n + 1}`;
-          const yaProcesadoSinQR = !necesitaQR && tallerPasos.some(p => p.pasoId === pasoIdSinQR);
+          // ✅ QR-EXCEPCION-001: un equipo procesado sin QR cuenta como procesado
+          // SIEMPRE — antes solo se reconocía en tenants sin módulo QR, así que
+          // en tenants CON módulo el trabajo hecho "se deshacía" al recargar la
+          // lista y el sistema volvía a exigir el QR para la misma recarga.
+          const yaProcesadoSinQR = tallerPasos.some(p => p.pasoId === pasoIdSinQR);
           equiposExpandidos.push({
             codigoQR: null,
-            qrPendiente: necesitaQR, // false = no pedirá QR
+            qrPendiente: necesitaQR && !yaProcesadoSinQR, // ✅ QR-EXCEPCION-001
             nombre: it.nombre || '',
             tipo: tipoEq,
             capacidad: capEq,
             categoria: it.categoria || '',
             esCambio: !!it.esCambio,
             codigoQRsugerido: it.codigoQR || '',
-            requiereQR: necesitaQR,
+            requiereQR: necesitaQR && !yaProcesadoSinQR, // ✅ QR-EXCEPCION-001
             procesado: yaProcesadoSinQR,
             _itemIdx: idx, _unidad: n + 1, _totalUnidad: cant
           });
@@ -1124,7 +1128,8 @@ export default function GestionTaller({ user }) {
         pasoId,
         pasoNombre: `${codigoQR || 'Sin QR'} — ${procesoNombre}`,
         insumosUsados,
-        observaciones
+        observaciones,
+        motivoSinQR: modalProcesoEquipo?.equipo?.motivoSinQR || undefined, // ✅ QR-EXCEPCION-001
       }, auth());
     } else {
       // Para procesos manuales, descontar insumos directamente
@@ -1415,11 +1420,28 @@ export default function GestionTaller({ user }) {
                             </div>
                             {/* ✅ FIX TALLER-003: el paso de QR solo aplica si el tenant tiene el módulo */}
                             {tieneQR && !eq.codigoQR && !orden.tallerCompletado && (
-                              <button
-                                onClick={() => setModalQR({ orden, equipo: eq })}
-                                style={s.btnSm('#7c3aed')}>
-                                🏷️ Generar / Escanear QR
-                              </button>
+                              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                <button
+                                  onClick={() => setModalQR({ orden, equipo: eq })}
+                                  style={s.btnSm('#7c3aed')}>
+                                  🏷️ Generar / Escanear QR
+                                </button>
+                                {/* ✅ QR-EXCEPCION-001: la recarga no puede quedar atrapada
+                                    porque falte la etiqueta. Excepción CONSCIENTE: exige
+                                    motivo, queda registrado en el paso — la hoja de vida
+                                    QR sigue siendo la regla, esto es la salida auditada. */}
+                                {!eq.procesado && procesos.length > 0 && (
+                                  <button
+                                    onClick={() => {
+                                      const motivo = window.prompt('¿Por qué se procesa SIN QR? (obligatorio — quedará registrado)\nEj: etiqueta dañada, sin impresora, cliente no autoriza sticker');
+                                      if (!motivo || !motivo.trim()) return;
+                                      setModalProcesoEquipo({ orden, equipo: { ...eq, codigoQR: '', sinQR: true, motivoSinQR: motivo.trim() } });
+                                    }}
+                                    style={s.btnSm('#f59e0b')}>
+                                    ⚙️ Procesar sin QR
+                                  </button>
+                                )}
+                              </div>
                             )}
                             {/* Con QR: procesar solo cuando ya tiene código asignado.
                                 Sin módulo QR: procesar directo, sin paso intermedio. */}

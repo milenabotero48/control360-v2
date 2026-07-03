@@ -387,7 +387,7 @@ router.get('/mensajero/:mensajeroId', async (req, res) => {
       .select('estado', 'fechaCompletada', 'completadaEn', 'updatedAt',
               'total', 'montoPagado', 'fotoEntrega', 'numeroOrden',
               'clienteNombre', 'lugarAtencion', 'sucursalDireccion',
-              'clienteDireccion', 'notasOrden', 'items')
+              'clienteDireccion', 'direccionTarea', 'notasOrden', 'items')
       .get();
     ordenes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (e) { warnings.push('orders: ' + e.message); }
@@ -458,7 +458,7 @@ router.get('/mensajero/:mensajeroId', async (req, res) => {
     rutaHoy: rutaHoy.map(o => ({
       id: o.id, numeroOrden: o.numeroOrden, clienteNombre: o.clienteNombre,
       estado: o.estado, lugarAtencion: o.lugarAtencion, total: o.total,
-      direccion: o.sucursalDireccion || o.clienteDireccion,
+      direccion: o.direccionTarea || o.sucursalDireccion || o.clienteDireccion /* ✅ INTERNA-DIR-001 */,
       // ✅ FIX ORDEN-NOTAS-002: las notas se perdían aquí — el mapper
       // recortaba los campos y las observaciones nunca llegaban al mensajero
       notasOrden: o.notasOrden || '',

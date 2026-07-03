@@ -457,9 +457,23 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
 
     // Actualizar items si vienen
     if (items && items.length > 0) {
+      // ✅ PRECIO-CERO-001: ningún item puede quedar en $0 — un cero nunca es
+      // un accidente. Las cortesías se manejan con descuento (decisión visible).
+      const itemCero = items.find(it => !(Number(it.precioUnitario) > 0));
+      if (itemCero) {
+        return res.status(400).json({ error: `El producto "${itemCero.nombre || 'sin nombre'}" no puede quedar con precio $0. Usa el campo descuento para cortesías.` });
+      }
       update.items = items;
-      const nuevoTotal = items.reduce((s, it) => s + (it.precioUnitario || 0) * (it.cantidad || 1) * (1 - (it.descuento || 0) / 100), 0);
-      update.total = Math.round(nuevoTotal);
+      // ✅ IVA-AJUSTE-001: antes esto escribía total = suma de items SIN IVA y
+      // dejaba el ivaValor viejo huérfano — toda orden con IVA donde el
+      // mensajero ajustara cantidades quedaba mal cobrada. Ahora se recalculan
+      // los TRES campos coherentes con la misma fórmula del resto del sistema.
+      const nuevoSubtotal = items.reduce((s, it) => s + (it.precioUnitario || 0) * (it.cantidad || 1) * (1 - (it.descuento || 0) / 100), 0);
+      const ivaPctOrden = Number(orden.ivaPct) || 0;
+      const nuevoIva = Math.round(nuevoSubtotal * ivaPctOrden / 100);
+      update.subtotal = Math.round(nuevoSubtotal);
+      update.ivaValor = nuevoIva;
+      update.total = Math.round(nuevoSubtotal) + nuevoIva;
 
       // Si el mensajero agregó equipos de recarga/mant SIN marcar cambio,
       // esos equipos hay que recogerlos y llevarlos a taller. La orden

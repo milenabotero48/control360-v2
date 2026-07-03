@@ -18,6 +18,24 @@ router.get('/', async (req, res) => {
   try {
     const userId = req.adminId || req.user.uid || req.user.id;
 
+    // ✅ CXP-IVA-001: período fiscal. La declaración de IVA en Colombia es
+    // cuatrimestral para estas empresas (bimestral solo el primer año), así
+    // que el panel calcula por CUATRIMESTRE (Ene-Abr, May-Ago, Sep-Dic).
+    // El frontend puede enviar ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD para ver
+    // otro período. Sin parámetros → cuatrimestre actual (hora Colombia).
+    const hoyCO = new Date(Date.now() - 5 * 3600 * 1000);
+    const anio = hoyCO.getUTCFullYear();
+    const mes = hoyCO.getUTCMonth(); // 0-11
+    const cuatri = Math.floor(mes / 4); // 0,1,2
+    const defDesde = `${anio}-${String(cuatri * 4 + 1).padStart(2, '0')}-01`;
+    const defHasta = `${anio}-${String(cuatri * 4 + 4).padStart(2, '0')}-31`;
+    const desde = /^\d{4}-\d{2}-\d{2}$/.test(req.query.desde || '') ? req.query.desde : defDesde;
+    const hasta = /^\d{4}-\d{2}-\d{2}$/.test(req.query.hasta || '') ? req.query.hasta : defHasta;
+    const enPeriodo = (f) => {
+      const fecha = String(f || '').slice(0, 10);
+      return fecha >= desde && fecha <= hasta;
+    };
+
     // FIX BUG A: el IVA descontable debe sumar TODOS los egresos del período
     // (PAGADOS Y PENDIENTES), no solo PENDIENTES. Antes el filtro de PENDIENTE
     // hacía que cuando pagabas un egreso desapareciera del cálculo.
@@ -46,7 +64,9 @@ router.get('/', async (req, res) => {
       // Excluir entradas que son solo "retención practicada" (no compras)
       if (e.tipo === 'retencion') return;
 
-      if (e.ivaVal > 0) totalIvaDescontable += Number(e.ivaVal) || 0;
+      // ✅ CXP-IVA-001: IVA descontable solo del período de declaración
+      if (e.ivaVal > 0 && enPeriodo(e.fecha)) totalIvaDescontable += Number(e.ivaVal) || 0;
+      // Retefuente pendiente de pago: no depende del período (es deuda viva)
       if (e.retenVal > 0 && e.estado !== 'PAGADO') totalRetefuente += Number(e.retenVal) || 0;
     });
 
@@ -77,28 +97,34 @@ router.get('/', async (req, res) => {
       });
     });
 
-    // 2. IVA generado en órdenes — FILTRADO por adminId (corrección Ola 1)
+    // ✅ CXP-IVA-001: el IVA se CAUSA al facturar, no al cobrar (régimen
+    // común). Antes solo sumaba órdenes en estado 'completada' — las ventas
+    // a crédito (estado cxc) y toda orden facturada aún en flujo quedaban
+    // por fuera: un contribuyente con operación a crédito veía IVA $0.
+    // Regla nueva: toda orden CON número de factura registrado y no anulada,
+    // dentro del período. También se fusionan las DOS queries idénticas que
+    // había (misma corrección que en el dashboard de taller) y se agrega
+    // .select() — una sola lectura liviana en vez de dos completas.
     const snapOrdenes = await db.collection('orders')
       .where('adminId', '==', userId)
-      .where('estado', '==', 'completada')
+      .select('numeroFactura', 'ivaValor', 'retencionPracticada', 'estado',
+              'fechaFactura', 'fechaPago', 'fechaProgramada', 'numeroOrden', 'clienteNombre')
       .get();
-    let ivaGenerado = 0;
-    snapOrdenes.forEach(doc => {
-      ivaGenerado += doc.data().ivaValor || 0;
-    });
 
-    // 3. Retenciones de clientes — también con filtro adminId
-    // Nota: Firestore no permite combinar where '==' con where '>' sin un
-    // índice compuesto. Filtramos retencionPracticada en memoria.
-    const snapCxc = await db.collection('orders')
-      .where('adminId', '==', userId)
-      .where('estado', '==', 'completada')
-      .get();
+    let ivaGenerado = 0;
     let totalRenta = 0;
     const retencionesClientes = [];
-    snapCxc.forEach(doc => {
+    snapOrdenes.forEach(doc => {
       const o = doc.data();
-      if ((o.retencionPracticada || 0) > 0) {
+      if (o.estado === 'anulada') return;
+      const fechaCausacion = o.fechaFactura || o.fechaPago || o.fechaProgramada;
+      const facturada = typeof o.numeroFactura === 'string' && o.numeroFactura.trim().length > 0;
+
+      if (facturada && enPeriodo(fechaCausacion)) {
+        ivaGenerado += o.ivaValor || 0;
+      }
+      // Retenciones practicadas por clientes — mismo período
+      if ((o.retencionPracticada || 0) > 0 && enPeriodo(o.fechaPago || fechaCausacion)) {
         totalRenta += o.retencionPracticada;
         retencionesClientes.push({
           ordenId: doc.id, numeroOrden: o.numeroOrden,
@@ -111,6 +137,7 @@ router.get('/', async (req, res) => {
     const ivaNeto = ivaGenerado - totalIvaDescontable;
 
     res.json({
+      periodo: { desde, hasta }, // ✅ CXP-IVA-001
       proveedores: Object.values(proveedores),
       impuestos: {
         ivaGenerado, totalIvaDescontable, ivaNeto,
