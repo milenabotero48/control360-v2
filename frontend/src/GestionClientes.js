@@ -251,6 +251,20 @@ const GestionClientes = ({ user, empresas = [] }) => {
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
 
+  // ✅ CLIENTES-DUP-001: reporte de duplicados bajo demanda (solo admin, un clic)
+  const [duplicados, setDuplicados] = useState(null);
+  const [buscandoDup, setBuscandoDup] = useState(false);
+  const detectarDuplicados = async () => {
+    setBuscandoDup(true);
+    try {
+      const res = await axios.get(API + '/clients/duplicados', { headers });
+      setDuplicados(res.data);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error detectando duplicados');
+    }
+    setBuscandoDup(false);
+  };
+
   // ─── CARGAR EMPRESAS DESDE FIRESTORE SI NO VIENEN POR PROP ───────────────
   const [empresasDisponibles, setEmpresasDisponibles] = useState(empresas);
   // Mini-Ola 2.6: catálogo de sectores
@@ -617,6 +631,7 @@ const GestionClientes = ({ user, empresas = [] }) => {
           <p style={s.pageSubtitle}>Base de clientes centralizada y sincronizada</p>
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
+          {isAdmin && <button onClick={detectarDuplicados} disabled={buscandoDup} style={s.btnSecundario}>{buscandoDup ? '⏳ Analizando...' : '🔍 Duplicados'}</button>}
           {isAdmin && <button onClick={exportarClientes} style={s.btnSecundario}>📤 Exportar CSV</button>}
           {isAdmin && <button onClick={() => setMostrarImportCli(true)} style={s.btnSecundario}>📥 Importar</button>}
           <button onClick={abrirNuevo} style={s.btnPrimario}>+ Nuevo Cliente</button>
@@ -626,6 +641,37 @@ const GestionClientes = ({ user, empresas = [] }) => {
       {/* ── ALERTAS GLOBALES ── */}
       {error && <div style={s.alertError}>{error}</div>}
       {exito && <div style={s.alertExito}>{exito}</div>}
+
+      {/* ✅ CLIENTES-DUP-001: resultado del análisis de duplicados */}
+      {duplicados && (
+        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '14px 18px', marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: duplicados.totalGrupos > 0 ? 10 : 0 }}>
+            <strong style={{ fontSize: 14 }}>
+              {duplicados.totalGrupos > 0
+                ? `⚠️ ${duplicados.totalGrupos} grupo(s) de posibles duplicados`
+                : '✅ No se detectaron clientes duplicados'}
+            </strong>
+            <button onClick={() => setDuplicados(null)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 16, color: '#9ca3af' }}>✕</button>
+          </div>
+          {(duplicados.grupos || []).map((g, gi) => (
+            <div key={gi} style={{ border: '1px solid #fde68a', background: '#fffbeb', borderRadius: 8, padding: '8px 12px', marginBottom: 6, fontSize: 13 }}>
+              <div style={{ fontWeight: 700, color: '#b45309', marginBottom: 4 }}>
+                Mismo {g.criterio === 'TEL' ? 'teléfono' : g.criterio === 'NIT' ? 'NIT' : 'nombre'}: {g.valor}
+              </div>
+              {(g.clientes || []).map((c, ci) => (
+                <div key={ci} style={{ color: '#374151' }}>
+                  • {c.nombre} {c.nit ? `— NIT ${c.nit}` : ''} {c.celular ? `— ${c.celular}` : (c.telefono ? `— ${c.telefono}` : '')} <span style={{ color: '#9ca3af' }}>({c.empresaNombre || 'sin empresa'})</span>
+                </div>
+              ))}
+            </div>
+          ))}
+          {duplicados.totalGrupos > 0 && (
+            <p style={{ fontSize: 12, color: '#6b7280', margin: '8px 0 0' }}>
+              La fusión de duplicados llegará en la siguiente actualización. Por ahora puedes revisar cada grupo y desactivar manualmente el repetido si no tiene órdenes asociadas.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* ── FILTROS ── */}
       <div style={s.filtros}>

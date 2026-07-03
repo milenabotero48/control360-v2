@@ -1053,6 +1053,11 @@ router.put('/:id/estado', authenticate, async (req, res) => {
     const usuarioNombre = req.user.nombre || req.user.email;
     const ahora = () => new Date().toISOString();
 
+    // ✅ FACTURA-FLOW-001: aislamiento multi-tenant (faltaba en este endpoint)
+    if (actual.adminId && actual.adminId !== usuarioId) {
+      return res.status(403).json({ error: 'No tienes acceso a esta orden' });
+    }
+
     // ── ANULACIÓN ─────────────────────────────────────────────────────────────
     // R-02-03: solo Admin/Tesorería con PIN válido pueden anular.
     if (nuevoEstado === 'anulada') {
@@ -1152,6 +1157,39 @@ router.put('/:id/estado', authenticate, async (req, res) => {
         datos: { estadoAnterior: actual.estado, motivo: notas, cajaRevertida }
       });
       return res.json({ id, estado: 'anulada', historialEstados: historial, cajaRevertida });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ✅ FACTURA-FLOW-001: COMPUERTA DE ROLES DEL AVANCE DE ESTADOS
+    // ──────────────────────────────────────────────────────────────────────────
+    // Antes este endpoint NO validaba rol para avances normales: la restricción
+    // "solo admin avanza" vivía únicamente en el frontend (hueco de seguridad).
+    // Ahora:
+    //   - admin: control total, como siempre.
+    //   - comercial/tesorería: ÚNICA jugada permitida — registrar el N° de
+    //     factura DIAN con la orden en 'facturado'. El backend calcula el paso
+    //     y la cascada automática hace el resto (la orden aterriza en logística
+    //     sin esperar al administrador). Registrar la factura ES el evento que
+    //     avanza la orden.
+    //   - demás roles: 403 (mensajeros y taller usan sus propios endpoints).
+    // ══════════════════════════════════════════════════════════════════════════
+    if (req.user.role !== 'admin') {
+      const facturaEnviada = typeof numeroFactura === 'string' && numeroFactura.trim().length > 0;
+      const esJugadaFactura =
+        ['comercial', 'tesoreria'].includes(req.user.role) &&
+        actual.estado === 'facturado' &&
+        facturaEnviada;
+      if (!esJugadaFactura) {
+        return res.status(403).json({
+          error: 'Tu rol solo puede registrar el número de factura DIAN en órdenes en estado Facturado. Los demás avances los realiza el administrador.'
+        });
+      }
+      if (forzar) {
+        return res.status(403).json({ error: 'Solo el administrador puede forzar transiciones' });
+      }
+      // Modo seguro obligatorio: el backend calcula el paso — un rol no-admin
+      // nunca elige estados arbitrarios.
+      nuevoEstado = 'auto';
     }
 
     if (!ESTADOS.includes(nuevoEstado) && nuevoEstado !== 'auto' && avanzar !== true) {
@@ -1258,6 +1296,36 @@ router.put('/:id/estado', authenticate, async (req, res) => {
     const facturaLimpia = numeroFactura ? numeroFactura.trim().toUpperCase()
                                         : (actual.numeroFactura || '');
     if (facturaLimpia) {
+      // ✅ FACTURA-FLOW-001: corregir un N° ya registrado = solo admin.
+      // El número de factura es dato fiscal: la primera escritura está abierta
+      // a los roles autorizados; cualquier corrección posterior es del admin.
+      if (actual.numeroFactura && facturaLimpia !== actual.numeroFactura && req.user.role !== 'admin') {
+        return res.status(403).json({
+          error: `Esta orden ya tiene registrada la factura ${actual.numeroFactura}. Solo el administrador puede corregir un número de factura.`
+        });
+      }
+      // ✅ FACTURA-FLOW-001: detección de factura duplicada por empresa.
+      // Protege el consecutivo DIAN de errores de transcripción. Si el índice
+      // de Firestore aún no existe, NO se bloquea la operación (se loguea).
+      if (facturaLimpia !== (actual.numeroFactura || '')) {
+        try {
+          const dupSnap = await db.collection('orders')
+            .where('adminId', '==', actual.adminId || usuarioId)
+            .where('empresaId', '==', actual.empresaId || '')
+            .where('numeroFactura', '==', facturaLimpia)
+            .limit(1).get();
+          if (!dupSnap.empty && dupSnap.docs[0].id !== id) {
+            const dup = dupSnap.docs[0].data();
+            return res.status(400).json({
+              error: `El número de factura ${facturaLimpia} ya está registrado en la orden ${dup.numeroOrden} de la misma empresa. Verifica el consecutivo antes de continuar.`,
+              facturaDuplicada: true,
+              ordenExistente: dup.numeroOrden
+            });
+          }
+        } catch (eDup) {
+          console.warn('FACTURA-FLOW-001: verificación de duplicados omitida (posible índice faltante):', eDup.message);
+        }
+      }
       cambios.numeroFactura = facturaLimpia;
       // La fecha de la factura = el día que se digita el N° por primera vez.
       // No se sobrescribe si la orden ya tenía factura.
@@ -1498,6 +1566,17 @@ router.put('/:id/estado', authenticate, async (req, res) => {
     }
 
     await ordenRef.update(cambios);
+
+    // ✅ FACTURA-FLOW-001: rastro dedicado de quién registró la factura DIAN
+    if (facturaLimpia && !actual.numeroFactura) {
+      await auditar({
+        accion: 'FACTURA_REGISTRADA',
+        descripcion: `${usuarioNombre} registró la factura DIAN ${facturaLimpia} en ${actual.numeroOrden}`,
+        usuarioId, usuarioNombre, ordenId: id,
+        documento: actual.numeroOrden,
+        datos: { numeroFactura: facturaLimpia, empresaId: actual.empresaId || '', estadoResultante: estadoCursor }
+      });
+    }
 
     await auditar({
       accion: 'CAMBIO_ESTADO_ORDEN',
@@ -2256,6 +2335,122 @@ router.get('/stats/resumen', authenticate, async (req, res) => {
 //   { items: [ { productoId, nombre, categoria, cantidad, precioUnitario,
 //                descuento?, notas?, serial? } ] }
 // ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ TALLER-REPUESTOS-001: RUTINA COMPARTIDA — AGREGAR ITEMS A UNA ORDEN
+// Única fuente de verdad para agregar items a una orden existente (mismo
+// principio que construirFlujo). La consumen:
+//   - POST /:id/agregar-items (mensajero en sitio) — comportamiento idéntico
+//   - workshop.js PUT /defecto/autorizar (repuestos de taller autorizados)
+// Hace: validación de estructura + verificación de stock + sanitizado +
+// recálculo subtotal/IVA/total + descuento de inventario + historial +
+// auditoría + UN SOLO update atómico del documento.
+// Lanza Error con .status para errores de validación (400).
+// ══════════════════════════════════════════════════════════════════════════════
+const agregarItemsAOrden = async ({
+  ordenRef, orden, ordenId, itemsNuevos,
+  usuarioId, usuarioNombre,
+  marcaItems = {},          // campos extra por item, ej. { agregadoEnSitio: true }
+  flagsOrden = {},          // campos extra del documento, ej. { itemsAgregadosEnSitio: true }
+  accionHistorial,          // ej. 'ITEMS_AGREGADOS_EN_SITIO'
+  accionAuditoria,          // ej. 'AGREGAR_ITEMS_EN_SITIO'
+  etiquetaHistorial = '',   // ej. 'Mensajero' | 'Taller'
+  sufijoHistorial = '',     // ej. ' en sitio' | ' por defecto autorizado'
+  sufijoAuditoria = ''      // ej. ' en sitio' | ' — repuestos de defecto autorizado'
+}) => {
+  const err400 = (msg) => { const e = new Error(msg); e.status = 400; return e; };
+
+  // ── Validación de estructura + sanitizado ────────────────────────────────
+  const itemsSanitizados = [];
+  for (const it of itemsNuevos) {
+    if (!it.productoId || !it.nombre) {
+      throw err400('Cada item requiere productoId y nombre');
+    }
+    const cant = Number(it.cantidad);
+    const precio = Number(it.precioUnitario);
+    if (!cant || cant <= 0) throw err400(`Cantidad inválida para ${it.nombre}`);
+    if (isNaN(precio) || precio < 0) throw err400(`Precio inválido para ${it.nombre}`);
+
+    // Verificar stock real del producto (preventivo, no bloquea si falla lectura)
+    try {
+      const prodDoc = await db.collection('products').doc(it.productoId).get();
+      if (prodDoc.exists) {
+        const prod = prodDoc.data();
+        if (prod.tieneStock && Number(prod.stock || 0) < cant) {
+          throw err400(`Stock insuficiente para ${it.nombre}. Disponible: ${prod.stock || 0}, solicitado: ${cant}.`);
+        }
+      }
+    } catch (e) { if (e.status) throw e; /* lectura fallida no bloquea */ }
+
+    itemsSanitizados.push({
+      productoId:     it.productoId,
+      nombre:         it.nombre,
+      categoria:      it.categoria || '',
+      cantidad:       cant,
+      precioUnitario: precio,
+      descuento:      Number(it.descuento) || 0,
+      notas:          it.notas || '',
+      serial:         it.serial || '',
+      agregadoPorId:      usuarioId,
+      agregadoPorNombre:  usuarioNombre,
+      agregadoEn:         new Date().toISOString(),
+      ...marcaItems
+    });
+  }
+
+  // ── Recalcular totales (misma fórmula que el PUT de orders) ──────────────
+  const itemsCompletos = [...(orden.items || []), ...itemsSanitizados];
+  const calcSubtotal = (lista) => lista.reduce((s, x) => {
+    const p = Number(x.precioUnitario) || 0;
+    const c = Number(x.cantidad)       || 1;
+    const d = Number(x.descuento)      || 0;
+    return s + (p * c * (1 - d / 100));
+  }, 0);
+  const subtotal = calcSubtotal(itemsCompletos);
+  const ivaPct   = Number(orden.ivaPct) || 0;
+  const ivaValor = subtotal * (ivaPct / 100);
+  const total    = subtotal + ivaValor;
+
+  // ── Descontar inventario solo de los nuevos ──────────────────────────────
+  await descontarInventario(itemsSanitizados, ordenId);
+
+  // ── Historial + UN SOLO update atómico (incluye flagsOrden del llamador) ──
+  const historial = orden.historialEstados || [];
+  historial.push({
+    estado: orden.estado, // se queda en el mismo estado
+    fecha: new Date().toISOString(),
+    usuarioId, usuarioNombre,
+    accion: accionHistorial,
+    notas: `${etiquetaHistorial || usuarioNombre} agregó ${itemsSanitizados.length} item(s)${sufijoHistorial}. Subtotal: ${subtotal.toFixed(0)}`
+  });
+
+  await ordenRef.update({
+    items: itemsCompletos,
+    subtotal, ivaValor, total,
+    historialEstados: historial,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    ...flagsOrden
+  });
+
+  // ── Auditoría ─────────────────────────────────────────────────────────────
+  await auditar({
+    accion: accionAuditoria,
+    descripcion: `${usuarioNombre} agregó ${itemsSanitizados.length} item(s) a la orden ${orden.numeroOrden}${sufijoAuditoria} (subtotal anterior ${(orden.subtotal || 0).toFixed(0)} → nuevo ${subtotal.toFixed(0)})`,
+    usuarioId, usuarioNombre, ordenId,
+    documento: orden.numeroOrden,
+    datos: {
+      itemsAgregados: itemsSanitizados.map(x => ({
+        productoId: x.productoId, nombre: x.nombre, cantidad: x.cantidad, precio: x.precioUnitario
+      })),
+      subtotalAnterior: orden.subtotal || 0,
+      subtotalNuevo: subtotal,
+      totalAnterior: orden.total || 0,
+      totalNuevo: total
+    }
+  });
+
+  return { itemsCompletos, itemsSanitizados, subtotal, ivaValor, total };
+};
+
 router.post('/:id/agregar-items', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
@@ -2315,116 +2510,33 @@ router.post('/:id/agregar-items', authenticate, async (req, res) => {
       });
     }
 
-    // ── Validación 5: estructura de cada item + sanitizado ───────────────────
-    const itemsSanitizados = [];
-    for (const it of itemsNuevos) {
-      if (!it.productoId || !it.nombre) {
-        return res.status(400).json({ error: 'Cada item requiere productoId y nombre' });
-      }
-      const cant = Number(it.cantidad);
-      const precio = Number(it.precioUnitario);
-      if (!cant || cant <= 0) {
-        return res.status(400).json({ error: `Cantidad inválida para ${it.nombre}` });
-      }
-      if (isNaN(precio) || precio < 0) {
-        return res.status(400).json({ error: `Precio inválido para ${it.nombre}` });
-      }
-
-      // Validación 6: verificar stock real del producto
-      try {
-        const prodDoc = await db.collection('products').doc(it.productoId).get();
-        if (prodDoc.exists) {
-          const prod = prodDoc.data();
-          if (prod.tieneStock && Number(prod.stock || 0) < cant) {
-            return res.status(400).json({
-              error: `Stock insuficiente para ${it.nombre}. Disponible: ${prod.stock || 0}, solicitado: ${cant}.`
-            });
-          }
-        }
-      } catch { /* si falla la lectura no bloqueamos — solo validación preventiva */ }
-
-      itemsSanitizados.push({
-        productoId:     it.productoId,
-        nombre:         it.nombre,
-        categoria:      it.categoria || '',
-        cantidad:       cant,
-        precioUnitario: precio,
-        descuento:      Number(it.descuento) || 0,
-        notas:          it.notas || '',
-        serial:         it.serial || '',
-        agregadoEnSitio:    true,
-        agregadoPorId:      userId,
-        agregadoPorNombre:  userNombre,
-        agregadoEn:         new Date().toISOString()
-      });
-    }
-
-    // ── Recalcular totales ───────────────────────────────────────────────────
-    const itemsCompletos = [...(orden.items || []), ...itemsSanitizados];
-
-    const calcSubtotal = (lista) => lista.reduce((s, x) => {
-      const p = Number(x.precioUnitario) || 0;
-      const c = Number(x.cantidad)       || 1;
-      const d = Number(x.descuento)      || 0;
-      return s + (p * c * (1 - d / 100));
-    }, 0);
-
-    const subtotal = calcSubtotal(itemsCompletos);
-
-    // IVA: si la orden ya lo tenía calculado, usamos el mismo %
-    const ivaPct = Number(orden.ivaPct) || 0;
-    const ivaValor = subtotal * (ivaPct / 100);
-    const total = subtotal + ivaValor;
-
-    // ── Descontar inventario solo de los nuevos ──────────────────────────────
-    await descontarInventario(itemsSanitizados, id);
-
-    // ── Actualizar la orden ──────────────────────────────────────────────────
-    const historial = orden.historialEstados || [];
-    historial.push({
-      estado: orden.estado, // se queda en el mismo estado
-      fecha: new Date().toISOString(),
-      usuarioId: userId,
-      usuarioNombre: userNombre,
-      accion: 'ITEMS_AGREGADOS_EN_SITIO',
-      notas: `Mensajero agregó ${itemsSanitizados.length} item(s) en sitio. Subtotal: ${subtotal.toFixed(0)}`
-    });
-
-    await ordenRef.update({
-      items: itemsCompletos,
-      subtotal, ivaValor, total,
-      historialEstados: historial,
-      itemsAgregadosEnSitio: true,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    // ── Auditoría ────────────────────────────────────────────────────────────
-    await auditar({
-      accion: 'AGREGAR_ITEMS_EN_SITIO',
-      descripcion: `${userNombre} agregó ${itemsSanitizados.length} item(s) a la orden ${orden.numeroOrden} en sitio (subtotal anterior ${(orden.subtotal || 0).toFixed(0)} → nuevo ${subtotal.toFixed(0)})`,
-      usuarioId: userId, usuarioNombre: userNombre, ordenId: id,
-      documento: orden.numeroOrden,
-      datos: {
-        itemsAgregados: itemsSanitizados.map(x => ({
-          productoId: x.productoId, nombre: x.nombre, cantidad: x.cantidad, precio: x.precioUnitario
-        })),
-        subtotalAnterior: orden.subtotal || 0,
-        subtotalNuevo: subtotal,
-        totalAnterior: orden.total || 0,
-        totalNuevo: total
-      }
+    // ✅ TALLER-REPUESTOS-001: la validación de estructura, stock, sanitizado,
+    // recálculo, inventario, historial y auditoría ahora viven en la rutina
+    // compartida agregarItemsAOrden — comportamiento idéntico al anterior.
+    const resultado = await agregarItemsAOrden({
+      ordenRef, orden, ordenId: id, itemsNuevos,
+      usuarioId: userId, usuarioNombre: userNombre,
+      marcaItems:  { agregadoEnSitio: true },
+      flagsOrden:  { itemsAgregadosEnSitio: true },
+      accionHistorial:   'ITEMS_AGREGADOS_EN_SITIO',
+      accionAuditoria:   'AGREGAR_ITEMS_EN_SITIO',
+      etiquetaHistorial: 'Mensajero',
+      sufijoHistorial:   ' en sitio',
+      sufijoAuditoria:   ' en sitio'
     });
 
     res.json({
       ok: true,
       id,
-      items: itemsCompletos,
-      itemsAgregados: itemsSanitizados,
-      subtotal, ivaValor, total
+      items: resultado.itemsCompletos,
+      itemsAgregados: resultado.itemsSanitizados,
+      subtotal: resultado.subtotal,
+      ivaValor: resultado.ivaValor,
+      total: resultado.total
     });
   } catch (error) {
     console.error('Error agregando items en sitio:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -2440,5 +2552,8 @@ router.verificarPinUsuario = verificarPinUsuario;
 // ✅ FIX NUMERACION-001: expuesto para que configuracion.js pueda mostrar
 // el estado real del contador (incluye el histórico) antes de editarlo.
 router.asegurarContadorInicializado = asegurarContadorInicializado;
+// ✅ TALLER-REPUESTOS-001: rutina compartida para agregar items a una orden
+// (la consume workshop.js al autorizar repuestos de defectos).
+router.agregarItemsAOrden = agregarItemsAOrden;
 
 module.exports = router;

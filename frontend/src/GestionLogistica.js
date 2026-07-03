@@ -568,7 +568,8 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
           {(necesitaFotoRecogida || necesitaFotoEntrega) && (
             <div style={{ marginBottom: 14 }}>
               <label style={s.label}>{necesitaFotoRecogida ? 'Foto del equipo recogido *' : 'Foto de la entrega *'}</label>
-              <input ref={fotoRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }}
+              {/* ✅ FOTO-GALERIA-001: sin capture — el celular ofrece Cámara O Galería */}
+              <input ref={fotoRef} type="file" accept="image/*" style={{ display: 'none' }}
                 onChange={e => e.target.files[0] && subirFoto(e.target.files[0], setFotoUrl)} />
               {fotoUrl ? (
                 <div style={{ position: 'relative' }}>
@@ -861,7 +862,8 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
                       <div style={{ fontSize: 11, color: '#dc2626', fontWeight: 700, marginBottom: 6 }}>
                         * Foto del comprobante obligatoria para {formaPago}
                       </div>
-                      <input ref={fotoTransRef} type="file" accept="image/*" capture="environment" style={{ display: 'none' }}
+                      {/* ✅ FOTO-GALERIA-001: sin capture — el celular ofrece Cámara O Galería */}
+                      <input ref={fotoTransRef} type="file" accept="image/*" style={{ display: 'none' }}
                         onChange={e => e.target.files[0] && subirFoto(e.target.files[0], setFotoTransUrl)} />
                       {fotoTransUrl ? (
                         <div style={{ position: 'relative' }}>

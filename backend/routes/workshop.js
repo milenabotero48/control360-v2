@@ -501,10 +501,49 @@ router.post('/ordenes/:ordenId/defecto', async (req, res) => {
 
     const orden = ordenDoc.data();
 
+    // ✅ TALLER-REPUESTOS-001: aislamiento multi-tenant (faltaba)
+    if (orden.adminId && orden.adminId !== adminId) {
+      return res.status(403).json({ error: 'No tienes acceso a esta orden' });
+    }
+
+    // ✅ TALLER-REPUESTOS-001: el técnico selecciona los repuestos del catálogo
+    // al registrar el defecto (se acabó la lista de precios impresa). Se validan
+    // en estructura aquí; stock e inventario se procesan al AUTORIZAR, que es
+    // cuando realmente entran a la orden vía la rutina compartida de orders.js.
+    const { repuestos = [] } = req.body;
+    const repuestosLimpios = [];
+    for (const r of (Array.isArray(repuestos) ? repuestos : [])) {
+      if (!r.productoId || !r.nombre) {
+        return res.status(400).json({ error: 'Cada repuesto requiere productoId y nombre' });
+      }
+      const cant = Number(r.cantidad);
+      const precio = Number(r.precioUnitario);
+      if (!cant || cant <= 0) return res.status(400).json({ error: `Cantidad inválida para ${r.nombre}` });
+      if (isNaN(precio) || precio < 0) return res.status(400).json({ error: `Precio inválido para ${r.nombre}` });
+      repuestosLimpios.push({
+        productoId: r.productoId,
+        nombre: r.nombre,
+        categoria: r.categoria || '',
+        cantidad: cant,
+        precioUnitario: precio,
+        descuento: Number(r.descuento) || 0,
+        notas: r.notas || ''
+      });
+    }
+
+    // Cotización del defecto con la MISMA fórmula de totales de la orden
+    const subtotalRep = repuestosLimpios.reduce((s, x) =>
+      s + (x.precioUnitario * x.cantidad * (1 - x.descuento / 100)), 0);
+    const ivaPct = Number(orden.ivaPct) || 0;
+    const ivaRep = subtotalRep * (ivaPct / 100);
+    const totalRep = Math.round(subtotalRep + ivaRep);
+    const costoFinal = repuestosLimpios.length > 0 ? totalRep : (Number(costoReparacion) || 0);
+
     const defecto = {
       descripcion,
       foto,
-      costoReparacion,
+      costoReparacion: costoFinal,
+      repuestos: repuestosLimpios, // ✅ TALLER-REPUESTOS-001
       itemIndex,
       estado: 'pendiente_autorizacion', // pendiente_autorizacion | autorizado | rechazado
       tecnicoId: req.user.uid || req.user.id,
@@ -523,7 +562,15 @@ router.post('/ordenes/:ordenId/defecto', async (req, res) => {
     const celular = orden.clienteCelular?.replace(/\D/g, '');
     let whatsappUrl = null;
     if (celular) {
-      const msg = `Hola ${orden.clienteNombre}, le informamos que durante la revisión de su extintor en la orden ${orden.numeroOrden} encontramos el siguiente defecto:\n\n🔧 ${descripcion}\n💰 Costo de reparación: $${costoReparacion.toLocaleString('es-CO')}\n\n¿Autoriza la reparación? Responda SÍ o NO.\n\nGracias.`;
+      // ✅ TALLER-REPUESTOS-001: mensaje desglosado repuesto por repuesto
+      let detalle = '';
+      if (repuestosLimpios.length > 0) {
+        detalle = '\n\nRepuestos necesarios:\n' + repuestosLimpios.map(r =>
+          `• ${r.cantidad} x ${r.nombre} — $${Math.round(r.precioUnitario * r.cantidad * (1 - r.descuento / 100)).toLocaleString('es-CO')}`
+        ).join('\n');
+        if (ivaPct > 0) detalle += `\n\nSubtotal: $${Math.round(subtotalRep).toLocaleString('es-CO')}\nIVA (${ivaPct}%): $${Math.round(ivaRep).toLocaleString('es-CO')}`;
+      }
+      const msg = `Hola ${orden.clienteNombre}, le informamos que durante la revisión de su extintor en la orden ${orden.numeroOrden} encontramos el siguiente defecto:\n\n🔧 ${descripcion}${detalle}\n\n💰 Costo total de la reparación: $${costoFinal.toLocaleString('es-CO')}\n\n¿Autoriza la reparación? Responda SÍ o NO.\n\nGracias.`;
       whatsappUrl = `https://wa.me/57${celular}?text=${encodeURIComponent(msg)}`;
     }
 
@@ -532,7 +579,7 @@ router.post('/ordenes/:ordenId/defecto', async (req, res) => {
       descripcion: `Técnico registró defecto en orden ${orden.numeroOrden}: ${descripcion}`,
       usuarioId: req.user.uid || req.user.id,
       usuarioNombre: req.user.nombre || req.user.email,
-      datos: { ordenId, descripcion, costoReparacion }
+      datos: { ordenId, descripcion, costoReparacion: costoFinal, repuestos: repuestosLimpios.map(r => ({ nombre: r.nombre, cantidad: r.cantidad, precio: r.precioUnitario })) }
     });
 
     res.json({ message: 'Defecto registrado', defecto, whatsappUrl });
@@ -544,53 +591,106 @@ router.post('/ordenes/:ordenId/defecto', async (req, res) => {
 // PUT /api/workshop/ordenes/:ordenId/defecto/autorizar — Autorizar o rechazar reparación
 router.put('/ordenes/:ordenId/defecto/autorizar', async (req, res) => {
   try {
+    // ✅ TALLER-REPUESTOS-001: reescritura completa del endpoint.
+    // Cambios respecto a la versión anterior:
+    //   1. Aislamiento multi-tenant (faltaba por completo).
+    //   2. Roles permitidos: admin, taller, comercial y tesorería — el cliente
+    //      aprueba llamando a quien le conteste, no solo al taller.
+    //   3. Los repuestos entran a la orden vía la rutina compartida
+    //      agregarItemsAOrden de orders.js (recálculo con IVA, stock,
+    //      inventario, historial y auditoría — una sola fuente de verdad).
+    //   4. La orden PERMANECE en_taller: ya no se cambia a reparacion_proceso,
+    //      que la hacía desaparecer de la lista del taller sin poder completarse.
+    //   5. Doble aprobación bloqueada: un defecto ya respondido no se reprocesa
+    //      (evita duplicar repuestos y descontar inventario dos veces).
+    const adminId = getAdminId(req);
     const { ordenId } = req.params;
-    const { defectoIndex, autorizado, itemsAdicionales = [] } = req.body;
-    // itemsAdicionales = productos que se agregan a la orden si autoriza
+    const { defectoIndex, autorizado, repuestos: repuestosOverride } = req.body;
+
+    const rolesPermitidos = ['admin', 'taller', 'comercial', 'tesoreria'];
+    if (!rolesPermitidos.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Tu rol no puede responder autorizaciones de reparación' });
+    }
 
     const ordenRef = db.collection('orders').doc(ordenId);
     const ordenDoc = await ordenRef.get();
     if (!ordenDoc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
 
     const orden = ordenDoc.data();
-    const defectos = orden.tallerDefectos || [];
+    if (orden.adminId && orden.adminId !== adminId) {
+      return res.status(403).json({ error: 'No tienes acceso a esta orden' });
+    }
 
+    const defectos = orden.tallerDefectos || [];
     if (defectoIndex === undefined || !defectos[defectoIndex]) {
       return res.status(400).json({ error: 'Defecto no encontrado' });
     }
 
-    defectos[defectoIndex].estado = autorizado ? 'autorizado' : 'rechazado';
-    defectos[defectoIndex].fechaRespuesta = new Date().toISOString();
-
-    const updates = {
-      tallerDefectos: defectos,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    };
-
-    // Si autorizado, agregar items de reparación a la orden
-    if (autorizado && itemsAdicionales.length > 0) {
-      const itemsActuales = orden.items || [];
-      updates.items = [...itemsActuales, ...itemsAdicionales];
-      // Recalcular total
-      const nuevoTotal = updates.items.reduce((sum, item) => {
-        return sum + ((item.precioUnitario || 0) * (item.cantidad || 1));
-      }, 0);
-      updates.total = nuevoTotal;
-      updates.estado = 'reparacion_proceso';
+    const defecto = defectos[defectoIndex];
+    if (defecto.estado !== 'pendiente_autorizacion') {
+      return res.status(400).json({ error: 'Este defecto ya fue respondido' });
     }
 
-    // Si todos los defectos están resueltos, quitar flag
-    const pendientes = defectos.filter(d => d.estado === 'pendiente_autorizacion');
-    if (pendientes.length === 0) updates.tieneDefectosPendientes = false;
+    const usuarioId = req.user.uid || req.user.id;
+    const usuarioNombre = req.user.nombre || req.user.email;
 
-    await ordenRef.update(updates);
+    defectos[defectoIndex].estado = autorizado ? 'autorizado' : 'rechazado';
+    defectos[defectoIndex].fechaRespuesta = new Date().toISOString();
+    defectos[defectoIndex].respondidoPorId = usuarioId;
+    defectos[defectoIndex].respondidoPorNombre = usuarioNombre;
+
+    const pendientes = defectos.filter(d => d.estado === 'pendiente_autorizacion');
+    const flagsDefectos = {
+      tallerDefectos: defectos,
+      ...(pendientes.length === 0 ? { tieneDefectosPendientes: false } : {})
+    };
+
+    // Repuestos a agregar: los guardados al registrar el defecto
+    // (opcionalmente ajustados desde el frontend al momento de aprobar)
+    const repuestosAgregar = Array.isArray(repuestosOverride) && repuestosOverride.length > 0
+      ? repuestosOverride
+      : (defecto.repuestos || []);
+
+    let totales = null;
+
+    if (autorizado && repuestosAgregar.length > 0) {
+      // La rutina compartida hace UN SOLO update atómico que incluye items,
+      // totales, historial Y el estado del defecto (vía flagsOrden).
+      const resultado = await ordersRouter.agregarItemsAOrden({
+        ordenRef, orden, ordenId,
+        itemsNuevos: repuestosAgregar,
+        usuarioId, usuarioNombre,
+        marcaItems:  { agregadoEnTaller: true, origenDefecto: defecto.descripcion || '' },
+        flagsOrden:  flagsDefectos,
+        accionHistorial:   'REPUESTOS_DEFECTO_AUTORIZADOS',
+        accionAuditoria:   'TALLER_DEFECTO_AUTORIZADO',
+        etiquetaHistorial: 'Taller',
+        sufijoHistorial:   ' por defecto autorizado por el cliente',
+        sufijoAuditoria:   ' — repuestos de defecto autorizado por el cliente'
+      });
+      totales = { subtotal: resultado.subtotal, ivaValor: resultado.ivaValor, total: resultado.total };
+    } else {
+      // Autorizado sin repuestos, o rechazado: solo actualizar el defecto
+      await ordenRef.update({
+        ...flagsDefectos,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      await auditar({
+        accion: autorizado ? 'TALLER_DEFECTO_AUTORIZADO' : 'TALLER_DEFECTO_RECHAZADO',
+        descripcion: `${usuarioNombre} registró que el cliente ${autorizado ? 'AUTORIZÓ' : 'RECHAZÓ'} la reparación del defecto en orden ${orden.numeroOrden}: ${defecto.descripcion || ''}`,
+        usuarioId, usuarioNombre,
+        datos: { ordenId, defectoIndex, autorizado }
+      });
+    }
 
     res.json({
-      message: autorizado ? 'Reparación autorizada' : 'Reparación rechazada',
-      estado: updates.estado || orden.estado
+      message: autorizado ? 'Reparación autorizada — repuestos agregados a la orden' : 'Reparación rechazada',
+      autorizado: !!autorizado,
+      estado: orden.estado, // la orden no cambia de estado
+      totales
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 

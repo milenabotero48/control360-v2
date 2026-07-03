@@ -316,6 +316,11 @@ router.post('/importar', async (req, res) => {
     // pantalla). Los clientes nuevos nacen con el esquema oficial completo.
     const empresaId = req.body?.empresaId || '';
     const empresaNombre = req.body?.empresaNombre || '';
+    // ✅ COMERCIAL-BASE-001: mes de la base importada — lo heredan los
+    // prospectos creados desde filas sin fecha, para que en Telemercadeo
+    // no se mezclen bases de meses distintos.
+    const periodoActual = new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 7);
+    const basePeriodo = /^\d{4}-(0[1-9]|1[0-2])$/.test(req.body?.basePeriodo || '') ? req.body.basePeriodo : periodoActual;
 
     if (!filas.length) return res.status(400).json({ error: 'No se recibieron filas para importar' });
     if (filas.length > 2000) return res.status(400).json({ error: 'Máximo 2000 filas por importación. Divide el archivo.' });
@@ -324,12 +329,25 @@ router.post('/importar', async (req, res) => {
     // 1. Cargar clientes existentes del tenant UNA vez (mapa por teléfono)
     const clientesSnap = await db.collection('clients').where('adminId', '==', adminId).get();
     const porTelefono = new Map();
+    // ✅ CLIENTES-DUP-001: regla única de identidad — el emparejamiento ya no es
+    // solo por teléfono: también por NIT y por nombre normalizado. Antes, un
+    // cliente existente con OTRO teléfono en el Excel (otro contacto, fijo vs
+    // celular) se duplicaba aunque el NIT fuera idéntico. Los tres mapas salen
+    // del MISMO snapshot que ya se cargaba — cero lecturas adicionales.
+    const porNit = new Map();
+    const porNombre = new Map();
+    const normNombreCli = (n) => String(n || '').toUpperCase().trim().replace(/\s+/g, ' ') || null;
     clientesSnap.docs.forEach(d => {
       // Clientes oficiales usan `celular`; antiguos pueden usar `telefono`.
       const data = d.data();
+      if (data.activo === false) return;
       [normalizarTelefono(data.celular), normalizarTelefono(data.telefono)]
         .filter(Boolean)
         .forEach(t => { if (!porTelefono.has(t)) porTelefono.set(t, d.id); });
+      const nitCli = String(data.nit || '').replace(/[^0-9]/g, '');
+      if (nitCli && !porNit.has(nitCli)) porNit.set(nitCli, d.id);
+      const nomCli = normNombreCli(data.nombre);
+      if (nomCli && !porNombre.has(nomCli)) porNombre.set(nomCli, d.id);
     });
 
     // Prospectos existentes por teléfono → MODO ACTUALIZAR: si la fila trae
@@ -399,6 +417,7 @@ router.post('/importar', async (req, res) => {
             sucursal: f.sucursal || null,
             equipoReportado: f.equipo || null,
             origen: 'importacion',
+            basePeriodo, // ✅ COMERCIAL-BASE-001
             estado: 'NUEVO',
             asignadoA: null,
             proximaLlamada: null,
@@ -412,7 +431,10 @@ router.post('/importar', async (req, res) => {
         }
 
         // ─── CON FECHA → cliente + vencimiento
-        let clienteId = porTelefono.get(telefono);
+        // ✅ CLIENTES-DUP-001: teléfono primero, luego NIT, luego nombre
+        let clienteId = porTelefono.get(telefono)
+          || (nitFila ? porNit.get(nitFila) : null)
+          || porNombre.get(normNombreCli(nombre));
         if (!clienteId) {
           // Esquema OFICIAL de cliente (visible y editable en el módulo Clientes)
           const refC = db.collection('clients').doc();
@@ -442,6 +464,10 @@ router.post('/importar', async (req, res) => {
           });
           clienteId = refC.id;
           porTelefono.set(telefono, clienteId); // evita duplicar en filas siguientes
+          // ✅ CLIENTES-DUP-001: registrar en los tres mapas
+          if (nitFila) porNit.set(nitFila, clienteId);
+          const nomNuevo = normNombreCli(nombre);
+          if (nomNuevo) porNombre.set(nomNuevo, clienteId);
           ops++; resultado.clientesNuevos++;
         }
         // Si existe un prospecto con este teléfono → vincularlo y enriquecerlo

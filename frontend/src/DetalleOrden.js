@@ -130,6 +130,40 @@ const [configCerts, setConfigCerts]   = useState([]);
 
   useEffect(() => { cargarOrden(); cargarFormasPago(); cargarConfigCerts(); }, [ordenId]);
 
+  // ✅ TALLER-REPUESTOS-001: el cliente aprueba llamando a quien le conteste —
+  // admin, comercial o tesorería pueden registrar la respuesta desde aquí.
+  // Al aprobar, el backend agrega los repuestos cotizados a la orden.
+  // ✅ FACTURA-FLOW-001: comercial/tesorería registran el N° de factura y la
+  // orden avanza sola por la cascada — sin esperar al administrador.
+  const [avanzandoFactura, setAvanzandoFactura] = useState(false);
+  const registrarFacturaYDespachar = async () => {
+    if (!numeroFactura.trim()) return;
+    setAvanzandoFactura(true);
+    try {
+      await axios.put(`${API}/orders/${ordenId}/estado`,
+        { avanzar: true, numeroFactura: numeroFactura.trim() }, { headers });
+      setNumeroFactura('');
+      await cargarOrden();
+    } catch (e) {
+      alert(e.response?.data?.error || 'Error registrando la factura');
+    }
+    setAvanzandoFactura(false);
+  };
+
+  const responderDefecto = async (defectoIndex, autorizado) => {
+    const msg = autorizado
+      ? '¿El cliente APROBÓ la reparación? Los repuestos cotizados se agregarán a la orden y se facturarán.'
+      : '¿El cliente RECHAZÓ la reparación?';
+    if (!window.confirm(msg)) return;
+    try {
+      await axios.put(`${API}/workshop/ordenes/${ordenId}/defecto/autorizar`,
+        { defectoIndex, autorizado }, { headers });
+      await cargarOrden();
+    } catch (e) {
+      alert(e.response?.data?.error || 'Error al responder el defecto');
+    }
+  };
+
   const cargarOrden = async () => {
     try {
       setLoading(true);
@@ -661,7 +695,8 @@ const cargarConfigCerts = async () => {
                   <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                     <a href={orden.facturaPdfUrl} target="_blank" rel="noopener noreferrer"
                       style={{ color: '#0284c7', fontWeight: 700, fontSize: 13, textDecoration: 'none' }}>
-                      ⬇ Ver / Descargar PDF
+                      {/* ✅ FACTURA-FLOW-001: nombre del archivo visible — el N° DIAN se lee sin descargar */}
+                      ⬇ {orden.facturaPdfNombre || 'Ver / Descargar PDF'}
                     </a>
                     <span style={{ fontSize: 11, color: '#9ca3af' }}>{orden.facturaPdfSubidaPor ? `subida por ${orden.facturaPdfSubidaPor}` : ''}</span>
                     {puedeAdjuntarFactura && (
@@ -728,6 +763,71 @@ const cargarConfigCerts = async () => {
               )}
             </div>
           </div>
+
+          {/* ✅ FACTURA-FLOW-001: registrar factura DIAN — comercial/tesorería */}
+          {!isAdmin && puedeCargaFactura && orden.estado === 'facturado' && (
+            <div style={{ ...s.card, border: '2px solid #7c3aed' }}>
+              <h3 style={s.cardTitulo}>📄 Registrar Factura DIAN</h3>
+              <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 10px' }}>
+                Al registrar el número, la orden avanza automáticamente al siguiente paso del flujo — sin esperar al administrador.
+              </p>
+              {orden.facturaPdfNombre && (
+                <p style={{ fontSize: 12, color: '#0284c7', margin: '0 0 10px' }}>
+                  📎 Archivo adjunto: <strong>{orden.facturaPdfNombre}</strong>
+                </p>
+              )}
+              <input style={{ ...s.input, marginBottom: 10 }} placeholder="FE-0001..."
+                value={numeroFactura} onChange={e => setNumeroFactura(e.target.value)} />
+              <button onClick={registrarFacturaYDespachar}
+                disabled={!numeroFactura.trim() || avanzandoFactura}
+                style={{ width: '100%', padding: '10px', borderRadius: 8, border: 'none',
+                  background: (!numeroFactura.trim() || avanzandoFactura) ? '#9ca3af' : '#7c3aed',
+                  color: '#fff', fontWeight: 800, fontSize: 13,
+                  cursor: (!numeroFactura.trim() || avanzandoFactura) ? 'not-allowed' : 'pointer' }}>
+                {avanzandoFactura ? '⏳ Registrando...' : '📄 Registrar factura y avanzar'}
+              </button>
+            </div>
+          )}
+
+          {/* ✅ TALLER-REPUESTOS-001: Defectos de taller y autorización del cliente */}
+          {(orden.tallerDefectos || []).length > 0 && (
+            <div style={s.card}>
+              <h3 style={s.cardTitulo}>🔧 Defectos de Taller</h3>
+              {(orden.tallerDefectos || []).map((d, di) => (
+                <div key={di} style={{
+                  border: `1px solid ${d.estado === 'pendiente_autorizacion' ? '#fca5a5' : '#e5e7eb'}`,
+                  background: d.estado === 'pendiente_autorizacion' ? '#fff1f2' : d.estado === 'autorizado' ? '#f0fdf4' : '#f9fafb',
+                  borderRadius: 8, padding: '10px 14px', marginBottom: 8
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+                    <div style={{ fontSize: 13 }}>
+                      <strong>{d.descripcion}</strong>
+                      <div style={{ fontSize: 11, color: '#9ca3af' }}>Registrado por {d.tecnicoNombre || '—'}</div>
+                      {(d.repuestos || []).length > 0 && (
+                        <div style={{ color: '#6b7280', marginTop: 4 }}>
+                          {(d.repuestos || []).map((r, ri) => (
+                            <div key={ri}>• {r.cantidad} x {r.nombre} — {formatCOP((Number(r.precioUnitario) || 0) * (Number(r.cantidad) || 1))}</div>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ marginTop: 4, fontWeight: 700 }}>Total cotizado: {formatCOP(d.costoReparacion || 0)}</div>
+                      {d.estado !== 'pendiente_autorizacion' && (
+                        <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
+                          {d.estado === 'autorizado' ? '✅ Autorizado' : '❌ Rechazado'} por {d.respondidoPorNombre || '—'} {d.fechaRespuesta ? `— ${formatFechaCorta(d.fechaRespuesta)}` : ''}
+                        </div>
+                      )}
+                    </div>
+                    {d.estado === 'pendiente_autorizacion' && (isAdmin || isComercial || isTesoreria) && (
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                        <button onClick={() => responderDefecto(di, true)} style={{ padding: '6px 12px', borderRadius: 6, border: 'none', background: '#16a34a', color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>✅ Cliente aprobó</button>
+                        <button onClick={() => responderDefecto(di, false)} style={{ padding: '6px 12px', borderRadius: 6, border: 'none', background: '#6b7280', color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>❌ Rechazó</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Certificado */}
           {orden.generaCertificado && (

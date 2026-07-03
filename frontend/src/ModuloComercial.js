@@ -12,6 +12,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+// ✅ COMERCIAL-BASE-001: helpers de período de base ('2026-06' → 'JUN-26')
+const MESES_ABREV = ['ENE','FEB','MAR','ABR','MAY','JUN','JUL','AGO','SEP','OCT','NOV','DIC'];
+const labelPeriodo = (per) => {
+  if (!per || per.length < 7) return per || '';
+  const m = Number(per.slice(5, 7));
+  return `${MESES_ABREV[m - 1] || '?'}-${per.slice(2, 4)}`;
+};
+const periodoActualCO = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 7);
+
 
 const MOTIVOS_DESCARTE = [
   { value: 'precio',            label: 'Precio' },
@@ -120,6 +129,9 @@ function MiDia({ user, onNavegar }) {
     setCargando(false);
   }, []);
 
+  // ✅ COMERCIAL-BASE-001: filtro por período de base (vista, no borra nada)
+  const [filtroPeriodo, setFiltroPeriodo] = useState('todos');
+
   useEffect(() => { cargar(); }, [cargar]);
 
   if (cargando) return <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Cargando tu día...</div>;
@@ -127,6 +139,14 @@ function MiDia({ user, onNavegar }) {
 
   const { cola = {}, meta = {}, totalPendientes = 0 } = data;
   const pct = Math.min(meta.porcentaje ?? 0, 100);
+
+  // ✅ COMERCIAL-BASE-001: períodos presentes en la cola + filtro de vista
+  const todosPeriodos = [...new Set(
+    [...(cola.reprogramados || []), ...(cola.reintentos || []), ...(cola.nuevos || [])]
+      .map(p => p.basePeriodo).filter(Boolean)
+  )].sort();
+  const filtrarPeriodo = (lista = []) =>
+    filtroPeriodo === 'todos' ? lista : lista.filter(p => p.basePeriodo === filtroPeriodo);
 
   return (
     <div>
@@ -175,11 +195,26 @@ function MiDia({ user, onNavegar }) {
         </div>
       )}
 
-      <Seccion titulo="⏰ Reprogramadas para hoy" sub="Te pidieron que llamaras — respeta la hora acordada" lista={cola.reprogramados} conHora
+      {/* ✅ COMERCIAL-BASE-001: filtro por mes de base — para trabajar una base a la vez */}
+      {todosPeriodos.length > 1 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#6b7280' }}>📅 Base:</span>
+          {['todos', ...todosPeriodos].map(per => (
+            <button key={per} onClick={() => setFiltroPeriodo(per)} style={{
+              border: filtroPeriodo === per ? '2px solid #7c3aed' : '1px solid #d1d5db',
+              background: filtroPeriodo === per ? '#f5f3ff' : '#fff',
+              color: filtroPeriodo === per ? '#5b21b6' : '#374151',
+              borderRadius: 99, padding: '5px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+            }}>{per === 'todos' ? 'Todas' : labelPeriodo(per)}</button>
+          ))}
+        </div>
+      )}
+
+      <Seccion titulo="⏰ Reprogramadas para hoy" sub="Te pidieron que llamaras — respeta la hora acordada" lista={filtrarPeriodo(cola.reprogramados)} conHora
         onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
-      <Seccion titulo="🔁 Reintentos" sub="No contestaron antes — nuevo intento hoy" lista={cola.reintentos}
+      <Seccion titulo="🔁 Reintentos" sub="No contestaron antes — nuevo intento hoy" lista={filtrarPeriodo(cola.reintentos)}
         onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
-      <Seccion titulo="🆕 Prospectos nuevos" sub="Primera llamada" lista={cola.nuevos}
+      <Seccion titulo="🆕 Prospectos nuevos" sub="Primera llamada" lista={filtrarPeriodo(cola.nuevos)}
         onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
 
       {/* Ola 3: agenda de llamadas futuras — para que "el martes 9am" no se
@@ -264,11 +299,21 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar, clientesRecargado
                 <div style={{ fontWeight: 700, fontSize: 14, color: '#1a1a2e', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.nombre}</div>
                 {p.empresa && <div style={{ fontSize: 11, color: '#6b7280' }}>{p.empresa}</div>}
               </div>
-              {conHora && p.proximaLlamada?.hora && (
-                <span style={{ background: '#fef3c7', color: '#b45309', fontWeight: 800, fontSize: 12, padding: '3px 9px', borderRadius: 8, flexShrink: 0 }}>
-                  🕒 {p.proximaLlamada.hora}
-                </span>
-              )}
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                {/* ✅ COMERCIAL-BASE-001: mes de la base — ámbar si es base atrasada */}
+                {p.basePeriodo && (
+                  <span style={{
+                    background: p.basePeriodo < periodoActualCO() ? '#fef3c7' : '#f3f4f6',
+                    color: p.basePeriodo < periodoActualCO() ? '#b45309' : '#6b7280',
+                    fontWeight: 800, fontSize: 11, padding: '3px 8px', borderRadius: 8,
+                  }}>📅 {labelPeriodo(p.basePeriodo)}</span>
+                )}
+                {conHora && p.proximaLlamada?.hora && (
+                  <span style={{ background: '#fef3c7', color: '#b45309', fontWeight: 800, fontSize: 12, padding: '3px 9px', borderRadius: 8 }}>
+                    🕒 {p.proximaLlamada.hora}
+                  </span>
+                )}
+              </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
               <a href={`tel:+${p.telefono}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>
@@ -572,6 +617,8 @@ function Prospectos({ user }) {
   const [empresasFact, setEmpresasFact] = useState([]);
   const [empresaImport, setEmpresaImport] = useState(null);
   const [importandoV, setImportandoV] = useState(false);
+  // ✅ COMERCIAL-BASE-001: mes de la base que se va a importar (default: mes actual)
+  const [periodoImport, setPeriodoImport] = useState(periodoActualCO());
   const [msgImportV, setMsgImportV] = useState(null);
   const [erroresImportV, setErroresImportV] = useState([]);
   const [erroresImport, setErroresImport] = useState([]);
@@ -624,7 +671,7 @@ function Prospectos({ user }) {
 
       const res = await fetch(`${API}/vencimientos/importar`, {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ filas, empresaId: empresaImport.id, empresaNombre: empresaImport.name }),
+        body: JSON.stringify({ filas, empresaId: empresaImport.id, empresaNombre: empresaImport.name, basePeriodo: periodoImport }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Error al importar');
@@ -680,7 +727,7 @@ function Prospectos({ user }) {
       }).filter(f => f.nombre || f.telefono);
 
       const res = await fetch(`${API}/comercial/prospectos/importar`, {
-        method: 'POST', headers: authHeaders(), body: JSON.stringify({ filas }),
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ filas, basePeriodo: periodoImport }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Error al importar');
@@ -756,6 +803,10 @@ function Prospectos({ user }) {
           Sube tu base de clientes con la <strong>fecha de última recarga</strong>: el sistema calcula el vencimiento, arma la cola de llamadas del mes y vincula a los clientes existentes. Las filas sin fecha quedan como prospectos. Re-importar <strong>actualiza sin duplicar</strong>.
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {/* ✅ COMERCIAL-BASE-001: mes al que pertenece la base importada */}
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>📅 Mes de la base</span>
+          <input type="month" value={periodoImport} onChange={e => setPeriodoImport(e.target.value || periodoActualCO())}
+            style={{ border: '1px solid #d1d5db', borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 700, color: '#374151' }} />
           <span style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>¿Quién factura?</span>
           {empresasFact.map(e => (
             <button key={e.id} type="button" onClick={() => setEmpresaImport(e)} style={{
@@ -809,7 +860,11 @@ function Prospectos({ user }) {
       </div>
 
       {/* Acciones */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
+        {/* ✅ COMERCIAL-BASE-001: mes de la base para prospectos fríos */}
+        <span style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>📅 Mes de la base</span>
+        <input type="month" value={periodoImport} onChange={e => setPeriodoImport(e.target.value || periodoActualCO())}
+          style={{ border: '1px solid #d1d5db', borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 700, color: '#374151' }} />
         <label style={{ background: '#7c3aed', color: '#fff', borderRadius: 9, padding: '9px 14px', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}>
           {importando ? 'Importando...' : '⬆ Importar prospectos (números fríos)'}
           <input type="file" accept=".csv" hidden disabled={importando}

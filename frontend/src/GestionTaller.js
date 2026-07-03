@@ -403,16 +403,76 @@ const ModalQR = ({ orden, equipo, onResolver, onCerrar }) => {
 };
 
 const ModalDefecto = ({ orden, equipoActual, onGuardar, onCerrar }) => {
+  // ✅ TALLER-REPUESTOS-001: el técnico selecciona los repuestos del catálogo
+  // aquí mismo (con precios reales), el sistema calcula el total con IVA y el
+  // WhatsApp sale desglosado. Se acabó la lista de precios impresa.
   const [descripcion, setDescripcion] = useState('');
-  const [costo, setCosto] = useState('');
+  const [productos, setProductos] = useState([]);
+  const [buscarProd, setBuscarProd] = useState('');
+  const [repuestos, setRepuestos] = useState([]);
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState('');
 
+  useEffect(() => {
+    // Catálogo se carga UNA vez al abrir el modal
+    axios.get(`${API}/products`, auth())
+      .then(r => setProductos((Array.isArray(r.data) ? r.data : []).filter(p => p.activo !== false)))
+      .catch(() => setProductos([]));
+  }, []);
+
+  const productosFiltrados = buscarProd.trim().length >= 2
+    ? productos.filter(p =>
+        p.nombre?.toLowerCase().includes(buscarProd.toLowerCase()) ||
+        p.codigo?.toLowerCase().includes(buscarProd.toLowerCase())
+      ).slice(0, 8)
+    : [];
+
+  const agregarRepuesto = (p) => {
+    setRepuestos(prev => {
+      const idx = prev.findIndex(r => r.productoId === p.id);
+      if (idx >= 0) {
+        const n = [...prev];
+        n[idx] = { ...n[idx], cantidad: n[idx].cantidad + 1 };
+        return n;
+      }
+      return [...prev, {
+        productoId: p.id, nombre: p.nombre, categoria: p.categoria || p.categoriaNombre || '',
+        cantidad: 1, precioUnitario: Number(p.precio) || 0, descuento: 0, notas: ''
+      }];
+    });
+    setBuscarProd('');
+  };
+
+  const updateRepuesto = (i, campo, valor) => setRepuestos(prev => {
+    const n = [...prev]; n[i] = { ...n[i], [campo]: valor }; return n;
+  });
+  const quitarRepuesto = (i) => setRepuestos(prev => prev.filter((_, x) => x !== i));
+
+  const ivaPct = Number(orden.ivaPct) || 0;
+  const subtotalRep = repuestos.reduce((s, r) =>
+    s + ((Number(r.precioUnitario) || 0) * (Number(r.cantidad) || 1) * (1 - (Number(r.descuento) || 0) / 100)), 0);
+  const ivaRep = subtotalRep * (ivaPct / 100);
+  const totalRep = Math.round(subtotalRep + ivaRep);
+
   const handleGuardar = async () => {
     if (!descripcion) return setError('Describe el defecto encontrado');
+    if (repuestos.length === 0) return setError('Agrega al menos un repuesto o servicio del catálogo para cotizar al cliente');
+    for (const r of repuestos) {
+      if (!Number(r.cantidad) || Number(r.cantidad) <= 0) return setError(`Cantidad inválida para ${r.nombre}`);
+      if (isNaN(Number(r.precioUnitario)) || Number(r.precioUnitario) < 0) return setError(`Precio inválido para ${r.nombre}`);
+    }
     setGuardando(true); setError('');
     try {
-      const res = await onGuardar({ descripcion, costoReparacion: parseFloat(costo) || 0, codigoQR: equipoActual?.codigoQR });
+      const res = await onGuardar({
+        descripcion,
+        codigoQR: equipoActual?.codigoQR,
+        repuestos: repuestos.map(r => ({
+          ...r,
+          cantidad: Number(r.cantidad),
+          precioUnitario: Number(r.precioUnitario),
+          descuento: Number(r.descuento) || 0
+        }))
+      });
       if (res?.whatsappUrl) window.open(res.whatsappUrl, '_blank');
     } catch (e) { setError(e.response?.data?.error || 'Error al registrar defecto'); }
     setGuardando(false);
@@ -420,7 +480,7 @@ const ModalDefecto = ({ orden, equipoActual, onGuardar, onCerrar }) => {
 
   return (
     <div style={s.overlay}>
-      <div style={s.modal}>
+      <div style={{ ...s.modal, maxWidth: 620 }}>
         <div style={s.modalHeader}>
           <div>
             <h3 style={s.modalTitulo}>🔧 Registrar Defecto</h3>
@@ -430,18 +490,69 @@ const ModalDefecto = ({ orden, equipoActual, onGuardar, onCerrar }) => {
           </div>
           <button onClick={onCerrar} style={s.btnCerrar}>✕</button>
         </div>
-        <div style={s.modalBody}>
+        <div style={{ ...s.modalBody, maxHeight: '70vh', overflowY: 'auto' }}>
           {error && <div style={s.alertError}>{error}</div>}
-          <div style={s.alertWarn}>📱 Al guardar se generará mensaje WhatsApp para el cliente</div>
+          <div style={s.alertWarn}>📱 Al guardar se generará el mensaje WhatsApp con el desglose de repuestos y el total para el cliente</div>
+
           <div style={{ marginTop: 14, marginBottom: 14 }}>
             <label style={s.label}>Descripción del defecto *</label>
             <textarea style={s.textarea} value={descripcion} onChange={e => setDescripcion(e.target.value)}
               placeholder="Ej: Válvula dañada, requiere reemplazo. Cilindro con corrosión interna..." />
           </div>
-          <div>
-            <label style={s.label}>Costo estimado reparación (COP)</label>
-            <input type="number" style={s.input} value={costo} onChange={e => setCosto(e.target.value)} placeholder="Ej: 25000" />
+
+          <div style={{ marginBottom: 8 }}>
+            <label style={s.label}>Repuestos / servicios del catálogo *</label>
+            <input style={s.input} value={buscarProd} onChange={e => setBuscarProd(e.target.value)}
+              placeholder="🔍 Buscar por nombre o código..." />
+            {productosFiltrados.length > 0 && (
+              <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, marginTop: 4, background: '#fff', maxHeight: 180, overflowY: 'auto' }}>
+                {productosFiltrados.map(p => (
+                  <div key={p.id} onClick={() => agregarRepuesto(p)}
+                    style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>{p.nombre}</span>
+                    <span style={{ color: '#16a34a', fontWeight: 700, fontSize: 13 }}>${(Number(p.precio) || 0).toLocaleString('es-CO')}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
+
+          {repuestos.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              {repuestos.map((r, i) => (
+                <div key={i} style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 10, marginBottom: 8, background: '#fafafa' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <span style={{ fontWeight: 700, fontSize: 13 }}>{r.nombre}</span>
+                    <button onClick={() => quitarRepuesto(i)} style={{ ...s.btnCerrar, fontSize: 14 }}>✕</button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '70px 1fr', gap: 8, marginBottom: 6 }}>
+                    <div>
+                      <label style={{ ...s.label, fontSize: 11 }}>Cant.</label>
+                      <input type="number" min="1" style={{ ...s.input, padding: '6px 8px' }} value={r.cantidad}
+                        onChange={e => updateRepuesto(i, 'cantidad', e.target.value)} />
+                    </div>
+                    <div>
+                      <label style={{ ...s.label, fontSize: 11 }}>Precio unitario (COP)</label>
+                      <input type="number" min="0" style={{ ...s.input, padding: '6px 8px' }} value={r.precioUnitario}
+                        onChange={e => updateRepuesto(i, 'precioUnitario', e.target.value)} />
+                    </div>
+                  </div>
+                  <div>
+                    <label style={{ ...s.label, fontSize: 11 }}>Notas (salen en la factura)</label>
+                    <input style={{ ...s.input, padding: '6px 8px' }} value={r.notas}
+                      onChange={e => updateRepuesto(i, 'notas', e.target.value)}
+                      placeholder="Ej: Válvula del extintor #003" />
+                  </div>
+                </div>
+              ))}
+
+              <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '10px 14px', fontSize: 13 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Subtotal</span><span>${Math.round(subtotalRep).toLocaleString('es-CO')}</span></div>
+                {ivaPct > 0 && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>IVA ({ivaPct}%)</span><span>${Math.round(ivaRep).toLocaleString('es-CO')}</span></div>}
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 800, marginTop: 4 }}><span>Total a cotizar</span><span style={{ color: '#16a34a' }}>${totalRep.toLocaleString('es-CO')}</span></div>
+              </div>
+            </div>
+          )}
         </div>
         <div style={s.modalFooter}>
           <button onClick={onCerrar} style={s.btnOutline}>Cancelar</button>
@@ -895,6 +1006,24 @@ export default function GestionTaller({ user }) {
     cargarOrdenes(); cargarDashboard();
   };
 
+  // ✅ TALLER-REPUESTOS-001: responder autorización del cliente (aprobó/rechazó).
+  // Al aprobar, el backend agrega los repuestos cotizados a la orden con
+  // recálculo de totales — quedan listos para facturarse en logística.
+  const handleResponderDefecto = async (ordenId, defectoIndex, autorizado) => {
+    const confirmMsg = autorizado
+      ? '¿El cliente APROBÓ la reparación? Los repuestos cotizados se agregarán a la orden y se facturarán.'
+      : '¿El cliente RECHAZÓ la reparación? El defecto quedará registrado como rechazado.';
+    if (!window.confirm(confirmMsg)) return;
+    try {
+      await axios.put(`${API}/workshop/ordenes/${ordenId}/defecto/autorizar`,
+        { defectoIndex, autorizado }, auth());
+      notif(autorizado ? '✅ Reparación autorizada — repuestos agregados a la orden' : 'Defecto marcado como rechazado');
+      cargarOrdenes();
+    } catch (e) {
+      notif(e.response?.data?.error || 'Error al responder el defecto', 'error');
+    }
+  };
+
   const handleDefecto = async (ordenId, datos) => {
     const { data } = await axios.post(`${API}/workshop/ordenes/${ordenId}/defecto`, datos, auth());
     notif('Defecto registrado — notificación WhatsApp generada');
@@ -1331,6 +1460,44 @@ export default function GestionTaller({ user }) {
 
                       {orden.tallerCompletado && <span style={s.badge('#16a34a', '#f0fdf4')}>✅ En Facturación</span>}
                     </div>
+
+                    {/* ✅ TALLER-REPUESTOS-001: defectos registrados con respuesta del cliente */}
+                    {(orden.tallerDefectos || []).length > 0 && (
+                      <div style={{ marginTop: 12 }}>
+                        {(orden.tallerDefectos || []).map((d, di) => (
+                          <div key={di} style={{
+                            border: `1px solid ${d.estado === 'pendiente_autorizacion' ? '#fca5a5' : '#e5e7eb'}`,
+                            background: d.estado === 'pendiente_autorizacion' ? '#fff1f2' : d.estado === 'autorizado' ? '#f0fdf4' : '#f9fafb',
+                            borderRadius: 8, padding: '10px 12px', marginBottom: 8
+                          }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+                              <div style={{ fontSize: 13 }}>
+                                <strong>🔧 {d.descripcion}</strong>
+                                {(d.repuestos || []).length > 0 && (
+                                  <div style={{ color: '#6b7280', marginTop: 2 }}>
+                                    {(d.repuestos || []).map((r, ri) => (
+                                      <div key={ri}>• {r.cantidad} x {r.nombre} — ${((Number(r.precioUnitario) || 0) * (Number(r.cantidad) || 1)).toLocaleString('es-CO')}</div>
+                                    ))}
+                                  </div>
+                                )}
+                                <div style={{ marginTop: 2, fontWeight: 700 }}>Total cotizado: ${(d.costoReparacion || 0).toLocaleString('es-CO')}</div>
+                                {d.estado !== 'pendiente_autorizacion' && (
+                                  <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
+                                    {d.estado === 'autorizado' ? '✅ Autorizado' : '❌ Rechazado'} por {d.respondidoPorNombre || '—'}
+                                  </div>
+                                )}
+                              </div>
+                              {d.estado === 'pendiente_autorizacion' && (
+                                <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                                  <button onClick={() => handleResponderDefecto(orden.id, di, true)} style={s.btnSm('#16a34a')}>✅ Cliente aprobó</button>
+                                  <button onClick={() => handleResponderDefecto(orden.id, di, false)} style={s.btnSm('#6b7280')}>❌ Rechazó</button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
                     {orden.tallerRecepcion?.observaciones && (
                       <div style={{ marginTop: 8, padding: '6px 10px', background: '#fffbeb', borderRadius: 6, fontSize: 12, color: '#92400e' }}>

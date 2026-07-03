@@ -193,6 +193,51 @@ router.post('/', authenticate, async (req, res) => {
       }
     }
 
+    // ✅ CLIENTES-DUP-001: regla única de identidad de cliente en el tenant —
+    // NIT (arriba), celular/teléfono y nombre. Muchos clientes no tienen NIT:
+    // sin esto se creaban repetidos con el mismo celular o el mismo nombre.
+    // Igual que con el NIT, solo cuenta como duplicado en la MISMA empresa
+    // (un cliente puede existir legítimamente en Sur y en Valle).
+    // Consultas limit(1) puntuales — costo mínimo, cero escaneos.
+    if (!confirmarDuplicado) {
+      const normTel = (t) => {
+        let d = String(t || '').replace(/\D/g, '');
+        if (d.length === 12 && d.startsWith('57')) d = d.slice(2);
+        return d || null;
+      };
+      const telBuscar = normTel(celular) || normTel(telefono);
+      const candidatos = [];
+      if (telBuscar) {
+        for (const campo of ['celular', 'telefono']) {
+          try {
+            const snapDup = await db.collection('clients')
+              .where('adminId', '==', adminIdActual)
+              .where(campo, '==', telBuscar)
+              .limit(1).get();
+            if (!snapDup.empty) candidatos.push(snapDup.docs[0]);
+          } catch (e) { console.warn('CLIENTES-DUP-001 tel:', e.message); }
+        }
+      }
+      try {
+        const snapNom = await db.collection('clients')
+          .where('adminId', '==', adminIdActual)
+          .where('nombre', '==', nombreUpper)
+          .limit(1).get();
+        if (!snapNom.empty) candidatos.push(snapNom.docs[0]);
+      } catch (e) { console.warn('CLIENTES-DUP-001 nombre (¿falta índice adminId+nombre?):', e.message); }
+
+      const dup = candidatos.find(d => d.data().empresaId === empresaId && d.data().activo !== false);
+      if (dup) {
+        const dd = dup.data();
+        const motivo = dd.nombre === nombreUpper ? 'nombre' : 'celular/teléfono';
+        return res.status(409).json({
+          error: `Ya existe un cliente con ese ${motivo} en esta empresa: ${dd.nombre}${dd.nit ? ` (NIT ${dd.nit})` : ''}. Si realmente es otro cliente, confirma la creación.`,
+          clienteExistente: { id: dup.id, ...dd },
+          duplicadoPor: motivo
+        });
+      }
+    }
+
     // Construir objeto cliente
     const nuevoCliente = {
       nombre: nombreUpper,
@@ -247,6 +292,63 @@ router.post('/', authenticate, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/clients/:id — Ver detalle de cliente
 // ─────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ CLIENTES-DUP-001: GET /clients/duplicados — reporte de duplicados
+// Solo lectura, solo admin, BAJO DEMANDA (un clic, no polling). Una única
+// lectura del tenant con .select() de campos mínimos; el agrupamiento es en
+// memoria. Detecta grupos con mismo NIT, mismo teléfono o mismo nombre
+// dentro de la misma empresa — insumo para la futura herramienta de fusión.
+// ══════════════════════════════════════════════════════════════════════════════
+router.get('/duplicados', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el administrador puede ver el reporte de duplicados' });
+    }
+    const adminId = req.adminId || req.user.uid || req.user.id;
+    const snap = await db.collection('clients')
+      .where('adminId', '==', adminId)
+      .select('nombre', 'nit', 'celular', 'telefono', 'empresaId', 'empresaNombre', 'activo')
+      .get();
+    const clientes = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(c => c.activo !== false);
+
+    const normTel = (t) => {
+      let d = String(t || '').replace(/\D/g, '');
+      if (d.length === 12 && d.startsWith('57')) d = d.slice(2);
+      return d || null;
+    };
+    const normNom = (n) => String(n || '').toUpperCase().trim().replace(/\s+/g, ' ') || null;
+
+    const grupos = new Map();
+    const agrupar = (clave, c) => {
+      if (!clave) return;
+      if (!grupos.has(clave)) grupos.set(clave, new Map());
+      grupos.get(clave).set(c.id, c);
+    };
+    for (const c of clientes) {
+      const emp = c.empresaId || '';
+      if (c.nit) agrupar(`NIT|${emp}|${c.nit}`, c);
+      const t = normTel(c.celular) || normTel(c.telefono);
+      if (t) agrupar(`TEL|${emp}|${t}`, c);
+      const n = normNom(c.nombre);
+      if (n) agrupar(`NOMBRE|${emp}|${n}`, c);
+    }
+
+    const resultado = [];
+    const vistos = new Set();
+    for (const [clave, mapaC] of grupos) {
+      if (mapaC.size < 2) continue;
+      const ids = [...mapaC.keys()].sort().join('|');
+      if (vistos.has(ids)) continue; // mismo grupo ya detectado por otro criterio
+      vistos.add(ids);
+      resultado.push({ criterio: clave.split('|')[0], valor: clave.split('|')[2], clientes: [...mapaC.values()] });
+    }
+
+    res.json({ totalGrupos: resultado.length, grupos: resultado });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/:id', authenticate, validarTenant('clients'), async (req, res) => {
   try {
     const doc = await db.collection('clients').doc(req.params.id).get();

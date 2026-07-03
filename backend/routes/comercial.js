@@ -37,6 +37,21 @@ const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = 
 };
 
 const hoyColombia = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+
+// ✅ COMERCIAL-BASE-001: período (mes) de la base a la que pertenece un prospecto.
+// Evita que las bases de meses distintos se mezclen indistinguibles en Mi Día.
+const periodoActualCO = () => hoyColombia().slice(0, 7); // 'YYYY-MM'
+const validarPeriodo = (p) => /^\d{4}-(0[1-9]|1[0-2])$/.test(p || '');
+// Prospectos anteriores al campo basePeriodo: se deriva del mes de creación
+// (createdAt en zona Colombia) — las bases existentes quedan etiquetadas
+// correctamente sin migración de datos.
+const periodoDeProspecto = (p) => {
+  if (p.basePeriodo) return p.basePeriodo;
+  const c = p.createdAt;
+  const d = c?.toDate ? c.toDate() : (c?._seconds ? new Date(c._seconds * 1000) : null);
+  if (!d) return null;
+  return new Date(d.getTime() - 5 * 3600 * 1000).toISOString().slice(0, 7);
+};
 const esFecha = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 const esHora  = (s) => typeof s === 'string' && /^\d{2}:\d{2}$/.test(s);
 
@@ -135,6 +150,7 @@ router.post('/prospectos', async (req, res) => {
 
     const nuevo = {
       adminId,
+      basePeriodo: periodoActualCO(), // ✅ COMERCIAL-BASE-001
       nombre: String(nombre).trim(),
       empresa: empresa || null,
       telefono: tel,
@@ -168,6 +184,8 @@ router.post('/prospectos/importar', async (req, res) => {
   try {
     if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador puede importar' });
     const adminId = getAdminId(req);
+    // ✅ COMERCIAL-BASE-001: mes de la base que se está importando
+    const basePeriodo = validarPeriodo(req.body?.basePeriodo) ? req.body.basePeriodo : periodoActualCO();
     const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
     const asignadoA = req.body?.asignadoA || null;
 
@@ -198,6 +216,7 @@ router.post('/prospectos/importar', async (req, res) => {
         telefono: tel,
         sucursal: f.sucursal || null,
         origen: 'importacion',
+        basePeriodo, // ✅ COMERCIAL-BASE-001
         estado: 'NUEVO',
         asignadoA,
         proximaLlamada: null,
@@ -249,6 +268,9 @@ router.get('/mi-dia', async (req, res) => {
     if (req.user?.role !== 'admin') {
       prospectos = prospectos.filter(p => !p.asignadoA || p.asignadoA === uid);
     }
+
+    // ✅ COMERCIAL-BASE-001: cada prospecto lleva su período de base visible
+    prospectos = prospectos.map(p => ({ ...p, basePeriodo: periodoDeProspecto(p) }));
 
     const conFechaHoy = (p) => p.proximaLlamada?.fecha && p.proximaLlamada.fecha <= hoy;
 
@@ -500,6 +522,31 @@ router.post('/prospectos/:id/convertir', async (req, res) => {
       ]);
       if (!dupCel.empty) clienteId = dupCel.docs[0].id;
       else if (!dupTel.empty) clienteId = dupTel.docs[0].id;
+    }
+
+    // ✅ CLIENTES-DUP-001: regla única de identidad — si el teléfono no
+    // coincidió, buscar también por NIT y por nombre normalizado antes de
+    // crear. Consultas limit(1) puntuales, resilientes a índice faltante.
+    if (!clienteId && nitFinal) {
+      try {
+        const dupNit = await db.collection('clients')
+          .where('adminId', '==', adminId)
+          .where('nit', '==', String(nitFinal))
+          .limit(1).get();
+        if (!dupNit.empty) clienteId = dupNit.docs[0].id;
+      } catch (e) { console.warn('CLIENTES-DUP-001 nit:', e.message); }
+    }
+    if (!clienteId) {
+      const nombreNorm = String(nombreFinal || p.nombre || '').toUpperCase().trim().replace(/\s+/g, ' ');
+      if (nombreNorm) {
+        try {
+          const dupNom = await db.collection('clients')
+            .where('adminId', '==', adminId)
+            .where('nombre', '==', nombreNorm)
+            .limit(1).get();
+          if (!dupNom.empty) clienteId = dupNom.docs[0].id;
+        } catch (e) { console.warn('CLIENTES-DUP-001 nombre:', e.message); }
+      }
     }
 
     if (!clienteId) {
