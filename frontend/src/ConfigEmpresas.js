@@ -15,6 +15,10 @@ const TIPOS_ERI = [
   { value: 'gasto_administrativo',  label: '📋 Gasto administrativo',              desc: 'Marketing, publicidad, contabilidad externa' },
   { value: 'gasto_financiero',      label: '🏦 Gasto financiero',                  desc: 'Intereses, comisiones bancarias' },
   { value: 'gasto_fiscal',          label: '📑 Gasto fiscal',                      desc: 'Impuestos (Retefuente se descuenta automáticamente)' },
+  // ✅ ERI-COSTO-001: compra de mercancía/insumos NO es gasto ni costo del
+  // período — es convertir dinero en inventario (activo). NO resta en el ERI;
+  // se muestra aparte, informativo. El costo real se causa cuando se VENDE.
+  { value: 'compra_inventario',     label: '📦 Compra de inventario/mercancía',    desc: 'Compra de productos o insumos para stock. NO afecta la utilidad — va a inventario.' },
 ];
 
 const TIPOS_CAJA = ['Efectivo', 'Banco', 'Nequi/Daviplata', 'Datafono', 'Mensajero', 'Otro'];

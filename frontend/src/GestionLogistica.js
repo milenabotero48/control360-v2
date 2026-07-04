@@ -1073,6 +1073,39 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                 <div style={{ ...s.kpi, background: '#f0fdf4', border: '1px solid #86efac' }}><span style={s.kpiLabel}>Total a entregar</span><span style={{ fontWeight: 800, color: '#16a34a', fontSize: 18 }}>{fmt(cuadre.totalAEntregar)}</span></div>
               </div>
 
+              {/* ✅ LOGISTICA-CUADRE-002: DETALLE DE RUTA — todas las órdenes del
+                  mensajero con su estado. Para que el admin vea qué está
+                  haciendo cada uno y ubique cualquier error sin ir a ciegas. */}
+              {cuadre.rutaDetalle?.length > 0 && (
+                <div style={{ marginBottom: 16, border: '1px solid #e2e8f0', borderRadius: 10, overflow: 'hidden' }}>
+                  <div style={{ padding: '8px 12px', background: '#f8fafc', fontSize: 12, fontWeight: 800, color: '#475569', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>📋 ÓRDENES DE LA RUTA ({cuadre.rutaDetalle.length})</span>
+                    <span>{cuadre.rutaDetalle.filter(o => o.cobrado).length} cobradas · {cuadre.rutaDetalle.filter(o => !o.cobrado).length} pendientes</span>
+                  </div>
+                  <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+                    {cuadre.rutaDetalle.map((o, i) => (
+                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderTop: '1px solid #f1f5f9', fontSize: 12 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontWeight: 700, color: '#334155' }}>{o.numeroOrden} · {o.clienteNombre}</div>
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 2 }}>
+                            <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 6, background: o.cobrado ? '#dcfce7' : '#fef9c3', color: o.cobrado ? '#15803d' : '#a16207' }}>{o.estadoLabel}</span>
+                            {o.formaPago && <span style={{ fontSize: 10, color: '#94a3b8' }}>{o.formaPago}</span>}
+                          </div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          {o.cobrado
+                            ? <span style={{ fontWeight: 800, color: '#16a34a' }}>{fmt(o.montoRecaudado)}</span>
+                            : <span style={{ fontWeight: 600, color: '#cbd5e1' }}>sin cobro</span>}
+                          {o.total > 0 && o.montoRecaudado !== o.total && (
+                            <div style={{ fontSize: 10, color: '#94a3b8' }}>de {fmt(o.total)}</div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Órdenes cobradas */}
               {cuadre.ordenesCobro?.length > 0 && (
                 <div style={{ marginBottom: 16 }}>

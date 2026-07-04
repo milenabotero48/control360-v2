@@ -385,7 +385,7 @@ router.get('/mensajero/:mensajeroId', async (req, res) => {
       .where('adminId', '==', adminId)
       .where('mensajeroId', '==', mensajeroId)
       .select('estado', 'fechaCompletada', 'completadaEn', 'updatedAt',
-              'total', 'montoPagado', 'fotoEntrega', 'numeroOrden',
+              'total', 'subtotal', 'ivaValor', 'montoPagado', 'fotoEntrega', 'numeroOrden',
               'clienteNombre', 'lugarAtencion', 'sucursalDireccion',
               'clienteDireccion', 'direccionTarea', 'notasOrden', 'items')
       .get();
@@ -458,6 +458,12 @@ router.get('/mensajero/:mensajeroId', async (req, res) => {
     rutaHoy: rutaHoy.map(o => ({
       id: o.id, numeroOrden: o.numeroOrden, clienteNombre: o.clienteNombre,
       estado: o.estado, lugarAtencion: o.lugarAtencion, total: o.total,
+      // ✅ LOGISTICA-IVA-001: el mensajero debe ver el desglose IGUAL que la
+      // orden (Subtotal + IVA + Total), no un subtotal suelto — así cobra el
+      // valor correcto. No se calcula nada: se traen los campos que la orden
+      // ya tiene. Si ivaValor es 0, el móvil muestra solo el total.
+      subtotal: o.subtotal || null,
+      ivaValor: o.ivaValor || 0,
       direccion: o.direccionTarea || o.sucursalDireccion || o.clienteDireccion /* ✅ INTERNA-DIR-001 */,
       // ✅ FIX ORDEN-NOTAS-002: las notas se perdían aquí — el mapper
       // recortaba los campos y las observaciones nunca llegaban al mensajero

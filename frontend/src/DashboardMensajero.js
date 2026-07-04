@@ -358,7 +358,19 @@ const DashboardMensajero = ({ user }) => {
                     )}
                   </div>
                   <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: '#16a34a' }}>{fmtCop(o.total)}</div>
+                    {/* ✅ LOGISTICA-IVA-001: mostrar el desglose IGUAL que la orden
+                        (Subtotal + IVA + Total) para que el mensajero cobre el
+                        valor correcto. Solo se muestra si la orden tiene IVA;
+                        si no, se ve solo el total (regla $0 no se muestra). */}
+                    {o.ivaValor > 0 ? (
+                      <>
+                        <div style={{ fontSize: 11, color: '#6b7280' }}>Subtotal {fmtCop(o.subtotal || (o.total - o.ivaValor))}</div>
+                        <div style={{ fontSize: 11, color: '#6b7280' }}>IVA {fmtCop(o.ivaValor)}</div>
+                        <div style={{ fontSize: 15, fontWeight: 800, color: '#16a34a', borderTop: '1px solid #e5e7eb', paddingTop: 2, marginTop: 2 }}>{fmtCop(o.total)}</div>
+                      </>
+                    ) : (
+                      <div style={{ fontSize: 14, fontWeight: 700, color: '#16a34a' }}>{fmtCop(o.total)}</div>
+                    )}
                     {/* Ola 2.5: indicador si tiene cobro pendiente */}
                     {o.estado === 'entrega_cobranza' && (
                       <div style={{ fontSize: 10, color: '#dc2626', fontWeight: 700, marginTop: 2 }}>

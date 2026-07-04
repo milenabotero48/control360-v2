@@ -981,11 +981,32 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
     const ordenesCobro = [];
     const ordenesVirtual = [];
     const ordenesSinPago = []; // entregadas sin pago → quedan en cartera (CxC) al cuadrar
+    // ✅ LOGISTICA-CUADRE-002: detalle completo de la ruta — para que el admin
+    // vea QUÉ está haciendo cada mensajero (no ir a ciegas). Cada orden con su
+    // estado, monto y si ya cobró.
+    const rutaDetalle = [];
+
+    const etiquetaEstado = {
+      en_ruta_recogida: 'En ruta recogida', en_ruta_entrega: 'En ruta entrega',
+      entrega_cobranza: 'Entrega/cobranza', cuadre_dinero: 'Por cuadrar',
+      completada: 'Completada', en_taller: 'En taller'
+    };
 
     snapOrdenes.forEach(doc => {
       const o = doc.data();
       if (o.cuadrado === true) return;
       const monto = Number(o.montoRecaudado) || 0;
+      // Registrar en el detalle de ruta (todas, cobradas o no)
+      rutaDetalle.push({
+        numeroOrden: o.numeroOrden,
+        clienteNombre: o.clienteNombre,
+        estado: o.estado,
+        estadoLabel: etiquetaEstado[o.estado] || o.estado,
+        total: Number(o.total) || 0,
+        montoRecaudado: monto,
+        formaPago: o.formaPagoRecaudo || '',
+        cobrado: monto > 0
+      });
       if (monto <= 0) {
         // Sin cobro real: NO suma al cuadre, pero el Admin debe verla — al
         // confirmar el cuadre pasará a CxC (Ola 3: visibilidad de cartera).
@@ -1069,7 +1090,8 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
       ordenesSinPago,         // entregadas sin pago → pasarán a CxC al confirmar
       egresosProv,
       extintoresPendientes,   // préstamos pendientes de devolver/recoger
-      cambiosEntregados       // extintores de cambio para confirmar 1x1
+      cambiosEntregados,      // extintores de cambio para confirmar 1x1
+      rutaDetalle             // ✅ LOGISTICA-CUADRE-002: todas las órdenes de la ruta con su estado
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1389,7 +1411,12 @@ router.get('/resumen-mensajeros', async (req, res) => {
     // empresas. Se filtra por adminId primero y el estado en memoria
     // (mismo patrón que /ordenes, evita índice compuesto).
     const adminId = req.adminId || req.user?.uid || req.user?.id;
-    const estadosResumen = ['en_ruta_recogida', 'en_ruta_entrega', 'entrega_cobranza', 'en_taller'];
+    // ✅ LOGISTICA-CUADRE-002: unificar la fuente de verdad con el cuadre.
+    // Antes la tarjeta contaba estados distintos al modal de cuadre, por eso
+    // mostraba "Recaudado $53.000" mientras el cuadre salía en $0. Ahora ambos
+    // usan el MISMO universo de estados y el mismo montoRecaudado, solo de
+    // órdenes NO cuadradas todavía (las ya cuadradas no son recaudo pendiente).
+    const estadosResumen = ['en_ruta_recogida', 'en_ruta_entrega', 'entrega_cobranza', 'en_taller', 'cuadre_dinero', 'completada'];
 
     const snap = await db.collection('orders')
       .where('adminId', '==', adminId)
@@ -1412,9 +1439,10 @@ router.get('/resumen-mensajeros', async (req, res) => {
       }
       const m = porMensajero[o.mensajeroId];
       m.totalOrdenes++;
-      if (o.estado === 'entrega_cobranza') m.completadas++;
+      if (o.estado === 'entrega_cobranza' || o.estado === 'completada') m.completadas++;
       if (['en_ruta_recogida', 'en_ruta_entrega'].includes(o.estado)) m.enRuta++;
-      m.totalRecaudado += o.montoRecaudado || 0;
+      // ✅ LOGISTICA-CUADRE-002: solo recaudo pendiente (no ya cuadrado)
+      if (o.cuadrado !== true) m.totalRecaudado += o.montoRecaudado || 0;
     });
 
     res.json(Object.values(porMensajero));
