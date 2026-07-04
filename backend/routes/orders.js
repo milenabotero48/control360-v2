@@ -831,8 +831,10 @@ router.post('/', authenticate, async (req, res) => {
       // ✅ INTERNA-FLUJO-001: la interna debe fluir como interna, no como
       // domicilio. Antes se guardaba 'domicilio' y construirFlujo la enviaba
       // por recogida→taller→cuadre→CxC. Ahora se enruta a su flujo propio.
+      // FIX: en el backend la variable es tipoOrden (no tipoServicio, que no
+      // existe aquí y rompía TODA creación de órdenes con error 500).
       lugarAtencion: esProduccion ? 'produccion'
-                   : (tipoServicio === 'interna' ? 'interna'
+                   : (tipoOrden === 'interna' ? 'interna'
                    : (lugarAtencion || 'domicilio')),
       formaPago: formaPago || '',
       numeroFactura: numeroFactura || '',
