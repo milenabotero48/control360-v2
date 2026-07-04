@@ -37,6 +37,7 @@ const ESTADOS = {
   en_ruta_entrega:    { label: 'En Ruta Entrega',      color: '#059669', bg: '#ecfdf5',  modulo: 'logistica' },
   entrega_cobranza:   { label: 'Entrega Cobranza',     color: '#ea580c', bg: '#fff7ed',  modulo: 'logistica' },
   reparacion_proceso: { label: 'Reparación en Proceso',color: '#e11d48', bg: '#ffe4e8',  modulo: 'taller' },
+  interna_proceso:    { label: 'En Proceso',           color: '#7c3aed', bg: '#f5f3ff',  modulo: null }, // ✅ INTERNA-FLUJO-001
   cuadre_dinero:      { label: 'Cuadre Dinero',        color: '#0891b2', bg: '#ecfeff',  modulo: 'logistica' },
   anulada:            { label: 'Anulada',              color: '#6b7280', bg: '#f3f4f6',  modulo: null },
 };
@@ -71,6 +72,9 @@ const GestionOrdenes = ({ user }) => {
   const [loading, setLoading]           = useState(true);
   const [buscar, setBuscar]             = useState('');
   const [filtroEstado, setFiltroEstado] = useState('');
+  // ✅ ORDENES-FILTRO-EMPRESA-001: filtro por empresa que factura (auditar IVA)
+  const [empresas, setEmpresas]         = useState([]);
+  const [filtroEmpresa, setFiltroEmpresa] = useState('');
   const [filtroTipo, setFiltroTipo]     = useState('');
   const [filtroDesde, setFiltroDesde]   = useState('');
   const [filtroHasta, setFiltroHasta]   = useState('');
@@ -100,6 +104,7 @@ const GestionOrdenes = ({ user }) => {
       let url = `${API}/orders?limite=${LIMITE_PAGINA}&offset=${offset}&`;
       if (filtroEstado) url += `estado=${filtroEstado}&`;
       if (filtroTipo) url += `tipoOrden=${filtroTipo}&`;
+      if (filtroEmpresa) url += `empresaId=${filtroEmpresa}&`; // ✅ ORDENES-FILTRO-EMPRESA-001
       if (buscar) url += `buscar=${encodeURIComponent(buscar)}&`;
       // Ola 3: pasar fechas al backend para que filtre ANTES del límite
       if (filtroDesde) url += `fechaDesde=${filtroDesde}&`;
@@ -117,9 +122,17 @@ const GestionOrdenes = ({ user }) => {
       setOffsetActual(offset);
     } catch { if (offset === 0) setOrdenes([]); }
     finally { setLoading(false); }
-  }, [filtroEstado, filtroTipo, buscar, filtroDesde, filtroHasta, token]);
+  }, [filtroEstado, filtroTipo, filtroEmpresa, buscar, filtroDesde, filtroHasta, token]);
 
   useEffect(() => { cargarOrdenes(0); }, [cargarOrdenes]);
+
+  // ✅ ORDENES-FILTRO-EMPRESA-001: cargar las empresas del tenant una sola vez
+  useEffect(() => {
+    if (!isAdmin) return;
+    axios.get(`${API}/companies`, { headers })
+      .then(r => setEmpresas(Array.isArray(r.data) ? r.data : []))
+      .catch(() => setEmpresas([]));
+  }, [isAdmin, token]);
 
   const abrirDetalle = (orden) => {
     setOrdenSeleccionada(orden);
@@ -259,6 +272,19 @@ const GestionOrdenes = ({ user }) => {
           {buscar && <button onClick={() => setBuscar('')} style={s.clearBtn}>✕</button>}
         </div>
 
+        {/* ✅ ORDENES-FILTRO-EMPRESA-001: filtro por empresa que factura.
+            Permite auditar por separado las órdenes de cada empresa emisora
+            (ej. verificar que las de IVA 19% quedaron bien calculadas). */}
+        {isAdmin && empresas.length > 1 && (
+          <select value={filtroEmpresa} onChange={e => setFiltroEmpresa(e.target.value)}
+            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #e2e8f0', fontSize: 13, fontWeight: 600, color: '#475569', background: '#fff', cursor: 'pointer' }}>
+            <option value="">🏢 Todas las empresas</option>
+            {empresas.map(emp => (
+              <option key={emp.id} value={emp.id}>{emp.name}</option>
+            ))}
+          </select>
+        )}
+
         {/* Ola 2.5: filtro rápido de pagos pendientes de validar (admin/tesorería) */}
         {(user?.role === 'admin' || user?.role === 'tesoreria') && totalPendientesPago > 0 && (
           <button
@@ -355,6 +381,18 @@ const GestionOrdenes = ({ user }) => {
                   </div>
                   <span style={{ fontSize: 15, fontWeight: 800, color: '#16a34a' }}>{formatCOP(o.total)}</span>
                 </div>
+                {/* ✅ ORDENES-FILTRO-EMPRESA-001: desglose de IVA visible sin abrir
+                    la orden — detecta de un vistazo si el IVA quedó bien sumado.
+                    Solo se muestra cuando la orden efectivamente tiene IVA. */}
+                {Number(o.ivaValor) > 0 && (
+                  <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <span>Base: {formatCOP(o.subtotal)}</span>
+                    <span>+ IVA: {formatCOP(o.ivaValor)}</span>
+                    {Math.abs((Number(o.subtotal) || 0) + (Number(o.ivaValor) || 0) - (Number(o.total) || 0)) > 1 && (
+                      <span style={{ color: '#dc2626', fontWeight: 700 }}>⚠️ Total no cuadra</span>
+                    )}
+                  </div>
+                )}
                 {/* Fila 2: cliente */}
                 <div style={{ fontSize: 14, fontWeight: 700, color: '#111', marginBottom: 2 }}>{o.clienteNombre}</div>
                 {o.sucursalNombre && <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>🏢 {o.sucursalNombre}</div>}
@@ -450,7 +488,18 @@ const GestionOrdenes = ({ user }) => {
                         )}
                       </div>
                     </td>
-                    <td style={{ ...s.td, fontWeight: 700, color: '#16a34a' }}>{formatCOP(o.total)}</td>
+                    <td style={{ ...s.td, fontWeight: 700, color: '#16a34a' }}>
+                      {formatCOP(o.total)}
+                      {/* ✅ ORDENES-FILTRO-EMPRESA-001: desglose de IVA para auditar */}
+                      {Number(o.ivaValor) > 0 && (
+                        <div style={{ fontSize: 10, fontWeight: 500, color: '#64748b', marginTop: 2 }}>
+                          {formatCOP(o.subtotal)} + IVA {formatCOP(o.ivaValor)}
+                          {Math.abs((Number(o.subtotal) || 0) + (Number(o.ivaValor) || 0) - (Number(o.total) || 0)) > 1 && (
+                            <span style={{ color: '#dc2626', fontWeight: 700 }}> ⚠️</span>
+                          )}
+                        </div>
+                      )}
+                    </td>
                     <td style={s.td}>{formatFecha(o.fechaProgramada)}</td>
                     <td style={s.td}>{o.mensajeroNombre || <span style={{ color: '#9ca3af' }}>Sin asignar</span>}</td>
                     <td style={s.td} onClick={e => e.stopPropagation()}>

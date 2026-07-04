@@ -320,6 +320,18 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar, clientesRecargado
                 📱 {telBonito(p.telefono)}
               </a>
               {p.sucursal && <span style={{ fontSize: 11, color: '#9ca3af' }}>📍 {p.sucursal}</span>}
+              {/* ✅ TELEMERCADEO-EQUIPOS: equipo reportado visible sin abrir el prospecto */}
+              {(p.equipoReportado || p.equipo) && (
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', padding: '2px 8px', borderRadius: 8 }}>
+                  🧯 {p.equipoReportado || p.equipo}
+                </span>
+              )}
+              {/* ✅ DUP-002: teléfono importado con formato dudoso — a corregir en gestión */}
+              {p.telefonoPorVerificar && (
+                <span style={{ fontSize: 10, fontWeight: 700, color: '#c2410c', background: '#fff7ed', padding: '2px 8px', borderRadius: 8, border: '1px solid #fed7aa' }}>
+                  ☎️ por verificar
+                </span>
+              )}
               {(p.totalLlamadas || 0) > 0 && <span style={{ fontSize: 10, color: '#9ca3af' }}>({p.totalLlamadas} llamada{p.totalLlamadas > 1 ? 's' : ''} previas)</span>}
             </div>
             {p.notas && <div style={{ fontSize: 11, color: '#6b7280', marginTop: 6, background: '#f9fafb', borderRadius: 6, padding: '5px 8px' }}>📝 {p.notas}</div>}
@@ -394,7 +406,10 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
     if (!resultado) return setError('Selecciona el resultado de la llamada');
     if (resultado === 'reprogramar' && !fecha) return setError('Indica la fecha de la próxima llamada');
     if (resultado === 'no_interesa' && !motivo) return setError('Indica el motivo');
-    if (resultado === 'numero_errado' && !telefonoCorregido.trim()) return setError('Escribe el número correcto o déjalo en blanco para buscarlo después');
+    // ✅ TELEMERCADEO-EQUIPOS: número errado NO exige el nuevo teléfono. Dejarlo
+    // en blanco es válido (el prospecto queda marcado para corregir después).
+    // Antes esta validación bloqueaba el guardado si el campo estaba vacío,
+    // contradiciendo su propio mensaje ("o déjalo en blanco").
     if (resultado === 'acepta') {
       if (!cliNombre.trim()) return setError('Verifica el nombre / razón social del cliente');
       if (!empresaFac) return setError('Selecciona la empresa que factura');
@@ -731,7 +746,7 @@ function Prospectos({ user }) {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Error al importar');
-      setMsgImport(`✓ ${json.creados} prospectos creados · ${json.duplicados} duplicados omitidos${json.errores?.length ? ` · ${json.errores.length} filas con error` : ''}`);
+      setMsgImport(`✓ ${json.creados} prospectos creados · ${json.duplicados} duplicados omitidos${json.porVerificar ? ` · ☎️ ${json.porVerificar} con teléfono por verificar` : ''}${json.errores?.length ? ` · ${json.errores.length} filas con error` : ''}`);
       setErroresImport(json.errores || []);
       cargar();
     } catch (e) {

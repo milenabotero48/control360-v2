@@ -30,6 +30,7 @@ const ESTADOS = {
   en_ruta_entrega:  { label: 'En Ruta Entrega',   color: '#059669', bg: '#ecfdf5' },
   entrega_cobranza: { label: 'Entrega Cobranza',  color: '#dc2626', bg: '#fef2f2' },
   reparacion_proceso: { label: 'Reparación en Proceso', color: '#e11d48', bg: '#ffe4e8' },
+  interna_proceso:  { label: 'En Proceso',           color: '#7c3aed', bg: '#f5f3ff' }, // ✅ INTERNA-FLUJO-001
   cuadre_dinero:    { label: 'Completada',         color: '#16a34a', bg: '#f0fdf4' },
   completada:       { label: 'Completada',         color: '#16a34a', bg: '#f0fdf4' },
   cxc:              { label: 'Cuenta por Cobrar',  color: '#b45309', bg: '#fffbeb' },

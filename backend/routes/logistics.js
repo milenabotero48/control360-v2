@@ -1153,10 +1153,12 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
     let sumaEfectivo = 0;   // → caja Efectivo
     let sumaVirtual  = 0;   // → caja Bancos
     const ordenesParaCaja = [];
+    let mensajeroNombreCuadre = ''; // ✅ LOGISTICA-CUADRE-001: para el arqueo
 
     snapOrdenes.forEach(doc => {
       const o = doc.data();
       if (o.cuadrado === true) return;
+      if (!mensajeroNombreCuadre && o.mensajeroNombre) mensajeroNombreCuadre = o.mensajeroNombre;
 
       const monto = Number(o.montoRecaudado) || 0;
       const tipo = o.tipoCobro
@@ -1272,6 +1274,61 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       usuarioEmail: req.user.email
     });
 
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ LOGISTICA-CUADRE-001: ARQUEO INMUTABLE
+    // Al confirmar, se congela una "foto" permanente de este cuadre. Antes no
+    // quedaba ningún registro consultable: si el mensajero decía "yo cuadré $X"
+    // no había cómo verificarlo. Este documento es la huella de auditoría del
+    // arqueo de caja — inmutable (nunca se edita ni borra, se anula si acaso),
+    // respetando el invariante contable del sistema.
+    // Opción (c): si hay descuadre (recibido ≠ esperado), se registra con la
+    // nota/motivo, se permite confirmar, y el faltante/sobrante queda marcado.
+    // ══════════════════════════════════════════════════════════════════════
+    try {
+      const esperadoEntregar = sumaEfectivo; // efectivo que debía entregar a caja
+      const recibidoReal = montoRecibido !== undefined && montoRecibido !== null
+        ? Number(montoRecibido)
+        : esperadoEntregar;
+      const descuadre = recibidoReal - esperadoEntregar; // <0 faltante, >0 sobrante
+
+      const arqueo = {
+        adminId,
+        mensajeroId,
+        mensajeroNombre: mensajeroNombreCuadre || '',
+        fecha: new Date().toISOString(),
+        autorizadoPorId: req.user.uid || req.user.id,
+        autorizadoPorEmail: req.user.email,
+        // Totales del arqueo
+        efectivoEsperado: esperadoEntregar,
+        efectivoRecibido: recibidoReal,
+        descuadre,                       // faltante (−) o sobrante (+)
+        motivoDescuadre: req.body.motivoDescuadre || '',
+        virtualIngresado: sumaVirtual,
+        // Detalle congelado (evidencia)
+        ordenesCuadradas: ordenesParaCaja,
+        extintoresDevueltos: Array.isArray(extintoresDevueltos) ? extintoresDevueltos : [],
+        // Estado del arqueo
+        anulado: false
+      };
+
+      const refArqueo = await db.collection('cuadres_historial').add(arqueo);
+
+      // Auditoría cruzada del arqueo (además del registro propio)
+      await db.collection('audit_logs').add({
+        accion: descuadre === 0 ? 'CUADRE_CONFIRMADO' : 'CUADRE_CON_DESCUADRE',
+        adminId,
+        mensajeroId,
+        arqueoId: refArqueo.id,
+        descripcion: `${req.user.email} confirmó cuadre de ${mensajeroNombreCuadre || mensajeroId}` +
+          (descuadre !== 0 ? ` — DESCUADRE ${descuadre > 0 ? '+' : ''}${descuadre.toLocaleString('es-CO')} (${req.body.motivoDescuadre || 'sin motivo'})` : ''),
+        fecha: new Date().toISOString()
+      });
+    } catch (eArqueo) {
+      // El arqueo es registro; si falla no revierte el cuadre ya confirmado,
+      // pero sí se loguea para revisión.
+      console.error('LOGISTICA-CUADRE-001: no se pudo registrar el arqueo:', eArqueo.message);
+    }
+
     res.json({
       ok: true,
       efectivoIngresado: sumaEfectivo,
@@ -1280,6 +1337,42 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
     });
   } catch (e) {
     console.error('POST cuadre/confirmar:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ✅ LOGISTICA-CUADRE-001: HISTÓRICO DE ARQUEOS (Admin / Tesorería)
+// GET /api/logistica/cuadres-historial?mensajeroId=&desde=&hasta=
+// Solo lectura. Consulta cualquier cuadre pasado con su detalle congelado —
+// la respuesta a "¿cuánto cuadró Henry el día X?" con evidencia firmada.
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get('/cuadres-historial', async (req, res) => {
+  try {
+    if (!['admin', 'tesoreria'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Solo administración o tesorería pueden ver el histórico de cuadres' });
+    }
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const { mensajeroId, desde, hasta } = req.query;
+
+    // Filtro por adminId en Firestore; el resto en memoria (evita índices compuestos)
+    const snap = await db.collection('cuadres_historial')
+      .where('adminId', '==', adminId)
+      .get();
+
+    let arqueos = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (mensajeroId) arqueos = arqueos.filter(a => a.mensajeroId === mensajeroId);
+    if (desde) arqueos = arqueos.filter(a => (a.fecha || '') >= desde);
+    if (hasta) arqueos = arqueos.filter(a => (a.fecha || '') <= `${hasta}T23:59:59`);
+
+    // Más recientes primero
+    arqueos.sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+
+    res.json({
+      total: arqueos.length,
+      arqueos
+    });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });

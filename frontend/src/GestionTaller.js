@@ -4,6 +4,23 @@ import axios from 'axios';
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const token = () => localStorage.getItem('token');
 const auth = () => ({ headers: { Authorization: `Bearer ${token()}` } });
+
+// ✅ TALLER-QR-002: clave determinística para identificar un equipo procesado
+// SIN QR, usada IDÉNTICAMENTE al escribir el paso y al reconstruir la lista.
+// Prioriza _itemIdx+_unidad (posición exacta en la orden). Si faltan (el
+// equipo pasó por el ModalQR y los perdió), cae a un fallback por contenido
+// (nombre+capacidad+unidad) que sigue siendo estable entre recargas. Así el
+// estado "procesado sin QR" nunca se pierde al refrescar la pantalla.
+const construirPasoIdSinQR = (eq = {}) => {
+  const idx = eq._itemIdx;
+  const uni = eq._unidad;
+  if (idx !== undefined && idx !== null && uni !== undefined && uni !== null) {
+    return `equipo_sinqr_${idx}_${uni}`;
+  }
+  const base = `${eq.nombre || ''}|${eq.tipo || ''}|${eq.capacidad || ''}|${uni || 1}`
+    .toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_|]/g, '');
+  return `equipo_sinqr_c_${base}`;
+};
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 const fmtFecha = f => {
   if (!f) return '—';
@@ -933,12 +950,15 @@ export default function GestionTaller({ user }) {
           // ✅ FIX TALLER-002: id determinístico y único por posición del
           // equipo en la orden — se usa para buscar si ya quedó registrado
           // en tallerPasos (equipo sin QR ya procesado antes de este reload).
-          const pasoIdSinQR = `equipo_sinqr_${idx}_${n + 1}`;
-          // ✅ QR-EXCEPCION-001: un equipo procesado sin QR cuenta como procesado
-          // SIEMPRE — antes solo se reconocía en tenants sin módulo QR, así que
-          // en tenants CON módulo el trabajo hecho "se deshacía" al recargar la
-          // lista y el sistema volvía a exigir el QR para la misma recarga.
-          const yaProcesadoSinQR = tallerPasos.some(p => p.pasoId === pasoIdSinQR);
+          // ✅ QR-EXCEPCION-001 + TALLER-QR-002: un equipo procesado sin QR
+          // cuenta como procesado SIEMPRE. La clave se calcula con la MISMA
+          // función que la escritura (construirPasoIdSinQR), y se acepta tanto
+          // la clave por posición como la de fallback por contenido — así el
+          // "procesado" persiste aunque el paso se haya guardado por cualquiera
+          // de los dos caminos (modal directo o ModalQR "Continuar sin QR").
+          const claveePos = `equipo_sinqr_${idx}_${n + 1}`;
+          const claveCont = construirPasoIdSinQR({ nombre: it.nombre, tipo: tipoEq, capacidad: capEq, _unidad: n + 1 });
+          const yaProcesadoSinQR = tallerPasos.some(p => p.pasoId === claveePos || p.pasoId === claveCont);
           equiposExpandidos.push({
             codigoQR: null,
             qrPendiente: necesitaQR && !yaProcesadoSinQR, // ✅ QR-EXCEPCION-001
@@ -1051,8 +1071,14 @@ export default function GestionTaller({ user }) {
     // en la orden sin asociar una etiqueta fisica.
     if (modo === 'sin_qr') {
       setModalQR(null);
+      // ✅ TALLER-QR-002: preservar explícitamente _itemIdx y _unidad — son la
+      // identidad del equipo dentro de la orden y sin ellos el pasoId no se
+      // puede reconstruir. El spread {...equipo} ya los trae, pero se dejan
+      // explícitos para blindar contra cualquier objeto equipo incompleto.
       const equipoSinQR = {
         ...equipo,
+        _itemIdx: equipo._itemIdx,
+        _unidad: equipo._unidad,
         codigoQR: '',
         qrPendiente: false,
         procesado: false,
@@ -1116,11 +1142,18 @@ export default function GestionTaller({ user }) {
     // mismo pasoId "equipo_undefined". Como cargarEquiposDeOrden nunca leía
     // ese historial, el estado "procesado" de un equipo sin QR se perdía en
     // cada recarga de pantalla y la orden nunca llegaba a "todos listos".
-    const equipoActualIdx = modalProcesoEquipo?.equipo?._itemIdx;
-    const equipoActualUnidad = modalProcesoEquipo?.equipo?._unidad;
+    // ✅ TALLER-QR-002: el pasoId sin QR debe ser DETERMINÍSTICO y estable.
+    // Antes, si _itemIdx/_unidad llegaban undefined (el equipo pasó por el
+    // ModalQR "Continuar sin QR" y perdió esos campos), el pasoId era
+    // "equipo_sinqr_undefined_undefined". Al recargar, la reconstrucción
+    // buscaba "equipo_sinqr_0_1" y NUNCA casaba: el equipo procesado
+    // "retrocedía" a pendiente (el bug que viste: verde que aparece y regresa).
+    // Ahora hay fallback por contenido (nombre+capacidad) para que la clave
+    // sea siempre reconstruible aunque falten los índices.
+    const eqActual = modalProcesoEquipo?.equipo || {};
     const pasoId = codigoQR
       ? `equipo_${codigoQR}`
-      : `equipo_sinqr_${equipoActualIdx}_${equipoActualUnidad}`;
+      : construirPasoIdSinQR(eqActual);
 
     if (!esOrdenManual) {
       // 1. Registrar paso en la orden
@@ -1158,11 +1191,13 @@ export default function GestionTaller({ user }) {
     // 3. Si NO es manual: verificar si todos los equipos de la orden están listos
     if (!esOrdenManual) {
       const equipos = equiposOrden[ordenId] || [];
-      // Cuando es sin_qr (codigoQR === ''), identificar el equipo por _itemIdx + _unidad
-      // para marcarlo procesado correctamente. Con QR se busca por código como antes.
+      // ✅ TALLER-QR-002: identificar el equipo procesado por su pasoId
+      // determinístico (misma clave que se escribió) en vez de comparar
+      // _itemIdx/_unidad sueltos — que fallaba cuando esos campos venían
+      // undefined y dejaba el verde "retrocediendo" a pendiente al recargar.
       const updatedEquipos = equipos.map(e => {
         if (codigoQR && e.codigoQR === codigoQR) return { ...e, procesado: true };
-        if (!codigoQR && e._itemIdx === equipoActualIdx && e._unidad === equipoActualUnidad) return { ...e, procesado: true };
+        if (!codigoQR && construirPasoIdSinQR(e) === pasoId) return { ...e, procesado: true };
         return e;
       });
       setEquiposOrden(prev => ({ ...prev, [ordenId]: updatedEquipos }));

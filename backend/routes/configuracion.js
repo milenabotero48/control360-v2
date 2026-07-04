@@ -54,6 +54,13 @@ const LINEAS_SERVICIO_DEFAULT = [
 //     'gasto_financiero'    — Intereses, comisiones bancarias
 //     'gasto_fiscal'        — Impuestos, retenciones (la Retefuente la práctica
 //                              el sistema automáticamente desde CxC)
+//     'compra_inventario'   — ✅ ERI-COSTO-001: compra de mercancía para stock.
+//                              NO es gasto NI costo del período: es convertir
+//                              dinero en inventario (un activo). NO resta en el
+//                              ERI. Se muestra aparte, informativo, para que el
+//                              movimiento de dinero no se pierda. El costo real
+//                              se causa cuando la mercancía se VENDE (costo de
+//                              ventas por categoría, calculado desde productos).
 //
 //   lineaServicioId:
 //     Solo aplica para tipoERI = 'costo_servicio'. En las demás es null.
@@ -72,7 +79,9 @@ const CATEGORIAS_DEFAULT = [
   { nombre: 'Marketing',                  tipoERI: 'gasto_administrativo', lineaServicioId: null, activa: false, orden: 10 },
   { nombre: 'Comisiones bancarias',       tipoERI: 'gasto_financiero', lineaServicioId: null, activa: true, orden: 11 },
   { nombre: 'Impuestos',                  tipoERI: 'gasto_fiscal',    lineaServicioId: null, activa: true, orden: 12 },
-  { nombre: 'Otros',                      tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true, orden: 13 },
+  // ✅ ERI-COSTO-001: compra de mercancía va como inventario, NO como gasto/costo
+  { nombre: 'Compra de mercancía',        tipoERI: 'compra_inventario', lineaServicioId: null, activa: true, orden: 13 },
+  { nombre: 'Otros',                      tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true, orden: 14 },
 ];
 
 // ─── RETENCIONES — Ola 2.5 Bloque 3 ─────────────────────────────────────────

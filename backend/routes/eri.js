@@ -193,6 +193,14 @@ router.get('/', async (req, res) => {
     const detalleOrdenes = [];       // Para drill-down
     const detalleEgresos = [];
 
+    // ✅ ERI-COSTO-001: acumuladores del INFORME P&G por CATEGORÍA de producto.
+    // Ingresos y costo de ventas se agrupan por la categoría del producto
+    // (Extintores, Botiquines, Recarga...). El costo es el REAL de lo vendido:
+    // cantidad vendida × precioCosto del producto — nunca la compra de mercancía.
+    const ingresoPorCategoria = {};  // categoria → monto vendido
+    const costoPorCategoria = {};    // categoria → costo de lo vendido
+    const anexoVentas = [];          // listado de órdenes (anexo)
+
     // Helper: clasificar item como servicio o producto
     const clasificarItem = (item) => {
       const prod = productos[item.productoId];
@@ -223,6 +231,17 @@ router.get('/', async (req, res) => {
         const cantidad = Number(item.cantidad) || 1;
         const subtotal = Number(item.subtotalItem || (item.precioUnitario * cantidad * (1 - (item.descuento || 0) / 100))) || 0;
 
+        // ✅ ERI-COSTO-001: agrupar por categoría de producto para el informe.
+        // Ingreso = lo vendido; costo = cantidad × precioCosto (costo real de
+        // lo vendido, NO la compra de mercancía). Los servicios también tienen
+        // categoría (Recarga, etc.) y su costo directo si el producto lo define.
+        const catNombre = cls.categoria || 'Sin categoría';
+        ingresoPorCategoria[catNombre] = (ingresoPorCategoria[catNombre] || 0) + subtotal;
+        const costoItem = cls.precioCosto * cantidad;
+        if (costoItem > 0) {
+          costoPorCategoria[catNombre] = (costoPorCategoria[catNombre] || 0) + costoItem;
+        }
+
         if (cls.esServicio) {
           ingresoServiciosOrden += subtotal;
           totalServicios += subtotal;
@@ -249,6 +268,14 @@ router.get('/', async (req, res) => {
         ingresoProductos: ingresoProductosOrden,
         costoProductos: costoProductosOrden
       });
+
+      // ✅ ERI-COSTO-001: anexo de ventas — una línea por orden (suma = ingresos)
+      anexoVentas.push({
+        numeroOrden: o.numeroOrden,
+        fecha: o._fechaRef.toISOString().slice(0, 10),
+        clienteNombre: o.clienteNombre || '',
+        total: Number(o.total) || 0
+      });
     });
 
     // ── Procesar egresos ────────────────────────────────────────────────────
@@ -257,10 +284,26 @@ router.get('/', async (req, res) => {
       gasto_administrativo: 0, gasto_financiero: 0, gasto_fiscal: 0
     };
     const gastosDetallePorCategoria = {}; // 'Nómina' → 1500000
+    // ✅ ERI-COSTO-001: compras de mercancía — acumulan APARTE, NO son gasto ni
+    // costo del período. Van a la sección informativa de inventario.
+    let totalComprasInventario = 0;
+    const anexoCompras = []; // listado de compras de mercancía (anexo)
 
     egresosEnRango.forEach(e => {
       const cls = mapaCategoria[e.categoria] || { tipoERI: 'gasto_operativo', lineaServicioId: null };
       const monto = Number(e.monto) || 0;
+
+      // ✅ ERI-COSTO-001: compra de mercancía NO entra al P&G
+      if (cls.tipoERI === 'compra_inventario') {
+        totalComprasInventario += monto;
+        anexoCompras.push({
+          fecha: (e.fecha || '').slice(0, 10),
+          proveedor: e.proveedor || '',
+          concepto: e.concepto || '',
+          monto
+        });
+        return; // no suma a gastos ni a costos
+      }
 
       if (cls.tipoERI === 'costo_servicio') {
         // Costo directo de una línea
@@ -380,6 +423,77 @@ router.get('/', async (req, res) => {
       respuesta.detalleOrdenes = detalleOrdenes;
       respuesta.detalleEgresos = detalleEgresos;
     }
+
+    // ✅ ERI-COSTO-001: INVENTARIO (informativo) — desde el módulo de productos.
+    // Al costo = Σ(stock × precioCosto). Valorizado = Σ(stock × precioVenta).
+    // Es un activo, no afecta la utilidad; solo para que el dinero no se pierda.
+    let inventarioAlCosto = 0;
+    let inventarioValorizado = 0;
+    const anexoCostos = []; // productos por categoría con su costo (anexo)
+    Object.values(productos).forEach(p => {
+      const stock = Number(p.stock) || 0;
+      const costo = Number(p.precioCosto) || 0;
+      const venta = Number(p.precioVenta) || 0;
+      if (stock > 0) {
+        inventarioAlCosto += stock * costo;
+        inventarioValorizado += stock * venta;
+      }
+    });
+
+    // Costo de ventas por categoría (anexo): lo que se vendió, agrupado
+    Object.entries(costoPorCategoria).forEach(([categoria, costo]) => {
+      anexoCostos.push({ categoria, costo, ingreso: ingresoPorCategoria[categoria] || 0 });
+    });
+    anexoCostos.sort((a, b) => b.costo - a.costo);
+
+    // ✅ ERI-COSTO-001: INFORME P&G — ingresos y costos por CATEGORÍA de producto,
+    // gastos por categoría de egreso. Regla: los valores en $0 se filtran (un
+    // punto de venta sin servicios no ve "Costo recarga: $0").
+    const noCero = (obj) => Object.entries(obj)
+      .filter(([, v]) => Math.round(v) !== 0)
+      .map(([nombre, valor]) => ({ nombre, valor }))
+      .sort((a, b) => b.valor - a.valor);
+
+    const totalIngresosInforme = Object.values(ingresoPorCategoria).reduce((s, v) => s + v, 0);
+    const totalCostoInforme = Object.values(costoPorCategoria).reduce((s, v) => s + v, 0);
+    const utilidadBrutaInforme = totalIngresosInforme - totalCostoInforme;
+
+    respuesta.informe = {
+      periodo: respuesta.periodo || { desde: desde || null, hasta: hasta || null },
+      ingresos: {
+        porCategoria: noCero(ingresoPorCategoria),
+        total: totalIngresosInforme
+      },
+      costoVentas: {
+        porCategoria: noCero(costoPorCategoria),
+        total: totalCostoInforme
+      },
+      utilidadBruta: utilidadBrutaInforme,
+      gastos: {
+        // por categoría real de egreso, sin ceros
+        porCategoria: Object.entries(gastosDetallePorCategoria)
+          .filter(([, v]) => Math.round(v) !== 0)
+          .map(([nombre, valor]) => ({ nombre, valor }))
+          .sort((a, b) => b.valor - a.valor),
+        total: totalGastos
+      },
+      utilidadNeta: utilidadBrutaInforme - totalGastos,
+      // ✅ Sección inventario (informativa, NO afecta utilidad)
+      inventario: {
+        comprasDelPeriodo: totalComprasInventario,
+        alCosto: Math.round(inventarioAlCosto),
+        valorizado: Math.round(inventarioValorizado)
+      },
+      // Anexos (soporte del informe)
+      anexos: {
+        ventas: anexoVentas.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')),
+        costos: anexoCostos,
+        gastos: Object.entries(gastosDetallePorCategoria)
+          .map(([categoria, monto]) => ({ categoria, monto }))
+          .sort((a, b) => b.monto - a.monto),
+        compras: anexoCompras.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''))
+      }
+    };
 
     res.json(respuesta);
   } catch (e) {

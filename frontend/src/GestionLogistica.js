@@ -260,17 +260,43 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
 
   const subirFoto = async (file, setter) => {
     setSubiendoFoto(true);
+    setError('');
 
-    // Capturar GPS en el momento de la foto
-    let gpsData = null;
-    try {
-      const pos = await new Promise((resolve, reject) =>
-        navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 5000 })
+    // ✅ GPS-FOTO-001: el timeout nativo de getCurrentPosition NO cubre el caso
+    // en que el permiso de ubicación queda pendiente de respuesta del usuario
+    // (típico en iPhone): la promesa no se resuelve NI se rechaza, y la foto
+    // "se queda pensando" para siempre. Envolvemos el GPS en un Promise.race
+    // con un tope DURO de 4s que siempre gana. Con o sin GPS, la foto sube.
+    // Además, GPS y compresión corren EN PARALELO (antes eran secuenciales).
+    const obtenerGPS = () => new Promise((resolve) => {
+      if (!navigator.geolocation) return resolve(null);
+      let resuelto = false;
+      const finalizar = (val) => { if (!resuelto) { resuelto = true; resolve(val); } };
+      // Tope duro: pase lo que pase, a los 4s seguimos sin GPS
+      const topeDuro = setTimeout(() => finalizar(null), 4000);
+      navigator.geolocation.getCurrentPosition(
+        (pos) => { clearTimeout(topeDuro); finalizar({ lat: pos.coords.latitude, lng: pos.coords.longitude, timestamp: new Date().toISOString() }); },
+        () => { clearTimeout(topeDuro); finalizar(null); },
+        { timeout: 4000, enableHighAccuracy: false }
       );
-      gpsData = { lat: pos.coords.latitude, lng: pos.coords.longitude, timestamp: new Date().toISOString() };
-    } catch { /* GPS no disponible */ }
+    });
 
-    const fileComprimido = await comprimirImagen(file, 1200, 0.82);
+    // GPS y compresión en paralelo — no esperamos uno para empezar el otro
+    let gpsData = null;
+    let fileComprimido;
+    try {
+      [gpsData, fileComprimido] = await Promise.all([
+        obtenerGPS(),
+        comprimirImagen(file, 1200, 0.82)
+      ]);
+    } catch {
+      // Si la compresión falla, subir el original antes que bloquear la entrega
+      fileComprimido = file;
+    }
+
+    // Aviso claro en vez de spinner mudo cuando no hay ubicación
+    if (!gpsData) setError('Subiendo sin ubicación (GPS no disponible)…');
+
     const formData = new FormData();
     formData.append('file', fileComprimido);
     formData.append('upload_preset', CLOUDINARY_PRESET);
@@ -278,12 +304,22 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
     if (gpsData) formData.append('context', `lat=${gpsData.lat}|lng=${gpsData.lng}`);
 
     try {
-      const res = await fetch(CLOUDINARY_URL, { method: 'POST', body: formData });
+      // ✅ GPS-FOTO-001: timeout de subida — si Cloudinary tarda demasiado,
+      // avisar y permitir reintentar en vez de dejar la pantalla colgada.
+      const controller = new AbortController();
+      const abortSubida = setTimeout(() => controller.abort(), 30000);
+      const res = await fetch(CLOUDINARY_URL, { method: 'POST', body: formData, signal: controller.signal });
+      clearTimeout(abortSubida);
       const data = await res.json();
+      if (!data.secure_url) throw new Error('respuesta sin URL');
       setter(data.secure_url);
-      // Guardar GPS para enviarlo al backend
       if (gpsData) setter._gps = gpsData;
-    } catch { setError('Error al subir foto'); }
+      setError(''); // limpiar el aviso de "sin ubicación" si la subida fue bien
+    } catch (e) {
+      setError(e.name === 'AbortError'
+        ? 'La subida tardó demasiado. Revisa tu señal e intenta de nuevo.'
+        : 'No se pudo subir la foto. Intenta de nuevo.');
+    }
     setSubiendoFoto(false);
   };
 
@@ -901,6 +937,75 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
   );
 };
 
+// ─── ✅ LOGISTICA-CUADRE-001: MODAL HISTÓRICO DE ARQUEOS ──────────────────────
+// Consulta los cuadres pasados de un mensajero con su detalle congelado.
+// Responde "¿cuánto cuadró Henry el día X?" con evidencia firmada e inmutable.
+const ModalHistorialCuadres = ({ mensajeroId, mensajeroNombre, headers, onCerrar }) => {
+  const [arqueos, setArqueos] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    axios.get(`${API}/logistica/cuadres-historial?mensajeroId=${mensajeroId}`, { headers })
+      .then(r => setArqueos(r.data?.arqueos || []))
+      .catch(e => setError(e.response?.data?.error || 'Error al cargar el histórico'));
+  }, [mensajeroId]);
+
+  const fmtFechaHora = (iso) => {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString('es-CO', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+    } catch { return iso; }
+  };
+
+  return (
+    <div style={s.overlay}>
+      <div style={{ ...s.modal, maxWidth: 620 }}>
+        <div style={s.modalHeader}>
+          <div>
+            <h3 style={s.modalTitulo}>📋 Histórico de cuadres — {mensajeroNombre}</h3>
+            <p style={{ margin: '2px 0 0', fontSize: 13, color: '#6b7280' }}>Arqueos firmados e inmutables</p>
+          </div>
+          <button onClick={onCerrar} style={s.btnCerrar}>✕</button>
+        </div>
+        <div style={{ ...s.modalBody, maxHeight: '70vh', overflowY: 'auto' }}>
+          {error && <div style={s.alertError}>{error}</div>}
+          {arqueos === null && !error && <div style={{ textAlign: 'center', padding: 30, color: '#9ca3af' }}>Cargando...</div>}
+          {arqueos && arqueos.length === 0 && (
+            <div style={s.empty}><p style={{ fontSize: 40 }}>📭</p><p>Aún no hay cuadres registrados para este mensajero</p></div>
+          )}
+          {arqueos && arqueos.map((a, i) => (
+            <div key={a.id || i} style={{ border: '1px solid #e5e7eb', borderRadius: 10, padding: '12px 14px', marginBottom: 10, background: a.descuadre !== 0 ? '#fffbeb' : '#fff' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 6 }}>
+                <div style={{ fontSize: 13, fontWeight: 700 }}>{fmtFechaHora(a.fecha)}</div>
+                <div style={{ fontSize: 12, color: '#6b7280' }}>Autorizó: {a.autorizadoPorEmail || '—'}</div>
+              </div>
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 8, fontSize: 13 }}>
+                <span>Esperado: <strong>{fmt(a.efectivoEsperado)}</strong></span>
+                <span>Recibido: <strong>{fmt(a.efectivoRecibido)}</strong></span>
+                {a.virtualIngresado > 0 && <span style={{ color: '#1d4ed8' }}>Virtual: {fmt(a.virtualIngresado)}</span>}
+              </div>
+              {a.descuadre !== 0 && (
+                <div style={{ marginTop: 8, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                  background: a.descuadre < 0 ? '#fef2f2' : '#eff6ff',
+                  color: a.descuadre < 0 ? '#dc2626' : '#1d4ed8' }}>
+                  {a.descuadre < 0 ? '⚠️ Faltante' : '↑ Sobrante'} de {fmt(Math.abs(a.descuadre))}
+                  {a.motivoDescuadre ? ` — ${a.motivoDescuadre}` : ''}
+                </div>
+              )}
+              {(a.ordenesCuadradas || []).length > 0 && (
+                <div style={{ marginTop: 8, fontSize: 12, color: '#6b7280' }}>
+                  {a.ordenesCuadradas.length} orden(es): {a.ordenesCuadradas.map(o => o.numeroOrden).join(', ')}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── MODAL CUADRE ─────────────────────────────────────────────────────────────
 const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCerrar }) => {
   const [cuadre, setCuadre]     = useState(null);
@@ -908,20 +1013,39 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
   const [extDevueltos, setExtDevueltos] = useState({});
   const [guardando, setGuardando] = useState(false);
   const [error, setError]       = useState('');
+  // ✅ LOGISTICA-CUADRE-001: monto realmente recibido + motivo si hay descuadre.
+  // Antes se asumía que el mensajero SIEMPRE entregaba el total exacto; ahora
+  // se puede registrar lo que entregó de verdad y queda huella del faltante.
+  const [montoRecibido, setMontoRecibido] = useState('');
+  const [motivoDescuadre, setMotivoDescuadre] = useState('');
 
   useEffect(() => {
     axios.get(`${API}/logistica/cuadre/${mensajeroId}`, { headers })
-      .then(r => setCuadre(r.data))
+      .then(r => {
+        setCuadre(r.data);
+        // Prellenar con lo esperado; el admin ajusta si el mensajero entregó otra cifra
+        setMontoRecibido(String(r.data?.totalAEntregar || 0));
+      })
       .catch(() => setError('Error al cargar cuadre'));
   }, [mensajeroId]);
 
+  const esperado = cuadre?.totalAEntregar || 0;
+  const recibidoNum = Number(montoRecibido) || 0;
+  const descuadre = recibidoNum - esperado; // <0 faltante, >0 sobrante
+  const hayDescuadre = cuadre && Math.abs(descuadre) > 0;
+
   const handleConfirmar = async () => {
     if (pin.length !== 4) return setError('Ingresa el PIN de 4 dígitos');
+    // ✅ Opción (c): si hay descuadre, exigir motivo antes de confirmar
+    if (hayDescuadre && !motivoDescuadre.trim()) {
+      return setError(`Hay un ${descuadre < 0 ? 'faltante' : 'sobrante'} de ${fmt(Math.abs(descuadre))}. Escribe el motivo para dejar constancia.`);
+    }
     setGuardando(true); setError('');
     try {
       await onConfirmar({
         pin,
-        montoRecibido: cuadre?.totalAEntregar || 0,
+        montoRecibido: recibidoNum,
+        motivoDescuadre: motivoDescuadre.trim() || undefined,
         extintoresDevueltos: Object.keys(extDevueltos).filter(k => extDevueltos[k])
       });
     } catch (e) { setError(e.response?.data?.error || 'Error al confirmar cuadre'); }
@@ -1015,6 +1139,35 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                 </div>
               )}
 
+              {/* ✅ LOGISTICA-CUADRE-001: monto realmente recibido + descuadre.
+                  Deja registrar lo que el mensajero entregó de verdad; si no
+                  coincide con lo esperado, exige motivo y queda en el arqueo. */}
+              <div style={{ marginBottom: 14, padding: '12px 14px', background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+                <label style={s.label}>💵 Monto en efectivo recibido</label>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 4 }}>
+                  <input type="number" inputMode="numeric" value={montoRecibido}
+                    onChange={e => setMontoRecibido(e.target.value)}
+                    style={{ ...s.input, width: 160, fontSize: 16, fontWeight: 700 }}
+                    placeholder="0" />
+                  <span style={{ fontSize: 12, color: '#6b7280' }}>Esperado: <strong>{fmt(esperado)}</strong></span>
+                </div>
+                {hayDescuadre && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{
+                      padding: '8px 12px', borderRadius: 8, marginBottom: 8, fontWeight: 700, fontSize: 13,
+                      background: descuadre < 0 ? '#fef2f2' : '#eff6ff',
+                      color: descuadre < 0 ? '#dc2626' : '#1d4ed8',
+                      border: `1px solid ${descuadre < 0 ? '#fecaca' : '#bfdbfe'}`
+                    }}>
+                      {descuadre < 0 ? '⚠️ Faltante' : '↑ Sobrante'} de {fmt(Math.abs(descuadre))}
+                    </div>
+                    <input value={motivoDescuadre} onChange={e => setMotivoDescuadre(e.target.value)}
+                      style={{ ...s.input, width: '100%' }}
+                      placeholder="Motivo del descuadre (obligatorio) — quedará en el arqueo" />
+                  </div>
+                )}
+              </div>
+
               {/* PIN */}
               <div style={{ marginBottom: 14 }}>
                 <label style={s.label}>PIN de autorización *</label>
@@ -1067,6 +1220,7 @@ const GestionLogistica = ({ user }) => {
   const [modalAvanzar, setModalAvanzar] = useState(null);
   const isMobile = useIsMobile(); // ← reactivo, nunca se congela
   const [modalCuadre, setModalCuadre]   = useState(null);
+  const [modalHistorial, setModalHistorial] = useState(null); // ✅ LOGISTICA-CUADRE-001
   const [mostrarNuevaOrden, setMostrarNuevaOrden] = useState(false);
   const [buscarExt, setBuscarExt]       = useState('');
   const [filtroExtEstado, setFiltroExtEstado] = useState('prestado');
@@ -1468,6 +1622,11 @@ const GestionLogistica = ({ user }) => {
                         style={{ padding: '8px 16px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 13 }}>
                         💰 Cuadrar
                       </button>
+                      {/* ✅ LOGISTICA-CUADRE-001: consultar arqueos pasados de este mensajero */}
+                      <button onClick={() => setModalHistorial({ mensajeroId: m.mensajeroId, mensajeroNombre: m.mensajeroNombre })}
+                        style={{ padding: '8px 14px', background: '#f1f5f9', color: '#475569', border: '1px solid #e2e8f0', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 13 }}>
+                        📋 Histórico
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1567,6 +1726,16 @@ const GestionLogistica = ({ user }) => {
           headers={headers}
           onConfirmar={confirmarCuadre}
           onCerrar={() => setModalCuadre(null)}
+        />
+      )}
+
+      {/* ✅ LOGISTICA-CUADRE-001: histórico de arqueos consultable */}
+      {modalHistorial && (
+        <ModalHistorialCuadres
+          mensajeroId={modalHistorial.mensajeroId}
+          mensajeroNombre={modalHistorial.mensajeroNombre}
+          headers={headers}
+          onCerrar={() => setModalHistorial(null)}
         />
       )}
 

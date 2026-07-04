@@ -11,7 +11,7 @@ const { crearVencimientosDeOrden } = require('../services/vencimientosService');
 const ESTADOS = [
   'programada', 'en_ruta_recogida', 'en_taller', 'listo_entregar', 'facturado',
   'despacho', 'en_ruta_entrega', 'entrega_cobranza', 'cuadre_dinero',
-  'reparacion_proceso', 'completada', 'cxc', 'anulada'
+  'reparacion_proceso', 'interna_proceso', 'completada', 'cxc', 'anulada'
 ];
 
 const ESTADO_LABELS = {
@@ -20,6 +20,7 @@ const ESTADO_LABELS = {
   facturado: 'Facturado', despacho: 'Despacho',
   en_ruta_entrega: 'En Ruta Entrega', entrega_cobranza: 'Entrega Cobranza',
   reparacion_proceso: 'Reparación en Proceso', cuadre_dinero: 'Completada',
+  interna_proceso: 'En Proceso', // ✅ INTERNA-FLUJO-001
   completada: 'Completada', cxc: 'Cuenta por Cobrar', anulada: 'Anulada'
 };
 
@@ -162,8 +163,13 @@ const construirFlujo = (lugarAtencion, requiereFactura, tieneEquipoTaller = true
     },
 
     // INTERNA: tarea operativa (vueltas, compras). Sin factura ni cobro.
+    // ✅ INTERNA-FLUJO-001: flujo de 2 pasos. La nota de lo realizado es la
+    // evidencia de que la tarea se hizo (equivalente a la foto de entrega).
+    //   programada → interna_proceso (el mensajero deja la nota) → completada
+    // NUNCA pasa por cuadre_dinero ni cxc: una tarea interna no le cobra a nadie.
     interna: {
-      programada: { siguiente: 'completada', auto: false, accion: 'cerrar_interna' }
+      programada:      { siguiente: 'interna_proceso', auto: false, accion: 'iniciar_interna' },
+      interna_proceso: { siguiente: 'completada',        auto: false, accion: 'cerrar_interna' }
     },
 
     // PRODUCCIÓN: stock de equipos de cambio. Pedro los carga, salen con QR
@@ -569,6 +575,9 @@ router.get('/', authenticate, async (req, res) => {
     }
     if (clienteId)    ordenes = ordenes.filter(o => o.clienteId === clienteId);
     if (mensajeroId)  ordenes = ordenes.filter(o => o.mensajeroId === mensajeroId);
+    // ✅ ORDENES-FILTRO-EMPRESA-001: filtrar por empresa que factura, para
+    // auditar que las órdenes con IVA (ej. Valle SAS 19%) quedaron correctas.
+    if (empresaId)    ordenes = ordenes.filter(o => o.empresaId === empresaId);
     if (fechaDesde) {
       const ms = Date.parse(`${fechaDesde}T05:00:00.000Z`);
       if (!isNaN(ms)) {
@@ -819,7 +828,12 @@ router.post('/', authenticate, async (req, res) => {
       generaCertificado,
       certificadoGenerado: false,
       certificadoUrl: null,
-      lugarAtencion: esProduccion ? 'produccion' : (lugarAtencion || 'domicilio'),
+      // ✅ INTERNA-FLUJO-001: la interna debe fluir como interna, no como
+      // domicilio. Antes se guardaba 'domicilio' y construirFlujo la enviaba
+      // por recogida→taller→cuadre→CxC. Ahora se enruta a su flujo propio.
+      lugarAtencion: esProduccion ? 'produccion'
+                   : (tipoServicio === 'interna' ? 'interna'
+                   : (lugarAtencion || 'domicilio')),
       formaPago: formaPago || '',
       numeroFactura: numeroFactura || '',
       fechaFactura: numeroFactura ? new Date().toISOString() : null,

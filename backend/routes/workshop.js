@@ -339,6 +339,12 @@ router.get('/ordenes', async (req, res) => {
       const data = doc.data();
       // adminId ya filtrado en el query — no necesitamos filtrar aquí
 
+      // ✅ TALLER-REGRESO-001: red de seguridad. Una orden con el taller ya
+      // completado NUNCA debe reaparecer en la lista de taller, aunque por una
+      // inconsistencia de datos su estado siga en 'en_taller'. Esto evita que
+      // una orden ya facturada/pagada se re-procese o re-cobre por error.
+      if (data.tallerCompletado === true) return;
+
       // ✅ NUEVO: Filtrar items SOLO de taller (recarga, mantenimiento, prueba hidrostática)
       // ✅ FIX ORDEN-CAMBIO-003 (2026-07-01): un item marcado como CAMBIO se
       // entrega listo — NO se procesa en taller. En órdenes mixtas (ej: 2
@@ -769,6 +775,21 @@ router.post('/ordenes/:ordenId/completar', async (req, res) => {
         }
         nuevoEstado = estadoCursor;
       }
+    }
+
+    // ✅ TALLER-REGRESO-001: garantía anti-atasco. Si el flujo no encontró un
+    // paso válido (orden mixta, lugarAtencion inesperado), nuevoEstado podría
+    // seguir en 'en_taller' — dejando la orden marcada como completada pero
+    // atascada en taller (el bug de NEURUM). Nunca permitir esa combinación:
+    // si el taller se completó, la orden DEBE avanzar como mínimo a facturado.
+    if (nuevoEstado === 'en_taller' || nuevoEstado === orden.estado) {
+      nuevoEstado = 'facturado';
+      historialExtra.push({
+        estado: nuevoEstado, fecha: ahora,
+        usuarioId: req.user.uid || req.user.id,
+        usuarioNombre: req.user.nombre || req.user.email,
+        notas: 'Avance de seguridad: taller completado sin paso de flujo válido'
+      });
     }
 
     await ordenRef.update({

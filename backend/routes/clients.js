@@ -4,6 +4,17 @@ const { db, admin } = require('../config/firebase');
 const jwt = require('jsonwebtoken');
 const { authenticate, validarTenant } = require('../middleware/auth');
 
+// ✅ DUP-002: normalización telefónica coherente con el resto del dominio
+// comercial (misma regla que comercial.js): 10 dígitos limpios, sin prefijo 57.
+// Evita que el mismo cliente quede con formatos distintos entre módulos y se
+// escape de la detección de duplicados.
+const normalizarCelular = (t) => {
+  if (!t) return null;
+  let d = String(t).replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('57')) d = d.slice(2);
+  return d || null;
+};
+
 // ─── HELPER: auditoría ────────────────────────────────────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = {} }) => {
   try {
@@ -159,18 +170,24 @@ router.post('/', authenticate, async (req, res) => {
     // Nombre siempre en mayúsculas
     const nombreUpper = nombre.toUpperCase().trim();
 
+    // ✅ DUP-002: normalizar teléfono ANTES de validar — así un celular con
+    // prefijo 57 (573105112345) se limpia a 10 dígitos en vez de rechazarse,
+    // y se guarda coherente con la regla de identidad de duplicados.
+    const celularNorm = normalizarCelular(celular);
+    const telefonoNorm = normalizarCelular(telefono);
+
     // Validar NIT solo números
     if (nit && !/^\d+$/.test(nit)) {
       return res.status(400).json({ error: 'El NIT debe contener solo números' });
     }
 
-    // Validar celular solo números
-    if (celular && !/^\d{10}$/.test(celular)) {
+    // Validar celular solo números (ya normalizado a 10 dígitos)
+    if (celularNorm && !/^\d{10}$/.test(celularNorm)) {
       return res.status(400).json({ error: 'El celular debe tener exactamente 10 dígitos' });
     }
 
     // Validar teléfono solo números
-    if (telefono && !/^\d+$/.test(telefono)) {
+    if (telefonoNorm && !/^\d+$/.test(telefonoNorm)) {
       return res.status(400).json({ error: 'El teléfono debe contener solo números' });
     }
 
@@ -243,8 +260,8 @@ router.post('/', authenticate, async (req, res) => {
       nombre: nombreUpper,
       nit: nit ? nit.toString() : '',
       tipoDocumento,
-      telefono: telefono || '',
-      celular: celular || '',
+      telefono: telefonoNorm || '',
+      celular: celularNorm || '',
       emailLegal: emailLegal || '',
       emailsAdicionales: Array.isArray(emailsAdicionales) ? emailsAdicionales.filter(e => e) : [],
       direccionPrincipal: direccionPrincipal || '',
@@ -311,13 +328,27 @@ router.get('/duplicados', authenticate, async (req, res) => {
       .get();
     const clientes = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(c => c.activo !== false);
 
+    // ✅ DUP-002: grupos ya descartados por el admin (falsos positivos:
+    // "son empresas del mismo dueño"). No se vuelven a mostrar.
+    const descSnap = await db.collection('duplicados_descartados')
+      .where('adminId', '==', adminId).get();
+    const gruposDescartados = new Set(descSnap.docs.map(d => d.data().firma));
+
     const normTel = (t) => {
       let d = String(t || '').replace(/\D/g, '');
       if (d.length === 12 && d.startsWith('57')) d = d.slice(2);
       return d || null;
     };
     const normNom = (n) => String(n || '').toUpperCase().trim().replace(/\s+/g, ' ') || null;
+    // Palabras significativas de un nombre (para medir similitud)
+    const palabras = (n) => new Set(normNom(n)?.split(' ').filter(w => w.length >= 3) || []);
+    const compartenPalabra = (a, b) => {
+      const pa = palabras(a), pb = palabras(b);
+      for (const w of pa) if (pb.has(w)) return true;
+      return false;
+    };
 
+    // Agrupar por cada criterio
     const grupos = new Map();
     const agrupar = (clave, c) => {
       if (!clave) return;
@@ -330,20 +361,88 @@ router.get('/duplicados', authenticate, async (req, res) => {
       const t = normTel(c.celular) || normTel(c.telefono);
       if (t) agrupar(`TEL|${emp}|${t}`, c);
       const n = normNom(c.nombre);
-      if (n) agrupar(`NOMBRE|${emp}|${n}`, c);
+      // ✅ DUP-002: el nombre solo agrupa si es COMPLETO (2+ palabras). Antes
+      // "OSCAR" o "GERMAN" a secas generaban falsos grupos con homónimos.
+      if (n && n.split(' ').length >= 2) agrupar(`NOMBRE|${emp}|${n}`, c);
     }
 
-    const resultado = [];
+    // ✅ DUP-002: clasificar cada grupo por nivel de confianza
+    //   🔴 seguro   → mismo NIT, o mismo teléfono + nombres que se parecen
+    //   🟡 revisar  → mismo teléfono con nombres distintos (posible multi-negocio
+    //                 de un mismo dueño: NO es duplicado, solo se muestra por si acaso)
+    const seguros = [];
+    const revisar = [];
     const vistos = new Set();
+
     for (const [clave, mapaC] of grupos) {
       if (mapaC.size < 2) continue;
-      const ids = [...mapaC.keys()].sort().join('|');
-      if (vistos.has(ids)) continue; // mismo grupo ya detectado por otro criterio
-      vistos.add(ids);
-      resultado.push({ criterio: clave.split('|')[0], valor: clave.split('|')[2], clientes: [...mapaC.values()] });
+      const arr = [...mapaC.values()];
+      const ids = arr.map(c => c.id).sort();
+      // Firma estable del grupo (para descarte y dedupe entre criterios)
+      const firma = ids.join('|');
+      if (vistos.has(firma)) continue;
+      vistos.add(firma);
+      if (gruposDescartados.has(firma)) continue; // ✅ ya revisado, es legítimo
+
+      const criterio = clave.split('|')[0];
+      const valor = clave.split('|')[2];
+
+      let nivel;
+      if (criterio === 'NIT' || criterio === 'NOMBRE') {
+        nivel = 'seguro'; // mismo NIT o mismo nombre completo = misma entidad
+      } else {
+        // Criterio TEL: ¿los nombres se parecen entre sí?
+        let algunoSimilar = false;
+        for (let i = 0; i < arr.length && !algunoSimilar; i++) {
+          for (let j = i + 1; j < arr.length; j++) {
+            if (compartenPalabra(arr[i].nombre, arr[j].nombre)) { algunoSimilar = true; break; }
+          }
+        }
+        nivel = algunoSimilar ? 'seguro' : 'revisar';
+      }
+
+      const grupo = {
+        firma, criterio,
+        criterioLabel: criterio === 'TEL' ? 'teléfono' : criterio === 'NIT' ? 'NIT' : 'nombre',
+        valor,
+        clientes: arr
+      };
+      (nivel === 'seguro' ? seguros : revisar).push(grupo);
     }
 
-    res.json({ totalGrupos: resultado.length, grupos: resultado });
+    res.json({
+      totalSeguros: seguros.length,
+      totalRevisar: revisar.length,
+      seguros,   // 🔴 acción requerida
+      revisar    // 🟡 posible multi-negocio (colapsado en la UI)
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ✅ DUP-002: POST /clients/duplicados/descartar — marcar un grupo como
+// falso positivo (empresas legítimas del mismo dueño). No borra ni fusiona
+// nada; solo registra que ese grupo ya fue revisado y no debe reaparecer.
+router.post('/duplicados/descartar', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el administrador puede descartar duplicados' });
+    }
+    const adminId = req.adminId || req.user.uid || req.user.id;
+    const { firma, clienteIds } = req.body;
+    if (!firma || !Array.isArray(clienteIds) || clienteIds.length < 2) {
+      return res.status(400).json({ error: 'Datos insuficientes para descartar el grupo' });
+    }
+    await db.collection('duplicados_descartados').add({
+      adminId,
+      firma,                       // misma firma estable que arma el reporte
+      clienteIds,
+      descartadoPorId: req.user.uid || req.user.id,
+      descartadoPorEmail: req.user.email,
+      fecha: new Date().toISOString()
+    });
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -253,6 +253,27 @@ const GestionClientes = ({ user, empresas = [] }) => {
 
   // ✅ CLIENTES-DUP-001: reporte de duplicados bajo demanda (solo admin, un clic)
   const [duplicados, setDuplicados] = useState(null);
+  // ✅ DUP-002: acordeón de posibles multi-negocio (colapsado) + descarte
+  const [verMultinegocio, setVerMultinegocio] = useState(false);
+  const descartarGrupo = async (grupo) => {
+    if (!window.confirm('¿Confirmas que estos son clientes legítimos (empresas del mismo dueño) y NO duplicados? No se volverán a mostrar en el reporte.')) return;
+    try {
+      await axios.post(API + '/clients/duplicados/descartar', {
+        firma: grupo.firma,
+        clienteIds: (grupo.clientes || []).map(c => c.id)
+      }, { headers });
+      // Quitarlo de la vista al instante
+      setDuplicados(prev => prev ? {
+        ...prev,
+        seguros: (prev.seguros || []).filter(g => g.firma !== grupo.firma),
+        revisar: (prev.revisar || []).filter(g => g.firma !== grupo.firma),
+        totalSeguros: (prev.seguros || []).filter(g => g.firma !== grupo.firma).length,
+        totalRevisar: (prev.revisar || []).filter(g => g.firma !== grupo.firma).length,
+      } : prev);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error al descartar el grupo');
+    }
+  };
   const [buscandoDup, setBuscandoDup] = useState(false);
   const detectarDuplicados = async () => {
     setBuscandoDup(true);
@@ -642,36 +663,75 @@ const GestionClientes = ({ user, empresas = [] }) => {
       {error && <div style={s.alertError}>{error}</div>}
       {exito && <div style={s.alertExito}>{exito}</div>}
 
-      {/* ✅ CLIENTES-DUP-001: resultado del análisis de duplicados */}
-      {duplicados && (
-        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '14px 18px', marginBottom: 14 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: duplicados.totalGrupos > 0 ? 10 : 0 }}>
-            <strong style={{ fontSize: 14 }}>
-              {duplicados.totalGrupos > 0
-                ? `⚠️ ${duplicados.totalGrupos} grupo(s) de posibles duplicados`
-                : '✅ No se detectaron clientes duplicados'}
-            </strong>
-            <button onClick={() => setDuplicados(null)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 16, color: '#9ca3af' }}>✕</button>
-          </div>
-          {(duplicados.grupos || []).map((g, gi) => (
-            <div key={gi} style={{ border: '1px solid #fde68a', background: '#fffbeb', borderRadius: 8, padding: '8px 12px', marginBottom: 6, fontSize: 13 }}>
-              <div style={{ fontWeight: 700, color: '#b45309', marginBottom: 4 }}>
-                Mismo {g.criterio === 'TEL' ? 'teléfono' : g.criterio === 'NIT' ? 'NIT' : 'nombre'}: {g.valor}
+      {/* ✅ DUP-002: reporte de duplicados con niveles de confianza */}
+      {duplicados && (() => {
+        const totalSeg = duplicados.totalSeguros ?? (duplicados.seguros || []).length;
+        const totalRev = duplicados.totalRevisar ?? (duplicados.revisar || []).length;
+        const TarjetaGrupo = ({ g, color, bg, border }) => (
+          <div style={{ border: `1px solid ${border}`, background: bg, borderRadius: 8, padding: '10px 12px', marginBottom: 8, fontSize: 13 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+              <div style={{ fontWeight: 700, color, marginBottom: 4 }}>
+                Mismo {g.criterioLabel}: {g.valor}
               </div>
-              {(g.clientes || []).map((c, ci) => (
-                <div key={ci} style={{ color: '#374151' }}>
-                  • {c.nombre} {c.nit ? `— NIT ${c.nit}` : ''} {c.celular ? `— ${c.celular}` : (c.telefono ? `— ${c.telefono}` : '')} <span style={{ color: '#9ca3af' }}>({c.empresaNombre || 'sin empresa'})</span>
-                </div>
-              ))}
+              <button onClick={() => descartarGrupo(g)}
+                style={{ border: '1px solid #d1d5db', background: '#fff', color: '#475569', borderRadius: 6, padding: '3px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                title="Marcar como clientes legítimos (mismo dueño) — no volver a mostrar">
+                ✓ No es duplicado
+              </button>
             </div>
-          ))}
-          {duplicados.totalGrupos > 0 && (
-            <p style={{ fontSize: 12, color: '#6b7280', margin: '8px 0 0' }}>
-              La fusión de duplicados llegará en la siguiente actualización. Por ahora puedes revisar cada grupo y desactivar manualmente el repetido si no tiene órdenes asociadas.
-            </p>
-          )}
-        </div>
-      )}
+            {(g.clientes || []).map((c, ci) => (
+              <div key={ci} style={{ color: '#374151' }}>
+                • {c.nombre} {c.nit ? `— NIT ${c.nit}` : ''} {c.celular ? `— ${c.celular}` : (c.telefono ? `— ${c.telefono}` : '')} <span style={{ color: '#9ca3af' }}>({c.empresaNombre || 'sin empresa'})</span>
+              </div>
+            ))}
+          </div>
+        );
+        return (
+          <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: '14px 18px', marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: (totalSeg + totalRev) > 0 ? 12 : 0 }}>
+              <strong style={{ fontSize: 14 }}>
+                {(totalSeg + totalRev) === 0
+                  ? '✅ No se detectaron clientes duplicados'
+                  : `Análisis de duplicados`}
+              </strong>
+              <button onClick={() => setDuplicados(null)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 16, color: '#9ca3af' }}>✕</button>
+            </div>
+
+            {/* 🔴 Duplicados seguros — acción requerida */}
+            {totalSeg > 0 && (
+              <div style={{ marginBottom: totalRev > 0 ? 14 : 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#dc2626', marginBottom: 8 }}>
+                  🔴 Duplicados probables ({totalSeg}) — mismo NIT o mismo cliente repetido
+                </div>
+                {(duplicados.seguros || []).map((g, i) => (
+                  <TarjetaGrupo key={i} g={g} color="#b91c1c" bg="#fef2f2" border="#fecaca" />
+                ))}
+              </div>
+            )}
+
+            {/* 🟡 Posible multi-negocio — colapsado, NO son duplicados */}
+            {totalRev > 0 && (
+              <div>
+                <button onClick={() => setVerMultinegocio(v => !v)}
+                  style={{ width: '100%', textAlign: 'left', border: '1px solid #fde68a', background: '#fffbeb', borderRadius: 8, padding: '8px 12px', fontSize: 13, fontWeight: 700, color: '#b45309', cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }}>
+                  <span>🟡 Posibles empresas del mismo dueño ({totalRev}) — mismo teléfono, nombres distintos</span>
+                  <span>{verMultinegocio ? '▲' : '▼'}</span>
+                </button>
+                {verMultinegocio && (
+                  <div style={{ marginTop: 8 }}>
+                    <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 8px' }}>
+                      Estos NO son duplicados: comparten teléfono pero son clientes distintos (un dueño con varias empresas). Si confirmas que es así, descártalos para no volver a verlos.
+                    </p>
+                    {(duplicados.revisar || []).map((g, i) => (
+                      <TarjetaGrupo key={i} g={g} color="#b45309" bg="#fffbeb" border="#fde68a" />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── FILTROS ── */}
       <div style={s.filtros}>

@@ -51,6 +51,23 @@ router.get('/', async (req, res) => {
       db.collection('egresos').where('userId', '==', userId).where('estado', '==', 'PENDIENTE').get()
     ]);
 
+    // ✅ CXP-IVA-002: detectar dinámicamente qué empresa(s) son responsables de
+    // IVA (iva > 0). No se fija a una empresa concreta — otro suscriptor podría
+    // tener varias responsables. El IVA generado solo cuenta de estas empresas.
+    let empresasResponsablesIVA = [];
+    try {
+      const snapEmp = await db.collection('companies').where('adminId', '==', userId).get();
+      empresasResponsablesIVA = snapEmp.docs
+        .map(d => ({ id: d.id, name: d.data().name, nit: d.data().nit, iva: Number(d.data().iva) || 0 }))
+        .filter(e => e.iva > 0);
+    } catch (e) { /* si falla, el informe sale sin encabezado de empresa */ }
+    const idsResponsables = new Set(empresasResponsablesIVA.map(e => e.id));
+
+    // ✅ CXP-IVA-002: acumuladores del INFORME agrupado
+    const generadoPorCliente = {};   // clienteNombre → { nombre, nit, facturas[], subtotalIva, subtotalBase }
+    const descontablePorProveedor = {}; // proveedor → { nombre, facturas[], subtotalIva, subtotalBase }
+    let ivaDescontableFueraPeriodo = 0; // diagnóstico del descontable $0
+
     const proveedores = {};
     let totalIvaDescontable = 0;
     let totalRetefuente = 0;
@@ -65,7 +82,28 @@ router.get('/', async (req, res) => {
       if (e.tipo === 'retencion') return;
 
       // ✅ CXP-IVA-001: IVA descontable solo del período de declaración
-      if (e.ivaVal > 0 && enPeriodo(e.fecha)) totalIvaDescontable += Number(e.ivaVal) || 0;
+      if (e.ivaVal > 0 && enPeriodo(e.fecha)) {
+        totalIvaDescontable += Number(e.ivaVal) || 0;
+        // ✅ CXP-IVA-002: agrupar por proveedor para el informe
+        const prov = (e.proveedor || 'Sin proveedor').trim() || 'Sin proveedor';
+        if (!descontablePorProveedor[prov]) {
+          descontablePorProveedor[prov] = { nombre: prov, facturas: [], subtotalIva: 0, subtotalBase: 0 };
+        }
+        const baseEgreso = (Number(e.monto) || 0) - (Number(e.ivaVal) || 0);
+        descontablePorProveedor[prov].facturas.push({
+          concepto: e.concepto || '',
+          numeroFactura: e.numeroFactura || e.factura || '',
+          fecha: (e.fecha || '').slice(0, 10),
+          base: baseEgreso > 0 ? baseEgreso : (Number(e.monto) || 0),
+          iva: Number(e.ivaVal) || 0
+        });
+        descontablePorProveedor[prov].subtotalIva += Number(e.ivaVal) || 0;
+        descontablePorProveedor[prov].subtotalBase += baseEgreso > 0 ? baseEgreso : 0;
+      } else if (e.ivaVal > 0 && !enPeriodo(e.fecha)) {
+        // ✅ CXP-IVA-002: diagnóstico — hay IVA de compras pero cae fuera del
+        // período (o sin fecha válida). Explica por qué el descontable da bajo/$0.
+        ivaDescontableFueraPeriodo += Number(e.ivaVal) || 0;
+      }
       // Retefuente pendiente de pago: no depende del período (es deuda viva)
       if (e.retenVal > 0 && e.estado !== 'PAGADO') totalRetefuente += Number(e.retenVal) || 0;
     });
@@ -107,7 +145,7 @@ router.get('/', async (req, res) => {
     // .select() — una sola lectura liviana en vez de dos completas.
     const snapOrdenes = await db.collection('orders')
       .where('adminId', '==', userId)
-      .select('numeroFactura', 'ivaValor', 'retencionPracticada', 'estado',
+      .select('numeroFactura', 'ivaValor', 'subtotal', 'total', 'empresaId', 'retencionPracticada', 'estado',
               'fechaFactura', 'fechaPago', 'fechaProgramada', 'numeroOrden', 'clienteNombre')
       .get();
 
@@ -121,7 +159,28 @@ router.get('/', async (req, res) => {
       const facturada = typeof o.numeroFactura === 'string' && o.numeroFactura.trim().length > 0;
 
       if (facturada && enPeriodo(fechaCausacion)) {
-        ivaGenerado += o.ivaValor || 0;
+        // ✅ CXP-IVA-002: el IVA generado solo cuenta de las empresas
+        // responsables de IVA. Si no hay empresas responsables detectadas,
+        // se cuenta todo (compatibilidad / tenant sin empresas configuradas).
+        const esResponsable = idsResponsables.size === 0 || idsResponsables.has(o.empresaId);
+        if (esResponsable) {
+          ivaGenerado += o.ivaValor || 0;
+          // Agrupar por cliente para el informe
+          const cli = (o.clienteNombre || 'Sin cliente').trim() || 'Sin cliente';
+          if (!generadoPorCliente[cli]) {
+            generadoPorCliente[cli] = { nombre: cli, facturas: [], subtotalIva: 0, subtotalBase: 0 };
+          }
+          const baseOrden = Number(o.subtotal) || ((Number(o.total) || 0) - (Number(o.ivaValor) || 0));
+          generadoPorCliente[cli].facturas.push({
+            numeroOrden: o.numeroOrden || '',
+            numeroFactura: o.numeroFactura,
+            fecha: (fechaCausacion || '').slice(0, 10),
+            base: baseOrden,
+            iva: Number(o.ivaValor) || 0
+          });
+          generadoPorCliente[cli].subtotalIva += Number(o.ivaValor) || 0;
+          generadoPorCliente[cli].subtotalBase += baseOrden;
+        }
       }
       // Retenciones practicadas por clientes — mismo período
       if ((o.retencionPracticada || 0) > 0 && enPeriodo(o.fechaPago || fechaCausacion)) {
@@ -136,6 +195,32 @@ router.get('/', async (req, res) => {
 
     const ivaNeto = ivaGenerado - totalIvaDescontable;
 
+    // ✅ CXP-IVA-002: INFORME FISCAL DE IVA — estructura agrupada y auditable.
+    // Ordena cada grupo por IVA descendente (los más relevantes primero).
+    const ordenarPorIva = (obj) => Object.values(obj)
+      .map(g => ({ ...g, facturas: g.facturas.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')) }))
+      .sort((a, b) => b.subtotalIva - a.subtotalIva);
+
+    const informe = {
+      periodo: { desde, hasta },
+      // Encabezado: empresa(s) responsable(s) de IVA
+      empresasResponsables: empresasResponsablesIVA.map(e => ({ name: e.name, nit: e.nit, iva: e.iva })),
+      resumen: {
+        ivaGenerado,
+        ivaDescontable: totalIvaDescontable,
+        ivaNeto,
+        ivaFavor: ivaNeto < 0
+      },
+      generado: ordenarPorIva(generadoPorCliente),      // ventas por cliente
+      descontable: ordenarPorIva(descontablePorProveedor), // compras por proveedor
+      // Diagnóstico: por qué el descontable puede verse bajo/$0
+      diagnostico: {
+        ivaDescontableFueraPeriodo,
+        hayComprasFueraPeriodo: ivaDescontableFueraPeriodo > 0,
+        sinComprasConIva: totalIvaDescontable === 0 && ivaDescontableFueraPeriodo === 0
+      }
+    };
+
     res.json({
       periodo: { desde, hasta }, // ✅ CXP-IVA-001
       proveedores: Object.values(proveedores),
@@ -146,6 +231,7 @@ router.get('/', async (req, res) => {
         renta: totalRenta,
         retencionesClientes
       },
+      informe, // ✅ CXP-IVA-002
       totales: {
         proveedores: Object.values(proveedores).reduce((s, p) => s + p.totalPendiente, 0),
         impuestos: Math.max(ivaNeto, 0) + totalRetefuente + totalRenta

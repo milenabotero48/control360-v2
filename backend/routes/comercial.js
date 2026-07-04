@@ -82,12 +82,31 @@ const siguienteDiaHabil = (fechaStr) => {
   return proximoDiaHabil(sumarDias(fechaStr, 1));
 };
 
+// ✅ DUP-002: normalización telefónica UNIFICADA — fuente única de verdad para
+// todo el dominio comercial (importación, conversión, gestión). Regla:
+//   - Celular colombiano válido = exactamente 10 dígitos empezando en 3.
+//   - Se ELIMINA el prefijo 57 (antes se AGREGABA, causando que el mismo
+//     cliente quedara como 3105... en clientes y 573105... en prospectos,
+//     y los duplicados nunca casaran).
+//   - Devuelve { tel, valido }: tel siempre a 10 dígitos limpios cuando se
+//     puede; valido=false marca teléfonos dudosos (para la bandera "por
+//     verificar" en importación, en vez de guardar basura o perder el dato).
+const normalizarTelefonoInfo = (telefono) => {
+  if (!telefono) return { tel: null, valido: false };
+  let t = String(telefono).replace(/[\s\-().+]/g, '').replace(/\D/g, '');
+  // Quitar prefijo país si viene (57 + 10 dígitos = 12)
+  if (t.length === 12 && t.startsWith('57')) t = t.slice(2);
+  const valido = /^3\d{9}$/.test(t); // celular CO: 10 dígitos, empieza en 3
+  // Si no es válido pero hay algo, se conserva el dato crudo (recortado) para
+  // que la comercial lo pueda ver y corregir — nunca se pierde el prospecto.
+  return { tel: t || null, valido };
+};
+
+// Compatibilidad: las llamadas existentes esperan un string (o null).
+// Devuelve el teléfono a 10 dígitos si es válido; si no, el dato crudo.
 const normalizarTelefono = (telefono) => {
-  if (!telefono) return null;
-  let t = String(telefono).replace(/[\s\-\(\)\+\.]/g, '');
-  if (t.startsWith('57') && t.length === 12) return t;
-  if (t.length === 10 && t.startsWith('3')) return '57' + t;
-  return t.length >= 10 ? t : null;
+  const { tel } = normalizarTelefonoInfo(telefono);
+  return tel;
 };
 
 const ESTADOS = ['NUEVO', 'EN_GESTION', 'REPROGRAMADO', 'CONVERTIDO', 'DESCARTADO', 'SIN_CONTACTO', 'NUMERO_ERRADO'];
@@ -196,16 +215,21 @@ router.post('/prospectos/importar', async (req, res) => {
     const existentesSnap = await db.collection('prospectos').where('adminId', '==', adminId).get();
     const telefonosExistentes = new Set(existentesSnap.docs.map(d => d.data().telefono));
 
-    const resultado = { creados: 0, duplicados: 0, errores: [] };
+    const resultado = { creados: 0, duplicados: 0, porVerificar: 0, errores: [] };
     let batch = db.batch();
     let ops = 0;
 
     for (let i = 0; i < filas.length; i++) {
       const f = filas[i];
       const nombre = String(f.nombre || f.empresa || '').trim();
-      const tel = normalizarTelefono(f.telefono);
+      // ✅ DUP-002 (opción b): un teléfono inválido (>10 díg, sin 3 inicial, etc.)
+      // NO descarta el prospecto — es una oportunidad de venta. Entra con el
+      // dato crudo y la bandera telefonoPorVerificar para que la comercial lo
+      // corrija en la primera gestión. Solo se rechaza si NO hay nombre.
+      const { tel, valido } = normalizarTelefonoInfo(f.telefono);
 
-      if (!nombre || !tel) { resultado.errores.push({ fila: i + 2, error: 'Falta nombre o teléfono válido' }); continue; }
+      if (!nombre) { resultado.errores.push({ fila: i + 2, error: 'Falta el nombre' }); continue; }
+      if (!tel) { resultado.errores.push({ fila: i + 2, error: 'Falta el teléfono' }); continue; }
       if (telefonosExistentes.has(tel)) { resultado.duplicados++; continue; }
       telefonosExistentes.add(tel);
 
@@ -214,6 +238,7 @@ router.post('/prospectos/importar', async (req, res) => {
         adminId, nombre,
         empresa: f.empresa || null,
         telefono: tel,
+        telefonoPorVerificar: !valido, // ✅ DUP-002: bandera ☎️ por verificar
         sucursal: f.sucursal || null,
         origen: 'importacion',
         basePeriodo, // ✅ COMERCIAL-BASE-001
@@ -229,6 +254,7 @@ router.post('/prospectos/importar', async (req, res) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       ops++; resultado.creados++;
+      if (!valido) resultado.porVerificar++; // ✅ DUP-002
       if (ops >= 400) { await batch.commit(); batch = db.batch(); ops = 0; }
     }
     if (ops > 0) await batch.commit();
@@ -558,8 +584,11 @@ router.post('/prospectos/:id/convertir', async (req, res) => {
         nombre: nombreFinal || String(p.nombre || '').toUpperCase().trim(),
         tipoDocumento: 'NIT',
         nit: nitFinal,
-        celular: p.telefono,
-        telefono: p.telefono,
+        // ✅ DUP-002: normalizar al convertir — un prospecto viejo pudo quedar
+        // guardado con 57; el cliente debe nacer con 10 dígitos limpios para
+        // que coincida con la regla de identidad y no genere un falso duplicado.
+        celular: normalizarTelefono(p.telefono),
+        telefono: normalizarTelefono(p.telefono),
         emailLegal: email || null,
         emailsAdicionales: [],
         direccionPrincipal: direccion || null,

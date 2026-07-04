@@ -13,6 +13,9 @@ const GestionCxP = ({ user }) => {
   const [formasPagoConfig, setFormasPagoConfig] = useState([]);
   const [tab, setTab]             = useState('proveedores');
   const [modalPago, setModalPago] = useState(null);
+  // ✅ CXP-IVA-002: control de grupos expandidos del informe de IVA
+  const [grupoExpandido, setGrupoExpandido] = useState({});
+  const toggleGrupo = (k) => setGrupoExpandido(p => ({ ...p, [k]: !p[k] }));
   const [formPago, setFormPago]   = useState({ formaPago: '', cajaId: '', cajaLabel: '', fechaPago: new Date().toISOString().split('T')[0] });
   const [montoAbono, setMontoAbono] = useState('');
   const [verAbonos, setVerAbonos] = useState(null); // egresoId del que se muestran los abonos
@@ -115,6 +118,52 @@ const GestionCxP = ({ user }) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url;
     a.download = `cxp_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+  };
+
+  // ✅ CXP-IVA-002: informe fiscal de IVA exportable (imprimir / guardar PDF).
+  // Documento presentable — soporte de declaración ante la DIAN.
+  const imprimirInforme = (inf, per) => {
+    if (!inf) return;
+    const filasGrupo = (grupos, colorIva) => grupos.map(g => `
+      <tr style="background:#f1f5f9"><td colspan="3" style="padding:8px 12px;font-weight:700">${g.nombre}</td><td style="padding:8px 12px;text-align:right;font-weight:800;color:${colorIva}">${fmt(g.subtotalIva)}</td></tr>
+      ${g.facturas.map(f => `<tr>
+        <td style="padding:6px 12px;padding-left:24px">${f.numeroFactura || f.concepto || ''} ${f.numeroOrden ? `<span style="color:#94a3b8">${f.numeroOrden}</span>` : ''}</td>
+        <td style="padding:6px 12px;color:#64748b">${f.fecha || ''}</td>
+        <td style="padding:6px 12px;text-align:right;color:#64748b">${fmt(f.base)}</td>
+        <td style="padding:6px 12px;text-align:right">${fmt(f.iva)}</td>
+      </tr>`).join('')}
+    `).join('');
+
+    const encabezadoEmp = (inf.empresasResponsables || []).map(e => `${e.name} · NIT ${e.nit} · Responsable de IVA (${e.iva}%)`).join('<br/>') || 'Consolidado del período';
+
+    const win = window.open('', '_blank');
+    win.document.write(`
+      <html><head><title>Informe IVA ${per.label}</title>
+      <style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#1e293b;margin:0;padding:32px;font-size:13px}
+      table{width:100%;border-collapse:collapse}th{text-align:left;padding:6px 12px;color:#94a3b8;font-size:11px;border-bottom:2px solid #e2e8f0}</style>
+      </head><body>
+        <div style="border-bottom:3px solid #1e293b;padding-bottom:16px;margin-bottom:20px">
+          <div style="font-size:11px;letter-spacing:1px;color:#7c3aed;font-weight:700">CONTROL360 · INFORME DE IVA</div>
+          <h1 style="margin:4px 0;font-size:24px">Declaración de IVA</h1>
+          <div style="color:#475569">${encabezadoEmp}</div>
+          <div style="color:#475569;margin-top:4px">Período: <strong>${per.label}</strong></div>
+        </div>
+        <table style="margin-bottom:24px">
+          <tr><td style="padding:8px 12px">IVA generado (ventas)</td><td style="padding:8px 12px;text-align:right;font-weight:700;color:#dc2626">${fmt(inf.resumen.ivaGenerado)}</td></tr>
+          <tr><td style="padding:8px 12px">IVA descontable (compras)</td><td style="padding:8px 12px;text-align:right;font-weight:700;color:#16a34a">(${fmt(inf.resumen.ivaDescontable)})</td></tr>
+          <tr style="border-top:2px solid #1e293b"><td style="padding:10px 12px;font-weight:800;font-size:15px">IVA NETO A ${inf.resumen.ivaFavor ? 'FAVOR' : 'PAGAR'}</td><td style="padding:10px 12px;text-align:right;font-weight:800;font-size:16px;color:${inf.resumen.ivaFavor ? '#16a34a' : '#dc2626'}">${fmt(Math.abs(inf.resumen.ivaNeto))}</td></tr>
+        </table>
+        <h2 style="font-size:15px;color:#dc2626;border-bottom:1px solid #e2e8f0;padding-bottom:6px">IVA Generado · Ventas por cliente</h2>
+        <table style="margin-bottom:24px"><thead><tr><th>Factura</th><th>Fecha</th><th style="text-align:right">Base</th><th style="text-align:right">IVA</th></tr></thead>
+        <tbody>${filasGrupo(inf.generado || [], '#dc2626') || '<tr><td colspan="4" style="padding:12px;color:#94a3b8">Sin ventas con IVA</td></tr>'}</tbody></table>
+        <h2 style="font-size:15px;color:#16a34a;border-bottom:1px solid #e2e8f0;padding-bottom:6px">IVA Descontable · Compras por proveedor</h2>
+        <table><thead><tr><th>Factura / Concepto</th><th>Fecha</th><th style="text-align:right">Base</th><th style="text-align:right">IVA</th></tr></thead>
+        <tbody>${filasGrupo(inf.descontable || [], '#16a34a') || '<tr><td colspan="4" style="padding:12px;color:#94a3b8">Sin compras con IVA</td></tr>'}</tbody></table>
+        <div style="margin-top:32px;color:#94a3b8;font-size:11px;text-align:center">Generado por Control360 · ${new Date().toLocaleString('es-CO')}</div>
+      </body></html>
+    `);
+    win.document.close();
+    win.print();
   };
 
   const imprimirResumen = () => {
@@ -268,6 +317,139 @@ const GestionCxP = ({ user }) => {
               </div>
             </div>
           </div>
+
+          {/* ═══ ✅ CXP-IVA-002: INFORME FISCAL DE IVA (premium, auditable) ═══ */}
+          {data?.informe && (
+            <div style={{ border: '1px solid #e2e8f0', borderRadius: 16, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+              {/* Encabezado del informe */}
+              <div style={{ background: 'linear-gradient(135deg, #1e293b, #334155)', color: '#fff', padding: '20px 24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1, color: '#94a3b8', textTransform: 'uppercase' }}>Control360 · Informe de IVA</div>
+                    <h2 style={{ margin: '4px 0 2px', fontSize: 20, fontWeight: 800 }}>Declaración de IVA</h2>
+                    {(data.informe.empresasResponsables || []).map((e, i) => (
+                      <div key={i} style={{ fontSize: 13, color: '#cbd5e1' }}>{e.name} · NIT {e.nit} · Responsable de IVA ({e.iva}%)</div>
+                    ))}
+                    {(data.informe.empresasResponsables || []).length === 0 && (
+                      <div style={{ fontSize: 13, color: '#cbd5e1' }}>Consolidado del período</div>
+                    )}
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontSize: 11, color: '#94a3b8' }}>PERÍODO</div>
+                    <div style={{ fontSize: 15, fontWeight: 700 }}>{periodo.label}</div>
+                    <button onClick={() => imprimirInforme(data.informe, periodo)}
+                      style={{ marginTop: 8, background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 14px', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                      📄 Exportar informe
+                    </button>
+                  </div>
+                </div>
+                {/* Resumen destacado */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginTop: 18 }}>
+                  <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: 10, padding: '12px 14px' }}>
+                    <div style={{ fontSize: 11, color: '#94a3b8' }}>IVA GENERADO (ventas)</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: '#fca5a5' }}>{fmt(data.informe.resumen.ivaGenerado)}</div>
+                  </div>
+                  <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: 10, padding: '12px 14px' }}>
+                    <div style={{ fontSize: 11, color: '#94a3b8' }}>IVA DESCONTABLE (compras)</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: '#86efac' }}>({fmt(data.informe.resumen.ivaDescontable)})</div>
+                  </div>
+                  <div style={{ background: data.informe.resumen.ivaFavor ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)', borderRadius: 10, padding: '12px 14px', border: `1px solid ${data.informe.resumen.ivaFavor ? '#22c55e' : '#ef4444'}` }}>
+                    <div style={{ fontSize: 11, color: '#e2e8f0' }}>IVA NETO {data.informe.resumen.ivaFavor ? 'A FAVOR' : 'A PAGAR'}</div>
+                    <div style={{ fontSize: 22, fontWeight: 800 }}>{fmt(Math.abs(data.informe.resumen.ivaNeto))}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Diagnóstico del descontable */}
+              {data.informe.diagnostico?.hayComprasFueraPeriodo && (
+                <div style={{ background: '#fffbeb', borderBottom: '1px solid #fde68a', padding: '10px 24px', fontSize: 13, color: '#b45309' }}>
+                  ⚠️ Hay <strong>{fmt(data.informe.diagnostico.ivaDescontableFueraPeriodo)}</strong> en IVA de compras registradas <strong>fuera de este período o sin fecha válida</strong>. Revisa las fechas de esos egresos si deberían contar aquí.
+                </div>
+              )}
+              {data.informe.diagnostico?.sinComprasConIva && (
+                <div style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0', padding: '10px 24px', fontSize: 13, color: '#64748b' }}>
+                  ℹ️ No hay compras con IVA registradas en el período. Si compraste con IVA, verifica que los egresos tengan el IVA discriminado.
+                </div>
+              )}
+
+              {/* Cuerpo: dos columnas — generado y descontable */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 0 }}>
+                {/* IVA GENERADO por cliente */}
+                <div style={{ padding: '18px 24px', borderBottom: '1px solid #f1f5f9' }}>
+                  <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 800, color: '#dc2626' }}>▸ IVA Generado · Ventas por cliente</h3>
+                  {(data.informe.generado || []).length === 0 && <p style={{ fontSize: 13, color: '#94a3b8', margin: 0 }}>Sin ventas con IVA en el período.</p>}
+                  {(data.informe.generado || []).map((g, i) => {
+                    const k = `gen-${i}`;
+                    return (
+                      <div key={k} style={{ marginBottom: 8, border: '1px solid #f1f5f9', borderRadius: 10, overflow: 'hidden' }}>
+                        <button onClick={() => toggleGrupo(k)} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: '#fafafa', border: 'none', cursor: 'pointer' }}>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: '#334155' }}>{grupoExpandido[k] ? '▾' : '▸'} {g.nombre}</span>
+                          <span style={{ fontWeight: 800, fontSize: 13, color: '#dc2626' }}>{fmt(g.subtotalIva)}</span>
+                        </button>
+                        {grupoExpandido[k] && (
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                            <thead><tr style={{ background: '#fff', color: '#94a3b8' }}>
+                              <th style={{ textAlign: 'left', padding: '6px 14px', fontWeight: 600 }}>Factura</th>
+                              <th style={{ textAlign: 'left', padding: '6px', fontWeight: 600 }}>Fecha</th>
+                              <th style={{ textAlign: 'right', padding: '6px', fontWeight: 600 }}>Base</th>
+                              <th style={{ textAlign: 'right', padding: '6px 14px', fontWeight: 600 }}>IVA</th>
+                            </tr></thead>
+                            <tbody>
+                              {g.facturas.map((f, fi) => (
+                                <tr key={fi} style={{ borderTop: '1px solid #f8fafc' }}>
+                                  <td style={{ padding: '6px 14px' }}>{f.numeroFactura} <span style={{ color: '#cbd5e1' }}>{f.numeroOrden}</span></td>
+                                  <td style={{ padding: '6px', color: '#64748b' }}>{f.fecha}</td>
+                                  <td style={{ padding: '6px', textAlign: 'right', color: '#64748b' }}>{fmt(f.base)}</td>
+                                  <td style={{ padding: '6px 14px', textAlign: 'right', fontWeight: 700 }}>{fmt(f.iva)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* IVA DESCONTABLE por proveedor */}
+                <div style={{ padding: '18px 24px' }}>
+                  <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 800, color: '#16a34a' }}>▸ IVA Descontable · Compras por proveedor</h3>
+                  {(data.informe.descontable || []).length === 0 && <p style={{ fontSize: 13, color: '#94a3b8', margin: 0 }}>Sin compras con IVA en el período.</p>}
+                  {(data.informe.descontable || []).map((g, i) => {
+                    const k = `desc-${i}`;
+                    return (
+                      <div key={k} style={{ marginBottom: 8, border: '1px solid #f1f5f9', borderRadius: 10, overflow: 'hidden' }}>
+                        <button onClick={() => toggleGrupo(k)} style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: '#fafafa', border: 'none', cursor: 'pointer' }}>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: '#334155' }}>{grupoExpandido[k] ? '▾' : '▸'} {g.nombre}</span>
+                          <span style={{ fontWeight: 800, fontSize: 13, color: '#16a34a' }}>{fmt(g.subtotalIva)}</span>
+                        </button>
+                        {grupoExpandido[k] && (
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                            <thead><tr style={{ background: '#fff', color: '#94a3b8' }}>
+                              <th style={{ textAlign: 'left', padding: '6px 14px', fontWeight: 600 }}>Factura / Concepto</th>
+                              <th style={{ textAlign: 'left', padding: '6px', fontWeight: 600 }}>Fecha</th>
+                              <th style={{ textAlign: 'right', padding: '6px', fontWeight: 600 }}>Base</th>
+                              <th style={{ textAlign: 'right', padding: '6px 14px', fontWeight: 600 }}>IVA</th>
+                            </tr></thead>
+                            <tbody>
+                              {g.facturas.map((f, fi) => (
+                                <tr key={fi} style={{ borderTop: '1px solid #f8fafc' }}>
+                                  <td style={{ padding: '6px 14px' }}>{f.numeroFactura || f.concepto}</td>
+                                  <td style={{ padding: '6px', color: '#64748b' }}>{f.fecha}</td>
+                                  <td style={{ padding: '6px', textAlign: 'right', color: '#64748b' }}>{fmt(f.base)}</td>
+                                  <td style={{ padding: '6px 14px', textAlign: 'right', fontWeight: 700, color: '#16a34a' }}>{fmt(f.iva)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Retefuente */}
           <div style={s.card}>

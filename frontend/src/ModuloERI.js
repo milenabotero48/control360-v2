@@ -239,8 +239,10 @@ const ModuloERI = ({ user }) => {
           {/* TABS de vista */}
           <div style={s.tabs}>
             {[
+              { v: 'informe', l: '📊 Informe P&G' },
               { v: 'resumen', l: '📑 ERI Resumen' },
               { v: 'lineas',  l: '🎯 Por línea de servicio' },
+              { v: 'anexos',  l: '📎 Anexos' },
               { v: 'detalle', l: '📋 Detalle (órdenes/egresos)' },
             ].map(t => (
               <button key={t.v} onClick={() => setVista(t.v)}
@@ -251,12 +253,14 @@ const ModuloERI = ({ user }) => {
           </div>
 
           {/* VISTA RESUMEN — ERI contable tradicional */}
+          {vista === 'informe' && <VistaInforme eri={eri} />}
           {vista === 'resumen' && <VistaResumen eri={eri} />}
 
           {/* VISTA POR LÍNEA */}
           {vista === 'lineas' && <VistaLineas eri={eri} />}
 
           {/* VISTA DETALLE */}
+          {vista === 'anexos' && <VistaAnexos eri={eri} />}
           {vista === 'detalle' && <VistaDetalle eri={eri} />}
         </>
       )}
@@ -279,6 +283,119 @@ const KPI = ({ icon, label, value, sub, color, grande }) => (
     {sub && <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4 }}>{sub}</div>}
   </div>
 );
+
+// ✅ ERI-COSTO-001: INFORME P&G — ingresos y costos por categoría de producto,
+// gastos por categoría de egreso, regla $0 no se muestra, e inventario aparte.
+const VistaInforme = ({ eri }) => {
+  const inf = eri.informe;
+  if (!inf) return <div style={s.card}>El informe no está disponible.</div>;
+  const Linea = ({ nombre, valor, indent, bold, color }) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', paddingLeft: indent ? 20 : 0, fontWeight: bold ? 800 : 500, fontSize: bold ? 15 : 13, color: color || '#334155', borderTop: bold ? '1px solid #e2e8f0' : 'none' }}>
+      <span>{nombre}</span><span>{fmtCop(valor)}</span>
+    </div>
+  );
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={s.card}>
+        {/* INGRESOS por categoría */}
+        <div style={{ fontSize: 12, fontWeight: 800, color: '#0284c7', letterSpacing: 0.5, marginBottom: 4 }}>INGRESOS</div>
+        {inf.ingresos.porCategoria.map((c, i) => <Linea key={i} nombre={c.nombre} valor={c.valor} indent />)}
+        <Linea nombre="Total ingresos" valor={inf.ingresos.total} bold color="#0284c7" />
+
+        {/* COSTO DE VENTAS por categoría */}
+        {inf.costoVentas.porCategoria.length > 0 && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#dc2626', letterSpacing: 0.5, margin: '14px 0 4px' }}>(−) COSTO DE VENTAS</div>
+            {inf.costoVentas.porCategoria.map((c, i) => <Linea key={i} nombre={c.nombre} valor={c.valor} indent />)}
+            <Linea nombre="Total costo de ventas" valor={inf.costoVentas.total} bold color="#dc2626" />
+          </>
+        )}
+
+        {/* UTILIDAD BRUTA */}
+        <div style={{ margin: '10px 0', padding: '10px 14px', background: '#f0fdf4', borderRadius: 10, display: 'flex', justifyContent: 'space-between', fontWeight: 800, fontSize: 16, color: '#16a34a' }}>
+          <span>= UTILIDAD BRUTA</span><span>{fmtCop(inf.utilidadBruta)}</span>
+        </div>
+
+        {/* GASTOS por categoría */}
+        {inf.gastos.porCategoria.length > 0 && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#b45309', letterSpacing: 0.5, margin: '14px 0 4px' }}>(−) GASTOS OPERATIVOS</div>
+            {inf.gastos.porCategoria.map((c, i) => <Linea key={i} nombre={c.nombre} valor={c.valor} indent />)}
+            <Linea nombre="Total gastos" valor={inf.gastos.total} bold color="#b45309" />
+          </>
+        )}
+
+        {/* UTILIDAD NETA */}
+        <div style={{ marginTop: 12, padding: '14px 16px', background: inf.utilidadNeta >= 0 ? 'linear-gradient(135deg,#16a34a,#15803d)' : 'linear-gradient(135deg,#dc2626,#b91c1c)', borderRadius: 12, display: 'flex', justifyContent: 'space-between', fontWeight: 800, fontSize: 20, color: '#fff' }}>
+          <span>= UTILIDAD NETA</span><span>{fmtCop(inf.utilidadNeta)}</span>
+        </div>
+      </div>
+
+      {/* INVENTARIO (informativo, NO afecta utilidad) */}
+      <div style={{ ...s.card, border: '1px dashed #cbd5e1', background: '#f8fafc' }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: '#64748b', letterSpacing: 0.5, marginBottom: 8 }}>
+          📦 MOVIMIENTOS DE INVENTARIO <span style={{ fontWeight: 500, textTransform: 'none' }}>(informativo — no afecta la utilidad)</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+          <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Compras de mercancía del período</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{fmtCop(inf.inventario.comprasDelPeriodo)}</div>
+          </div>
+          <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Inventario actual al costo</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: '#334155' }}>{fmtCop(inf.inventario.alCosto)}</div>
+          </div>
+          <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Inventario valorizado (precio venta)</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>{fmtCop(inf.inventario.valorizado)}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ✅ ERI-COSTO-001: ANEXOS — soporte del informe (de dónde sale cada cifra)
+const VistaAnexos = ({ eri }) => {
+  const ax = eri.informe?.anexos;
+  if (!ax) return <div style={s.card}>Anexos no disponibles.</div>;
+  const Tabla = ({ titulo, headers, filas, color }) => (
+    <div style={s.card}>
+      <h3 style={{ margin: '0 0 10px', fontSize: 14, fontWeight: 800, color: color || '#334155' }}>{titulo}</h3>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+        <thead><tr style={{ background: '#f8fafc', color: '#64748b' }}>
+          {headers.map((h, i) => <th key={i} style={{ textAlign: h.right ? 'right' : 'left', padding: '6px 10px', fontWeight: 600 }}>{h.label}</th>)}
+        </tr></thead>
+        <tbody>
+          {filas.length === 0 && <tr><td colSpan={headers.length} style={{ padding: 12, color: '#94a3b8' }}>Sin registros en el período.</td></tr>}
+          {filas.map((f, i) => (
+            <tr key={i} style={{ borderTop: '1px solid #f1f5f9' }}>
+              {f.map((c, ci) => <td key={ci} style={{ padding: '6px 10px', textAlign: headers[ci].right ? 'right' : 'left', fontWeight: headers[ci].right ? 700 : 400, color: headers[ci].right ? '#334155' : '#64748b' }}>{c}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Tabla titulo="📄 Anexo 1 · Ventas del período" color="#0284c7"
+        headers={[{ label: 'Orden' }, { label: 'Fecha' }, { label: 'Cliente' }, { label: 'Total', right: true }]}
+        filas={ax.ventas.map(v => [v.numeroOrden, v.fecha, v.clienteNombre, fmtCop(v.total)])} />
+      <Tabla titulo="📦 Anexo 2 · Costo de ventas por categoría" color="#dc2626"
+        headers={[{ label: 'Categoría' }, { label: 'Ingreso', right: true }, { label: 'Costo', right: true }]}
+        filas={ax.costos.map(c => [c.categoria, fmtCop(c.ingreso), fmtCop(c.costo)])} />
+      <Tabla titulo="🧾 Anexo 3 · Gastos del período" color="#b45309"
+        headers={[{ label: 'Categoría' }, { label: 'Monto', right: true }]}
+        filas={ax.gastos.map(g => [g.categoria, fmtCop(g.monto)])} />
+      {ax.compras.length > 0 && (
+        <Tabla titulo="🛒 Anexo 4 · Compras de mercancía (inventario)" color="#7c3aed"
+          headers={[{ label: 'Fecha' }, { label: 'Proveedor' }, { label: 'Concepto' }, { label: 'Monto', right: true }]}
+          filas={ax.compras.map(c => [c.fecha, c.proveedor, c.concepto, fmtCop(c.monto)])} />
+      )}
+    </div>
+  );
+};
 
 const VistaResumen = ({ eri }) => (
   <div style={s.card}>
