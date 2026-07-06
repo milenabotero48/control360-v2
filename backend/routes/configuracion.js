@@ -115,6 +115,15 @@ const SECTORES_DEFAULT = [
   { id: 'sec_periferia',   etiqueta: 'Periferia',    color: '#6b7280', activo: true, orden: 6 },
 ];
 
+// ✅ OTROS-INGRESOS-001: conceptos de ingresos NO operacionales (recuperación
+// de cartera, venta de chatarra, reintegros...). Configurables por el
+// suscriptor. El tipo "Otros ingresos" es fijo — siempre va al ERI como no
+// operacional, separado de las ventas del período.
+const CONCEPTOS_OTROS_INGRESOS_DEFAULT = [
+  { id: 'oi_cartera',  nombre: 'Recuperación de cartera', activo: true },
+  { id: 'oi_otro',     nombre: 'Otro ingreso',            activo: true },
+];
+
 // Helper: obtener o crear doc de configuración del usuario
 const getConfigRef = (userId) => db.collection('configuracion').doc(userId);
 
@@ -129,6 +138,7 @@ const inicializarConfigSiNoExiste = async (userId) => {
       retenciones: RETENCIONES_DEFAULT,
       sectores: SECTORES_DEFAULT,
       lineasServicio: LINEAS_SERVICIO_DEFAULT,  // Ola 3
+      conceptosOtrosIngresos: CONCEPTOS_OTROS_INGRESOS_DEFAULT, // ✅ OTROS-INGRESOS-001
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
@@ -137,7 +147,8 @@ const inicializarConfigSiNoExiste = async (userId) => {
       categoriasEgresos: CATEGORIAS_DEFAULT,
       retenciones: RETENCIONES_DEFAULT,
       sectores: SECTORES_DEFAULT,
-      lineasServicio: LINEAS_SERVICIO_DEFAULT
+      lineasServicio: LINEAS_SERVICIO_DEFAULT,
+      conceptosOtrosIngresos: CONCEPTOS_OTROS_INGRESOS_DEFAULT // ✅ OTROS-INGRESOS-001
     };
   }
   const data = doc.data();
@@ -236,7 +247,8 @@ router.put('/categorias', async (req, res) => {
     // Tipos válidos contables (Ola 3)
     const TIPOS_ERI_VALIDOS = [
       'costo_servicio', 'gasto_personal', 'gasto_operativo',
-      'gasto_fijo', 'gasto_administrativo', 'gasto_financiero', 'gasto_fiscal'
+      'gasto_fijo', 'gasto_administrativo', 'gasto_financiero', 'gasto_fiscal',
+      'compra_inventario' // ✅ ERI-COSTO-001: faltaba — sin esto se rechazaba al reclasificar
     ];
 
     for (const c of categoriasEgresos) {
@@ -275,6 +287,37 @@ router.put('/categorias', async (req, res) => {
   } catch (e) {
     console.error('PUT categorias:', e);
     res.status(500).json({ error: 'Error al guardar categorías' });
+  }
+});
+
+// ─── ✅ OTROS-INGRESOS-001: PUT /api/configuracion/conceptos-otros-ingresos ────
+router.put('/conceptos-otros-ingresos', async (req, res) => {
+  try {
+    const { conceptosOtrosIngresos } = req.body;
+    if (!Array.isArray(conceptosOtrosIngresos)) {
+      return res.status(400).json({ error: 'conceptosOtrosIngresos debe ser un array' });
+    }
+    for (const c of conceptosOtrosIngresos) {
+      if (!c.nombre?.trim()) return res.status(400).json({ error: 'Cada concepto debe tener nombre' });
+    }
+    const ref = getConfigRef(req.adminId || req.user.uid);
+    await ref.set({
+      userId: req.adminId || req.user.uid,
+      conceptosOtrosIngresos,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    await db.collection('audit_logs').add({
+      accion: 'CONCEPTOS_OTROS_INGRESOS_ACTUALIZADOS', modulo: 'configuracion',
+      descripcion: `Conceptos de otros ingresos actualizados (${conceptosOtrosIngresos.length})`,
+      usuarioId: req.adminId || req.user.uid, usuarioNombre: req.user.email,
+      fecha: new Date().toISOString()
+    });
+
+    res.json({ ok: true, conceptosOtrosIngresos });
+  } catch (e) {
+    console.error('PUT conceptos-otros-ingresos:', e);
+    res.status(500).json({ error: 'Error al guardar conceptos' });
   }
 });
 

@@ -86,6 +86,15 @@ export const generarHTMLCuadreDiario = (cierre, empresa, empresas = []) => {
     .tarjeta .lbl { font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; color: #6b7280; }
     .tarjeta .val { font-size: 15px; font-weight: 900; margin-top: 2px; }
     .seccion { margin-top: 14px; page-break-inside: avoid; }
+    /* ✅ CAJA-IMPRESION-001: la sección de detalle de movimientos puede ser
+       muy larga (30+ filas). Con page-break-inside:avoid el navegador la
+       empujaba ENTERA a la página 2, dejando la página 1 casi vacía (solo
+       membrete). Esta clase permite que la tabla fluya y se parta de forma
+       natural entre páginas, aprovechando el espacio de la primera hoja. */
+    .seccion-larga { margin-top: 14px; page-break-inside: auto; }
+    .seccion-larga table { page-break-inside: auto; }
+    .seccion-larga tr { page-break-inside: avoid; }
+    .seccion-larga thead { display: table-header-group; }
     .seccion-titulo { font-size: 12px; font-weight: 800; color: #111; border-left: 4px solid #4f46e5; padding-left: 8px; margin-bottom: 6px; }
     .seccion-total { text-align: right; padding: 5px 8px; font-size: 11px; color: #374151; }
     .firmas { display: flex; gap: 40px; margin-top: 44px; page-break-inside: avoid; }
@@ -136,7 +145,7 @@ export const generarHTMLCuadreDiario = (cierre, empresa, empresas = []) => {
   ${seccionLista('Cuentas por Pagar registradas hoy', cxpNuevasHtml, 'Total CxP nuevas', c.cxp?.totalNuevas)}
   ${seccionLista('Egresos pagados hoy', egresosPagadosHtml, 'Total pagado', c.cxp?.totalPagadasHoy)}
 
-  <div class="seccion">
+  <div class="seccion-larga">
     <div class="seccion-titulo">Detalle de movimientos del día (${(c.movimientosDia || []).length})</div>
     ${movsHtml ? `<table>
       <thead><tr><th>Hora</th><th>Caja</th><th>Tipo</th><th>Concepto</th><th>Registró</th><th class="num">Monto</th></tr></thead>

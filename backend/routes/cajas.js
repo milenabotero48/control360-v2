@@ -187,6 +187,69 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// ─── ✅ OTROS-INGRESOS-001: POST /api/cajas/otro-ingreso ──────────────────────
+// Registra un ingreso NO operacional a una caja (recuperación de cartera, venta
+// de chatarra, reintegros...). Suma a la caja y queda en el histórico de
+// movimientos con referencia OTRO_INGRESO y esNoOperacional=true, para que el
+// ERI lo muestre en su línea de "no operacionales" SIN mezclarlo con las ventas.
+// NO toca CxC ni el flujo de órdenes — es un movimiento puro de caja.
+router.post('/otro-ingreso', async (req, res) => {
+  try {
+    const { cajaId, concepto, monto, nota, fecha } = req.body;
+    if (!cajaId) return res.status(400).json({ error: 'Selecciona la caja destino' });
+    if (!concepto || !concepto.trim()) return res.status(400).json({ error: 'El concepto es obligatorio' });
+    if (!monto || Number(monto) <= 0) return res.status(400).json({ error: 'El valor debe ser mayor a cero' });
+
+    const cajaRef = db.collection('cajas').doc(cajaId);
+    const cajaDoc = await cajaRef.get();
+    if (!cajaDoc.exists) return res.status(404).json({ error: 'Caja no encontrada' });
+
+    // Aislamiento multi-tenant
+    const adminId = req.adminId || req.user.uid || req.user.id;
+    const caja = cajaDoc.data();
+    if (caja.userId && caja.userId !== adminId) {
+      return res.status(403).json({ error: 'No tienes acceso a esta caja' });
+    }
+
+    const montoNum = Number(monto);
+    const fechaMov = fecha || new Date().toISOString();
+
+    await cajaRef.update({
+      saldo: Number(caja.saldo || 0) + montoNum,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    await db.collection('movimientos').add({
+      userId: adminId,
+      cajaId,
+      tipo: 'ingreso',
+      concepto: concepto.trim(),
+      nota: nota || '',
+      monto: montoNum,
+      referencia: 'OTRO_INGRESO',      // etiqueta del movimiento en el histórico
+      esNoOperacional: true,           // ✅ solo mueve caja — el ERI NO lo suma
+                                       // (decisión contable: cartera ya se
+                                       // reconoció al facturar; chatarra es
+                                       // esporádica). Es tesorería, no resultado.
+      fecha: fechaMov,
+      creadoPor: req.user.email,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    await registrarAuditoria({
+      accion: 'OTRO_INGRESO', modulo: 'cajas',
+      descripcion: `Otro ingreso ${concepto.trim()} $${montoNum} en "${caja.nombre}"`,
+      usuarioId: adminId, usuarioNombre: req.user.email,
+      datos: { cajaId, concepto: concepto.trim(), monto: montoNum, nota: nota || '' }
+    });
+
+    res.json({ ok: true, saldoNuevo: Number(caja.saldo || 0) + montoNum });
+  } catch (e) {
+    console.error('POST otro-ingreso:', e);
+    res.status(500).json({ error: 'Error al registrar el ingreso' });
+  }
+});
+
 // ─── POST /api/cajas/traslado ─────────────────────────────────────────────────
 router.post('/traslado', async (req, res) => {
   try {

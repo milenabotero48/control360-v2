@@ -668,6 +668,76 @@ router.post('/', authenticate, async (req, res) => {
     const sinCliente = esProduccion || esInterna;
 
     if (!sinCliente && !clienteId) return res.status(400).json({ error: 'El cliente es obligatorio' });
+
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ CARTERA-BLOQUEO-001: bloqueo por cartera vencida (validación BACKEND).
+    // Antes el bloqueo vivía solo en el frontend = hueco de seguridad: se podía
+    // crear la orden igual. Ahora el backend valida: si el cliente tiene órdenes
+    // vencidas más allá del parámetro de días (contados DESDE que se generó la
+    // orden), se bloquea. El admin puede autorizar con su PIN (pinCartera).
+    // ══════════════════════════════════════════════════════════════════════
+    if (!sinCliente && clienteId && !esCxc) {
+      const adminIdCartera = req.adminId || req.user.uid || req.user.id;
+      try {
+        const cfgDoc = await db.collection('configuracion').doc(adminIdCartera).get();
+        const diasBloqueo = cfgDoc.exists ? (cfgDoc.data().diasBloqueoCartera ?? 30) : 30;
+
+        // Órdenes del cliente pendientes de pago (CxC o no pagadas)
+        const snapCartera = await db.collection('orders')
+          .where('adminId', '==', adminIdCartera)
+          .where('clienteId', '==', clienteId)
+          .get();
+
+        const hoy = new Date();
+        let diasVencidoMax = 0;
+        snapCartera.forEach(d => {
+          const o = d.data();
+          if (o.estado === 'anulada') return;
+          // Solo cuentan las que deben dinero: CxC o no pagadas
+          const fpCxc = ['A crédito (CxC)', 'CXC', 'A crédito', 'credito'].includes(o.formaPago);
+          const debe = o.estado === 'cxc' || (o.pagado !== true && fpCxc);
+          if (!debe) return;
+          // Días DESDE que se generó la orden (tu regla)
+          const base = o.fechaCreacion || o.createdAt;
+          const fechaRef = base ? new Date(base.toDate ? base.toDate() : base) : hoy;
+          const dias = Math.floor((hoy - fechaRef) / (1000 * 60 * 60 * 24));
+          if (dias > diasVencidoMax) diasVencidoMax = dias;
+        });
+
+        // Bloqueado si supera el parámetro (día 31 si son 30 días)
+        if (diasVencidoMax > diasBloqueo) {
+          const pinCartera = req.body.pinCartera;
+          if (!pinCartera) {
+            return res.status(403).json({
+              error: `Este cliente está BLOQUEADO por cartera vencida (${diasVencidoMax} días). Valide o solicite autorización del administrador para crear la orden.`,
+              bloqueadoPorCartera: true,
+              diasVencido: diasVencidoMax
+            });
+          }
+          // Verificar PIN del admin del tenant
+          const verifPin = await verificarPinUsuario(adminIdCartera, pinCartera);
+          if (!verifPin.ok) {
+            return res.status(403).json({
+              error: 'PIN de autorización incorrecto. La orden no se creó.',
+              bloqueadoPorCartera: true
+            });
+          }
+          // PIN correcto → se autoriza y se deja rastro
+          await auditar({
+            accion: 'AUTORIZA_CARTERA_VENCIDA',
+            descripcion: `${req.user.nombre || req.user.email} autorizó crear orden a cliente bloqueado por cartera (${diasVencidoMax} días vencido)`,
+            usuarioId: adminIdCartera,
+            usuarioNombre: req.user.nombre || req.user.email,
+            datos: { clienteId, diasVencido: diasVencidoMax }
+          });
+        }
+      } catch (eCartera) {
+        // Si la verificación falla por un error técnico, NO bloqueamos la
+        // operación (para no frenar la venta), pero lo dejamos en el log.
+        console.error('CARTERA-BLOQUEO-001: error verificando cartera:', eCartera.message);
+      }
+    }
+
     if (tipoOrden === 'servicio' && items.length === 0) {
       return res.status(400).json({ error: 'La orden debe tener al menos un producto' });
     }
@@ -722,6 +792,12 @@ router.post('/', authenticate, async (req, res) => {
 
     const generaCertificado = tipoFinal === 'servicio' && requiereCertificado(items);
     const esCxc = formaPago === 'A crédito (CxC)' || formaPago === 'CXC' || formaPago === 'A crédito';
+    // ✅ EFECTIVO-PALABRA-001: es efectivo si el NOMBRE contiene la palabra
+    // "efectivo" (MAY EFECTIVO, EFECTIVO SAS, EFECTIVO SALA DE VENTAS...). Antes
+    // solo reconocía el texto exacto "Efectivo", así que las otras cajas de
+    // efectivo se trataban como pago digital y pedían un comprobante que no
+    // existe (¡es dinero físico!). El efectivo se entrega en el cuadre, sin foto.
+    const esEfectivo = (formaPago || '').toLowerCase().includes('efectivo');
 
     // ¿La orden lleva equipos que DEBEN ir a taller? Solo cuenta recarga/
     // mant/PH que NO estén marcados como "cambio". Un equipo de cambio se
@@ -744,15 +820,30 @@ router.post('/', authenticate, async (req, res) => {
     // cliente que recarga su extintor en taller pagando en efectivo NO
     // registraba el dinero en caja → la plata se perdía.
     const lugarNorm = normalizarLugar(lugarAtencion);
-    const clientePresentePaga = lugarNorm === 'oficina' || lugarNorm === 'taller';
+    // ✅ PAGO-DOMICILIO-001: la FORMA DE PAGO define si la orden nace pagada,
+    // NO el lugar de atención. El pago y el flujo logístico son independientes:
+    //   - Efectivo/transferencia/etc. seleccionado = el dinero YA ingresa →
+    //     la orden nace PAGADA y entra a caja (aunque sea domicilio: caso del
+    //     cliente que paga en oficina y pide que le lleven el producto).
+    //   - CxC seleccionado = la deben → el mensajero la cobra en ruta o queda
+    //     en cartera. NO entra a caja al crear.
+    // El mensajero igual la lleva por su ruta, pero si ya está pagada solo
+    // entrega (el cuadre reconoce pagado===true y no la cobra de nuevo).
+    // Antes esto solo miraba oficina/taller y el dinero de un domicilio pagado
+    // en oficina se embolataba: no entraba al crear ni en el cuadre.
+    const clientePresentePaga = !esCxc;
     const pagadoAlCrear = !esProduccion && clientePresentePaga
       && !esCxc && !!formaPago && formaPago !== '';
 
     // Ola 2.5: si el cliente ya pagó por adelantado (cliente envió comprobante),
     // marcamos pagado pero NO entra a caja todavía. Queda pendiente de validar
     // por Admin/Tesorería (igual que pasaría con un pago virtual del mensajero).
-    const esPagoVirtual = formaPago && formaPago !== 'Efectivo' && !esCxc;
-    const marcarPagoAdelantado = pagoAdelantado === true && esPagoVirtual && !!fotoTransferenciaUrl;
+    const esPagoVirtual = formaPago && !esEfectivo && !esCxc; // ✅ EFECTIVO-PALABRA-001
+    // ✅ PAGO-ADMIN-001: si quien crea la orden con pago adelantado es el ADMIN,
+    // su palabra da fe — no tiene sentido que él mismo valide después su propio
+    // pago. Entra directo a caja. Para otros roles sigue esperando validación.
+    const esAdmin = req.user.role === 'admin';
+    const marcarPagoAdelantado = pagoAdelantado === true && esPagoVirtual && !!fotoTransferenciaUrl && !esAdmin;
 
     // ── Mini-Ola 2.6: calcular sectorId de la orden ────────────────────────
     // Regla: si hay sucursal → toma sucursal.sectorId (fallback cliente.sectorId).
@@ -936,13 +1027,25 @@ router.post('/', authenticate, async (req, res) => {
       });
     }
 
+    // ✅ AUDITORIA-DINERO-001: registrar CÓMO nace la orden (forma de pago y si
+    // nace pagada o a crédito). Antes solo decía "creó orden X — cliente — $" y
+    // no se podía saber si se creó en efectivo, transferencia o CxC — clave para
+    // investigar descuadres de caja y ediciones posteriores.
+    const estadoPagoTexto = esCxc ? 'A crédito (CxC)'
+      : (pagadoAlCrear ? `${formaPago} (Pagada)` : (formaPago || 'Sin definir'));
+    const lugarTexto = lugarNorm === 'domicilio' ? '🏠 Domicilio'
+      : lugarNorm === 'oficina' ? '🏢 Oficina'
+      : lugarNorm === 'taller' ? '🔧 Taller'
+      : lugarNorm === 'despacho' ? '📦 Despacho'
+      : lugarNorm;
+
     await auditar({
       accion: 'CREAR_ORDEN',
-      descripcion: `${req.user.nombre || req.user.email} creó ${tipoFinal === 'produccion' ? 'orden de producción' : 'orden'} ${numeroOrden} — ${clienteNombre || 'Producción'} — $${total.toLocaleString()}`,
+      descripcion: `${req.user.nombre || req.user.email} creó ${tipoFinal === 'produccion' ? 'orden de producción' : 'orden'} ${numeroOrden} — ${clienteNombre || 'Producción'} — $${total.toLocaleString()}${(tipoFinal !== 'produccion' && tipoFinal !== 'interna') ? ` — ${lugarTexto} · ${estadoPagoTexto}` : ''}`,
       usuarioId: req.adminId || req.user.uid || req.user.id,
       usuarioNombre: req.user.nombre || req.user.email,
       ordenId: ref.id,
-      datos: { numeroOrden, clienteNombre, total, tipoOrden: tipoFinal, pagadoAlCrear, esCxc }
+      datos: { numeroOrden, clienteNombre, total, tipoOrden: tipoFinal, pagadoAlCrear, esCxc, formaPago, lugarAtencion: lugarNorm }
     });
 
     // ── Hook vencimientos: órdenes que nacen completadas (oficina/cambio) ────
@@ -1048,13 +1151,45 @@ router.put('/:id', authenticate, async (req, res) => {
 
     await ordenRef.update(cambios);
 
+    // ✅ AUDITORIA-DINERO-001: registrar el ANTES → DESPUÉS de los campos
+    // sensibles (dinero). Antes la auditoría solo decía "editó orden X" sin
+    // decir QUÉ cambió — imposible investigar descuadres como la OS-0024 que
+    // Luzma editó 3 veces. Ahora queda el rastro exacto. Es liviano: solo
+    // compara valores ya en memoria (actual vs cambios), sin queries extra.
+    const fmtMoneda = (v) => `$${(Number(v) || 0).toLocaleString('es-CO')}`;
+    const camposSensibles = [
+      { key: 'formaPago',    label: 'Forma de pago' },
+      { key: 'total',        label: 'Total',        money: true },
+      { key: 'montoPagado',  label: 'Monto pagado', money: true },
+      { key: 'pagado',       label: 'Estado de pago', map: (v) => v === true ? 'Pagada' : 'Pendiente/CxC' },
+      { key: 'clienteNombre',label: 'Cliente' },
+    ];
+    const diffs = [];
+    for (const c of camposSensibles) {
+      if (cambios[c.key] === undefined) continue;
+      const antes = actual[c.key];
+      const despues = cambios[c.key];
+      if (antes === despues) continue;
+      const fmt = c.money ? fmtMoneda : (c.map || ((x) => x ?? '—'));
+      diffs.push(`${c.label}: ${fmt(antes)} → ${fmt(despues)}`);
+    }
+    // ¿Cambiaron productos/valores? (comparación de cantidad de items o total)
+    if (cambios.items !== undefined && Array.isArray(cambios.items)) {
+      const nAntes = (actual.items || []).length;
+      const nDespues = cambios.items.length;
+      if (nAntes !== nDespues) diffs.push(`Productos: ${nAntes} → ${nDespues} ítems`);
+    }
+    const descripcionEdit = diffs.length > 0
+      ? `${req.user.nombre || req.user.email} editó orden ${actual.numeroOrden} — ${diffs.join(' · ')}`
+      : `${req.user.nombre || req.user.email} editó orden ${actual.numeroOrden}`;
+
     await auditar({
       accion: 'EDITAR_ORDEN',
-      descripcion: `${req.user.nombre || req.user.email} editó orden ${actual.numeroOrden}`,
+      descripcion: descripcionEdit,
       usuarioId: req.adminId || req.user.uid || req.user.id,
       usuarioNombre: req.user.nombre || req.user.email,
       ordenId: id,
-      datos: { campos: Object.keys(cambios) }
+      datos: { campos: Object.keys(cambios), cambiosDinero: diffs }
     });
 
     res.json({ id, ...cambios });

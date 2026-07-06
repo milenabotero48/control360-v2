@@ -908,7 +908,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
 router.get('/extintores-prestamo', async (req, res) => {
   try {
     const adminId = req.adminId || req.user?.uid || req.user?.id; // FIX: multi-tenant isolation
-    const { estado, buscar } = req.query;
+    const { estado, buscar, clienteId } = req.query;
 
     // Traer solo los préstamos del tenant activo
     const snap = await db.collection('extintores_prestamo')
@@ -916,6 +916,15 @@ router.get('/extintores-prestamo', async (req, res) => {
       .get();
 
     let lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    // ✅ PRESTAMO-ENTREGA-001: filtrar por cliente — al ir a ENTREGAR, el
+    // mensajero necesita ver qué extintores de préstamo tiene ESE cliente para
+    // saber cuántos y cuáles recoger. Antes decía solo "recoger extintores de
+    // préstamo" sin cantidad, y si iba otro mensajero o no se acordaba, recogía
+    // incompleto. Por defecto solo los que siguen en préstamo (no devueltos).
+    if (clienteId) {
+      lista = lista.filter(e => e.clienteId === clienteId && e.estado !== 'devuelto');
+    }
 
     // Filtros en memoria (evita índice compuesto)
     if (estado && estado !== 'todos') {

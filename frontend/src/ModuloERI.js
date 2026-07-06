@@ -149,6 +149,46 @@ const ModuloERI = ({ user }) => {
     filas.push({ s: 'RESULTADO', d: '═══ UTILIDAD NETA', v: eri.utilidadNeta.valor });
     filas.push({ s: 'RESULTADO', d: 'Margen Neto %', v: eri.utilidadNeta.margen.toFixed(2) });
 
+    // ✅ ERI-EXPORT-001: incluir anexos y cartera en el export (antes salía muy
+    // básico, sin sustancia). Ahora es un informe completo digno de contadora.
+    const inf = eri.informe;
+    if (inf) {
+      filas.push({ s: '', d: '', v: '' });
+      filas.push({ s: 'ANEXO 1 · VENTAS', d: '── Órdenes del período (causación) ──', v: '' });
+      (inf.anexos?.ventas || []).forEach(v => filas.push({ s: 'ANEXO VENTAS', d: `${v.numeroOrden} · ${v.fecha} · ${v.clienteNombre}`, v: v.total }));
+
+      filas.push({ s: '', d: '', v: '' });
+      filas.push({ s: 'ANEXO 2 · COSTOS', d: '── Costo de ventas por categoría ──', v: '' });
+      (inf.anexos?.costos || []).forEach(c => filas.push({ s: 'ANEXO COSTOS', d: `${c.categoria} (ingreso ${c.ingreso})`, v: c.costo }));
+
+      filas.push({ s: '', d: '', v: '' });
+      filas.push({ s: 'ANEXO 3 · GASTOS', d: '── Gastos del período ──', v: '' });
+      (inf.anexos?.gastos || []).forEach(g => filas.push({ s: 'ANEXO GASTOS', d: g.categoria, v: g.monto }));
+
+      if ((inf.anexos?.compras || []).length) {
+        filas.push({ s: '', d: '', v: '' });
+        filas.push({ s: 'ANEXO 4 · COMPRAS', d: '── Compras de mercancía ──', v: '' });
+        inf.anexos.compras.forEach(c => filas.push({ s: 'ANEXO COMPRAS', d: `${c.fecha} · ${c.proveedor} · ${c.concepto}`, v: c.monto }));
+      }
+
+      if (inf.cartera) {
+        filas.push({ s: '', d: '', v: '' });
+        filas.push({ s: 'CARTERA CxC', d: '── Por cobrar (informativo) ──', v: inf.cartera.cxc.total });
+        (inf.cartera.cxc.detalle || []).forEach(c => filas.push({ s: 'CxC', d: `${c.numeroOrden} · ${c.fecha} · ${c.clienteNombre}`, v: c.saldo }));
+        filas.push({ s: '', d: '', v: '' });
+        filas.push({ s: 'CARTERA CxP', d: '── Por pagar (informativo) ──', v: inf.cartera.cxp.total });
+        (inf.cartera.cxp.detalle || []).forEach(c => filas.push({ s: 'CxP', d: `${c.fecha} · ${c.proveedor} · ${c.concepto}`, v: c.saldo }));
+      }
+
+      if (inf.inventario) {
+        filas.push({ s: '', d: '', v: '' });
+        filas.push({ s: 'INVENTARIO', d: 'Compras del período', v: inf.inventario.comprasDelPeriodo });
+        filas.push({ s: 'INVENTARIO', d: 'Stock al costo', v: inf.inventario.alCosto });
+        filas.push({ s: 'INVENTARIO', d: 'Stock valorizado', v: inf.inventario.valorizado });
+        filas.push({ s: 'INVENTARIO', d: 'Utilidad potencial en stock', v: inf.inventario.potencial });
+      }
+    }
+
     exportarExcel(filas, [
       { label: 'Sección', key: 's' },
       { label: 'Concepto', key: 'd' },
@@ -239,11 +279,9 @@ const ModuloERI = ({ user }) => {
           {/* TABS de vista */}
           <div style={s.tabs}>
             {[
-              { v: 'informe', l: '📊 Informe P&G' },
-              { v: 'resumen', l: '📑 ERI Resumen' },
+              { v: 'informe', l: '📊 Estado de Resultados' },
               { v: 'lineas',  l: '🎯 Por línea de servicio' },
-              { v: 'anexos',  l: '📎 Anexos' },
-              { v: 'detalle', l: '📋 Detalle (órdenes/egresos)' },
+              { v: 'anexos',  l: '📎 Anexos y soporte' },
             ].map(t => (
               <button key={t.v} onClick={() => setVista(t.v)}
                 style={{ ...s.tab, ...(vista === t.v ? s.tabActivo : {}) }}>
@@ -252,16 +290,12 @@ const ModuloERI = ({ user }) => {
             ))}
           </div>
 
-          {/* VISTA RESUMEN — ERI contable tradicional */}
+          {/* ✅ ERI-UNIFICADO-001: un solo Estado de Resultados normativo (antes
+              P&G y "ERI Resumen" mostraban lo mismo). "Detalle" se absorbió en
+              Anexos. Menos redundancia, más claridad contable. */}
           {vista === 'informe' && <VistaInforme eri={eri} />}
-          {vista === 'resumen' && <VistaResumen eri={eri} />}
-
-          {/* VISTA POR LÍNEA */}
           {vista === 'lineas' && <VistaLineas eri={eri} />}
-
-          {/* VISTA DETALLE */}
           {vista === 'anexos' && <VistaAnexos eri={eri} />}
-          {vista === 'detalle' && <VistaDetalle eri={eri} />}
         </>
       )}
     </div>
@@ -329,28 +363,54 @@ const VistaInforme = ({ eri }) => {
         <div style={{ marginTop: 12, padding: '14px 16px', background: inf.utilidadNeta >= 0 ? 'linear-gradient(135deg,#16a34a,#15803d)' : 'linear-gradient(135deg,#dc2626,#b91c1c)', borderRadius: 12, display: 'flex', justifyContent: 'space-between', fontWeight: 800, fontSize: 20, color: '#fff' }}>
           <span>= UTILIDAD NETA</span><span>{fmtCop(inf.utilidadNeta)}</span>
         </div>
+        {/* ✅ ERI-CAUSACION-001: sello normativo */}
+        <div style={{ marginTop: 10, fontSize: 11, color: '#94a3b8', textAlign: 'center', fontStyle: 'italic' }}>
+          Elaborado bajo principio de causación (devengo) · Los ingresos se reconocen al prestar el servicio, no al cobrar
+        </div>
       </div>
 
       {/* INVENTARIO (informativo, NO afecta utilidad) */}
       <div style={{ ...s.card, border: '1px dashed #cbd5e1', background: '#f8fafc' }}>
         <div style={{ fontSize: 12, fontWeight: 800, color: '#64748b', letterSpacing: 0.5, marginBottom: 8 }}>
-          📦 MOVIMIENTOS DE INVENTARIO <span style={{ fontWeight: 500, textTransform: 'none' }}>(informativo — no afecta la utilidad)</span>
+          📦 INVENTARIO <span style={{ fontWeight: 500, textTransform: 'none' }}>(informativo — no afecta la utilidad)</span>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
           <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Compras de mercancía del período</div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>{fmtCop(inf.inventario.comprasDelPeriodo)}</div>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Compras del período</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: '#7c3aed' }}>{fmtCop(inf.inventario.comprasDelPeriodo)}</div>
           </div>
           <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Inventario actual al costo</div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: '#334155' }}>{fmtCop(inf.inventario.alCosto)}</div>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Stock al costo</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: '#334155' }}>{fmtCop(inf.inventario.alCosto)}</div>
           </div>
           <div style={{ padding: '12px 14px', background: '#fff', borderRadius: 10, border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: 11, color: '#64748b' }}>Inventario valorizado (precio venta)</div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: '#16a34a' }}>{fmtCop(inf.inventario.valorizado)}</div>
+            <div style={{ fontSize: 11, color: '#64748b' }}>Stock valorizado (venta)</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: '#16a34a' }}>{fmtCop(inf.inventario.valorizado)}</div>
+          </div>
+          <div style={{ padding: '12px 14px', background: '#ecfdf5', borderRadius: 10, border: '1px solid #a7f3d0' }}>
+            <div style={{ fontSize: 11, color: '#059669' }}>Utilidad potencial en stock</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: '#059669' }}>{fmtCop(inf.inventario.potencial || 0)}</div>
           </div>
         </div>
       </div>
+
+      {/* ✅ ERI-CARTERA-001: CARTERA (informativo) — CxC por cobrar + CxP por pagar */}
+      {inf.cartera && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+          <div style={{ ...s.card, borderTop: '3px solid #0284c7' }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#0284c7', marginBottom: 4 }}>💰 CARTERA POR COBRAR (CxC)</div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>Ventas a crédito del período pendientes de cobro</div>
+            <div style={{ fontSize: 24, fontWeight: 900, color: '#0284c7' }}>{fmtCop(inf.cartera.cxc.total)}</div>
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>{inf.cartera.cxc.detalle.length} {inf.cartera.cxc.detalle.length === 1 ? 'orden' : 'órdenes'} por cobrar</div>
+          </div>
+          <div style={{ ...s.card, borderTop: '3px solid #dc2626' }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: '#dc2626', marginBottom: 4 }}>📋 CARTERA POR PAGAR (CxP)</div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>Cuentas pendientes con proveedores</div>
+            <div style={{ fontSize: 24, fontWeight: 900, color: '#dc2626' }}>{fmtCop(inf.cartera.cxp.total)}</div>
+            <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>{inf.cartera.cxp.detalle.length} {inf.cartera.cxp.detalle.length === 1 ? 'cuenta' : 'cuentas'} por pagar</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -392,6 +452,17 @@ const VistaAnexos = ({ eri }) => {
         <Tabla titulo="🛒 Anexo 4 · Compras de mercancía (inventario)" color="#7c3aed"
           headers={[{ label: 'Fecha' }, { label: 'Proveedor' }, { label: 'Concepto' }, { label: 'Monto', right: true }]}
           filas={ax.compras.map(c => [c.fecha, c.proveedor, c.concepto, fmtCop(c.monto)])} />
+      )}
+      {/* ✅ ERI-CARTERA-001: anexos de cartera */}
+      {ax.cxc && ax.cxc.length > 0 && (
+        <Tabla titulo="💰 Anexo 5 · Cartera por cobrar (CxC)" color="#0284c7"
+          headers={[{ label: 'Orden' }, { label: 'Fecha' }, { label: 'Cliente' }, { label: 'Saldo', right: true }]}
+          filas={ax.cxc.map(c => [c.numeroOrden, c.fecha, c.clienteNombre, fmtCop(c.saldo)])} />
+      )}
+      {ax.cxp && ax.cxp.length > 0 && (
+        <Tabla titulo="📋 Anexo 6 · Cartera por pagar (CxP)" color="#dc2626"
+          headers={[{ label: 'Fecha' }, { label: 'Proveedor' }, { label: 'Concepto' }, { label: 'Saldo', right: true }]}
+          filas={ax.cxp.map(c => [c.fecha, c.proveedor, c.concepto, fmtCop(c.saldo)])} />
       )}
     </div>
   );

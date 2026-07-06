@@ -119,10 +119,17 @@ router.get('/', async (req, res) => {
     const empresas = {};
     empresasSnap.docs.forEach(d => { empresas[d.id] = { id: d.id, ...d.data() }; });
 
-    // ── 4. Cargar ÓRDENES en rango (filtrar por completadas/pagadas) ───────
-    // Las órdenes se guardan con campo `adminId` (no `userId`). Las que cuentan
-    // como ingreso son las pagadas o completadas. Usamos fechaPago si existe;
-    // si no, createdAt como fallback.
+    // ── 4. Cargar ÓRDENES en rango — PRINCIPIO DE CAUSACIÓN ─────────────────
+    // ✅ ERI-CAUSACION-001: bajo la norma colombiana, el ingreso se reconoce
+    // cuando se PRESTA el servicio (se devenga), NO cuando se cobra. Por eso:
+    //   - Cuenta TODA orden cuyo servicio se prestó en el período, esté
+    //     pagada, a crédito (CxC) o pendiente de cobro.
+    //   - La fecha de reconocimiento es la de ELABORACIÓN de la orden
+    //     (fechaCreacion/createdAt), no la de pago.
+    //   - Una venta de junio cuenta en JUNIO aunque paguen en julio.
+    //   - Las anuladas NO cuentan. Las internas/producción tampoco (no son
+    //     ingreso comercial).
+    // La cartera (CxC/CxP) se muestra aparte como sección informativa.
     let ordenesQuery = db.collection('orders').where('adminId', '==', adminId);
     if (empresaId) ordenesQuery = ordenesQuery.where('empresaId', '==', empresaId);
     const ordenesSnap = await ordenesQuery.get();
@@ -130,13 +137,12 @@ router.get('/', async (req, res) => {
     const ordenesEnRango = [];
     ordenesSnap.docs.forEach(d => {
       const o = d.data();
-      // Solo cuentan órdenes pagadas o completadas
-      if (!o.pagado && o.estado !== 'completada' && o.estado !== 'cuadre_dinero') return;
-      // Excluir órdenes anuladas
+      // Excluir anuladas (no se devengó nada)
       if (o.anulada === true || o.estado === 'anulada') return;
-      // Excluir órdenes internas / producción (no son ingreso comercial)
+      // Excluir internas / producción (no son ingreso comercial)
       if (o.tipoOrden === 'interna' || o.tipoOrden === 'produccion') return;
-      const fechaRef = parseFecha(o.fechaPago || o.fechaFactura || o.createdAt);
+      // ✅ CAUSACIÓN: fecha de elaboración de la orden (no de pago)
+      const fechaRef = parseFecha(o.fechaCreacion || o.createdAt || o.fechaFactura);
       if (!fechaRef) return;
       if (fechaRef < desdeDate || fechaRef > hastaDate) return;
       ordenesEnRango.push({ id: d.id, ...o, _fechaRef: fechaRef });
@@ -251,12 +257,31 @@ router.get('/', async (req, res) => {
             porLinea[lineaId] = { id: lineaId, nombre: 'Sin clasificar', color: '#9ca3af', ingresoServicio: 0, costoServicio: 0, utilidadBruta: 0, margenPct: 0 };
           }
           porLinea[lineaId].ingresoServicio += subtotal;
+          // ✅ ERI-COSTO-002: si el SERVICIO tiene precioCosto definido (raro,
+          // pero posible), también suma a su costo de línea. El costo principal
+          // de un servicio fabricado viene de los insumos (egresos costo_servicio).
+          if (cls.precioCosto > 0) {
+            porLinea[lineaId].costoServicio += cls.precioCosto * cantidad;
+          }
         } else {
           ingresoProductosOrden += subtotal;
           totalProductos += subtotal;
           const costo = cls.precioCosto * cantidad;
           costoProductosOrden += costo;
           totalCostoProductos += costo;
+          // ✅ ERI-COSTO-002: los PRODUCTOS también pertenecen a una línea (ej:
+          // señales compradas ya hechas → línea Señalización). Su ingreso y su
+          // costo (precioCosto ya digitado) van a la línea, para que el margen
+          // por línea sea real. Antes los productos no sumaban a ninguna línea
+          // y el costo de señales compradas se perdía.
+          const lineaIdProd = matchCategoriaConLinea(cls.categoria, lineasServicio);
+          if (lineaIdProd) {
+            if (!porLinea[lineaIdProd]) {
+              porLinea[lineaIdProd] = { id: lineaIdProd, nombre: 'Sin clasificar', color: '#9ca3af', ingresoServicio: 0, costoServicio: 0, utilidadBruta: 0, margenPct: 0 };
+            }
+            porLinea[lineaIdProd].ingresoServicio += subtotal;
+            porLinea[lineaIdProd].costoServicio += costo;
+          }
         }
       });
 
@@ -315,13 +340,18 @@ router.get('/', async (req, res) => {
         totalCostoServicios += monto;
       } else {
         // Gasto operativo/fijo/etc.
-        const tipo = cls.tipoERI || 'gasto_operativo';
-        if (gastosPorTipo[tipo] !== undefined) {
-          gastosPorTipo[tipo] += monto;
-        } else {
-          gastosPorTipo.gasto_operativo += monto;
-        }
-        gastosDetallePorCategoria[e.categoria] = (gastosDetallePorCategoria[e.categoria] || 0) + monto;
+        // ✅ ERI-GASTOS-001: garantizar que NINGÚN gasto se pierda. Si la
+        // categoría no tiene un tipoERI válido reconocido, el gasto NO se
+        // descarta ni se esconde: se marca como "Otros gastos no identificados"
+        // para que sea visible y Sandra lo reclasifique. El dinero SIEMPRE
+        // aparece en el informe.
+        const tiposValidos = ['gasto_personal', 'gasto_operativo', 'gasto_fijo', 'gasto_administrativo', 'gasto_financiero', 'gasto_fiscal'];
+        const tipo = tiposValidos.includes(cls.tipoERI) ? cls.tipoERI : 'gasto_operativo';
+        const noIdentificado = !cls.tipoERI || !tiposValidos.includes(cls.tipoERI);
+        gastosPorTipo[tipo] += monto;
+        // La categoría visible: si no está identificada, se agrupa aparte
+        const catVisible = noIdentificado ? 'Otros gastos no identificados' : (e.categoria || 'Sin categoría');
+        gastosDetallePorCategoria[catVisible] = (gastosDetallePorCategoria[catVisible] || 0) + monto;
       }
 
       detalleEgresos.push({
@@ -458,6 +488,51 @@ router.get('/', async (req, res) => {
     const totalCostoInforme = Object.values(costoPorCategoria).reduce((s, v) => s + v, 0);
     const utilidadBrutaInforme = totalIngresosInforme - totalCostoInforme;
 
+    // ── ✅ ERI-CARTERA-001: cartera informativa (NO afecta el resultado) ──────
+    // Bajo causación, el ingreso ya se reconoció al prestar el servicio. La
+    // cartera (CxC) es el dinero pendiente de cobrar de ese ingreso ya
+    // reconocido — se muestra aparte para control, no vuelve a sumar. La CxP
+    // es lo pendiente de pagar a proveedores.
+    let carteraCxC = 0;
+    const anexoCxC = [];
+    ordenesEnRango.forEach(o => {
+      // Una orden es cartera si está a crédito y no pagada
+      const esCredito = o.estado === 'cxc' || (o.pagado !== true &&
+        ['A crédito (CxC)', 'A crédito', 'CXC'].includes(o.formaPago));
+      const saldo = Number(o.saldoPendiente ?? (o.pagado ? 0 : o.total)) || 0;
+      if (esCredito && saldo > 0) {
+        carteraCxC += saldo;
+        anexoCxC.push({
+          numeroOrden: o.numeroOrden,
+          fecha: o._fechaRef.toISOString().slice(0, 10),
+          clienteNombre: o.clienteNombre || '',
+          saldo
+        });
+      }
+    });
+
+    // CxP: cuentas por pagar pendientes (proveedores)
+    let carteraCxP = 0;
+    const anexoCxP = [];
+    try {
+      const cxpSnap = await db.collection('cuentas_por_pagar')
+        .where('adminId', '==', adminId).get();
+      cxpSnap.docs.forEach(d => {
+        const c = d.data();
+        if (c.estado === 'anulada' || c.estado === 'pagada') return;
+        const saldo = Number(c.saldoPendiente ?? c.monto) || 0;
+        if (saldo > 0) {
+          carteraCxP += saldo;
+          anexoCxP.push({
+            proveedor: c.proveedorNombre || c.proveedor || '',
+            fecha: (c.fecha || '').slice(0, 10),
+            concepto: c.concepto || c.numeroFactura || '',
+            saldo
+          });
+        }
+      });
+    } catch (eCxp) { /* si no existe la colección, cartera CxP queda en 0 */ }
+
     respuesta.informe = {
       periodo: respuesta.periodo || { desde: desde || null, hasta: hasta || null },
       ingresos: {
@@ -482,7 +557,15 @@ router.get('/', async (req, res) => {
       inventario: {
         comprasDelPeriodo: totalComprasInventario,
         alCosto: Math.round(inventarioAlCosto),
-        valorizado: Math.round(inventarioValorizado)
+        valorizado: Math.round(inventarioValorizado),
+        // ✅ ERI-CARTERA-001: utilidad potencial en stock (valorizado − costo)
+        potencial: Math.round(inventarioValorizado - inventarioAlCosto)
+      },
+      // ✅ ERI-CARTERA-001: cartera informativa — NO afecta el resultado (el
+      // ingreso ya se reconoció por causación). Solo control de cobro/pago.
+      cartera: {
+        cxc: { total: Math.round(carteraCxC), detalle: anexoCxC.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')) },
+        cxp: { total: Math.round(carteraCxP), detalle: anexoCxP.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')) }
       },
       // Anexos (soporte del informe)
       anexos: {
@@ -491,7 +574,10 @@ router.get('/', async (req, res) => {
         gastos: Object.entries(gastosDetallePorCategoria)
           .map(([categoria, monto]) => ({ categoria, monto }))
           .sort((a, b) => b.monto - a.monto),
-        compras: anexoCompras.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''))
+        compras: anexoCompras.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')),
+        // ✅ ERI-CARTERA-001: anexos de cartera
+        cxc: anexoCxC.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')),
+        cxp: anexoCxP.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''))
       }
     };
 

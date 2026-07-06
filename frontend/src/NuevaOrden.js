@@ -136,7 +136,11 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   };
 
   // Helper: detecta si una forma de pago es virtual (todo lo que no sea Efectivo ni CxC)
-  const esFormaPagoVirtual = (fp) => fp && fp !== 'Efectivo' &&
+  // ✅ EFECTIVO-PALABRA-003: es efectivo si el nombre contiene "efectivo"
+  // (MAY EFECTIVO, EFECTIVO SAS...). Estas cajas de efectivo las maneja un
+  // responsable (Maykol) o son de otra empresa, pero SIGUEN siendo dinero
+  // físico — no piden comprobante, se entregan en el cuadre.
+  const esFormaPagoVirtual = (fp) => fp && !(fp || '').toLowerCase().includes('efectivo') &&
     fp !== 'A crédito (CxC)' && fp !== 'A crédito' && fp !== 'CXC' && fp !== 'Cuenta por Pagar';
   const esFormaPagoCxC = (fp) => fp === 'A crédito (CxC)' || fp === 'A crédito' || fp === 'CXC' || fp === 'Cuenta por Pagar';
 

@@ -208,15 +208,16 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
       .then(d => setProductosDisp((Array.isArray(d) ? d : []).filter(p => p.activo !== false && p.tipo !== 'insumo')))
       .catch(() => {});
 
-    // Ola 2.5: cargar préstamos pendientes del cliente cuando estamos en paso de entrega
+    // ✅ PRESTAMO-ENTREGA-001: cargar los préstamos del cliente al ir a entregar.
+    // Ahora se filtra por clienteId en el BACKEND (más eficiente: no descarga
+    // todos los préstamos del tenant para filtrarlos aquí). El mensajero ve
+    // exactamente cuántos y cuáles extintores debe recoger de este cliente.
     if (orden.clienteId && ['en_ruta_entrega', 'entrega_cobranza'].includes(orden.estado)) {
-      fetch(`${API}/logistica/extintores-prestamo?estado=prestado`, { headers })
+      fetch(`${API}/logistica/extintores-prestamo?clienteId=${orden.clienteId}`, { headers })
         .then(r => r.json())
         .then(d => {
           const lista = Array.isArray(d) ? d : [];
-          // Filtrar solo los del cliente actual
-          const delCliente = lista.filter(p => p.clienteId === orden.clienteId);
-          setPrestamosCliente(delCliente);
+          setPrestamosCliente(lista);
         })
         .catch(() => {});
     }
@@ -368,8 +369,13 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
 
     // ── Foto pago electrónico — BLOQUEA (SaaS-ready: cualquier forma que no sea
     // Efectivo ni CxC. Si mañana el admin agrega "Bold" o "Daviplata", pedirá foto.)
+    // ✅ EFECTIVO-PALABRA-002: es efectivo si el NOMBRE contiene "efectivo"
+    // (MAY EFECTIVO, EFECTIVO SAS, EFECTIVO SALA DE VENTAS...). Antes solo
+    // reconocía "Efectivo" exacto, así que las otras cajas de efectivo pedían
+    // comprobante que no existe. El efectivo se entrega en el cuadre, sin foto.
+    const esEfectivoFP = (formaPago || '').toLowerCase().includes('efectivo');
     const esPagoVirtual = formaPago &&
-      formaPago !== 'Efectivo' &&
+      !esEfectivoFP &&
       formaPago !== 'A crédito (CxC)' &&
       formaPago !== 'A crédito' &&
       formaPago !== 'CXC' &&
@@ -654,9 +660,20 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
                     <span style={{ fontSize: 13, flex: 1 }}>{item.nombre}</span>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <label style={{ fontSize: 12, color: '#6b7280' }}>Cant:</label>
-                      <input type="number" min="1" value={item.cantidad}
-                        onChange={e => setItems(prev => prev.map((x, i) => i === idx ? { ...x, cantidad: Number(e.target.value) || 1 } : x))}
-                        style={{ width: 50, padding: '4px 8px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 13 }} />
+                      <input type="number" min="1" inputMode="numeric" value={item.cantidad}
+                        onChange={e => {
+                          // ✅ LOGISTICA-UX-001: permitir el campo vacío mientras
+                          // el usuario borra para escribir otro número. Antes
+                          // Number('')||1 lo forzaba a 1 al instante y no dejaba
+                          // borrar. Se normaliza a 1 solo al salir del campo.
+                          const raw = e.target.value;
+                          setItems(prev => prev.map((x, i) => i === idx ? { ...x, cantidad: raw === '' ? '' : (Number(raw) || '') } : x));
+                        }}
+                        onBlur={e => {
+                          const val = Number(e.target.value);
+                          setItems(prev => prev.map((x, i) => i === idx ? { ...x, cantidad: val >= 1 ? val : 1 } : x));
+                        }}
+                        style={{ width: 64, padding: '8px 10px', border: '1px solid #e5e7eb', borderRadius: 6, fontSize: 15, textAlign: 'center' }} />
                       <span style={{ fontSize: 12, color: '#16a34a', fontWeight: 700, minWidth: 70, textAlign: 'right' }}>
                         {new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format((item.precioUnitario || 0) * (item.cantidad || 1))}
                       </span>
@@ -665,10 +682,43 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
                     </div>
                   </div>
                 ))}
-                <div style={{ padding: '8px 12px', background: '#f9fafb', display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: 14 }}>
-                  <span>Total orden:</span>
-                  <span style={{ color: '#16a34a' }}>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(totalItems)}</span>
-                </div>
+                {/* ✅ LOGISTICA-IVA-002: mostrar el desglose IGUAL que la orden.
+                    El mensajero debe cobrar el TOTAL con IVA, no el subtotal.
+                    Antes el modal solo sumaba los productos (sin IVA) y el
+                    mensajero veía/cobraba de menos. Se usa el IVA guardado en la
+                    orden; si la editó (agregó/quitó ítems), se recalcula proporcional. */}
+                {(() => {
+                  const ivaOrden = Number(orden.ivaValor) || 0;
+                  const subtotalOrden = Number(orden.subtotal) || 0;
+                  // Proporción de IVA sobre el subtotal original (para reflejar ediciones)
+                  const pctIva = subtotalOrden > 0 ? (ivaOrden / subtotalOrden) : 0;
+                  const ivaCalc = Math.round(totalItems * pctIva);
+                  const totalConIva = totalItems + ivaCalc;
+                  if (ivaOrden > 0) {
+                    return (
+                      <>
+                        <div style={{ padding: '4px 12px', display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#6b7280' }}>
+                          <span>Subtotal:</span>
+                          <span>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(totalItems)}</span>
+                        </div>
+                        <div style={{ padding: '4px 12px', display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#6b7280' }}>
+                          <span>IVA:</span>
+                          <span>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(ivaCalc)}</span>
+                        </div>
+                        <div style={{ padding: '8px 12px', background: '#f9fafb', display: 'flex', justifyContent: 'space-between', fontWeight: 800, fontSize: 15, borderTop: '1px solid #e5e7eb' }}>
+                          <span>Total a cobrar:</span>
+                          <span style={{ color: '#16a34a' }}>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(totalConIva)}</span>
+                        </div>
+                      </>
+                    );
+                  }
+                  return (
+                    <div style={{ padding: '8px 12px', background: '#f9fafb', display: 'flex', justifyContent: 'space-between', fontWeight: 700, fontSize: 14 }}>
+                      <span>Total orden:</span>
+                      <span style={{ color: '#16a34a' }}>{new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(totalItems)}</span>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}
@@ -892,8 +942,8 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
                       }}>{f}</button>
                     ))}
                   </div>
-                  {/* Foto comprobante: cualquier pago que no sea Efectivo ni CxC */}
-                  {formaPago && formaPago !== 'Efectivo' && formaPago !== 'A crédito (CxC)' && formaPago !== 'A crédito' && formaPago !== 'CXC' && formaPago !== 'Cuenta por Pagar' && (
+                  {/* Foto comprobante: cualquier pago que no sea efectivo ni CxC */}
+                  {formaPago && !(formaPago || '').toLowerCase().includes('efectivo') && formaPago !== 'A crédito (CxC)' && formaPago !== 'A crédito' && formaPago !== 'CXC' && formaPago !== 'Cuenta por Pagar' && (
                     <div style={{ marginTop: 10 }}>
                       <div style={{ fontSize: 11, color: '#dc2626', fontWeight: 700, marginBottom: 6 }}>
                         * Foto del comprobante obligatoria para {formaPago}

@@ -56,7 +56,11 @@ router.get('/', async (req, res) => {
     // tener varias responsables. El IVA generado solo cuenta de estas empresas.
     let empresasResponsablesIVA = [];
     try {
-      const snapEmp = await db.collection('companies').where('adminId', '==', userId).get();
+      // ✅ CXP-IVA-003 FIX: la colección companies usa el campo user_id (no
+      // adminId). Con adminId la consulta salía vacía, idsResponsables quedaba
+      // vacío, y el informe contaba TODAS las empresas en vez de solo la
+      // responsable de IVA — por eso el Valle traía datos que no eran suyos.
+      const snapEmp = await db.collection('companies').where('user_id', '==', userId).get();
       empresasResponsablesIVA = snapEmp.docs
         .map(d => ({ id: d.id, name: d.data().name, nit: d.data().nit, iva: Number(d.data().iva) || 0 }))
         .filter(e => e.iva > 0);

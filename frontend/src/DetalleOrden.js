@@ -428,8 +428,17 @@ const cargarConfigCerts = async () => {
 
   // Ocultar "Pasar a Cuadre Dinero" si es oficina_rapida y ya está pagado
   // El cuadre es solo para mensajero que cobró efectivo en campo
+  // ✅ TEMA-2 FIX: cuando la orden está en 'facturado' y el usuario es
+  // comercial/tesorería (no admin), su jugada correcta es la tarjeta
+  // "Registrar Factura DIAN" (que SÍ los deja escribir el número y avanzar la
+  // orden). El bloque de avance de estado de abajo les mostraba solo el candado
+  // "Solo el administrador" y tapaba la acción real — por eso no podían
+  // registrar la factura. Aquí ocultamos ese bloque para ellos en ese caso.
+  const debeUsarTarjetaFactura = !isAdmin && puedeCargaFactura && orden.estado === 'facturado';
+
   const mostrarSiguienteEstado = siguienteEstado &&
     orden.estado !== 'anulada' &&
+    !debeUsarTarjetaFactura &&
     !(orden.lugarAtencion === 'oficina_rapida' && orden.pagado && siguienteEstado === 'cuadre_dinero');
 
   const modalFotoRender = modalFoto ? (

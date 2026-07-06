@@ -3,6 +3,8 @@ import axios from 'axios';
 // Ola 3: plantilla ejecutiva del cuadre diario (documento de cierre del día).
 import { abrirImpresionCuadreDiario } from './printCuadreDiario';
 import { exportarExcel } from './exportExcel';
+// ✅ CAJA-REDISENO-001: gráficas SVG puras (dona + flujo mensual), livianas
+import { DonaDistribucion, FlujoMensual, colorPorIndice } from './CajaGraficas';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -115,6 +117,80 @@ function ModalCaja({ caja, empresas, onSave, onClose }) {
 }
 
 // ─── Modal Traslado entre Cajas ──────────────────────────────────────────────
+// ✅ CAJA-REDISENO-001: modal para registrar otros ingresos no operacionales.
+// Recuperación de cartera, venta de chatarra, etc. Solo mueve la caja y deja
+// huella — NO suma al ERI (ese ingreso ya se reconoció, o es esporádico).
+function ModalOtroIngreso({ cajas, onSave, onClose }) {
+  const [cajaId, setCajaId] = useState('');
+  const [concepto, setConcepto] = useState('Recuperación de cartera');
+  const [monto, setMonto] = useState('');
+  const [nota, setNota] = useState('');
+  const [fecha, setFecha] = useState(() => new Date().toISOString().slice(0, 10));
+  const [saving, setSaving] = useState(false);
+
+  // Conceptos base (el suscriptor puede tener más configurados en el futuro)
+  const conceptos = ['Recuperación de cartera', 'Venta de chatarra', 'Reintegro', 'Ajuste de saldo', 'Otro ingreso'];
+
+  const guardar = async () => {
+    if (!cajaId) return alert('Selecciona la caja');
+    if (!monto || Number(monto) <= 0) return alert('El valor debe ser mayor a cero');
+    if (!concepto.trim()) return alert('El concepto es obligatorio');
+    setSaving(true);
+    await onSave({ cajaId, concepto, monto, nota, fecha });
+    setSaving(false);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', zIndex: 1100, display: 'flex', justifyContent: 'center', alignItems: 'center', padding: 20 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 18, width: '100%', maxWidth: 460, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+        <div style={{ background: 'linear-gradient(135deg,#0891b2,#0e7490)', padding: '18px 22px', color: '#fff' }}>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>➕ Otro ingreso / Ajuste</div>
+          <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>Ingresa dinero a una caja con su concepto y huella</div>
+        </div>
+        <div style={{ padding: '20px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ background: '#ecfeff', border: '1px solid #a5f3fc', borderRadius: 10, padding: '10px 12px', fontSize: 12, color: '#0e7490' }}>
+            💡 Esto suma a la caja y queda registrado con auditoría. No afecta la utilidad del ERI (es un movimiento de tesorería, no una venta).
+          </div>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 700, color: '#475569' }}>Caja destino *</label>
+            <select value={cajaId} onChange={e => setCajaId(e.target.value)} style={{ width: '100%', padding: '10px 12px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 14, marginTop: 4 }}>
+              <option value="">— Selecciona —</option>
+              {cajas.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 700, color: '#475569' }}>Concepto *</label>
+            <select value={concepto} onChange={e => setConcepto(e.target.value)} style={{ width: '100%', padding: '10px 12px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 14, marginTop: 4 }}>
+              {conceptos.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 700, color: '#475569' }}>Valor *</label>
+            <input type="number" value={monto} onChange={e => setMonto(e.target.value)} placeholder="0"
+              style={{ width: '100%', padding: '10px 12px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 16, fontWeight: 700, marginTop: 4 }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 700, color: '#475569' }}>Nota / descripción</label>
+            <input value={nota} onChange={e => setNota(e.target.value)} placeholder="Ej: abono cliente Pérez, factura vieja..."
+              style={{ width: '100%', padding: '10px 12px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 14, marginTop: 4 }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 700, color: '#475569' }}>Fecha</label>
+            <input type="date" value={fecha} onChange={e => setFecha(e.target.value)}
+              style={{ width: '100%', padding: '10px 12px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 14, marginTop: 4 }} />
+          </div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+            <button onClick={onClose} style={{ flex: 1, padding: '12px', background: '#f1f5f9', color: '#475569', border: 'none', borderRadius: 10, fontWeight: 700, cursor: 'pointer' }}>Cancelar</button>
+            <button onClick={guardar} disabled={saving} style={{ flex: 2, padding: '12px', background: 'linear-gradient(135deg,#0891b2,#0e7490)', color: '#fff', border: 'none', borderRadius: 10, fontWeight: 700, cursor: 'pointer' }}>
+              {saving ? '⏳ Guardando...' : '✅ Registrar ingreso'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ModalTraslado({ cajas, onTraslado, onClose }) {
   const [cajaOrigenId, setCajaOrigenId] = useState('');
   const [cajaDestinoId, setCajaDestinoId] = useState('');
@@ -378,6 +454,10 @@ export default function GestionCaja({ user }) {
   const [filtroCaja, setFiltroCaja] = useState('todas');
   const [filtroDesde, setFiltroDesde] = useState('');
   const [filtroHasta, setFiltroHasta] = useState('');
+  // ✅ CAJA-REDISENO-001: vista de detalle por caja, búsqueda por número, mes
+  const [cajaDetalle, setCajaDetalle] = useState(null);
+  const [buscarMov, setBuscarMov] = useState('');
+  const [mesGrafica, setMesGrafica] = useState(() => new Date().toISOString().slice(0, 7));
 
   useEffect(() => { 
     cargarDatos();
@@ -483,6 +563,21 @@ export default function GestionCaja({ user }) {
       ...p
     ]);
     setModal(null);
+  };
+
+  // ✅ CAJA-REDISENO-001: registrar otro ingreso (recuperación de cartera,
+  // chatarra...). Llama al endpoint /cajas/otro-ingreso ya construido. Solo
+  // mueve caja + huella; NO afecta el ERI (decisión contable de Sandra).
+  const registrarOtroIngreso = async ({ cajaId, concepto, monto, nota, fecha }) => {
+    try {
+      await axios.post(`${API}/cajas/otro-ingreso`,
+        { cajaId, concepto, monto: Number(monto), nota, fecha },
+        { headers: getHeaders() });
+      setModal(null);
+      await cargarDatos();
+    } catch (e) {
+      alert(e.response?.data?.error || 'Error al registrar el ingreso');
+    }
   };
 
  const registrarMovimiento = async (form) => {
@@ -600,6 +695,7 @@ export default function GestionCaja({ user }) {
               }} style={{ ...S.actionBtn, fontSize: 12, padding: '8px 14px' }}>
                 📥 Exportar
               </button>
+              <button onClick={() => setModal('otro-ingreso')} style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#0891b2,#0e7490)' }}>➕ Otro ingreso</button>
               <button onClick={() => setModal('movimiento')} style={S.btnPrimary}>+ Movimiento manual</button>
             </>
           )}
@@ -609,19 +705,38 @@ export default function GestionCaja({ user }) {
         </div>
       </div>
 
-      {/* KPIs por caja */}
-      <div style={S.kpiRow}>
-        {cajasVisibles.map(c => (
-          <div key={c.id} style={{ ...S.kpiCard, borderLeft: `4px solid ${c.tipo === 'Banco' ? '#3b82f6' : c.tipo === 'Mensajero' ? '#f59e0b' : '#22c55e'}` }}>
-            <div style={S.kpiLabel}>{c.tipo === 'Banco' ? '🏦' : c.tipo === 'Mensajero' ? '🚚' : c.tipo === 'Nequi/Daviplata' ? '📱' : '💵'} {c.nombre}</div>
-            <div style={{ ...S.kpiValue, color: Number(c.saldo) < 0 ? '#dc2626' : '#1e293b', fontSize: c.saldo === null ? 16 : undefined }}>{fmtSaldo(c.saldo)}</div>
-            <div style={S.kpiSub}>{c.responsable || '—'}</div>
+      {/* ✅ CAJA-REDISENO-001: HERO de saldo total — una sola tarjeta destacada
+          en vez de la fila de KPIs que duplicaba los saldos de "Mis Cajas". */}
+      <div style={{
+        background: 'linear-gradient(135deg, #1e293b 0%, #4f46e5 100%)',
+        borderRadius: 18, padding: '22px 26px', marginBottom: 18, color: '#fff',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        flexWrap: 'wrap', gap: 16, boxShadow: '0 10px 30px rgba(79,70,229,0.25)'
+      }}>
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, letterSpacing: 1, color: '#c7d2fe', textTransform: 'uppercase' }}>
+            Control360 · {esAdminUser ? 'Saldo total consolidado' : 'Total a tu cargo'}
           </div>
-        ))}
-        <div style={{ ...S.kpiCard, borderLeft: '4px solid #6366f1', background: '#f5f3ff' }}>
-          <div style={S.kpiLabel}>💼 {esAdminUser ? 'Total general' : 'Total a tu cargo'}</div>
-          <div style={{ ...S.kpiValue, color: '#4f46e5' }}>{fmt(totalSaldo)}</div>
-          <div style={S.kpiSub}>{cajasVisibles.length} {cajasVisibles.length === 1 ? 'caja' : 'cajas'}{esAdminUser ? ' activas' : ' a tu cargo'}</div>
+          <div style={{ fontSize: 34, fontWeight: 800, marginTop: 4, letterSpacing: -0.5 }}>{fmt(totalSaldo)}</div>
+          <div style={{ fontSize: 13, color: '#a5b4fc', marginTop: 2 }}>
+            {cajasVisibles.length} {cajasVisibles.length === 1 ? 'caja activa' : 'cajas activas'}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          {(() => {
+            const efectivo = cajasVisibles.filter(c => (c.nombre || '').toLowerCase().includes('efectivo') || c.tipo === 'Efectivo').reduce((a, c) => a + Number(c.saldo || 0), 0);
+            const bancos = cajasVisibles.filter(c => c.tipo === 'Banco' || c.tipo === 'Nequi/Daviplata').reduce((a, c) => a + Number(c.saldo || 0), 0);
+            const Pill = ({ label, valor, icon }) => (
+              <div style={{ background: 'rgba(255,255,255,0.12)', borderRadius: 12, padding: '10px 16px', minWidth: 120 }}>
+                <div style={{ fontSize: 11, color: '#c7d2fe' }}>{icon} {label}</div>
+                <div style={{ fontSize: 17, fontWeight: 800, marginTop: 2 }}>{fmt(valor)}</div>
+              </div>
+            );
+            return <>
+              <Pill label="Efectivo" valor={efectivo} icon="💵" />
+              <Pill label="Bancos / Digital" valor={bancos} icon="🏦" />
+            </>;
+          })()}
         </div>
       </div>
 
@@ -662,24 +777,46 @@ export default function GestionCaja({ user }) {
               <div style={{ fontSize: 13 }}>Ve a <strong>Mi Empresa → Cajas</strong> para crear tus cajas</div>
             </div>
           ) : (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16, marginTop: 16 }}>
-              {cajasVisibles.map(caja => (
-                <div key={caja.id} style={{
-                  background: '#fff', borderRadius: 14, padding: '20px 22px',
-                  boxShadow: '0 1px 4px rgba(0,0,0,0.08)', border: '1px solid #e2e8f0',
-                  borderLeft: `4px solid ${caja.tipo === 'Banco' ? '#3b82f6' : caja.tipo === 'Mensajero' ? '#f59e0b' : caja.tipo === 'Nequi/Daviplata' ? '#a855f7' : '#22c55e'}`
-                }}>
-                  <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
-                    {caja.tipo === 'Banco' ? '🏦' : caja.tipo === 'Mensajero' ? '🚚' : caja.tipo === 'Nequi/Daviplata' ? '📱' : '💵'} {caja.tipo}
-                  </div>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: '#1e293b', marginBottom: 2 }}>{caja.nombre}</div>
-                  {caja.banco && <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>{caja.banco}{caja.numeroCuenta ? ` · ${caja.numeroCuenta}` : ''}</div>}
-                  <div style={{ fontSize: caja.saldo === null ? 18 : 28, fontWeight: 900, color: Number(caja.saldo) < 0 ? '#dc2626' : '#1e293b', margin: '10px 0 6px' }}>
-                    {fmtSaldo(caja.saldo)}
-                  </div>
-                  <div style={{ fontSize: 12, color: '#94a3b8' }}>Responsable: {caja.responsable || '—'}</div>
-                </div>
-              ))}
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 300px', gap: 20, marginTop: 16, alignItems: 'start' }}>
+              {/* Tarjetas premium translúcidas — clic para ver detalle */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 14 }}>
+                {cajasVisibles.map((caja, i) => {
+                  const col = colorPorIndice(i);
+                  const esEfectivo = (caja.nombre || '').toLowerCase().includes('efectivo') || caja.tipo === 'Efectivo';
+                  return (
+                    <div key={caja.id} onClick={() => { setCajaDetalle(caja); }} style={{
+                      background: col.soft, borderRadius: 16, padding: '18px 20px',
+                      border: `1px solid ${col.solid}33`, cursor: 'pointer',
+                      transition: 'transform 0.15s, box-shadow 0.15s', position: 'relative', overflow: 'hidden',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = `0 8px 20px ${col.solid}22`; }}
+                    onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}>
+                      {/* Acento de color */}
+                      <div style={{ position: 'absolute', top: 0, left: 0, width: 4, height: '100%', background: col.solid }} />
+                      <div style={{ fontSize: 11, color: col.solid, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
+                        {caja.tipo === 'Banco' ? '🏦' : caja.tipo === 'Mensajero' ? '🚚' : caja.tipo === 'Nequi/Daviplata' ? '📱' : '💵'} {caja.tipo}
+                      </div>
+                      <div style={{ fontSize: 15, fontWeight: 800, color: '#1e293b', marginBottom: 2 }}>{caja.nombre}</div>
+                      {caja.banco && <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>{caja.banco}{caja.numeroCuenta ? ` · ${caja.numeroCuenta}` : ''}</div>}
+                      <div style={{ fontSize: caja.saldo === null ? 18 : 26, fontWeight: 900, color: Number(caja.saldo) < 0 ? '#dc2626' : '#0f172a', margin: '8px 0 6px' }}>
+                        {fmtSaldo(caja.saldo)}
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: 11, color: '#94a3b8' }}>{caja.responsable || '—'}</span>
+                        <span style={{ fontSize: 11, color: col.solid, fontWeight: 700 }}>Ver movimientos →</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Dona de distribución */}
+              <div style={{ background: '#fff', borderRadius: 16, padding: '20px', border: '1px solid #e2e8f0', boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#334155', marginBottom: 4 }}>📊 Distribución de saldos</div>
+                <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 12 }}>Qué caja concentra más efectivo</div>
+                <DonaDistribucion datos={cajasVisibles.filter(c => Number(c.saldo) > 0).map((c, i) => ({
+                  nombre: c.nombre, valor: Number(c.saldo || 0), color: colorPorIndice(i).solid
+                }))} />
+              </div>
             </div>
           )}
         </div>
@@ -778,6 +915,92 @@ export default function GestionCaja({ user }) {
           onSave={registrarMovimiento} 
           onClose={() => setModal(null)} 
         />
+      )}
+
+      {/* ✅ CAJA-REDISENO-001: modal Otro Ingreso (recuperación de cartera,
+          venta de chatarra...). Solo mueve caja + huella. NO toca el ERI. */}
+      {modal === 'otro-ingreso' && (
+        <ModalOtroIngreso
+          cajas={cajasVisibles}
+          onSave={registrarOtroIngreso}
+          onClose={() => setModal(null)}
+        />
+      )}
+
+      {/* ✅ CAJA-REDISENO-001: vista de DETALLE de una caja — saldo + gráfica de
+          flujo del mes + movimientos con búsqueda por número de orden/egreso. */}
+      {cajaDetalle && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.5)', zIndex: 1000, display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: 20, overflowY: 'auto' }}
+          onClick={() => setCajaDetalle(null)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#f8fafc', borderRadius: 20, width: '100%', maxWidth: 720, marginTop: 20, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+            {/* Encabezado de la caja */}
+            {(() => {
+              const col = colorPorIndice(cajasVisibles.findIndex(c => c.id === cajaDetalle.id));
+              const movsCaja = movimientos.filter(m => m.cajaId === cajaDetalle.id);
+              const movsFiltrados = movsCaja.filter(m => {
+                if (!buscarMov.trim()) return true;
+                const q = buscarMov.toLowerCase();
+                return (m.concepto || '').toLowerCase().includes(q) ||
+                       (m.referencia || '').toLowerCase().includes(q);
+              });
+              return (
+                <>
+                  <div style={{ background: `linear-gradient(135deg, ${col.solid} 0%, ${col.solid}cc 100%)`, padding: '22px 26px', color: '#fff' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.85, textTransform: 'uppercase', letterSpacing: 1 }}>
+                          {cajaDetalle.tipo === 'Banco' ? '🏦' : cajaDetalle.tipo === 'Mensajero' ? '🚚' : cajaDetalle.tipo === 'Nequi/Daviplata' ? '📱' : '💵'} {cajaDetalle.tipo}
+                        </div>
+                        <div style={{ fontSize: 22, fontWeight: 800, marginTop: 4 }}>{cajaDetalle.nombre}</div>
+                        <div style={{ fontSize: 13, opacity: 0.85, marginTop: 2 }}>Responsable: {cajaDetalle.responsable || '—'}</div>
+                      </div>
+                      <button onClick={() => setCajaDetalle(null)} style={{ background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff', width: 32, height: 32, borderRadius: 8, cursor: 'pointer', fontSize: 16 }}>✕</button>
+                    </div>
+                    <div style={{ fontSize: 34, fontWeight: 900, marginTop: 14 }}>{fmtSaldo(cajaDetalle.saldo)}</div>
+                    <div style={{ fontSize: 12, opacity: 0.8 }}>Saldo actual</div>
+                  </div>
+
+                  <div style={{ padding: '20px 26px' }}>
+                    {/* Gráfica de flujo del mes */}
+                    <div style={{ background: '#fff', borderRadius: 14, padding: '16px 18px', border: '1px solid #e2e8f0', marginBottom: 16 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: '#334155' }}>📈 Flujo del mes</div>
+                        <input type="month" value={mesGrafica} onChange={e => setMesGrafica(e.target.value)}
+                          style={{ padding: '5px 8px', border: '1px solid #e2e8f0', borderRadius: 7, fontSize: 12 }} />
+                      </div>
+                      <FlujoMensual movimientos={movsCaja} mes={mesGrafica} />
+                    </div>
+
+                    {/* Búsqueda + movimientos */}
+                    <div style={{ background: '#fff', borderRadius: 14, padding: '16px 18px', border: '1px solid #e2e8f0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 10, flexWrap: 'wrap' }}>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: '#334155' }}>📋 Movimientos ({movsFiltrados.length})</div>
+                        <input value={buscarMov} onChange={e => setBuscarMov(e.target.value)}
+                          placeholder="🔍 Buscar por N° orden o egreso..."
+                          style={{ padding: '7px 12px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, minWidth: 220 }} />
+                      </div>
+                      <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+                        {movsFiltrados.length === 0 ? (
+                          <div style={{ textAlign: 'center', padding: 30, color: '#94a3b8', fontSize: 13 }}>Sin movimientos</div>
+                        ) : movsFiltrados.map((m, i) => (
+                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: 13, color: '#334155', fontWeight: 600 }}>{m.concepto}</div>
+                              <div style={{ fontSize: 11, color: '#94a3b8' }}>{(m.fecha || '').toString().slice(0, 10)}{m.referencia ? ` · ${m.referencia}` : ''}</div>
+                            </div>
+                            <div style={{ fontWeight: 800, fontSize: 14, color: m.tipo === 'ingreso' ? '#16a34a' : '#dc2626' }}>
+                              {m.tipo === 'ingreso' ? '+' : '-'}{fmt(Math.abs(Number(m.monto) || 0))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
       )}
     </div>
   );
