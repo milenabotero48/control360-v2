@@ -514,28 +514,26 @@ router.get('/', async (req, res) => {
       }
     });
 
-    // ✅ ERI-CXP-FIX: la CxP se calcula desde los EGRESOS pendientes con
-    // proveedor (igual que el módulo CxP real), NO de una colección
-    // 'cuentas_por_pagar' que no existe. Antes salía siempre en $0.
-    // Un egreso es cuenta por pagar si está PENDIENTE y tiene proveedor.
+    // ✅ ERI-CXP-FIX2: replicar EXACTAMENTE la lógica del módulo CxP real.
+    // Un egreso es cuenta por pagar si estado === 'PENDIENTE'. NO se exige que
+    // tenga proveedor (si no lo tiene, va como "Sin proveedor" — así aparece la
+    // retención de GOICOCHEA que antes se perdía). Se excluyen provisionales no
+    // cuadrados. El saldo = (totalPagar||monto) − montoPagado.
     let carteraCxP = 0;
     const anexoCxP = [];
     try {
       const cxpSnap = await db.collection('egresos')
-        .where('userId', '==', adminId).get();
+        .where('userId', '==', adminId)
+        .where('estado', '==', 'PENDIENTE').get();
       cxpSnap.docs.forEach(d => {
         const e = d.data();
-        // Solo pendientes de pago, con proveedor, no anulados, no retenciones puras
-        if (e.estado !== 'PENDIENTE') return;
+        if (e.esProvisional && !e.cuadrado) return;
         if (e.anulado === true) return;
-        if (e.tipo === 'retencion') return;
-        const proveedor = (e.proveedor || '').trim();
-        if (!proveedor) return;
-        const saldo = Number(e.saldoPendiente ?? e.monto) || 0;
+        const saldo = (Number(e.totalPagar || e.monto) || 0) - (Number(e.montoPagado) || 0);
         if (saldo > 0) {
           carteraCxP += saldo;
           anexoCxP.push({
-            proveedor,
+            proveedor: e.proveedor || 'Sin proveedor',
             fecha: (e.fecha || (e.createdAt && e.createdAt.toDate ? e.createdAt.toDate().toISOString() : '') || '').slice(0, 10),
             concepto: e.concepto || e.numeroFactura || '',
             saldo
