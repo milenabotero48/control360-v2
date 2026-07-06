@@ -514,27 +514,35 @@ router.get('/', async (req, res) => {
       }
     });
 
-    // CxP: cuentas por pagar pendientes (proveedores)
+    // ✅ ERI-CXP-FIX: la CxP se calcula desde los EGRESOS pendientes con
+    // proveedor (igual que el módulo CxP real), NO de una colección
+    // 'cuentas_por_pagar' que no existe. Antes salía siempre en $0.
+    // Un egreso es cuenta por pagar si está PENDIENTE y tiene proveedor.
     let carteraCxP = 0;
     const anexoCxP = [];
     try {
-      const cxpSnap = await db.collection('cuentas_por_pagar')
-        .where('adminId', '==', adminId).get();
+      const cxpSnap = await db.collection('egresos')
+        .where('userId', '==', adminId).get();
       cxpSnap.docs.forEach(d => {
-        const c = d.data();
-        if (c.estado === 'anulada' || c.estado === 'pagada') return;
-        const saldo = Number(c.saldoPendiente ?? c.monto) || 0;
+        const e = d.data();
+        // Solo pendientes de pago, con proveedor, no anulados, no retenciones puras
+        if (e.estado !== 'PENDIENTE') return;
+        if (e.anulado === true) return;
+        if (e.tipo === 'retencion') return;
+        const proveedor = (e.proveedor || '').trim();
+        if (!proveedor) return;
+        const saldo = Number(e.saldoPendiente ?? e.monto) || 0;
         if (saldo > 0) {
           carteraCxP += saldo;
           anexoCxP.push({
-            proveedor: c.proveedorNombre || c.proveedor || '',
-            fecha: (c.fecha || '').slice(0, 10),
-            concepto: c.concepto || c.numeroFactura || '',
+            proveedor,
+            fecha: (e.fecha || (e.createdAt && e.createdAt.toDate ? e.createdAt.toDate().toISOString() : '') || '').slice(0, 10),
+            concepto: e.concepto || e.numeroFactura || '',
             saldo
           });
         }
       });
-    } catch (eCxp) { /* si no existe la colección, cartera CxP queda en 0 */ }
+    } catch (eCxp) { /* si falla la lectura, cartera CxP queda en 0 (no rompe el ERI) */ }
 
     respuesta.informe = {
       periodo: respuesta.periodo || { desde: desde || null, hasta: hasta || null },
