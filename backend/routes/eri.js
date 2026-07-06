@@ -299,6 +299,8 @@ router.get('/', async (req, res) => {
         numeroOrden: o.numeroOrden,
         fecha: o._fechaRef.toISOString().slice(0, 10),
         clienteNombre: o.clienteNombre || '',
+        empresaNombre: o.empresaNombre || '',   // ✅ para auditar por empresa
+        estado: o.estado || '',                 // ✅ ver el estado de cada orden
         total: Number(o.total) || 0
       });
     });
@@ -401,6 +403,7 @@ router.get('/', async (req, res) => {
         hasta: hastaStr,
         empresaId: empresaId || 'consolidado',
         empresaNombre: empresaId ? (empresas[empresaId]?.name || '—') : 'Consolidado (todas las empresas)',
+        nit: empresaId ? (empresas[empresaId]?.nit || empresas[empresaId]?.NIT || '') : '', // ✅ ERI-PDF-001: membrete
         cantidadOrdenes: ordenesEnRango.length,
         cantidadEgresos: egresosEnRango.length,
         calculadoEn: new Date().toISOString()
@@ -569,7 +572,9 @@ router.get('/', async (req, res) => {
       },
       // Anexos (soporte del informe)
       anexos: {
-        ventas: anexoVentas.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')),
+        // ✅ ERI-PDF-001: ordenar por N° de orden (no por fecha) para que la
+        // supervisión sea más fácil — se lee secuencial OS-0001, OS-0002...
+        ventas: anexoVentas.sort((a, b) => String(a.numeroOrden || '').localeCompare(String(b.numeroOrden || ''), undefined, { numeric: true })),
         costos: anexoCostos,
         gastos: Object.entries(gastosDetallePorCategoria)
           .map(([categoria, monto]) => ({ categoria, monto }))
@@ -577,7 +582,20 @@ router.get('/', async (req, res) => {
         compras: anexoCompras.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')),
         // ✅ ERI-CARTERA-001: anexos de cartera
         cxc: anexoCxC.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')),
-        cxp: anexoCxP.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''))
+        cxp: anexoCxP.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || '')),
+        // ✅ ERI-ANEXO-EGRESOS-001: egresos detallados CON número de comprobante,
+        // para poder auditar cuáles están y cuáles faltan (antes el anexo de
+        // gastos solo agrupaba por categoría, sin el N° EGR-XXXX).
+        egresos: detalleEgresos
+          .map(e => ({
+            numero: e.numero || '—',
+            fecha: (e.fecha || '').slice(0, 10),
+            categoria: e.categoria || '',
+            concepto: e.concepto || '',
+            monto: e.monto,
+            tipoERI: e.tipoERI || ''
+          }))
+          .sort((a, b) => String(a.numero || '').localeCompare(String(b.numero || ''), undefined, { numeric: true }))
       }
     };
 

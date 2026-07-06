@@ -676,6 +676,15 @@ router.post('/', authenticate, async (req, res) => {
     // vencidas más allá del parámetro de días (contados DESDE que se generó la
     // orden), se bloquea. El admin puede autorizar con su PIN (pinCartera).
     // ══════════════════════════════════════════════════════════════════════
+    // ✅ FIX: esCxc y esEfectivo deben declararse ANTES de la validación de
+    // cartera (que los usa). Antes se declaraban 115 líneas más abajo, causando
+    // "Cannot access 'esCxc' before initialization" y bloqueando la creación de
+    // TODA orden. Se declaran una sola vez, aquí arriba.
+    const esCxc = formaPago === 'A crédito (CxC)' || formaPago === 'CXC' || formaPago === 'A crédito';
+    // ✅ EFECTIVO-PALABRA-001: es efectivo si el NOMBRE contiene "efectivo"
+    // (MAY EFECTIVO, EFECTIVO SAS...). El efectivo se entrega en el cuadre, sin foto.
+    const esEfectivo = (formaPago || '').toLowerCase().includes('efectivo');
+
     if (!sinCliente && clienteId && !esCxc) {
       const adminIdCartera = req.adminId || req.user.uid || req.user.id;
       try {
@@ -791,13 +800,7 @@ router.post('/', authenticate, async (req, res) => {
     const total = subtotal + ivaValor;
 
     const generaCertificado = tipoFinal === 'servicio' && requiereCertificado(items);
-    const esCxc = formaPago === 'A crédito (CxC)' || formaPago === 'CXC' || formaPago === 'A crédito';
-    // ✅ EFECTIVO-PALABRA-001: es efectivo si el NOMBRE contiene la palabra
-    // "efectivo" (MAY EFECTIVO, EFECTIVO SAS, EFECTIVO SALA DE VENTAS...). Antes
-    // solo reconocía el texto exacto "Efectivo", así que las otras cajas de
-    // efectivo se trataban como pago digital y pedían un comprobante que no
-    // existe (¡es dinero físico!). El efectivo se entrega en el cuadre, sin foto.
-    const esEfectivo = (formaPago || '').toLowerCase().includes('efectivo');
+    // esCxc y esEfectivo ya se declararon arriba (antes de la validación de cartera)
 
     // ¿La orden lleva equipos que DEBEN ir a taller? Solo cuenta recarga/
     // mant/PH que NO estén marcados como "cambio". Un equipo de cambio se

@@ -687,64 +687,189 @@ const labelTipoERI = (t) => ({
 }[t] || t);
 
 // ─── HTML para imprimir ──────────────────────────────────────────────────────
-const construirHtmlImprimir = (eri) => `
+const construirHtmlImprimir = (eri) => {
+  const inf = eri.informe || {};
+  const m = eri.meta || {};
+  const fmt = (n) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
+  const hoy = new Date().toLocaleDateString('es-CO', { day: 'numeric', month: 'long', year: 'numeric' });
+
+  // Filas de una sección de categorías
+  const filasCat = (arr) => (arr || []).map(c =>
+    `<tr><td class="ind">${c.nombre}</td><td class="num">${fmt(c.valor)}</td></tr>`).join('');
+
+  // Anexo genérico ordenado
+  const tablaAnexo = (titulo, headers, filas, colorHead) => `
+    <div class="anexo">
+      <div class="anexo-titulo" style="border-left:4px solid ${colorHead}">${titulo}</div>
+      <table class="tabla-anexo">
+        <thead><tr>${headers.map(h => `<th class="${h.num ? 'num' : ''}">${h.l}</th>`).join('')}</tr></thead>
+        <tbody>${filas || `<tr><td colspan="${headers.length}" class="vacio">Sin registros</td></tr>`}</tbody>
+      </table>
+    </div>`;
+
+  return `
 <html>
 <head>
-  <title>ERI ${eri.meta.desde} a ${eri.meta.hasta}</title>
   <meta charset="utf-8">
+  <title>Estado de Resultados — ${m.empresaNombre || 'Control360'} — ${m.desde} a ${m.hasta}</title>
   <style>
-    body { font-family: 'Segoe UI', sans-serif; padding: 24px; color: #111; }
-    h1 { color: #7c3aed; margin-bottom: 4px; }
-    .meta { color: #6b7280; font-size: 12px; margin-bottom: 24px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    td { padding: 7px 12px; border-bottom: 1px solid #e5e7eb; }
-    td:last-child { text-align: right; font-family: monospace; }
-    .seccion { background: #f3f4f6; font-weight: 700; color: #374151; font-size: 11px; text-transform: uppercase; }
-    .total { background: #eff6ff; font-weight: 800; color: #1e3a8a; font-size: 14px; }
-    .utilidad { background: #f0fdf4; font-weight: 800; color: #15803d; font-size: 14px; }
-    .neta { background: #7c3aed; color: #fff; font-weight: 900; font-size: 16px; }
-    .footer { margin-top: 32px; color: #9ca3af; font-size: 10px; text-align: center; }
+    * { box-sizing: border-box; }
+    body { font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; color: #1e293b; margin: 0; padding: 0; font-size: 12.5px; }
+    .hoja { padding: 40px 46px; }
+    /* MEMBRETE */
+    .membrete { border-bottom: 3px solid #4f46e5; padding-bottom: 18px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: flex-end; }
+    .brand { display: flex; flex-direction: column; }
+    .brand-logo { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+    .brand-logo .c360 { color: #4f46e5; }
+    .brand-logo .n { color: #0f172a; }
+    .brand-tag { font-size: 9px; letter-spacing: 3px; color: #94a3b8; text-transform: uppercase; margin-top: 2px; font-weight: 600; }
+    .empresa-info { text-align: right; font-size: 11px; color: #475569; line-height: 1.5; }
+    .empresa-info .nom { font-size: 14px; font-weight: 800; color: #0f172a; }
+    /* TÍTULO INFORME */
+    .doc-titulo { text-align: center; margin: 22px 0 6px; }
+    .doc-titulo h1 { font-size: 20px; color: #0f172a; margin: 0; letter-spacing: 0.5px; }
+    .doc-titulo .periodo { font-size: 12px; color: #64748b; margin-top: 4px; }
+    .doc-titulo .norma { font-size: 10px; color: #94a3b8; font-style: italic; margin-top: 2px; }
+    /* TABLA PRINCIPAL */
+    table { width: 100%; border-collapse: collapse; }
+    .tabla-eri td { padding: 7px 14px; }
+    .tabla-eri .ind { padding-left: 30px; color: #475569; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .seccion-h td { font-size: 11px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase; padding-top: 16px; }
+    .subtotal td { border-top: 1px solid #cbd5e1; font-weight: 700; }
+    .destacado td { font-weight: 800; font-size: 14px; padding: 11px 14px; border-radius: 6px; }
+    .util-bruta td { background: #f0fdf4; color: #16a34a; }
+    .util-op td { background: #eff6ff; color: #2563eb; }
+    .util-neta td { background: linear-gradient(90deg,#4f46e5,#7c3aed); color: #fff; font-size: 16px; }
+    /* INVENTARIO / CARTERA */
+    .info-box { margin-top: 20px; border: 1px dashed #cbd5e1; border-radius: 10px; padding: 14px 18px; background: #f8fafc; }
+    .info-box .t { font-size: 11px; font-weight: 800; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+    .info-grid { display: flex; gap: 20px; flex-wrap: wrap; }
+    .info-item { flex: 1; min-width: 130px; }
+    .info-item .lbl { font-size: 10px; color: #94a3b8; }
+    .info-item .val { font-size: 15px; font-weight: 800; }
+    /* ANEXOS */
+    .anexo { page-break-inside: auto; margin-top: 22px; }
+    .anexo-titulo { font-size: 13px; font-weight: 800; color: #334155; padding: 6px 0 6px 12px; margin-bottom: 8px; }
+    .tabla-anexo { font-size: 11px; }
+    .tabla-anexo th { text-align: left; padding: 6px 10px; background: #f1f5f9; color: #475569; font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px; border-bottom: 2px solid #e2e8f0; }
+    .tabla-anexo td { padding: 5px 10px; border-bottom: 1px solid #f1f5f9; }
+    .tabla-anexo tr { page-break-inside: avoid; }
+    .tabla-anexo thead { display: table-header-group; }
+    .vacio { color: #94a3b8; text-align: center; padding: 12px; }
+    .salto { page-break-before: always; }
+    .footer { margin-top: 30px; padding-top: 12px; border-top: 1px solid #e2e8f0; color: #94a3b8; font-size: 10px; text-align: center; }
+    @media print { .hoja { padding: 20px 26px; } }
   </style>
 </head>
 <body>
-  <h1>📊 Estado de Resultados Integral</h1>
-  <div class="meta">
-    Período: ${eri.meta.desde} al ${eri.meta.hasta}<br>
-    ${eri.meta.empresaNombre}<br>
-    Calculado: ${new Date(eri.meta.calculadoEn).toLocaleString('es-CO')}
+  <!-- ══════ HOJA 1: ESTADO DE RESULTADOS ══════ -->
+  <div class="hoja">
+    <div class="membrete">
+      <div class="brand">
+        <div class="brand-logo"><span class="c360">Control</span><span class="n">360</span></div>
+        <div class="brand-tag">Sistema Operativo Empresarial</div>
+      </div>
+      <div class="empresa-info">
+        <div class="nom">${m.empresaNombre || 'Consolidado'}</div>
+        ${m.nit ? `<div>NIT: ${m.nit}</div>` : ''}
+        <div>Informe generado: ${hoy}</div>
+      </div>
+    </div>
+
+    <div class="doc-titulo">
+      <h1>ESTADO DE RESULTADOS INTEGRAL</h1>
+      <div class="periodo">Período: ${m.desde} al ${m.hasta}</div>
+      <div class="norma">Elaborado bajo el principio de causación (devengo) — Norma contable colombiana</div>
+    </div>
+
+    <table class="tabla-eri">
+      <tr class="seccion-h"><td style="color:#0284c7">INGRESOS OPERACIONALES</td><td></td></tr>
+      ${filasCat(inf.ingresos?.porCategoria)}
+      <tr class="subtotal"><td>Total ingresos operacionales</td><td class="num">${fmt(inf.ingresos?.total)}</td></tr>
+
+      ${(inf.costoVentas?.porCategoria || []).length ? `
+      <tr class="seccion-h"><td style="color:#dc2626">(−) COSTO DE VENTAS</td><td></td></tr>
+      ${filasCat(inf.costoVentas.porCategoria)}
+      <tr class="subtotal"><td>Total costo de ventas</td><td class="num">${fmt(inf.costoVentas.total)}</td></tr>
+      ` : ''}
+
+      <tr class="destacado util-bruta"><td>= UTILIDAD BRUTA</td><td class="num">${fmt(inf.utilidadBruta)}</td></tr>
+
+      ${(inf.gastos?.porCategoria || []).length ? `
+      <tr class="seccion-h"><td style="color:#b45309">(−) GASTOS OPERACIONALES</td><td></td></tr>
+      ${filasCat(inf.gastos.porCategoria)}
+      <tr class="subtotal"><td>Total gastos operacionales</td><td class="num">${fmt(inf.gastos.total)}</td></tr>
+      ` : ''}
+
+      <tr class="destacado util-neta"><td>= UTILIDAD NETA DEL PERÍODO</td><td class="num">${fmt(inf.utilidadNeta)}</td></tr>
+    </table>
+
+    ${inf.inventario ? `
+    <div class="info-box">
+      <div class="t">📦 Inventario (informativo — no afecta el resultado)</div>
+      <div class="info-grid">
+        <div class="info-item"><div class="lbl">Compras del período</div><div class="val" style="color:#7c3aed">${fmt(inf.inventario.comprasDelPeriodo)}</div></div>
+        <div class="info-item"><div class="lbl">Stock al costo</div><div class="val" style="color:#334155">${fmt(inf.inventario.alCosto)}</div></div>
+        <div class="info-item"><div class="lbl">Stock valorizado</div><div class="val" style="color:#16a34a">${fmt(inf.inventario.valorizado)}</div></div>
+        <div class="info-item"><div class="lbl">Utilidad potencial</div><div class="val" style="color:#059669">${fmt(inf.inventario.potencial || 0)}</div></div>
+      </div>
+    </div>` : ''}
+
+    ${inf.cartera ? `
+    <div class="info-box">
+      <div class="t">💰 Cartera (informativo — no afecta el resultado)</div>
+      <div class="info-grid">
+        <div class="info-item"><div class="lbl">Por cobrar (CxC) · ${inf.cartera.cxc.detalle.length} órdenes</div><div class="val" style="color:#0284c7">${fmt(inf.cartera.cxc.total)}</div></div>
+        <div class="info-item"><div class="lbl">Por pagar (CxP) · ${inf.cartera.cxp.detalle.length} cuentas</div><div class="val" style="color:#dc2626">${fmt(inf.cartera.cxp.total)}</div></div>
+      </div>
+    </div>` : ''}
   </div>
 
-  <table>
-    <tr class="seccion"><td>INGRESOS POR SERVICIOS</td><td></td></tr>
-    <tr><td>Servicios de mano de obra</td><td>${fmtCop(eri.ingresos.servicios)}</td></tr>
-    <tr class="seccion"><td>INGRESOS POR PRODUCTOS</td><td></td></tr>
-    <tr><td>Venta de productos</td><td>${fmtCop(eri.ingresos.productos)}</td></tr>
-    <tr class="total"><td>TOTAL INGRESOS</td><td>${fmtCop(eri.ingresos.total)}</td></tr>
+  <!-- ══════ HOJAS SIGUIENTES: ANEXOS ══════ -->
+  <div class="hoja salto">
+    <div class="membrete">
+      <div class="brand"><div class="brand-logo"><span class="c360">Control</span><span class="n">360</span></div><div class="brand-tag">Anexos de soporte</div></div>
+      <div class="empresa-info"><div class="nom">${m.empresaNombre || 'Consolidado'}</div><div>${m.desde} al ${m.hasta}</div></div>
+    </div>
 
-    <tr class="seccion"><td>(-) COSTO DE VENTAS</td><td></td></tr>
-    <tr><td>Costo de insumos (servicios)</td><td>− ${fmtCop(eri.costoVentas.servicios)}</td></tr>
-    <tr><td>Costo de venta de productos</td><td>− ${fmtCop(eri.costoVentas.productos)}</td></tr>
-    <tr class="utilidad"><td>UTILIDAD BRUTA (${fmtPct(eri.utilidadBruta.margen)})</td><td>${fmtCop(eri.utilidadBruta.total)}</td></tr>
+    ${tablaAnexo('Anexo 1 · Ventas del período (ordenado por N° de orden)',
+      [{l:'Orden'},{l:'Fecha'},{l:'Cliente'},{l:'Estado'},{l:'Total',num:true}],
+      (inf.anexos?.ventas || []).map(v => `<tr><td><strong>${v.numeroOrden}</strong></td><td>${v.fecha}</td><td>${v.clienteNombre}</td><td>${v.estado || ''}</td><td class="num">${fmt(v.total)}</td></tr>`).join(''),
+      '#0284c7')}
 
-    <tr class="seccion"><td>(-) GASTOS OPERATIVOS</td><td></td></tr>
-    ${eri.gastos.personal > 0       ? `<tr><td>Personal (nómina)</td><td>− ${fmtCop(eri.gastos.personal)}</td></tr>` : ''}
-    ${eri.gastos.operativos > 0     ? `<tr><td>Operativos</td><td>− ${fmtCop(eri.gastos.operativos)}</td></tr>` : ''}
-    ${eri.gastos.fijos > 0          ? `<tr><td>Fijos</td><td>− ${fmtCop(eri.gastos.fijos)}</td></tr>` : ''}
-    ${eri.gastos.administrativos > 0? `<tr><td>Administrativos</td><td>− ${fmtCop(eri.gastos.administrativos)}</td></tr>` : ''}
-    <tr class="utilidad"><td>UTILIDAD OPERATIVA (${fmtPct(eri.utilidadOperativa.margen)})</td><td>${fmtCop(eri.utilidadOperativa.valor)}</td></tr>
+    ${tablaAnexo('Anexo 2 · Costo de ventas por categoría',
+      [{l:'Categoría'},{l:'Ingreso',num:true},{l:'Costo',num:true}],
+      (inf.anexos?.costos || []).map(c => `<tr><td>${c.categoria}</td><td class="num">${fmt(c.ingreso)}</td><td class="num">${fmt(c.costo)}</td></tr>`).join(''),
+      '#dc2626')}
 
-    ${eri.gastos.financieros > 0 ? `<tr><td>(-) Gastos financieros</td><td>− ${fmtCop(eri.gastos.financieros)}</td></tr>` : ''}
-    ${eri.gastos.fiscales > 0 ? `<tr><td>(-) Impuestos</td><td>− ${fmtCop(eri.gastos.fiscales)}</td></tr>` : ''}
+    ${tablaAnexo('Anexo 3 · Egresos del período (ordenado por N° de comprobante)',
+      [{l:'N° Egreso'},{l:'Fecha'},{l:'Categoría'},{l:'Concepto'},{l:'Monto',num:true}],
+      (inf.anexos?.egresos || []).map(e => `<tr><td><strong>${e.numero}</strong></td><td>${e.fecha}</td><td>${e.categoria}</td><td>${e.concepto}</td><td class="num">${fmt(e.monto)}</td></tr>`).join(''),
+      '#b45309')}
 
-    <tr class="neta"><td>UTILIDAD NETA (${fmtPct(eri.utilidadNeta.margen)})</td><td>${fmtCop(eri.utilidadNeta.valor)}</td></tr>
-  </table>
+    ${(inf.anexos?.compras || []).length ? tablaAnexo('Anexo 4 · Compras de mercancía (inventario)',
+      [{l:'Fecha'},{l:'Proveedor'},{l:'Concepto'},{l:'Monto',num:true}],
+      inf.anexos.compras.map(c => `<tr><td>${c.fecha}</td><td>${c.proveedor}</td><td>${c.concepto}</td><td class="num">${fmt(c.monto)}</td></tr>`).join(''),
+      '#7c3aed') : ''}
 
-  <div class="footer">Generado por Control360 — ${new Date().toLocaleString('es-CO')}</div>
+    ${(inf.anexos?.cxc || []).length ? tablaAnexo('Anexo 5 · Cartera por cobrar (CxC)',
+      [{l:'Orden'},{l:'Fecha'},{l:'Cliente'},{l:'Saldo',num:true}],
+      inf.anexos.cxc.map(c => `<tr><td><strong>${c.numeroOrden}</strong></td><td>${c.fecha}</td><td>${c.clienteNombre}</td><td class="num">${fmt(c.saldo)}</td></tr>`).join(''),
+      '#0284c7') : ''}
+
+    ${(inf.anexos?.cxp || []).length ? tablaAnexo('Anexo 6 · Cartera por pagar (CxP)',
+      [{l:'Fecha'},{l:'Proveedor'},{l:'Concepto'},{l:'Saldo',num:true}],
+      inf.anexos.cxp.map(c => `<tr><td>${c.fecha}</td><td>${c.proveedor}</td><td>${c.concepto}</td><td class="num">${fmt(c.saldo)}</td></tr>`).join(''),
+      '#dc2626') : ''}
+
+    <div class="footer">Control360 · Sistema Operativo Empresarial — Informe generado el ${new Date().toLocaleString('es-CO')}</div>
+  </div>
 </body>
-</html>
-`;
+</html>`;
+};
 
-// ─── ESTILOS ─────────────────────────────────────────────────────────────────
+
 const s = {
   wrapper:    { padding: '24px 32px', maxWidth: 1400, margin: '0 auto', fontFamily: "'Segoe UI', sans-serif" },
   pageHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, flexWrap: 'wrap', gap: 12 },
