@@ -156,7 +156,16 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
   // digitar nada se interpretaba como "pagó efectivo el total" (pago fantasma).
   // Ahora el mensajero DEBE decir qué pasó: 'pago' o 'no_pago' (→ CxC).
   const [resultadoCobro, setResultadoCobro] = useState('');
-  const [formasPago, setFormasPago]       = useState(['Efectivo', 'Transferencia', 'Nequi', 'Datafono']);
+  // ✅ PAGO-BINARIO-001: el mensajero YA NO elige entre N formas de pago
+  // (Nequi, Bancolombia, Datafono...) — ahí nacía el error de caja errada.
+  // Solo declara lo binario que él sí sabe: ¿recibió EFECTIVO o fue
+  // ELECTRÓNICO? La forma exacta y la caja destino las confirma quien
+  // valida/recibe el dinero (segregación de funciones).
+  // 'Transferencia' como valor interno: el backend ya lo clasifica virtual.
+  const FORMAS_MENSAJERO = [
+    { label: '💵 Efectivo',            value: 'Efectivo' },
+    { label: '📲 Electrónico / QR',    value: 'Transferencia' }
+  ];
   const [fotoUrl, setFotoUrl]             = useState('');
   const [fotoTransUrl, setFotoTransUrl]   = useState('');
   const [subiendoFoto, setSubiendoFoto]   = useState(false);
@@ -182,8 +191,8 @@ const ModalAvanzarEstado = ({ orden, headers, onAvanzar, onCerrar }) => {
     fetch(`${API}/configuracion`, { headers })
       .then(r => r.json())
       .then(d => {
-        const fps = (d?.formasPago || []).filter(f => f.activa && f.nombre !== 'Cuenta por Pagar' && f.nombre !== 'A crédito (CxC)').map(f => f.nombre);
-        if (fps.length > 0) setFormasPago(fps);
+        // ✅ PAGO-BINARIO-001: ya no se cargan las formas de pago del admin
+        // en el modal del mensajero — él solo declara Efectivo/Electrónico.
         // Ola 2.5: catálogo de retenciones activas
         const rets = (d?.retenciones || []).filter(r => r.activo);
         setRetencionesCat(rets);
@@ -336,7 +345,19 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
   const necesitaFotoEntrega  = orden.estado === 'en_ruta_entrega';
   const necesitaExtintor     = orden.estado === 'en_ruta_recogida';
   const necesitaCobro        = orden.estado === 'en_ruta_entrega' || orden.estado === 'en_ruta_recogida';
-  const puedeEditarItems     = ['en_ruta_recogida', 'en_ruta_entrega'].includes(orden.estado);
+  // ✅ ITEMS-RECOGIDA-001: productos editables SOLO en recogida (ahí se
+  // descubren las cantidades reales). En entrega salen FIJOS — excepto
+  // venta directa (sin equipo de taller: despacho/cambio/venta), donde la
+  // entrega es el primer contacto y el cliente puede retractarse o aumentar.
+  const esVentaDirecta = typeof orden.tieneEquipoTaller === 'boolean'
+    ? !orden.tieneEquipoTaller
+    : !(orden.items || []).some(it => {
+        const c = (it.categoria || '').toLowerCase();
+        const esTallerCat = ['recarga', 'mantenimiento', 'hidrost'].some(k => c.includes(k));
+        return esTallerCat && !it.esCambio;
+      });
+  const puedeEditarItems     = orden.estado === 'en_ruta_recogida' ||
+    (orden.estado === 'en_ruta_entrega' && esVentaDirecta);
   // El paso de entrega exige resultado de cobro explícito (si no está pagada).
   const exigeResultadoCobro  = orden.estado === 'en_ruta_entrega' && !orden.pagado && !esCobranza;
 
@@ -383,7 +404,7 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
     const hayCobroVirtual = esPagoVirtual &&
       (Number(cobro) > 0 || esCobranza || (exigeResultadoCobro && resultadoCobro === 'pago'));
     if (hayCobroVirtual && !fotoTransUrl) {
-      setError(`⛔ Pago por ${formaPago} requiere foto del comprobante (obligatoria).`);
+      setError('⛔ Pago electrónico requiere foto del comprobante (obligatoria).'); // ✅ PAGO-BINARIO-001
       return;
     }
 
@@ -624,6 +645,28 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
                   {subiendoFoto ? '⏳ Subiendo...' : '📷 Tomar / Cargar foto'}
                 </button>
               )}
+            </div>
+          )}
+
+          {/* ✅ ITEMS-RECOGIDA-001: en la ENTREGA los productos salen FIJOS —
+              el mensajero ve qué entrega y cuánto cobrar, sin poder alterar
+              cantidades (eso solo se hace en la recogida o en venta directa). */}
+          {!puedeEditarItems && orden.estado === 'en_ruta_entrega' && items.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <label style={s.label}>Productos a entregar <span style={{ fontWeight: 400, color: '#9ca3af' }}>(cantidades fijas)</span></label>
+              <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', background: '#f9fafb' }}>
+                {items.map((item, idx) => (
+                  <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid #f3f4f6' }}>
+                    <span style={{ fontSize: 13, flex: 1 }}>{item.nombre}</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 13, fontWeight: 800, color: '#334155', background: '#e2e8f0', borderRadius: 6, padding: '2px 10px' }}>x{item.cantidad || 1}</span>
+                      <span style={{ fontSize: 12, color: '#16a34a', fontWeight: 700, minWidth: 70, textAlign: 'right' }}>
+                        {new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format((item.precioUnitario || 0) * (item.cantidad || 1))}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
@@ -933,20 +976,23 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
               {(Number(cobro) > 0 || esCobranza || (exigeResultadoCobro && resultadoCobro === 'pago')) && (
                 <div style={{ marginBottom: 14 }}>
                   <label style={s.label}>Forma de pago</label>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {formasPago.map(f => (
-                      <button key={f} type="button" onClick={() => setFormaPago(f)} style={{
-                        padding: '6px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 600, border: 'none',
-                        background: formaPago === f ? '#0284c7' : '#f3f4f6',
-                        color: formaPago === f ? '#fff' : '#374151',
-                      }}>{f}</button>
+                  {/* ✅ PAGO-BINARIO-001: solo dos opciones grandes, imposibles
+                      de confundir en pantalla pequeña. */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    {FORMAS_MENSAJERO.map(f => (
+                      <button key={f.value} type="button" onClick={() => setFormaPago(f.value)} style={{
+                        padding: '12px 8px', borderRadius: 10, cursor: 'pointer', fontSize: 13, fontWeight: 700,
+                        border: formaPago === f.value ? '2px solid #0284c7' : '1px solid #e5e7eb',
+                        background: formaPago === f.value ? '#eff6ff' : '#fff',
+                        color: formaPago === f.value ? '#075985' : '#374151',
+                      }}>{f.label}</button>
                     ))}
                   </div>
                   {/* Foto comprobante: cualquier pago que no sea efectivo ni CxC */}
                   {formaPago && !(formaPago || '').toLowerCase().includes('efectivo') && formaPago !== 'A crédito (CxC)' && formaPago !== 'A crédito' && formaPago !== 'CXC' && formaPago !== 'Cuenta por Pagar' && (
                     <div style={{ marginTop: 10 }}>
                       <div style={{ fontSize: 11, color: '#dc2626', fontWeight: 700, marginBottom: 6 }}>
-                        * Foto del comprobante obligatoria para {formaPago}
+                        * Foto del comprobante obligatoria para pago electrónico {/* ✅ PAGO-BINARIO-001 */}
                       </div>
                       {/* ✅ FOTO-GALERIA-001: sin capture — el celular ofrece Cámara O Galería */}
                       <input ref={fotoTransRef} type="file" accept="image/*" style={{ display: 'none' }}
@@ -1068,6 +1114,10 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
   // se puede registrar lo que entregó de verdad y queda huella del faltante.
   const [montoRecibido, setMontoRecibido] = useState('');
   const [motivoDescuadre, setMotivoDescuadre] = useState('');
+  // ✅ CUADRE-CAJA-001: quien RECIBE el dinero elige la caja de efectivo
+  // destino. Se listan solo las cajas de efectivo del tenant.
+  const [cajasEfectivo, setCajasEfectivo] = useState([]);
+  const [cajaEfectivoId, setCajaEfectivoId] = useState('');
 
   useEffect(() => {
     axios.get(`${API}/logistica/cuadre/${mensajeroId}`, { headers })
@@ -1077,6 +1127,19 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
         setMontoRecibido(String(r.data?.totalAEntregar || 0));
       })
       .catch(() => setError('Error al cargar cuadre'));
+
+    // ✅ CUADRE-CAJA-001: cargar cajas de efectivo (tipo o nombre con "efectivo")
+    axios.get(`${API}/cajas`, { headers })
+      .then(r => {
+        const efec = (r.data || []).filter(c =>
+          c.activa !== false &&
+          ((c.tipo || '').toLowerCase().includes('efectivo') ||
+           (c.nombre || '').toLowerCase().includes('efectivo'))
+        );
+        setCajasEfectivo(efec);
+        if (efec.length === 1) setCajaEfectivoId(efec[0].id); // única: preseleccionar
+      })
+      .catch(() => {});
   }, [mensajeroId]);
 
   const esperado = cuadre?.totalAEntregar || 0;
@@ -1086,6 +1149,10 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
 
   const handleConfirmar = async () => {
     if (pin.length !== 4) return setError('Ingresa el PIN de 4 dígitos');
+    // ✅ CUADRE-CAJA-001: si entra efectivo, la caja destino es obligatoria
+    if (recibidoNum > 0 && cajasEfectivo.length > 0 && !cajaEfectivoId) {
+      return setError('Selecciona la caja de efectivo donde entra el dinero.');
+    }
     // ✅ Opción (c): si hay descuadre, exigir motivo antes de confirmar
     if (hayDescuadre && !motivoDescuadre.trim()) {
       return setError(`Hay un ${descuadre < 0 ? 'faltante' : 'sobrante'} de ${fmt(Math.abs(descuadre))}. Escribe el motivo para dejar constancia.`);
@@ -1096,6 +1163,7 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
         pin,
         montoRecibido: recibidoNum,
         motivoDescuadre: motivoDescuadre.trim() || undefined,
+        cajaEfectivoId: cajaEfectivoId || undefined, // ✅ CUADRE-CAJA-001
         extintoresDevueltos: Object.keys(extDevueltos).filter(k => extDevueltos[k])
       });
     } catch (e) { setError(e.response?.data?.error || 'Error al confirmar cuadre'); }
@@ -1217,6 +1285,32 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                           <span style={{ fontSize: 12, fontWeight: 600 }}>Devuelto</span>
                         </label>
                       </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ✅ CUADRE-BARRIDO-001: órdenes aún EN RUTA — el cuadre NO las
+                  toca. Conservan su estado para el día siguiente o reasignación. */}
+              {(cuadre.rutaDetalle || []).filter(o => ['en_ruta_recogida', 'en_ruta_entrega'].includes(o.estado)).length > 0 && (
+                <div style={{ marginBottom: 16, padding: '10px 12px', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, fontSize: 12, color: '#1d4ed8' }}>
+                  🚚 <strong>{(cuadre.rutaDetalle || []).filter(o => ['en_ruta_recogida', 'en_ruta_entrega'].includes(o.estado)).length} orden(es) siguen en ruta</strong> y NO entran en este cuadre: conservan su estado y quedan listas para la próxima ruta o para reasignar.
+                </div>
+              )}
+
+              {/* ✅ CUADRE-CAJA-001: caja destino del efectivo — la elige quien
+                  recibe el dinero, no el sistema a ciegas. */}
+              {cajasEfectivo.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <label style={s.label}>🏦 Caja donde entra el efectivo <span style={{ color: '#dc2626' }}>*</span></label>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
+                    {cajasEfectivo.map(c => (
+                      <button key={c.id} type="button" onClick={() => setCajaEfectivoId(c.id)} style={{
+                        padding: '10px 14px', borderRadius: 10, cursor: 'pointer', fontSize: 13, fontWeight: 700,
+                        border: cajaEfectivoId === c.id ? '2px solid #16a34a' : '1px solid #e5e7eb',
+                        background: cajaEfectivoId === c.id ? '#f0fdf4' : '#fff',
+                        color: cajaEfectivoId === c.id ? '#166534' : '#374151'
+                      }}>{c.nombre}</button>
                     ))}
                   </div>
                 </div>

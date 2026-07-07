@@ -435,7 +435,7 @@ const devolverInventario = async (items) => {
 // Marca la orden con dineroEnCaja=true en transacción atómica. Cualquier
 // segundo intento se rechaza al ver el flag → ELIMINA la doble suma de raíz.
 // ══════════════════════════════════════════════════════════════════════════════
-const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNombre, monto, formaPago, usuarioEmail, numeroFactura }) => {
+const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNombre, monto, formaPago, usuarioEmail, numeroFactura, cajaIdSeleccionada = null }) => {
   try {
     const esCxC = formaPago === 'A crédito (CxC)' || formaPago === 'A crédito'
       || formaPago === 'credito' || formaPago === 'CXC';
@@ -476,9 +476,21 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
       }
     }
 
-    const configDoc = await db.collection('configuracion').doc(userId).get();
+    // ✅ VALIDAR-CAJA-001: si quien registra el pago eligió una caja destino
+    // explícita, esa caja manda sobre el mapeo automático forma→caja
+    // (validando que exista y pertenezca al tenant).
     let cajaId = null;
-    if (configDoc.exists) {
+    if (cajaIdSeleccionada) {
+      const cajaSelDoc = await db.collection('cajas').doc(cajaIdSeleccionada).get();
+      if (cajaSelDoc.exists && (!cajaSelDoc.data().userId || cajaSelDoc.data().userId === userId)) {
+        cajaId = cajaIdSeleccionada;
+      } else {
+        console.warn('VALIDAR-CAJA-001: caja seleccionada inválida o de otro tenant — se usa el mapeo automático');
+      }
+    }
+
+    const configDoc = await db.collection('configuracion').doc(userId).get();
+    if (!cajaId && configDoc.exists) {
       const config = configDoc.data();
       const formaConfig = (config.formasPago || []).find(f =>
         f.nombre?.toLowerCase() === formaPago?.toLowerCase() && f.activa
@@ -1850,14 +1862,19 @@ router.post('/:id/pago', authenticate, async (req, res) => {
       // CxC explícita: marca el flag pero NO cambia estado.
       // (El estado seguirá moviéndose por el flujo del mensajero.)
       estadoFinal = actual.estado;
-    } else if (actual.estado === 'entrega_cobranza') {
-      // La orden estaba justo en cobranza: el pago la cierra.
+    } else if (['entrega_cobranza', 'cxc'].includes(actual.estado)) {
+      // ✅ FIX PAGO-CIERRA-CXC-001: el pago cierra la orden tanto en cobranza
+      // como en CARTERA. Antes una orden en 'cxc' cobrada desde aquí quedaba
+      // pagada pero atascada en Cuentas por Cobrar sin salida.
       await ordenRef.update({
         estado: 'completada',
+        ...(actual.estado === 'cxc' ? { cxcSaldo: 0, cxcEstado: 'pagada' } : {}),
         historialEstados: admin.firestore.FieldValue.arrayUnion({
           estado: 'completada', fecha: new Date().toISOString(),
           usuarioId, usuarioNombre,
-          notas: `Pago registrado en cobranza — ${formaPago}`
+          notas: actual.estado === 'cxc'
+            ? `Pago de cartera registrado — ${formaPago}`
+            : `Pago registrado en cobranza — ${formaPago}`
         }),
         ...(actual.generaCertificado && !actual.certificadoGenerado ? {
           certificadoGenerado: true,
@@ -1902,7 +1919,10 @@ router.post('/:id/pago', authenticate, async (req, res) => {
 router.post('/:id/validar-pago', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-    const { aprobado, motivo = '', pin } = req.body;
+    // ✅ VALIDAR-CAJA-001: el validador puede confirmar la forma de pago
+    // EXACTA (Nequi/Bancolombia/etc — el mensajero solo declaró "electrónico")
+    // y elegir la caja destino viendo dónde cayó realmente el dinero.
+    const { aprobado, motivo = '', pin, cajaId, formaPagoConfirmada } = req.body;
 
     // Solo Admin o Tesorería
     if (!['admin', 'tesoreria'].includes(req.user.role)) {
@@ -1940,10 +1960,21 @@ router.post('/:id/validar-pago', authenticate, async (req, res) => {
     if (aprobado) {
       // ── APROBAR ─────────────────────────────────────────────────────────────
       // Ola 2.5 REGLA: el pago se confirma → dinero entra a caja → marca pagado.
-      // PERO el estado del servicio solo se completa si la orden YA estaba
-      // en entrega_cobranza. Si todavía está en recogida/taller/entrega, el
-      // estado sigue su curso normal.
-      const cerrarPorCobranza = orden.estado === 'entrega_cobranza';
+      // PERO el estado del servicio solo se completa si el pago ES el evento
+      // pendiente. Si todavía está en recogida/taller/entrega, el estado
+      // sigue su curso normal.
+      // ✅ FIX PAGO-CIERRA-CXC-001: antes solo cerraba desde 'entrega_cobranza'.
+      // Una orden en CxC con pago electrónico aprobado quedaba PAGADA pero
+      // atascada en cartera para siempre (bug real OS-0018: historial con
+      // "Cuenta por Cobrar" duplicado y sin salida). El pago validado ES el
+      // cobro de esa cartera → la orden se completa.
+      const cerrarPorCobranza = ['entrega_cobranza', 'cxc'].includes(orden.estado);
+      const veniaDeCartera = orden.estado === 'cxc';
+
+      // ✅ VALIDAR-CAJA-001: forma de pago exacta confirmada por el validador.
+      const formaPagoFinal = (typeof formaPagoConfirmada === 'string' && formaPagoConfirmada.trim())
+        ? formaPagoConfirmada.trim()
+        : orden.formaPago;
 
       const updateAprobar = {
         pagoValidado: true,
@@ -1955,17 +1986,26 @@ router.post('/:id/validar-pago', authenticate, async (req, res) => {
         pagado: true,
         montoPagado: orden.total || 0,
         fechaPago: ahora,
+        // ✅ VALIDAR-CAJA-001: se guarda la forma de pago exacta confirmada
+        formaPago: formaPagoFinal,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
 
       if (cerrarPorCobranza) {
         updateAprobar.estado = 'completada';
+        // ✅ PAGO-CIERRA-CXC-001: si venía de cartera, cerrar también los
+        // campos de CxC para que el módulo de cartera no muestre deuda fantasma.
+        if (veniaDeCartera) {
+          updateAprobar.cxcSaldo = 0;
+          updateAprobar.cxcEstado = 'pagada';
+        }
         updateAprobar.historialEstados = admin.firestore.FieldValue.arrayUnion({
           estado: 'completada',
           fecha: ahora,
           usuarioId: userId,
           usuarioNombre,
-          accion: 'PAGO_VALIDADO_APROBADO_CIERRA_COBRANZA'
+          accion: veniaDeCartera ? 'PAGO_VALIDADO_APROBADO_CIERRA_CXC' : 'PAGO_VALIDADO_APROBADO_CIERRA_COBRANZA',
+          nota: veniaDeCartera ? 'Pago electrónico aprobado — cartera cobrada, orden completada' : ''
         });
       } else {
         // Solo registrar la aprobación en historial, sin cambiar estado.
@@ -1992,10 +2032,28 @@ router.post('/:id/validar-pago', authenticate, async (req, res) => {
         numeroOrden: orden.numeroOrden,
         clienteNombre: orden.clienteNombre,
         monto: orden.total || 0,
-        formaPago: orden.formaPago,
+        formaPago: formaPagoFinal,
         usuarioEmail: req.user.email,
-        numeroFactura: orden.numeroFactura || ''
+        numeroFactura: orden.numeroFactura || '',
+        // ✅ VALIDAR-CAJA-001: caja elegida por quien valida (manda sobre el mapeo)
+        cajaIdSeleccionada: cajaId || null
       }).catch((e) => { console.error('Caja virtual:', e); return null; });
+
+      // ✅ PAGO-CIERRA-CXC-001: si existía documento en la colección cxc,
+      // marcarlo pagado para que no quede deuda fantasma (mejor esfuerzo).
+      if (veniaDeCartera) {
+        try {
+          const cxcSnap = await db.collection('cxc').where('ordenId', '==', id).limit(1).get();
+          if (!cxcSnap.empty) {
+            await cxcSnap.docs[0].ref.update({
+              estado: 'pagada',
+              fechaPago: ahora,
+              pagadaPor: usuarioNombre,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+        } catch (eCxcDoc) { console.warn('PAGO-CIERRA-CXC-001: no se pudo cerrar doc cxc:', eCxcDoc.message); }
+      }
 
       await auditar({
         accion: 'PAGO_ELECTRONICO_APROBADO',

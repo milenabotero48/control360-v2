@@ -116,6 +116,12 @@ const [configCerts, setConfigCerts]   = useState([]);
   const [pinValidacion, setPinValidacion]           = useState('');
   const [verPinValidacion, setVerPinValidacion]     = useState(false);
   const [validandoPago, setValidandoPago]           = useState(false);
+  // ✅ VALIDAR-CAJA-001: el validador confirma la forma de pago EXACTA
+  // (el mensajero solo declaró "electrónico") y elige la caja destino
+  // viendo dónde cayó realmente el dinero. Se acaban los traslados.
+  const [formaPagoConfirmada, setFormaPagoConfirmada] = useState('');
+  const [cajaValidacionId, setCajaValidacionId]       = useState('');
+  const [cajasDisp, setCajasDisp]                     = useState([]);
 
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
@@ -311,6 +317,23 @@ const cargarConfigCerts = async () => {
     setPinValidacion('');
     setVerPinValidacion(false);
     setError('');
+    // ✅ VALIDAR-CAJA-001: precargar forma declarada y cajas del tenant.
+    // Solo cajas NO efectivo: un pago electrónico cae en banco/billetera.
+    setFormaPagoConfirmada(orden?.formaPago || '');
+    setCajaValidacionId('');
+    if (accion === 'aprobar') {
+      axios.get(`${API}/cajas`, { headers })
+        .then(r => {
+          const noEfectivo = (r.data || []).filter(c =>
+            c.activa !== false &&
+            !((c.tipo || '').toLowerCase().includes('efectivo') ||
+              (c.nombre || '').toLowerCase().includes('efectivo'))
+          );
+          setCajasDisp(noEfectivo);
+          if (noEfectivo.length === 1) setCajaValidacionId(noEfectivo[0].id);
+        })
+        .catch(() => setCajasDisp([]));
+    }
     setMostrarValidarPago(true);
   };
 
@@ -331,7 +354,10 @@ const cargarConfigCerts = async () => {
         {
           aprobado: accionPago === 'aprobar',
           motivo: motivoValidacion.trim(),
-          pin: pinValidacion
+          pin: pinValidacion,
+          // ✅ VALIDAR-CAJA-001: forma exacta y caja destino confirmadas
+          formaPagoConfirmada: accionPago === 'aprobar' ? (formaPagoConfirmada || undefined) : undefined,
+          cajaId: accionPago === 'aprobar' ? (cajaValidacionId || undefined) : undefined
         },
         { headers }
       );
@@ -1332,6 +1358,46 @@ const cargarConfigCerts = async () => {
                   </div>
                 )}
               </div>
+
+              {/* ✅ VALIDAR-CAJA-001: forma de pago exacta + caja destino */}
+              {accionPago === 'aprobar' && (
+                <>
+                  <div style={sValidPago.campo}>
+                    <label style={sValidPago.label}>Forma de pago confirmada</label>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      {formasPago.filter(f => !(f || '').toLowerCase().includes('efectivo') && f !== 'A crédito (CxC)' && f !== 'A crédito' && f !== 'CXC' && f !== 'Cuenta por Pagar').map(f => (
+                        <button key={f} type="button" onClick={() => setFormaPagoConfirmada(f)} disabled={validandoPago} style={{
+                          padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700,
+                          border: formaPagoConfirmada === f ? '2px solid #0284c7' : '1px solid #e5e7eb',
+                          background: formaPagoConfirmada === f ? '#eff6ff' : '#fff',
+                          color: formaPagoConfirmada === f ? '#075985' : '#374151'
+                        }}>{f}</button>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
+                      El mensajero solo declaró "electrónico" — aquí confirmas por dónde entró realmente.
+                    </div>
+                  </div>
+                  {cajasDisp.length > 0 && (
+                    <div style={sValidPago.campo}>
+                      <label style={sValidPago.label}>Caja destino del dinero <span style={{ color: '#dc2626' }}>*</span></label>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {cajasDisp.map(c => (
+                          <button key={c.id} type="button" onClick={() => setCajaValidacionId(c.id)} disabled={validandoPago} style={{
+                            padding: '7px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 700,
+                            border: cajaValidacionId === c.id ? '2px solid #16a34a' : '1px solid #e5e7eb',
+                            background: cajaValidacionId === c.id ? '#f0fdf4' : '#fff',
+                            color: cajaValidacionId === c.id ? '#166534' : '#374151'
+                          }}>{c.nombre}</button>
+                        ))}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
+                        Si no eliges, el sistema usa el mapeo automático de Mi Empresa.
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
 
               {/* Motivo */}
               <div style={sValidPago.campo}>

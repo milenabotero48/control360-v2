@@ -146,23 +146,30 @@ router.post('/asignar', async (req, res) => {
         return cat.includes('recarga') || cat.includes('mantenimiento')
           || cat.includes('hidrostatica') || cat.includes('hidrostática');
       };
-      // ¿Hay al menos un equipo de recarga/mant que NO sea de cambio?
-      // FIX (Ola 2.5): si la orden YA viene de taller (estado en_ruta_entrega o
-      // entrega_cobranza), el ciclo de recogida ya pasó. Hay que asignar siempre
-      // como entrega, sin importar los items. ANTES: el código evaluaba items y
-      // como una Domicilio que pasó por taller TODAVÍA tiene items de recarga,
-      // la mandaba de nuevo a en_ruta_recogida (bug que rompía el flujo).
-      const yaSalioDeTaller = ['en_ruta_entrega', 'entrega_cobranza'].includes(ordData.estado);
-      const tieneRecogerReal = !yaSalioDeTaller && (ordData.items || []).some(
+      // ✅ FIX ASIGNAR-ESTADO-001: asignar mensajero NO retrocede la orden.
+      // ANTES: este endpoint escribía `estado` a ciegas según los items. Una
+      // orden EN TALLER que se (re)asignaba volvía a 'en_ruta_recogida' —
+      // retroceso ilegal que rompía el flujo (bug real OS-0119). El parche
+      // anterior (yaSalioDeTaller) solo protegía 2 estados y dejó el resto
+      // expuesto.
+      // AHORA: la máquina de estados manda. La asignación solo mueve el
+      // estado si la orden está en 'programada' (su único paso legal de
+      // salida es la asignación). En CUALQUIER otro estado, asignar/reasignar
+      // solo actualiza el mensajero y deja constancia en el historial — el
+      // estado queda intacto. Pre-asignar el mensajero de entrega mientras
+      // la orden sigue en taller es válido y ya no daña nada.
+      const tieneRecogerReal = (ordData.items || []).some(
         it => esRecargaMant(it) && !it.esCambio
       );
-
-      const estadoAsignado = tieneRecogerReal ? 'en_ruta_recogida' : 'en_ruta_entrega';
+      const cambiaEstado = ordData.estado === 'programada';
+      const estadoAsignado = cambiaEstado
+        ? (tieneRecogerReal ? 'en_ruta_recogida' : 'en_ruta_entrega')
+        : ordData.estado;
 
       batch.update(ref, {
         mensajeroId,
         mensajeroNombre: mensajeroNombre || '',
-        estado: estadoAsignado,
+        ...(cambiaEstado ? { estado: estadoAsignado } : {}),
         fechaAsignacion: hoy,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         historialEstados: admin.firestore.FieldValue.arrayUnion({
@@ -170,9 +177,11 @@ router.post('/asignar', async (req, res) => {
           fecha: new Date().toISOString(),
           usuarioId: req.user.uid || req.user.id,
           usuarioNombre: req.user.email,
-          nota: tieneRecogerReal
-            ? `Asignada a ${mensajeroNombre} — recoge equipo para taller`
-            : `Asignada a ${mensajeroNombre} — lleva equipo (cambio/venta), va a entrega`
+          nota: cambiaEstado
+            ? (tieneRecogerReal
+                ? `Asignada a ${mensajeroNombre} — recoge equipo para taller`
+                : `Asignada a ${mensajeroNombre} — lleva equipo (cambio/venta), va a entrega`)
+            : `Mensajero asignado: ${mensajeroNombre} — la orden conserva su estado actual (ASIGNAR-ESTADO-001)`
         })
       });
     }
@@ -457,6 +466,29 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
 
     // Actualizar items si vienen
     if (items && items.length > 0) {
+      // ✅ ITEMS-RECOGIDA-001: la edición de productos solo es legal en la
+      // RECOGIDA (ahí el mensajero descubre las cantidades reales en el
+      // cliente). En la ENTREGA las cantidades ya están definidas por el
+      // taller/factura y NO se tocan — salvo VENTA DIRECTA (sin equipo de
+      // taller: despacho/cambio/venta a domicilio), donde la entrega es el
+      // primer contacto con el cliente y puede retractarse o aumentar.
+      // Se valida en backend porque esconderlo solo en pantalla deja el
+      // hueco abierto por API.
+      const esVentaDirectaItems = typeof orden.tieneEquipoTaller === 'boolean'
+        ? !orden.tieneEquipoTaller
+        : !(orden.items || []).some(it => {
+            const c = (it.categoria || '').toLowerCase();
+            const esTallerCat = ['recarga', 'mantenimiento', 'hidrostatica', 'hidrostática'].some(k => c.includes(k));
+            return esTallerCat && !it.esCambio;
+          });
+      const puedeEditarItemsBackend =
+        orden.estado === 'en_ruta_recogida' ||
+        (orden.estado === 'en_ruta_entrega' && esVentaDirectaItems);
+      if (!puedeEditarItemsBackend) {
+        return res.status(400).json({
+          error: 'Los productos de esta orden solo se pueden editar durante la recogida. En la entrega las cantidades son fijas.'
+        });
+      }
       // ✅ PRECIO-CERO-001: ningún item puede quedar en $0 — un cero nunca es
       // un accidente. Las cortesías se manejan con descuento (decisión visible).
       const itemCero = items.find(it => !(Number(it.precioUnitario) > 0));
@@ -1116,7 +1148,11 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
   try {
-    const { pin, montoRecibido, extintoresDevueltos } = req.body;
+    // ✅ CUADRE-CAJA-001: quien RECIBE el dinero elige la caja de efectivo
+    // destino (segregación de funciones: el mensajero declara, el receptor
+    // clasifica). Antes el backend tomaba a ciegas la primera caja tipo
+    // 'Efectivo' — origen de cajas erradas y traslados para cuadrar.
+    const { pin, montoRecibido, extintoresDevueltos, cajaEfectivoId } = req.body;
     const { mensajeroId } = req.params;
     const adminId = req.adminId || req.user?.uid || req.user?.id;
 
@@ -1176,10 +1212,33 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       }
     }
     // ── Marcar órdenes cuadradas + registrar dinero SOLO una vez ─────────────
+    // ✅ FIX CUADRE-BARRIDO-001: el cuadre YA NO incluye 'en_ruta_entrega'.
+    // ANTES: la consulta barría también las órdenes aún EN RUTA (sin entregar)
+    // y les forzaba un cierre: sin monto → CxC. Cuando al mensajero no le
+    // alcanzaba el día, sus órdenes pendientes saltaban a cartera sin entrega,
+    // sin foto y sin cobranza real (causa raíz de las órdenes atascadas).
+    // AHORA: el cuadre solo procesa órdenes que el mensajero YA declaró con el
+    // modal de entrega (entrega_cobranza / cuadre_dinero) o ya completadas.
+    // Las que sigan en ruta conservan su estado, listas para el día siguiente.
     const snapOrdenes = await db.collection('orders')
       .where('mensajeroId', '==', mensajeroId)
-      .where('estado', 'in', ['en_ruta_entrega', 'entrega_cobranza', 'cuadre_dinero', 'completada'])
+      .where('estado', 'in', ['entrega_cobranza', 'cuadre_dinero', 'completada'])
       .get();
+
+    // ✅ CUADRE-BARRIDO-001: contar las que quedan en ruta (solo informativo,
+    // NO se tocan) para reportarlas en la respuesta y en el arqueo.
+    let ordenesPendientesRuta = [];
+    try {
+      const snapEnRuta = await db.collection('orders')
+        .where('mensajeroId', '==', mensajeroId)
+        .where('estado', 'in', ['en_ruta_recogida', 'en_ruta_entrega'])
+        .get();
+      ordenesPendientesRuta = snapEnRuta.docs.map(d => ({
+        numeroOrden: d.data().numeroOrden,
+        clienteNombre: d.data().clienteNombre || '',
+        estado: d.data().estado
+      }));
+    } catch (ePend) { console.warn('CUADRE-BARRIDO-001: no se pudo listar pendientes:', ePend.message); }
 
     let sumaEfectivo = 0;   // → caja Efectivo
     let sumaVirtual  = 0;   // → caja Bancos
@@ -1271,21 +1330,44 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
     const refOrdenes = ordenesParaCaja.map(o => o.numeroOrden).join(', ') || 'Cuadre';
     const registrarEnCaja = async (monto, tipoCaja, concepto) => {
       if (monto <= 0) return;
-      const snapCajas = await db.collection('cajas')
-        .where('userId', '==', req.user.uid)
-        .where('tipo', '==', tipoCaja)
-        .limit(1).get();
-      if (snapCajas.empty) {
-        console.warn(`Cuadre: no se encontró caja tipo ${tipoCaja}`);
-        return;
+
+      // ✅ CUADRE-CAJA-001: si el receptor eligió caja para el EFECTIVO,
+      // esa caja manda (validando que exista y pertenezca al tenant).
+      let cajaDestinoRef = null;
+      let cajaDestinoId = null;
+      if (tipoCaja === 'Efectivo' && cajaEfectivoId) {
+        const cajaSelDoc = await db.collection('cajas').doc(cajaEfectivoId).get();
+        if (cajaSelDoc.exists && cajaSelDoc.data().userId === adminId) {
+          cajaDestinoRef = cajaSelDoc.ref;
+          cajaDestinoId = cajaSelDoc.id;
+        } else {
+          console.warn('CUADRE-CAJA-001: caja seleccionada inválida o de otro tenant — se usa fallback');
+        }
       }
-      await snapCajas.docs[0].ref.update({
+
+      if (!cajaDestinoRef) {
+        // Fallback (comportamiento histórico): primera caja del tipo.
+        // ✅ CUADRE-CAJA-001: se busca por adminId (antes req.user.uid — si
+        // tesorería confirmaba el cuadre, no encontraba las cajas del tenant).
+        const snapCajas = await db.collection('cajas')
+          .where('userId', '==', adminId)
+          .where('tipo', '==', tipoCaja)
+          .limit(1).get();
+        if (snapCajas.empty) {
+          console.warn(`Cuadre: no se encontró caja tipo ${tipoCaja}`);
+          return;
+        }
+        cajaDestinoRef = snapCajas.docs[0].ref;
+        cajaDestinoId = snapCajas.docs[0].id;
+      }
+
+      await cajaDestinoRef.update({
         saldo: admin.firestore.FieldValue.increment(monto),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
       await db.collection('movimientos').add({
-        userId: req.user.uid,
-        cajaId: snapCajas.docs[0].id,
+        userId: adminId,
+        cajaId: cajaDestinoId,
         tipo: 'ingreso',
         concepto,
         monto,
@@ -1337,6 +1419,10 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
         virtualIngresado: sumaVirtual,
         // Detalle congelado (evidencia)
         ordenesCuadradas: ordenesParaCaja,
+        // ✅ CUADRE-BARRIDO-001: constancia de lo que quedó en ruta (no cuadrado)
+        ordenesPendientesRuta,
+        // ✅ CUADRE-CAJA-001: caja de efectivo elegida por el receptor
+        cajaEfectivoId: cajaEfectivoId || null,
         extintoresDevueltos: Array.isArray(extintoresDevueltos) ? extintoresDevueltos : [],
         // Estado del arqueo
         anulado: false
@@ -1364,7 +1450,10 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       ok: true,
       efectivoIngresado: sumaEfectivo,
       virtualIngresado: sumaVirtual,
-      ordenesCuadradas: ordenesParaCaja.length
+      ordenesCuadradas: ordenesParaCaja.length,
+      // ✅ CUADRE-BARRIDO-001: informar cuántas quedaron en ruta sin tocar
+      ordenesPendientesRuta: ordenesPendientesRuta.length,
+      pendientesDetalle: ordenesPendientesRuta
     });
   } catch (e) {
     console.error('POST cuadre/confirmar:', e);
