@@ -6,6 +6,19 @@
 //   · Mi Día      → cola de llamadas priorizada + meta en vivo (vendedora y admin)
 //   · Prospectos  → gestión, importación CSV, asignación (solo admin)
 //   · Métricas    → desempeño por vendedora + motivos descarte (solo admin)
+//
+// ✅ TELEVENC (2026-07-06):
+//   · TELEVENC-005: nueva cola 🔥 VENCIDOS del mes en Mi Día (prioridad sobre
+//     reintentos y nuevos) + modal de llamada de RETENCIÓN que cuenta en meta
+//   · TELEVENC-006: alerta "ya tuvo servicios este mes" con detalle de la
+//     orden y sus equipos, para comparar antes de llamar
+//   · TELEVENC-003: al capturar fecha de recarga en llamada se pide la
+//     empresa facturadora — el prospecto pasa a la base de Vencimientos y
+//     deja de salir en la cola de prospectos
+//   · TELEVENC-004: si al convertir ya existe un cliente con el mismo
+//     teléfono/NIT/nombre, la comercial DECIDE: usar el existente o crear
+//     uno nuevo (cliente multiempresa / otra sede)
+//
 // Sin dependencias nuevas: importación por CSV (consistente con exportExcel.js)
 // ============================================================
 
@@ -38,6 +51,8 @@ const ETIQUETA_ESTADO = {
   DESCARTADO:     { txt: 'Descartado',      bg: '#fee2e2', color: '#b91c1c' },
   SIN_CONTACTO:   { txt: 'Sin contacto',    bg: '#f3f4f6', color: '#6b7280' },
   NUMERO_ERRADO:  { txt: '📵 Nº errado',   bg: '#fff7ed', color: '#c2410c' },
+  // ✅ TELEVENC-003: informó su fecha → ya vive en la base de Vencimientos
+  A_VENCIMIENTOS: { txt: '⏳ En vencimientos', bg: '#e0f2fe', color: '#0369a1' },
 };
 
 const authHeaders = () => ({
@@ -49,6 +64,12 @@ const telBonito = (t) => {
   if (!t) return '';
   const s = String(t).replace(/^57/, '');
   return s.length === 10 ? `${s.slice(0,3)} ${s.slice(3,6)} ${s.slice(6)}` : s;
+};
+
+// ✅ TELEVENC-005: 'YYYY-MM-DD' → 'DD/MM/YY' para mostrar fechas vencidas
+const fechaBonita = (f) => {
+  if (!f || f.length < 10) return f || '';
+  return `${f.slice(8, 10)}/${f.slice(5, 7)}/${f.slice(2, 4)}`;
 };
 
 export default function ModuloComercial({ user, onNavegar }) {
@@ -89,6 +110,8 @@ function MiDia({ user, onNavegar }) {
   const [data, setData] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [prospectoActivo, setProspectoActivo] = useState(null); // abre modal
+  // ✅ TELEVENC-005: cliente vencido activo (abre el modal de retención)
+  const [vencidoActivo, setVencidoActivo] = useState(null);
   // Clientes que ya recargaron este mes — para mostrar alerta en la cola
   const [clientesRecargados, setClientesRecargados] = useState(new Set());
   // Ola 3: el comercial también crea prospectos (quedan asignados a él)
@@ -141,8 +164,9 @@ function MiDia({ user, onNavegar }) {
   const pct = Math.min(meta.porcentaje ?? 0, 100);
 
   // ✅ COMERCIAL-BASE-001: períodos presentes en la cola + filtro de vista
+  // ✅ TELEVENC-005: la cola de vencidos también aporta sus períodos
   const todosPeriodos = [...new Set(
-    [...(cola.reprogramados || []), ...(cola.reintentos || []), ...(cola.nuevos || [])]
+    [...(cola.reprogramados || []), ...(cola.vencidos || []), ...(cola.reintentos || []), ...(cola.nuevos || [])]
       .map(p => p.basePeriodo).filter(Boolean)
   )].sort();
   const filtrarPeriodo = (lista = []) =>
@@ -212,6 +236,11 @@ function MiDia({ user, onNavegar }) {
 
       <Seccion titulo="⏰ Reprogramadas para hoy" sub="Te pidieron que llamaras — respeta la hora acordada" lista={filtrarPeriodo(cola.reprogramados)} conHora
         onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
+
+      {/* ✅ TELEVENC-005: VENCIDOS del mes — PRIORIDAD sobre reintentos y nuevos.
+          Son clientes con recarga vencida: retención, plata casi segura. */}
+      <SeccionVencidos lista={filtrarPeriodo(cola.vencidos)} onLlamar={setVencidoActivo} />
+
       <Seccion titulo="🔁 Reintentos" sub="No contestaron antes — nuevo intento hoy" lista={filtrarPeriodo(cola.reintentos)}
         onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
       <Seccion titulo="🆕 Prospectos nuevos" sub="Primera llamada" lista={filtrarPeriodo(cola.nuevos)}
@@ -266,6 +295,17 @@ function MiDia({ user, onNavegar }) {
           if (huboCambio) cargar();
         }} onCrearOrden={(cli) => {
           // Cliente recién convertido → orden de servicio sin salir a buscarlo.
+          sessionStorage.setItem('c360_orden_prefill', JSON.stringify(cli));
+          if (onNavegar) onNavegar('ordenes');
+        }} />
+      )}
+
+      {/* ✅ TELEVENC-005: modal de llamada de RETENCIÓN (cliente vencido) */}
+      {vencidoActivo && (
+        <ModalLlamadaVencido vencido={vencidoActivo} onCerrar={(huboCambio) => {
+          setVencidoActivo(null);
+          if (huboCambio) cargar();
+        }} onCrearOrden={(cli) => {
           sessionStorage.setItem('c360_orden_prefill', JSON.stringify(cli));
           if (onNavegar) onNavegar('ordenes');
         }} />
@@ -355,6 +395,276 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar, clientesRecargado
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ✅ TELEVENC-005 — SECCIÓN VENCIDOS DEL MES (retención)
+// Una tarjeta por CLIENTE con sus equipos vencidos. La fuente de verdad es la
+// colección `vencimientos` — aquí NO se duplican datos en prospectos.
+// ════════════════════════════════════════════════════════════════════════════
+function SeccionVencidos({ lista = [], onLlamar }) {
+  if (!lista.length) return null;
+  const hoyMes = periodoActualCO();
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ marginBottom: 8 }}>
+        <span style={{ fontSize: 14, fontWeight: 800, color: '#b91c1c' }}>🔥 Vencidos del mes</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: '#b91c1c', marginLeft: 8 }}>{lista.length}</span>
+        <div style={{ fontSize: 11, color: '#9ca3af' }}>Clientes con recarga vencida — llámalos ANTES que a los prospectos: es retención</div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(290px, 1fr))', gap: 10 }}>
+        {lista.map(v => {
+          const tuvoServicios = (v.serviciosMes || []).length > 0;
+          return (
+          <div key={v.id} style={{ background: '#fff', borderRadius: 12, border: `2px solid ${tuvoServicios ? '#fbbf24' : '#fecaca'}`, padding: '12px 14px' }}>
+            {/* ✅ TELEVENC-006: ya tuvo servicios este mes — comparar equipos */}
+            {tuvoServicios && (
+              <div style={{ background: '#fef3c7', color: '#92400e', borderRadius: 8, padding: '7px 10px', fontSize: 11.5, fontWeight: 700, marginBottom: 8 }}>
+                ⚠️ Ya tuvo servicios ESTE MES — verifica si son los mismos equipos:
+                {v.serviciosMes.map((s, i) => (
+                  <div key={i} style={{ fontWeight: 600, marginTop: 3 }}>
+                    🧾 Orden {s.numeroOrden ? `#${s.numeroOrden}` : ''} · {fechaBonita(s.fecha)}{s.resumenItems ? ` · ${s.resumenItems}` : ''}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: '#1a1a2e', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{v.nombre}</div>
+                {v.contacto && <div style={{ fontSize: 11, color: '#6b7280' }}>👤 {v.contacto}</div>}
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <span style={{
+                  background: v.basePeriodo < hoyMes ? '#fee2e2' : '#fef3c7',
+                  color: v.basePeriodo < hoyMes ? '#b91c1c' : '#b45309',
+                  fontWeight: 800, fontSize: 11, padding: '3px 8px', borderRadius: 8,
+                }}>⏰ venció {fechaBonita(v.fechaMasAntigua)}</span>
+                {v.escaladoPorLucy && (
+                  <span style={{ background: '#f5f3ff', color: '#7c3aed', fontWeight: 800, fontSize: 10, padding: '3px 8px', borderRadius: 8 }}>
+                    🤖 Lucy no logró contacto
+                  </span>
+                )}
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+              <a href={`tel:+${v.telefono}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>
+                📱 {telBonito(v.telefono)}
+              </a>
+              {v.telefonoPorVerificar && (
+                <span style={{ fontSize: 10, fontWeight: 700, color: '#c2410c', background: '#fff7ed', padding: '2px 8px', borderRadius: 8, border: '1px solid #fed7aa' }}>
+                  ☎️ por verificar
+                </span>
+              )}
+              {(v.totalLlamadas || 0) > 0 && <span style={{ fontSize: 10, color: '#9ca3af' }}>({v.totalLlamadas} llamada{v.totalLlamadas > 1 ? 's' : ''} previas)</span>}
+            </div>
+            {/* Equipos vencidos — contexto que un prospecto frío no tiene */}
+            <div style={{ marginTop: 8, background: '#fef2f2', borderRadius: 8, padding: '6px 9px' }}>
+              {v.equipos.slice(0, 4).map(e => (
+                <div key={e.id} style={{ fontSize: 11.5, color: '#7f1d1d', padding: '2px 0' }}>
+                  🧯 {e.cantidad > 1 ? `${e.cantidad}x ` : ''}{e.descripcionEquipo}
+                  {e.sucursal ? <span style={{ color: '#b91c1c' }}> · 📍 {e.sucursal}</span> : null}
+                  <span style={{ fontWeight: 700 }}> · vence {fechaBonita(e.fechaVencimiento)}</span>
+                </div>
+              ))}
+              {v.equipos.length > 4 && <div style={{ fontSize: 10.5, color: '#b91c1c', fontWeight: 700 }}>+ {v.equipos.length - 4} equipos más...</div>}
+            </div>
+            {v.notasUltimaLlamada && (
+              <div style={{ fontSize: 11, color: '#7c3aed', marginTop: 4, background: '#f5f3ff', borderRadius: 6, padding: '5px 8px', borderLeft: '3px solid #7c3aed' }}>
+                💬 Última llamada: {v.notasUltimaLlamada}
+              </div>
+            )}
+            <button onClick={() => onLlamar(v)} style={{
+              marginTop: 10, width: '100%', border: 'none', borderRadius: 9, padding: '9px 0',
+              background: '#b91c1c', color: '#fff', fontWeight: 800, fontSize: 13, cursor: 'pointer',
+            }}>
+              ☎ Registrar llamada de retención
+            </button>
+          </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ✅ TELEVENC-005 — MODAL LLAMADA DE RETENCIÓN (cliente con equipos vencidos)
+// Registra en /comercial/vencidos/:clienteId/llamada → cuenta en la meta
+// diaria y actualiza los vencimientos (gestionado / reprogramado / intentos).
+// ════════════════════════════════════════════════════════════════════════════
+function ModalLlamadaVencido({ vencido, onCerrar, onCrearOrden }) {
+  const [resultado, setResultado] = useState(null);
+  const [notas, setNotas] = useState('');
+  const [fecha, setFecha] = useState('');
+  const [hora, setHora] = useState('');
+  const [motivo, setMotivo] = useState('');
+  // Equipos seleccionados (todos marcados por defecto)
+  const [seleccion, setSeleccion] = useState(() => new Set(vencido.equipos.map(e => e.id)));
+  const [guardando, setGuardando] = useState(false);
+  const [exito, setExito] = useState(null);
+  const [error, setError] = useState(null);
+  const [clienteListo, setClienteListo] = useState(null);
+
+  const RESULTADOS = [
+    { value: 'acepta',      label: '✅ Acepta la recarga',  bg: '#dcfce7', color: '#15803d' },
+    { value: 'reprogramar', label: '📅 Llamar después',     bg: '#fef3c7', color: '#b45309' },
+    { value: 'no_contesto', label: '📵 No contestó',        bg: '#f3f4f6', color: '#6b7280' },
+    { value: 'no_interesa', label: '❌ No le interesa',     bg: '#fee2e2', color: '#b91c1c' },
+  ];
+
+  const toggleEquipo = (id) => {
+    setSeleccion(s => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+
+  const guardar = async () => {
+    setError(null);
+    if (!resultado) return setError('Selecciona el resultado de la llamada');
+    if (resultado === 'reprogramar' && !fecha) return setError('Indica la fecha de la próxima llamada');
+    if (resultado === 'no_interesa' && !motivo) return setError('Indica el motivo');
+    if ((resultado === 'acepta' || resultado === 'no_interesa') && !seleccion.size) {
+      return setError('Selecciona al menos un equipo');
+    }
+
+    setGuardando(true);
+    try {
+      const body = {
+        resultado,
+        notas: notas || null,
+        proximaLlamada: resultado === 'reprogramar' ? { fecha, hora: hora || null } : undefined,
+        motivoDescarte: resultado === 'no_interesa' ? motivo : undefined,
+        // Con acepta / no_interesa aplica a los equipos marcados;
+        // con reprogramar / no_contesto el seguimiento cubre todos.
+        vencimientoIds: (resultado === 'acepta' || resultado === 'no_interesa') ? [...seleccion] : undefined,
+      };
+      const res = await fetch(`${API}/comercial/vencidos/${vencido.clienteId}/llamada`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Error al registrar');
+
+      if (resultado === 'acepta') {
+        setClienteListo(json.cliente || { id: vencido.clienteId, nombre: vencido.nombre, celular: vencido.telefono });
+        setExito(`🎉 ¡Recarga aceptada! ${json.actualizados} equipo(s) gestionados. Crea la orden de servicio.`);
+        setGuardando(false);
+        return; // muestra botones — no se cierra solo
+      }
+      setExito('✓ Llamada registrada');
+      setTimeout(() => onCerrar(true), 1400);
+    } catch (e) {
+      setError(e.message);
+      setGuardando(false);
+    }
+  };
+
+  const inputStyle = { width: '100%', padding: '9px 10px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 13, boxSizing: 'border-box' };
+
+  return (
+    <div onClick={() => !guardando && onCerrar(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 400, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: '16px 16px 0 0', width: '100%', maxWidth: 520, maxHeight: '92vh', overflowY: 'auto', padding: '18px 18px 24px' }}>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 10.5, fontWeight: 800, color: '#b91c1c', letterSpacing: 0.5 }}>🔥 RETENCIÓN — CLIENTE VENCIDO</div>
+            <div style={{ fontWeight: 800, fontSize: 16, color: '#1a1a2e' }}>{vencido.nombre}</div>
+            <a href={`tel:+${vencido.telefono}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>📱 {telBonito(vencido.telefono)}</a>
+          </div>
+          <button onClick={() => onCerrar(false)} style={{ border: 'none', background: '#f3f4f6', borderRadius: 8, width: 32, height: 32, cursor: 'pointer', fontSize: 14 }}>✕</button>
+        </div>
+
+        {exito ? (
+          <div>
+            <div style={{ background: '#dcfce7', color: '#15803d', borderRadius: 10, padding: '16px 14px', fontWeight: 700, fontSize: 14, textAlign: 'center' }}>{exito}</div>
+            {clienteListo && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                <button onClick={() => onCerrar(true)} style={{ flex: 1, border: 'none', borderRadius: 10, padding: '13px', fontWeight: 700, cursor: 'pointer', background: '#f3f4f6', color: '#374151', fontSize: 13 }}>
+                  Cerrar
+                </button>
+                <button onClick={() => { onCerrar(true); onCrearOrden && onCrearOrden(clienteListo); }} style={{ flex: 2, border: 'none', borderRadius: 10, padding: '13px', fontWeight: 800, cursor: 'pointer', background: 'linear-gradient(135deg,#15803d,#16a34a)', color: '#fff', fontSize: 13 }}>
+                  🧾 Crear orden de servicio ahora
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            {/* ✅ TELEVENC-006: recordatorio dentro del modal si ya tuvo servicios */}
+            {(vencido.serviciosMes || []).length > 0 && (
+              <div style={{ background: '#fef3c7', color: '#92400e', borderRadius: 8, padding: '7px 10px', fontSize: 11.5, fontWeight: 700, marginBottom: 10 }}>
+                ⚠️ Ya tuvo servicios este mes — confirma que estos equipos NO fueron los atendidos.
+              </div>
+            )}
+
+            {/* Equipos vencidos con checkbox */}
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>Equipos vencidos ({vencido.equipos.length})</div>
+            <div style={{ background: '#fef2f2', borderRadius: 10, padding: '8px 10px', marginBottom: 12, maxHeight: 160, overflowY: 'auto' }}>
+              {vencido.equipos.map(e => (
+                <label key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', fontSize: 12, color: '#7f1d1d', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={seleccion.has(e.id)} onChange={() => toggleEquipo(e.id)} />
+                  <span>
+                    🧯 {e.cantidad > 1 ? `${e.cantidad}x ` : ''}{e.descripcionEquipo}
+                    {e.sucursal ? ` · 📍 ${e.sucursal}` : ''}
+                    <strong> · vence {fechaBonita(e.fechaVencimiento)}</strong>
+                  </span>
+                </label>
+              ))}
+            </div>
+
+            {/* Resultado */}
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>¿Cómo terminó la llamada?</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+              {RESULTADOS.map(r => (
+                <button key={r.value} onClick={() => setResultado(r.value)} style={{
+                  border: resultado === r.value ? `2px solid ${r.color}` : '2px solid transparent',
+                  background: r.bg, color: r.color, borderRadius: 10, padding: '12px 8px',
+                  fontWeight: 800, fontSize: 12.5, cursor: 'pointer',
+                }}>{r.label}</button>
+              ))}
+            </div>
+
+            {resultado === 'reprogramar' && (
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#374151', marginBottom: 4 }}>Fecha *</div>
+                  <input type="date" value={fecha} onChange={e => setFecha(e.target.value)} style={inputStyle} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#374151', marginBottom: 4 }}>Hora (si la pidió)</div>
+                  <input type="time" value={hora} onChange={e => setHora(e.target.value)} style={inputStyle} />
+                </div>
+              </div>
+            )}
+
+            {resultado === 'no_interesa' && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: '#374151', marginBottom: 4 }}>Motivo *</div>
+                <select value={motivo} onChange={e => setMotivo(e.target.value)} style={inputStyle}>
+                  <option value="">— Selecciona —</option>
+                  {MOTIVOS_DESCARTE.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                </select>
+                <div style={{ fontSize: 10.5, color: '#9ca3af', marginTop: 4 }}>Los equipos marcados quedarán gestionados — no volverán a salir este ciclo.</div>
+              </div>
+            )}
+
+            <textarea placeholder="Notas de la llamada (opcional)" value={notas} onChange={e => setNotas(e.target.value)} rows={2}
+              style={{ ...inputStyle, resize: 'vertical', marginBottom: 12 }} />
+
+            {error && <div style={{ background: '#fee2e2', color: '#b91c1c', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 600, marginBottom: 10 }}>{error}</div>}
+
+            <button onClick={guardar} disabled={guardando} style={{
+              width: '100%', border: 'none', borderRadius: 10, padding: '13px 0',
+              background: guardando ? '#fca5a5' : '#b91c1c', color: '#fff', fontWeight: 800, fontSize: 14, cursor: 'pointer',
+            }}>
+              {guardando ? 'Guardando...' : 'Guardar llamada'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // MODAL — REGISTRAR LLAMADA (formulario de 4 toques + captura de equipos)
 // ════════════════════════════════════════════════════════════════════════════
 function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
@@ -377,6 +687,8 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
   const [empresas, setEmpresas] = useState([]);
   const [empresaFac, setEmpresaFac] = useState(null);
   const [clienteCreado, setClienteCreado] = useState(null);
+  // ✅ TELEVENC-004: coincidencia de cliente existente pendiente de decisión
+  const [dupCoincidencia, setDupCoincidencia] = useState(null);
 
   // Empresas facturadoras (si hay una sola, queda seleccionada sola)
   useEffect(() => {
@@ -401,6 +713,54 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
     { value: 'numero_errado',  label: '🚫 Número errado',      bg: '#fff7ed', color: '#c2410c' },
   ];
 
+  // ✅ TELEVENC-003: ¿la captura trae FECHA de recarga? Entonces el prospecto
+  // pasará a la base de Vencimientos — si aún no es cliente, se necesita la
+  // empresa facturadora para crearlo con el esquema oficial.
+  const capturaConFecha = capturar && equipos.some(e => e.equipo && e.fechaUltimaRecarga);
+  const necesitaEmpresa = capturaConFecha && !prospecto.clienteId && resultado !== 'acepta';
+
+  // ✅ TELEVENC-004: convertir con decisión explícita (reintentable desde el
+  // recuadro de duplicado). Se separa de guardar() para no repetir la llamada.
+  const convertir = async (decisionDuplicado, clienteExistenteId) => {
+    const resC = await fetch(`${API}/comercial/prospectos/${prospecto.id}/convertir`, {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({
+        nombre: cliNombre.trim(),
+        nit: cliNit || null,
+        email: emailNuevo || null,
+        direccion: direccionNueva || null,
+        contacto: cliContacto || null,
+        empresaId: empresaFac?.id || '',
+        empresaNombre: empresaFac?.name || '',
+        decisionDuplicado: decisionDuplicado || undefined,
+        clienteExistenteId: clienteExistenteId || undefined,
+      }),
+    });
+    const jsonC = await resC.json();
+    if (resC.status === 409 && jsonC.requiereDecision) {
+      // Cliente parecido encontrado → la comercial decide
+      setDupCoincidencia(jsonC.coincidencia);
+      setGuardando(false);
+      return;
+    }
+    if (!resC.ok) throw new Error(jsonC.error || 'Llamada registrada, pero falló la conversión');
+    setDupCoincidencia(null);
+    setClienteCreado(jsonC.cliente || { id: jsonC.clienteId, nombre: cliNombre.trim().toUpperCase() });
+    setExito('🎉 ¡Venta! El cliente quedó creado y visible en el módulo Clientes.');
+    setGuardando(false);
+  };
+
+  const decidirDuplicado = async (decision) => {
+    setError(null);
+    setGuardando(true);
+    try {
+      await convertir(decision, decision === 'usar_existente' ? dupCoincidencia?.cliente?.id : undefined);
+    } catch (e) {
+      setError(e.message);
+      setGuardando(false);
+    }
+  };
+
   const guardar = async () => {
     setError(null);
     if (!resultado) return setError('Selecciona el resultado de la llamada');
@@ -414,6 +774,11 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
       if (!cliNombre.trim()) return setError('Verifica el nombre / razón social del cliente');
       if (!empresaFac) return setError('Selecciona la empresa que factura');
     }
+    // ✅ TELEVENC-003: capturó FECHA de recarga → el cliente nace ya en la
+    // base de Vencimientos; se necesita saber quién factura.
+    if (necesitaEmpresa && !empresaFac) {
+      return setError('Capturaste una fecha de recarga: selecciona la empresa que factura para pasar el cliente a Vencimientos');
+    }
 
     setGuardando(true);
     try {
@@ -423,6 +788,10 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
         motivoDescarte: resultado === 'no_interesa' ? motivo : undefined,
         equiposCapturados: capturar ? equipos.filter(e => e.equipo) : undefined,
         telefonoCorregido: resultado === 'numero_errado' && telefonoCorregido.trim() ? telefonoCorregido.trim() : undefined,
+        // ✅ TELEVENC-003: empresa facturadora para crear el cliente cuando
+        // la llamada captura fechas (el backend la ignora si no la necesita)
+        empresaId: capturaConFecha ? (empresaFac?.id || undefined) : undefined,
+        empresaNombre: capturaConFecha ? (empresaFac?.name || undefined) : undefined,
       };
       const res = await fetch(`${API}/comercial/prospectos/${prospecto.id}/llamada`, {
         method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
@@ -432,28 +801,15 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
 
       // Si aceptó → convertir a cliente automáticamente
       if (resultado === 'acepta') {
-        const resC = await fetch(`${API}/comercial/prospectos/${prospecto.id}/convertir`, {
-          method: 'POST', headers: authHeaders(),
-          body: JSON.stringify({
-            nombre: cliNombre.trim(),
-            nit: cliNit || null,
-            email: emailNuevo || null,
-            direccion: direccionNueva || null,
-            contacto: cliContacto || null,
-            empresaId: empresaFac?.id || '',
-            empresaNombre: empresaFac?.name || '',
-          }),
-        });
-        const jsonC = await resC.json();
-        if (!resC.ok) throw new Error(jsonC.error || 'Llamada registrada, pero falló la conversión');
-        setClienteCreado(jsonC.cliente || { id: jsonC.clienteId, nombre: cliNombre.trim().toUpperCase() });
-        setExito('🎉 ¡Venta! El cliente quedó creado y visible en el módulo Clientes.');
-        setGuardando(false);
+        await convertir(); // ✅ TELEVENC-004: puede pedir decisión de duplicado
         return; // el éxito de venta muestra botones — no se cierra solo
+      } else if (json.pasoAVencimientos) {
+        // ✅ TELEVENC-003: informó su fecha — sale de la cola de prospectos
+        setExito('✓ Fecha registrada — el cliente pasó a la base de Vencimientos y saldrá de esta cola. Volverá solo cuando le toque recarga.');
       } else {
         setExito('✓ Llamada registrada');
       }
-      setTimeout(() => onCerrar(true), 1400);
+      setTimeout(() => onCerrar(true), 1800);
     } catch (e) {
       setError(e.message);
       setGuardando(false);
@@ -491,6 +847,44 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
                 </button>
               </div>
             )}
+          </div>
+        ) : dupCoincidencia ? (
+          /* ✅ TELEVENC-004: decisión de duplicado — informada, nunca silenciosa */
+          <div>
+            <div style={{ background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 12, padding: '14px 14px', marginBottom: 12 }}>
+              <div style={{ fontWeight: 800, fontSize: 14, color: '#c2410c', marginBottom: 8 }}>
+                ⚠️ Este cliente parece ya estar creado
+              </div>
+              <div style={{ fontSize: 12.5, color: '#78350f', marginBottom: 4 }}>
+                Coincidencia por <strong>{dupCoincidencia.tipo === 'telefono' ? 'teléfono' : dupCoincidencia.tipo === 'nit' ? 'NIT' : 'nombre'}</strong>:
+              </div>
+              <div style={{ background: '#fff', borderRadius: 8, padding: '10px 12px', fontSize: 12.5, color: '#374151' }}>
+                <div style={{ fontWeight: 800, color: '#1a1a2e' }}>{dupCoincidencia.cliente?.nombre}</div>
+                {dupCoincidencia.cliente?.nit && <div>NIT: {dupCoincidencia.cliente.nit}</div>}
+                {dupCoincidencia.cliente?.celular && <div>📱 {telBonito(dupCoincidencia.cliente.celular)}</div>}
+                {dupCoincidencia.cliente?.empresaNombre && <div>🏢 Factura con: {dupCoincidencia.cliente.empresaNombre}</div>}
+                {dupCoincidencia.cliente?.direccion && <div>📍 {dupCoincidencia.cliente.direccion}</div>}
+              </div>
+            </div>
+            {error && <div style={{ background: '#fee2e2', color: '#b91c1c', borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 600, marginBottom: 10 }}>{error}</div>}
+            <button onClick={() => decidirDuplicado('usar_existente')} disabled={guardando} style={{
+              width: '100%', border: 'none', borderRadius: 10, padding: '13px 0', marginBottom: 8,
+              background: guardando ? '#86efac' : '#15803d', color: '#fff', fontWeight: 800, fontSize: 13.5, cursor: 'pointer',
+            }}>
+              ✅ Es el mismo — usar el cliente existente
+            </button>
+            <button onClick={() => decidirDuplicado('crear_nuevo')} disabled={guardando} style={{
+              width: '100%', border: '1px solid #c4b5fd', borderRadius: 10, padding: '13px 0', marginBottom: 8,
+              background: '#fff', color: '#7c3aed', fontWeight: 800, fontSize: 13.5, cursor: 'pointer',
+            }}>
+              🏢 Es otra sede / empresa distinta — crear cliente nuevo
+            </button>
+            <button onClick={() => setDupCoincidencia(null)} disabled={guardando} style={{
+              width: '100%', border: 'none', borderRadius: 10, padding: '11px 0',
+              background: '#f3f4f6', color: '#6b7280', fontWeight: 700, fontSize: 12.5, cursor: 'pointer',
+            }}>
+              ← Volver y corregir datos
+            </button>
           </div>
         ) : (
           <>
@@ -591,6 +985,27 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
                   style={{ border: 'none', background: '#ede9fe', color: '#7c3aed', borderRadius: 8, padding: '6px 12px', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}>
                   + Otro equipo
                 </button>
+
+                {/* ✅ TELEVENC-003: capturó FECHA → pasa a Vencimientos; si aún no
+                    es cliente se pide la facturadora (en "acepta" ya se pide). */}
+                {necesitaEmpresa && (
+                  <div style={{ background: '#e0f2fe', border: '1px solid #7dd3fc', borderRadius: 10, padding: '10px 12px', marginTop: 8 }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: '#0369a1', marginBottom: 6 }}>
+                      ⏳ Capturaste una fecha de recarga: este cliente pasará a la base de VENCIMIENTOS y saldrá de esta cola. ¿Quién factura? *
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {empresas.map(e => (
+                        <button key={e.id} type="button" onClick={() => setEmpresaFac(e)} style={{
+                          border: empresaFac?.id === e.id ? '2px solid #0369a1' : '1px solid #d1d5db',
+                          background: empresaFac?.id === e.id ? '#e0f2fe' : '#fff',
+                          color: empresaFac?.id === e.id ? '#0369a1' : '#374151',
+                          borderRadius: 8, padding: '8px 12px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                        }}>🏢 {e.name}</button>
+                      ))}
+                      {!empresas.length && <span style={{ fontSize: 12, color: '#9ca3af' }}>Cargando empresas...</span>}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -690,7 +1105,8 @@ function Prospectos({ user }) {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || 'Error al importar');
-      setMsgImportV(`✓ ${json.vencimientosCreados} vencimientos · ${json.clientesNuevos} clientes nuevos · ${json.prospectosCreados} prospectos nuevos · ${json.prospectosActualizados || 0} actualizados${json.errores?.length ? ` · ${json.errores.length} filas con error` : ''}`);
+      // ✅ TELEFONO-UNIF-001: informar cuántos teléfonos quedaron por verificar
+      setMsgImportV(`✓ ${json.vencimientosCreados} vencimientos · ${json.clientesNuevos} clientes nuevos · ${json.prospectosCreados} prospectos nuevos · ${json.prospectosActualizados || 0} actualizados${json.porVerificar ? ` · ☎️ ${json.porVerificar} teléfonos por verificar` : ''}${json.errores?.length ? ` · ${json.errores.length} filas con error` : ''}`);
       setErroresImportV(json.errores || []);
       cargar();
     } catch (e) {
@@ -973,7 +1389,7 @@ function Prospectos({ user }) {
                 <span style={{ background: et.bg, color: et.color, fontWeight: 800, fontSize: 10, padding: '4px 8px', borderRadius: 8, height: 'fit-content', flexShrink: 0 }}>{et.txt}</span>
               </div>
               {p.motivoDescarte && <div style={{ fontSize: 10.5, color: '#b91c1c', marginTop: 4 }}>Motivo: {MOTIVOS_DESCARTE.find(m => m.value === p.motivoDescarte)?.label || p.motivoDescarte}</div>}
-              {!['CONVERTIDO', 'DESCARTADO'].includes(p.estado) && (
+              {!['CONVERTIDO', 'DESCARTADO', 'A_VENCIMIENTOS'].includes(p.estado) && (
                 <select value={p.asignadoA || ''} onChange={e => asignar(p.id, e.target.value)} style={{ width: '100%', marginTop: 8, padding: '7px 8px', borderRadius: 8, border: '1px solid #e5e7eb', fontSize: 11.5, color: '#374151' }}>
                   <option value="">— Sin asignar (la ven todas) —</option>
                   {vendedoras.map(v => <option key={v.id || v.uid} value={v.id || v.uid}>{v.nombre || v.email}</option>)}
@@ -1058,6 +1474,13 @@ function Metricas({ user }) {
               <Stat label="Tasa conversión" valor={`${v.tasaConversion}%`} />
               <Stat label="Cumplim. meta" valor={v.cumplimientoMeta != null ? `${v.cumplimientoMeta}%` : '—'}
                 alerta={v.cumplimientoMeta != null && v.cumplimientoMeta < 80} />
+              {/* ✅ TELEVENC-002: retención vs captación — dos KPIs distintos */}
+              {(v.llamadasRetencion > 0 || v.llamadasCaptacion > 0) && (
+                <>
+                  <Stat label="🔥 Retención (vencidos)" valor={v.llamadasRetencion ?? 0} />
+                  <Stat label="🆕 Captación (prospectos)" valor={v.llamadasCaptacion ?? 0} />
+                </>
+              )}
             </div>
           </div>
         ))}

@@ -11,6 +11,18 @@
 //   (R-COM-02 / 07 — agrupación y candado 30 días — viven en el
 //    motor automático de la Fase 4, no en este archivo)
 //
+// ✅ TELEFONO-UNIF-001 (2026-07-06): la normalización telefónica de este
+// archivo AGREGABA el prefijo 57 (573105...), mientras que el dominio
+// comercial (DUP-002) lo QUITA (3105...). El mismo cliente quedaba con dos
+// formatos y los emparejamientos anti-duplicado nunca casaban. Ahora este
+// archivo usa la MISMA regla que comercial.js:
+//   · Celular colombiano válido = 10 dígitos empezando en 3.
+//   · 12 dígitos con prefijo 57 → se QUITA el 57.
+//   · Otras longitudes (11, 13, 9...) → NO se pierde la fila: entra con
+//     bandera telefonoPorVerificar para corrección en la primera gestión.
+// Requiere correr UNA vez el script migrar-telefonos.js para normalizar
+// los datos ya guardados con 57 (clientes de importaciones anteriores).
+//
 // DISEÑO DEL IMPORTADOR: el frontend parsea el Excel con SheetJS
 // (ya disponible en el stack) y envía JSON. El backend NO necesita
 // dependencias nuevas (multer/xlsx). Cero cambios en package.json.
@@ -118,13 +130,26 @@ const calcularEstado = (venc, hoy) => {
   return 'VIGENTE';
 };
 
-// ─── HELPER: normalizar teléfono (mismo criterio del servicio WhatsApp) ──────
+// ─── ✅ TELEFONO-UNIF-001: normalización UNIFICADA (regla DUP-002) ────────────
+// MISMA función que backend/routes/comercial.js — fuente única de verdad.
+//   - Celular colombiano válido = exactamente 10 dígitos empezando en 3.
+//   - Se ELIMINA el prefijo 57 (12 dígitos → 10). Antes este archivo lo
+//     AGREGABA, creando clientes 573105... que nunca casaban con los
+//     3105... de telemercadeo — raíz de los duplicados.
+//   - Devuelve { tel, valido }: valido=false NO descarta la fila — activa
+//     la bandera telefonoPorVerificar (11+ dígitos raros, sin 3 inicial...).
+const normalizarTelefonoInfo = (telefono) => {
+  if (!telefono) return { tel: null, valido: false };
+  let t = String(telefono).replace(/[\s\-().+]/g, '').replace(/\D/g, '');
+  if (t.length === 12 && t.startsWith('57')) t = t.slice(2); // quitar prefijo país
+  const valido = /^3\d{9}$/.test(t); // celular CO: 10 dígitos, empieza en 3
+  return { tel: t || null, valido };
+};
+
+// Compatibilidad: el resto del archivo espera un string (o null).
 const normalizarTelefono = (telefono) => {
-  if (!telefono) return null;
-  let t = String(telefono).replace(/[\s\-\(\)\+\.]/g, '');
-  if (t.startsWith('57') && t.length === 12) return t;
-  if (t.length === 10 && t.startsWith('3')) return '57' + t;
-  return t.length >= 10 ? t : null;
+  const { tel } = normalizarTelefonoInfo(telefono);
+  return tel;
 };
 
 // ✅ FIX VENC-EQUIPOS-003 (2026-07-01): una fila puede traer VARIOS equipos
@@ -304,6 +329,13 @@ router.post('/', async (req, res) => {
 //   CON fecha  → cliente (existente o nuevo) + registro en vencimientos
 //   SIN fecha  → colección prospectos (estado NUEVO) para la vendedora
 //   Teléfono ya en clients → no duplica cliente, agrega vencimientos
+//
+// ✅ TELEFONO-UNIF-001: teléfonos con prefijo 57 (12 dígitos) se normalizan a
+// 10 dígitos ANTES de guardar y de emparejar. Teléfonos con longitudes raras
+// (11, 13, 9...) NO descartan la fila: entran con telefonoPorVerificar=true
+// para corrección en la primera gestión. Los mapas de emparejamiento también
+// normalizan lo YA guardado, así el emparejado funciona incluso antes de
+// correr la migración de datos.
 // ═════════════════════════════════════════════════════════════════════════════
 router.post('/importar', async (req, res) => {
   try {
@@ -339,6 +371,8 @@ router.post('/importar', async (req, res) => {
     const normNombreCli = (n) => String(n || '').toUpperCase().trim().replace(/\s+/g, ' ') || null;
     clientesSnap.docs.forEach(d => {
       // Clientes oficiales usan `celular`; antiguos pueden usar `telefono`.
+      // ✅ TELEFONO-UNIF-001: normalizar TAMBIÉN lo guardado — un cliente viejo
+      // con 573105... queda indexado como 3105... y el emparejado sí casa.
       const data = d.data();
       if (data.activo === false) return;
       [normalizarTelefono(data.celular), normalizarTelefono(data.telefono)]
@@ -363,7 +397,8 @@ router.post('/importar', async (req, res) => {
 
 
     let resultadoExtra = { prospectosActualizados: 0 };
-    const resultado = { vencimientosCreados: 0, clientesNuevos: 0, prospectosCreados: 0, errores: [] };
+    // ✅ TELEFONO-UNIF-001: contador de teléfonos dudosos (bandera ☎️)
+    const resultado = { vencimientosCreados: 0, clientesNuevos: 0, prospectosCreados: 0, porVerificar: 0, errores: [] };
     let batch = db.batch();
     let ops = 0;
     const commitSiLleno = async () => {
@@ -376,13 +411,16 @@ router.post('/importar', async (req, res) => {
       try {
         // Alias de columnas — acepta la plantilla de clientes de la empresa:
         const nombre = String(f.nombre || f.razonSocial || f['razon social'] || f.empresa || '').trim();
-        const telefono = normalizarTelefono(f.telefono || f.celular);
+        // ✅ TELEFONO-UNIF-001: normalizar con la regla DUP-002. Un teléfono
+        // "raro" (11+ dígitos, fijo, etc.) NO bota la fila — entra marcada.
+        const { tel: telefono, valido: telValido } = normalizarTelefonoInfo(f.telefono || f.celular);
         const nitFila = String(f.nit || '').replace(/[^0-9]/g, '') || null;
 
         if (!nombre || !telefono) {
-          resultado.errores.push({ fila, error: 'Falta nombre o teléfono válido' });
+          resultado.errores.push({ fila, error: 'Falta nombre o teléfono' });
           continue;
         }
+        if (!telValido) resultado.porVerificar++; // ✅ TELEFONO-UNIF-001
 
         // ✅ FIX: antes solo aceptaba 'YYYY-MM-DD'/'YYYY-MM'; formatos como
         // "26-Jul-25" se descartaban silenciosamente y la fila caía a Prospectos.
@@ -413,6 +451,7 @@ router.post('/importar', async (req, res) => {
             nombre,
             empresa: f.empresa || null,
             telefono,
+            telefonoPorVerificar: !telValido, // ✅ TELEFONO-UNIF-001: bandera ☎️
             nit: nitFila,
             sucursal: f.sucursal || null,
             equipoReportado: f.equipo || null,
@@ -447,8 +486,11 @@ router.post('/importar', async (req, res) => {
             contacto: String(f.contacto || '').trim() || null,
             tipoDocumento: 'NIT',
             nit: nitFila,
+            // ✅ TELEFONO-UNIF-001: el cliente nace con 10 dígitos limpios
+            // (ya sin 57) — mismo formato que telemercadeo y conversiones.
             celular: telefono,
             telefono,
+            telefonoPorVerificar: !telValido, // ✅ TELEFONO-UNIF-001
             emailLegal: f.email || null,
             emailsAdicionales: [],
             direccionPrincipal: f.direccion || null,
@@ -513,7 +555,7 @@ router.post('/importar', async (req, res) => {
 
     await auditar({
       accion: 'importar',
-      descripcion: `Importación: ${resultado.vencimientosCreados} vencimientos, ${resultado.clientesNuevos} clientes nuevos, ${resultado.prospectosCreados} prospectos, ${resultadoExtra.prospectosActualizados} prospectos actualizados`,
+      descripcion: `Importación: ${resultado.vencimientosCreados} vencimientos, ${resultado.clientesNuevos} clientes nuevos, ${resultado.prospectosCreados} prospectos, ${resultadoExtra.prospectosActualizados} prospectos actualizados, ${resultado.porVerificar} teléfonos por verificar`,
       usuarioId: adminId, usuarioNombre: req.user?.nombre || req.user?.email,
       datos: { totalFilas: filas.length, errores: resultado.errores.length }
     });
