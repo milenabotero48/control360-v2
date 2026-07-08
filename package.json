@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "pino": "^10.3.1"
+  }
+}

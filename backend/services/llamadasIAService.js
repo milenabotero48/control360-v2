@@ -350,7 +350,7 @@ const procesarResultadoLlamada = async (payload) => {
     // para que la cola de Telemercadeo lo tome (no se toca su lógica interna,
     // solo se deja la señal — el módulo Comercial ya sabe leer esto).
     const data = doc.data();
-    if (resultado === 'sin_respuesta' && data.intento >= 2) {
+    if ((resultado === 'sin_respuesta' && data.intento >= 2) || resultado === 'escalado_asesor') { // ✅ TELEVENC-001
       await db.collection('vencimientos').doc(data.vencimientoId).update({
         escaladoTelemercadeo: true,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
