@@ -53,6 +53,28 @@ const RESPUESTAS_BASE = {
 };
 
 // ============================================================
+// FIX ANNY-GATE-001: igual patrón que Lucy (llamadasIAService.js).
+// El módulo 'anny_ia' SOLO se activa si el SuperAdmin lo agrega
+// explícitamente al array `modulos` del documento del admin en
+// la colección `users` (Panel Suscriptores → botón "Módulos").
+// La convención modulos===[] ("ve todo") NO aplica a módulos
+// premium — deben estar EXPLÍCITAMENTE en el array.
+// Esto es la ÚNICA fuente de verdad de si Anny está activo.
+// El suscriptor NUNCA puede activarlo por su cuenta.
+// ============================================================
+async function tenantTieneAnnyActiva(adminId) {
+  try {
+    const userDoc = await db.collection('users').doc(adminId).get();
+    if (!userDoc.exists) return false;
+    const modulos = userDoc.data().modulos || [];
+    return modulos.includes('anny_ia');
+  } catch (err) {
+    console.error('[ANNY] Error verificando módulo anny_ia:', err.message);
+    return false;
+  }
+}
+
+// ============================================================
 // Buscar respuesta pre-configurada
 // ============================================================
 function buscarRespuestaConfigura(mensajeTexto) {
@@ -214,8 +236,11 @@ async function procesarMensajeEntrante(props) {
 
   try {
     // PASO 1: Verificar que Anny está activo para este admin
-    const configSnap = await db.collection('annyConfig').doc(adminId).get();
-    if (!configSnap.exists || !configSnap.data().activo) {
+    // FIX ANNY-GATE-001: el gate es el array `modulos` (control exclusivo
+    // de Milena vía Panel Suscriptores), no un campo que el suscriptor
+    // pudiera tocar desde su propia config.
+    const activo = await tenantTieneAnnyActiva(adminId);
+    if (!activo) {
       return { procesado: false, error: 'anny_inactivo' };
     }
 
@@ -340,26 +365,42 @@ async function obtenerMetricasHoy(adminId) {
 
 // ============================================================
 // Obtener configuración de Anny para admin
+// FIX ANNY-GATE-001: `activo` SIEMPRE viene del array `modulos`
+// (fuente única de verdad, igual que Lucy). El documento annyConfig
+// solo guarda datos operativos (número, horario, estado de conexión
+// de Baileys) — nunca decide si el módulo está prendido o apagado.
 // ============================================================
 async function obtenerConfig(adminId) {
   try {
+    const activo = await tenantTieneAnnyActiva(adminId);
     const doc = await db.collection('annyConfig').doc(adminId).get();
-    if (!doc.exists) {
-      return { activo: false };
-    }
-    return doc.data();
+    const operativo = doc.exists ? doc.data() : {};
+
+    // Nunca devolver campos internos de Baileys (qrCode) en bruto aquí;
+    // el endpoint dedicado /qr/:adminId es quien lo expone como imagen.
+    const { qrCode, ...resto } = operativo;
+
+    return {
+      ...resto,
+      activo, // <- siempre pisa cualquier valor viejo que pudiera existir en el doc
+    };
   } catch (err) {
     console.error('[ANNY] Error leyendo config:', err.message);
-    return { error: err.message };
+    return { error: err.message, activo: false };
   }
 }
 
 // ============================================================
-// Crear/actualizar configuración
+// Crear/actualizar configuración OPERATIVA (número, horario, etc.)
+// FIX ANNY-GATE-001: se descarta explícitamente cualquier intento
+// de mandar `activo` desde este endpoint — ese campo solo lo cambia
+// Milena desde Panel Suscriptores → Módulos (array `modulos` en
+// la colección `users`), nunca el propio suscriptor.
 // ============================================================
 async function actualizarConfig(adminId, datos) {
   try {
-    await db.collection('annyConfig').doc(adminId).set(datos, { merge: true });
+    const { activo, ...datosPermitidos } = datos; // activo se ignora siempre
+    await db.collection('annyConfig').doc(adminId).set(datosPermitidos, { merge: true });
     return { ok: true };
   } catch (err) {
     console.error('[ANNY] Error actualizando config:', err.message);
@@ -374,5 +415,6 @@ module.exports = {
   actualizarConfig,
   registrarConversacion,
   registrarCasoEscalado,
+  tenantTieneAnnyActiva,
   RESPUESTAS_BASE
 };

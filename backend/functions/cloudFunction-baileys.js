@@ -29,15 +29,17 @@ const reconexionCounters = {}; // { adminId: intentos }
 // ============================================================
 async function conectarBaileys(adminId) {
   try {
-    // 1. Leer config del admin en Firestore
-    const configSnap = await db.collection('annyConfig').doc(adminId).get();
-
-    if (!configSnap.exists || !configSnap.data().activo) {
-      console.log(`[BAILEYS] Anny inactivo para ${adminId}`);
+    // 1. FIX ANNY-GATE-001: el gate real es el array `modulos` del
+    // suscriptor (Panel Suscriptores → Módulos), NO un campo `activo`
+    // dentro de annyConfig. annyConfig solo guarda datos operativos.
+    const activo = await annyService.tenantTieneAnnyActiva(adminId);
+    if (!activo) {
+      console.log(`[BAILEYS] Anny inactivo para ${adminId} (módulo anny_ia no asignado)`);
       return null;
     }
 
-    const config = configSnap.data();
+    const configSnap = await db.collection('annyConfig').doc(adminId).get();
+    const config = configSnap.exists ? configSnap.data() : {};
     console.log(`[BAILEYS] Conectando ${adminId} con número ${config.whatsappNumber}`);
 
     // 2. Setup de autenticación (carpeta local por admin)
@@ -264,12 +266,15 @@ exports.inicializarBaileysPeriodicamente = functions.pubsub
     console.log('[BAILEYS] Cron: Inicializando conexiones...');
 
     try {
-      const configsSnap = await db.collection('annyConfig')
-        .where('activo', '==', true)
+      // FIX ANNY-GATE-001: el gate es `modulos` array-contains 'anny_ia'
+      // en la colección `users` (lo que Milena marca desde Panel
+      // Suscriptores), no un campo `activo` en annyConfig.
+      const usersSnap = await db.collection('users')
+        .where('modulos', 'array-contains', 'anny_ia')
         .get();
 
-      for (const configDoc of configsSnap.docs) {
-        const adminId = configDoc.id;
+      for (const userDoc of usersSnap.docs) {
+        const adminId = userDoc.id;
 
         // Si no está conectado, intentar conectar
         if (!socketsByAdmin[adminId]) {

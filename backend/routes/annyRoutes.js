@@ -16,7 +16,31 @@ const { authenticate } = require('../middleware/auth');
 const annyService = require('../services/annyService');
 
 // ============================================================
+// FIX ANNY-GATE-001: middleware de acceso al módulo.
+// Mismo patrón de seguridad que 'qr' y 'llamadas_ia' (Lucy):
+// el módulo 'anny_ia' SOLO existe si Milena lo agregó al array
+// `modulos` del suscriptor desde Panel Suscriptores → Módulos.
+// Se aplica a TODAS las rutas de datos — NO a GET /config, que
+// debe responder siempre (con activo:false) para que el frontend
+// pueda mostrar el aviso "módulo no activo" en vez de un error 403.
+// ============================================================
+async function requireAnnyActivo(req, res, next) {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const activo = await annyService.tenantTieneAnnyActiva(adminId);
+    if (!activo) {
+      return res.status(403).json({ error: 'anny_inactivo', mensaje: 'WhatsApp IA Anny no está activo para tu cuenta.' });
+    }
+    next();
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+}
+
+// ============================================================
 // 1. GET /api/anny/config — Obtener configuración
+// SIN gate: siempre responde (incluye activo:true/false) para que
+// el frontend decida qué mostrar.
 // ============================================================
 router.get('/config', authenticate, async (req, res) => {
   try {
@@ -29,16 +53,18 @@ router.get('/config', authenticate, async (req, res) => {
 });
 
 // ============================================================
-// 2. PUT /api/anny/config — Actualizar configuración
-// Body: { activo, whatsappNumber, diasAntes, horaEnvio }
+// 2. PUT /api/anny/config — Actualizar configuración OPERATIVA
+// Body: { whatsappNumber, diasAntes, horaEnvio }
+// FIX ANNY-GATE-001: ya NO acepta `activo` — ese campo solo lo
+// cambia Milena vía Panel Suscriptores. Si el módulo no está
+// activo, ni siquiera deja configurar el número (gate aplicado).
 // ============================================================
-router.put('/config', authenticate, async (req, res) => {
+router.put('/config', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
-    const { activo, whatsappNumber, diasAntes = 30, horaEnvio = '09:00' } = req.body;
+    const { whatsappNumber, diasAntes = 30, horaEnvio = '09:00' } = req.body;
 
     const resultado = await annyService.actualizarConfig(adminId, {
-      activo: Boolean(activo),
       whatsappNumber,
       diasAntes: Number(diasAntes),
       horaEnvio,
@@ -54,7 +80,7 @@ router.put('/config', authenticate, async (req, res) => {
 // ============================================================
 // 3. GET /api/anny/metricas — Métricas del día
 // ============================================================
-router.get('/metricas', authenticate, async (req, res) => {
+router.get('/metricas', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
     const metricas = await annyService.obtenerMetricasHoy(adminId);
@@ -68,7 +94,7 @@ router.get('/metricas', authenticate, async (req, res) => {
 // 4. GET /api/anny/conversaciones — Últimas conversaciones
 // Query: ?limit=50&estado=escalado|automatico|ia|todas
 // ============================================================
-router.get('/conversaciones', authenticate, async (req, res) => {
+router.get('/conversaciones', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
     const limite = Math.min(parseInt(req.query.limit) || 50, 200);
@@ -103,7 +129,7 @@ router.get('/conversaciones', authenticate, async (req, res) => {
 // 5. GET /api/anny/casos-escalados — Casos pendientes
 // Query: ?estado=pendiente|resuelto|todos
 // ============================================================
-router.get('/casos-escalados', authenticate, async (req, res) => {
+router.get('/casos-escalados', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
     const estado = req.query.estado || 'pendiente';
@@ -134,7 +160,7 @@ router.get('/casos-escalados', authenticate, async (req, res) => {
 // 6. PUT /api/anny/casos/:caseId — Actualizar estado caso
 // Body: { estado, respuestaAdmin, notas }
 // ============================================================
-router.put('/casos/:caseId', authenticate, async (req, res) => {
+router.put('/casos/:caseId', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
     const { caseId } = req.params;
@@ -162,7 +188,7 @@ router.put('/casos/:caseId', authenticate, async (req, res) => {
 // ============================================================
 // 7. GET /api/anny/respuestas — Obtener respuestas pre-configuradas
 // ============================================================
-router.get('/respuestas', authenticate, async (req, res) => {
+router.get('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
 
@@ -183,7 +209,7 @@ router.get('/respuestas', authenticate, async (req, res) => {
 // 8. PUT /api/anny/respuestas — Actualizar respuesta configurada
 // Body: { key, patrones[], respuesta, tipo }
 // ============================================================
-router.put('/respuestas', authenticate, async (req, res) => {
+router.put('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
     const { key, patrones, respuesta, tipo } = req.body;
@@ -213,7 +239,7 @@ router.put('/respuestas', authenticate, async (req, res) => {
 // 9. GET /api/anny/estadisticas — Estadísticas completas
 // Query: ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD
 // ============================================================
-router.get('/estadisticas', authenticate, async (req, res) => {
+router.get('/estadisticas', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
     const desde = req.query.desde || new Date(Date.now() - 7*24*60*60*1000).toISOString().split('T')[0];
@@ -270,7 +296,7 @@ router.get('/estadisticas', authenticate, async (req, res) => {
 // 10. POST /api/anny/test — Enviar mensaje de prueba
 // Body: { telefono, mensaje } (solo para testing)
 // ============================================================
-router.post('/test', authenticate, async (req, res) => {
+router.post('/test', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     // Solo admin puede hacer pruebas
     if (req.user.role !== 'admin') {

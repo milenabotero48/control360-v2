@@ -18,6 +18,9 @@ export default function VencimientosAnny() {
   const [conversaciones, setConversaciones] = useState([]);
   const [casos, setCasos] = useState([]);
   const [config, setConfig] = useState(null);
+  // FIX ANNY-GATE-001: null = aún no se sabe, true/false una vez cargado
+  // (mismo patrón que `activa` en LlamadasIA.js)
+  const [activo, setActivo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('metricas'); // metricas | conversaciones | casos
   const [diasAntes, setDiasAntes] = useState(30);
@@ -26,6 +29,11 @@ export default function VencimientosAnny() {
 
   // ============================================================
   // Cargar datos
+  // FIX ANNY-GATE-001: primero se consulta /config (nunca da 403,
+  // siempre responde con { activo: true|false }). Si el módulo NO
+  // está activo para este suscriptor, no se golpean los demás
+  // endpoints (que ahora responden 403) — se corta ahí, igual que
+  // hace LlamadasIA.js con Lucy.
   // ============================================================
   useEffect(() => {
     cargarDatos();
@@ -35,22 +43,29 @@ export default function VencimientosAnny() {
 
   const cargarDatos = async () => {
     try {
-      const [m, c, cas, cfg] = await Promise.all([
-        fetch(`${API}/anny/metricas`, { headers: authHeaders() }).then(r => r.json()),
-        fetch(`${API}/anny/conversaciones?limit=20`, { headers: authHeaders() }).then(r => r.json()),
-        fetch(`${API}/anny/casos-escalados?estado=pendiente`, { headers: authHeaders() }).then(r => r.json()),
-        fetch(`${API}/anny/config`, { headers: authHeaders() }).then(r => r.json()),
-      ]);
-
-      setMetricas(m);
-      setConversaciones(Array.isArray(c) ? c : []);
-      setCasos(Array.isArray(cas) ? cas : []);
+      const cfg = await fetch(`${API}/anny/config`, { headers: authHeaders() }).then(r => r.json());
       setConfig(cfg);
+      setActivo(!!cfg?.activo);
 
       if (cfg) {
         setDiasAntes(cfg.diasAntes || 30);
         setHoraEnvio(cfg.horaEnvio || '09:00');
       }
+
+      if (!cfg?.activo) {
+        setLoading(false);
+        return; // módulo no activo: no pedir el resto
+      }
+
+      const [m, c, cas] = await Promise.all([
+        fetch(`${API}/anny/metricas`, { headers: authHeaders() }).then(r => r.json()),
+        fetch(`${API}/anny/conversaciones?limit=20`, { headers: authHeaders() }).then(r => r.json()),
+        fetch(`${API}/anny/casos-escalados?estado=pendiente`, { headers: authHeaders() }).then(r => r.json()),
+      ]);
+
+      setMetricas(m);
+      setConversaciones(Array.isArray(c) ? c : []);
+      setCasos(Array.isArray(cas) ? cas : []);
     } catch (err) {
       console.error('Error cargando datos Anny:', err);
     } finally {
@@ -105,6 +120,26 @@ export default function VencimientosAnny() {
     return (
       <div style={{ padding: 20, textAlign: 'center', color: '#9ca3af' }}>
         Cargando Anny...
+      </div>
+    );
+  }
+
+  // ============================================================
+  // FIX ANNY-GATE-001: módulo no activo para este suscriptor.
+  // Mismo mensaje/patrón visual que Lucy (LlamadasIA.js) — el
+  // suscriptor entiende que es Milena quien lo activa, no un switch
+  // propio.
+  // ============================================================
+  if (activo === false) {
+    return (
+      <div style={{ padding: '12px 12px 80px', maxWidth: 1100, margin: '0 auto' }}>
+        <div style={{ background: '#fff', border: '1.5px solid #e5e7eb', borderRadius: 12, padding: 40, textAlign: 'center' }}>
+          <div style={{ fontSize: 32 }}>🤖</div>
+          <div style={{ fontWeight: 800, color: '#1a1a2e', marginTop: 8, fontSize: 15 }}>WhatsApp IA Anny no está activo</div>
+          <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 4, maxWidth: 360, marginLeft: 'auto', marginRight: 'auto' }}>
+            Este módulo se activa manualmente por nuestro equipo. Si te interesa automatizar la atención de vencimientos por WhatsApp, contáctanos.
+          </div>
+        </div>
       </div>
     );
   }

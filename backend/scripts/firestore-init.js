@@ -24,8 +24,12 @@ const db = getFirestore();
 
 const ADMIN_ID = '6h2gpIJ1vAZaUwBA5SLXTRONShp1'; // Milena (Extintores del Valle)
 
+// FIX ANNY-GATE-001: este documento SOLO guarda datos operativos.
+// El interruptor real de "activo" vive en users/{ADMIN_ID}.modulos
+// (array), y se prende ÚNICAMENTE desde Panel Suscriptores → Módulos,
+// exactamente igual que 'llamadas_ia' (Lucy). Este script NO activa
+// el módulo — eso lo haces tú manualmente en el panel, a propósito.
 const annyConfig = {
-  activo: true,
   whatsappNumber: '3117762773',
   diasAntes: 30,
   horaEnvio: '09:00',
@@ -133,7 +137,7 @@ async function initAnnyFirestore() {
     console.log(`   Empresa: Extintores del Valle SAS`);
     console.log(`   Admin ID: ${ADMIN_ID}`);
     console.log(`   Número WhatsApp: ${annyConfig.whatsappNumber}`);
-    console.log(`   Estado: ${annyConfig.activo ? '🟢 ACTIVO' : '⚪ INACTIVO'}`);
+    console.log(`   Estado del módulo: se controla desde Panel Suscriptores → Módulos → 'anny_ia' (no desde este script)`);
     console.log(`   Respuestas pre-configuradas: 6`);
 
     console.log('\n✅ Firestore inicializado exitosamente!');
@@ -159,13 +163,16 @@ async function verificarEstado() {
 
     const configSnap = await db.collection('annyConfig').doc(ADMIN_ID).get();
     if (configSnap.exists) {
-      console.log('✅ annyConfig existe:');
-      console.log(`   Activo: ${configSnap.data().activo}`);
+      console.log('✅ annyConfig existe (datos operativos):');
       console.log(`   Conectado: ${configSnap.data().conectado || false}`);
       console.log(`   WhatsApp: ${configSnap.data().whatsappNumber}`);
     } else {
       console.log('❌ annyConfig NO existe');
     }
+
+    const userSnap = await db.collection('users').doc(ADMIN_ID).get();
+    const modulos = userSnap.exists ? (userSnap.data().modulos || []) : [];
+    console.log(`\n🔐 Gate real del módulo (users.modulos): ${modulos.includes('anny_ia') ? '🟢 anny_ia ACTIVO' : '⚪ anny_ia NO asignado — actívalo desde Panel Suscriptores → Módulos'}`);
 
     const respuestasSnap = await db.collection('respuestasAnny').doc(ADMIN_ID).get();
     if (respuestasSnap.exists) {

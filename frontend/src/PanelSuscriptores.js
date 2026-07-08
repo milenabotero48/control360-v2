@@ -37,6 +37,7 @@ const CATALOGO_MODULOS = [
   { key: 'reportes',     label: 'Reportes' },
   { key: 'qr',           label: 'QR Activos ⭐ (solo invitados)' },
   { key: 'llamadas_ia',  label: 'Llamadas IA — Lucy ⭐ (solo invitados)' },
+ { key: 'anny_ia',      label: 'WhatsApp IA Anny ⭐ (solo invitados)' },
 ];
 
 const ESTADO_UI = {
