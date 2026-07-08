@@ -2,3 +2,7 @@ backend/serviceAccountKey.json
 backend/.env
 node_modules/
 .DS_Storebackend/config/*.json
+backend/config/*.json
+backend/.env
+.env
+node_modules/
