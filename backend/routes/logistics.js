@@ -1240,6 +1240,34 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       }));
     } catch (ePend) { console.warn('CUADRE-BARRIDO-001: no se pudo listar pendientes:', ePend.message); }
 
+    // ✅ FIX CUADRE-MONTO-001: monto recibido OBLIGATORIO si hay efectivo.
+    // ANTES: si el receptor no digitaba el monto, el backend asumía
+    // recibido = esperado y el arqueo quedaba con descuadre $0 aunque nadie
+    // hubiera contado el dinero (arqueos reales en $0/$0). AHORA: si hay
+    // efectivo por entregar, el monto recibido se digita SÍ o SÍ — el conteo
+    // físico del dinero es el corazón del arqueo. Se valida ANTES de tocar
+    // cualquier dato (el batch aún no se ha confirmado).
+    let esperadoPrevio = 0;
+    snapOrdenes.forEach(doc => {
+      const o = doc.data();
+      if (o.cuadrado === true) return;
+      const montoPre = Number(o.montoRecaudado) || 0;
+      const tipoPre = o.tipoCobro
+        || (/transfer|nequi|banco|consign|qr/i.test(o.formaPagoRecaudo || '') ? 'virtual' : 'efectivo');
+      const esCreditoPre = tipoPre === 'credito' || /cr.dito|cxc|fiado/i.test(o.formaPagoRecaudo || '');
+      if (!esCreditoPre && montoPre > 0 && o.dineroEnCaja !== true && tipoPre !== 'virtual') {
+        esperadoPrevio += montoPre;
+      }
+    });
+    const montoRecibidoDigitado = montoRecibido !== undefined && montoRecibido !== null && montoRecibido !== '';
+    if (esperadoPrevio > 0 && !montoRecibidoDigitado) {
+      return res.status(400).json({
+        error: `Debes digitar el monto recibido. El mensajero debe entregar $${esperadoPrevio.toLocaleString('es-CO')} en efectivo — cuéntalo y digítalo antes de confirmar.`,
+        requiereMontoRecibido: true,
+        efectivoEsperado: esperadoPrevio
+      });
+    }
+
     let sumaEfectivo = 0;   // → caja Efectivo
     let sumaVirtual  = 0;   // → caja Bancos
     const ordenesParaCaja = [];

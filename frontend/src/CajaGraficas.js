@@ -8,6 +8,28 @@ import React from 'react';
 
 const fmt = (n) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 
+// ✅ FIX CAJA-FLUJO-001: normalizador de fecha de movimientos → 'YYYY-MM-DD'.
+// Los movimientos que crean el cuadre y registrarIngresoEnCaja NO traen campo
+// `fecha`: solo `createdAt` como Timestamp de Firestore, que llega al frontend
+// como objeto {_seconds}. El código anterior le hacía .toString() → devolvía
+// "[object Object]", nunca coincidía con el mes seleccionado y la gráfica
+// mostraba "Sin movimientos este mes" teniendo movimientos reales. Este helper
+// acepta string ISO, Timestamp serializado (_seconds/seconds), Timestamp vivo
+// (toDate) y Date — siempre en fecha de Colombia (America/Bogota).
+export const fechaMovISO = (m) => {
+  const v = (m && (m.fecha || m.createdAt || m.timestamp)) || m;
+  if (!v) return '';
+  if (typeof v === 'string') return v.slice(0, 10);
+  let d = null;
+  if (v._seconds) d = new Date(v._seconds * 1000);
+  else if (v.seconds) d = new Date(v.seconds * 1000);
+  else if (typeof v.toDate === 'function') d = v.toDate();
+  else if (v instanceof Date) d = v;
+  if (!d || isNaN(d.getTime())) return '';
+  // 'en-CA' produce YYYY-MM-DD; timeZone Bogota evita el corrimiento de día UTC
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+};
+
 // Paleta premium por tipo de caja (translúcida y elegante)
 export const COLORES_CAJA = [
   { solid: '#10b981', soft: 'rgba(16,185,129,0.12)', name: 'esmeralda' },
@@ -105,7 +127,9 @@ export const FlujoMensual = ({ movimientos = [], mes, width = 520, height = 200 
   // Agrupar por día del mes seleccionado — cálculo en memoria, sin queries
   const porDia = {};
   movimientos.forEach(m => {
-    const fecha = (m.fecha || m.createdAt || '').toString().slice(0, 10);
+    // ✅ FIX CAJA-FLUJO-001: fecha normalizada (antes los Timestamps de
+    // Firestore daban "[object Object]" y todos los movimientos se descartaban)
+    const fecha = fechaMovISO(m);
     if (mes && !fecha.startsWith(mes)) return;
     const dia = fecha.slice(8, 10);
     if (!dia) return;

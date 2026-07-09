@@ -4,7 +4,8 @@ import axios from 'axios';
 import { abrirImpresionCuadreDiario } from './printCuadreDiario';
 import { exportarExcel } from './exportExcel';
 // ✅ CAJA-REDISENO-001: gráficas SVG puras (dona + flujo mensual), livianas
-import { DonaDistribucion, FlujoMensual, colorPorIndice } from './CajaGraficas';
+// ✅ FIX CAJA-FLUJO-001: fechaMovISO normaliza Timestamps de Firestore
+import { DonaDistribucion, FlujoMensual, colorPorIndice, fechaMovISO } from './CajaGraficas';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -458,6 +459,9 @@ export default function GestionCaja({ user }) {
   const [cajaDetalle, setCajaDetalle] = useState(null);
   const [buscarMov, setBuscarMov] = useState('');
   const [mesGrafica, setMesGrafica] = useState(() => new Date().toISOString().slice(0, 7));
+  // ✅ FIX CAJA-002: movimientos huérfanos (dinero registrado sin caja destino)
+  const [huerfanos, setHuerfanos] = useState([]);
+  const [huerfanoCaja, setHuerfanoCaja] = useState({}); // movId → cajaId elegida
 
   useEffect(() => { 
     cargarDatos();
@@ -520,7 +524,28 @@ export default function GestionCaja({ user }) {
     } catch (e) {
       console.error('Error cargando caja:', e);
     }
+    // ✅ FIX CAJA-002: cargar movimientos huérfanos (dinero sin caja asignada).
+    // Va aparte para que un fallo aquí no tumbe la carga principal del módulo.
+    try {
+      const { data } = await axios.get(`${API}/cajas/movimientos/sin-asignar`, { headers: getHeaders() });
+      setHuerfanos(data || []);
+    } catch { setHuerfanos([]); }
     setLoading(false);
+  };
+
+  // ✅ FIX CAJA-002: asignar un movimiento huérfano a una caja real
+  const asignarHuerfano = async (movId, cajaId) => {
+    if (!cajaId) return alert('Selecciona la caja destino.');
+    try {
+      const { data } = await axios.put(`${API}/cajas/movimientos/${movId}/asignar`,
+        { cajaId }, { headers: getHeaders() });
+      if (data.duplicado) {
+        alert('El dinero de esa orden ya estaba en caja — el movimiento se archivó sin sumar dos veces.');
+      }
+      await cargarDatos();
+    } catch (e) {
+      alert(e.response?.data?.error || 'Error al asignar el movimiento');
+    }
   };
 
   const guardarCaja = async (form) => {
@@ -704,6 +729,44 @@ export default function GestionCaja({ user }) {
           )}
         </div>
       </div>
+
+      {/* ✅ FIX CAJA-002: ALERTA DE DINERO SIN CAJA — antes estos movimientos
+          eran invisibles y el dinero "desaparecía" del sistema (caso OS-0187).
+          El admin los ve aquí y los asigna a la caja correcta. */}
+      {esAdminUser && huerfanos.length > 0 && (
+        <div style={{ background: '#fffbeb', border: '2px solid #f59e0b', borderRadius: 14, padding: '16px 20px', marginBottom: 18 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: '#92400e', marginBottom: 4 }}>
+            ⚠️ Dinero registrado SIN caja asignada ({huerfanos.length})
+          </div>
+          <div style={{ fontSize: 12, color: '#a16207', marginBottom: 12 }}>
+            Estos pagos se registraron pero no entraron a ninguna caja. Asigna cada uno a su caja para que el saldo quede correcto.
+          </div>
+          {huerfanos.map(m => (
+            <div key={m.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', background: '#fff', borderRadius: 10, padding: '10px 14px', marginBottom: 8, border: '1px solid #fde68a' }}>
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#334155' }}>{m.concepto || 'Movimiento'}</div>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                  {fechaMovISO(m) || '—'}{m.referencia ? ` · ${m.referencia}` : ''}{m.formaPago ? ` · ${m.formaPago}` : ''}
+                </div>
+              </div>
+              <div style={{ fontWeight: 800, fontSize: 15, color: m.tipo === 'egreso' ? '#dc2626' : '#16a34a' }}>
+                {m.tipo === 'egreso' ? '-' : '+'}{fmt(Math.abs(Number(m.monto) || 0))}
+              </div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <select value={huerfanoCaja[m.id] || ''} onChange={e => setHuerfanoCaja(p => ({ ...p, [m.id]: e.target.value }))}
+                  style={{ padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, maxWidth: 180 }}>
+                  <option value="">— Caja destino —</option>
+                  {cajasVisibles.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                </select>
+                <button onClick={() => asignarHuerfano(m.id, huerfanoCaja[m.id])}
+                  style={{ padding: '7px 14px', background: 'linear-gradient(135deg,#16a34a,#15803d)', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 12 }}>
+                  Asignar
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* ✅ CAJA-REDISENO-001: HERO de saldo total — una sola tarjeta destacada
           en vez de la fila de KPIs que duplicaba los saldos de "Mis Cajas". */}
@@ -986,7 +1049,9 @@ export default function GestionCaja({ user }) {
                           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
                             <div style={{ flex: 1 }}>
                               <div style={{ fontSize: 13, color: '#334155', fontWeight: 600 }}>{m.concepto}</div>
-                              <div style={{ fontSize: 11, color: '#94a3b8' }}>{(m.fecha || '').toString().slice(0, 10)}{m.referencia ? ` · ${m.referencia}` : ''}</div>
+                              {/* ✅ FIX CAJA-FLUJO-001: fecha real del movimiento (antes salía
+                                  vacía porque createdAt es Timestamp, no string) */}
+                              <div style={{ fontSize: 11, color: '#94a3b8' }}>{fechaMovISO(m) || '—'}{m.referencia ? ` · ${m.referencia}` : ''}</div>
                             </div>
                             <div style={{ fontWeight: 800, fontSize: 14, color: m.tipo === 'ingreso' ? '#16a34a' : '#dc2626' }}>
                               {m.tipo === 'ingreso' ? '+' : '-'}{fmt(Math.abs(Number(m.monto) || 0))}

@@ -1123,8 +1123,9 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
     axios.get(`${API}/logistica/cuadre/${mensajeroId}`, { headers })
       .then(r => {
         setCuadre(r.data);
-        // Prellenar con lo esperado; el admin ajusta si el mensajero entregó otra cifra
-        setMontoRecibido(String(r.data?.totalAEntregar || 0));
+        // ✅ FIX CUADRE-MONTO-001: ya NO se prellena con lo esperado. Prellenar
+        // hacía que se confirmara "descuadre $0" sin contar el dinero físico
+        // (causa real de arqueos en $0/$0). El receptor cuenta y digita.
       })
       .catch(() => setError('Error al cargar cuadre'));
 
@@ -1149,6 +1150,11 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
 
   const handleConfirmar = async () => {
     if (pin.length !== 4) return setError('Ingresa el PIN de 4 dígitos');
+    // ✅ FIX CUADRE-MONTO-001: si hay efectivo esperado, el monto recibido se
+    // digita obligatoriamente (conteo físico). El backend también lo valida.
+    if (esperado > 0 && montoRecibido === '') {
+      return setError(`⛔ Cuenta el dinero y digita el monto recibido. El mensajero debe entregar ${fmt(esperado)}.`);
+    }
     // ✅ CUADRE-CAJA-001: si entra efectivo, la caja destino es obligatoria
     if (recibidoNum > 0 && cajasEfectivo.length > 0 && !cajaEfectivoId) {
       return setError('Selecciona la caja de efectivo donde entra el dinero.');

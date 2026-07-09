@@ -456,26 +456,15 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
       return { tipo: 'cxc', mensaje: 'Registrado en CxC' };
     }
 
-    // ── CANDADO ANTI-DOBLE-SUMA (transacción atómica) ─────────────────────────
-    if (ordenId) {
-      const ordenRef = db.collection('orders').doc(ordenId);
-      const yaRegistrado = await db.runTransaction(async (tx) => {
-        const snap = await tx.get(ordenRef);
-        if (snap.exists && snap.data().dineroEnCaja === true) return true;
-        if (snap.exists) {
-          tx.update(ordenRef, {
-            dineroEnCaja: true,
-            dineroEnCajaFecha: new Date().toISOString(),
-            dineroEnCajaPor: usuarioEmail || userId
-          });
-        }
-        return false;
-      });
-      if (yaRegistrado) {
-        return { tipo: 'duplicado', mensaje: 'El dinero de esta orden ya estaba en caja (no se duplicó)' };
-      }
-    }
-
+    // ✅ FIX CAJA-002: resolver la caja destino ANTES del candado.
+    // ANTES: el candado marcaba dineroEnCaja=true PRIMERO y después buscaba la
+    // caja. Si la forma de pago no tenía caja mapeada, el movimiento quedaba
+    // 'sin_asignar' (invisible en pantalla), NINGUNA caja recibía el dinero,
+    // pero la orden ya estaba marcada "dinero en caja" → el cuadre del
+    // mensajero la saltaba (esperado $0) y el dinero desaparecía del sistema
+    // (caso real OS-0187). AHORA: primero se resuelve la caja; solo si existe
+    // caja destino se marca dineroEnCaja.
+    //
     // ✅ VALIDAR-CAJA-001: si quien registra el pago eligió una caja destino
     // explícita, esa caja manda sobre el mapeo automático forma→caja
     // (validando que exista y pertenezca al tenant).
@@ -499,16 +488,55 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
       if (!cajaId && config.mapeoCajas?.[formaPago]) cajaId = config.mapeoCajas[formaPago];
     }
 
+    // ✅ FIX CAJA-002 (respaldo): si el mapeo no resolvió y el pago es en
+    // EFECTIVO, usar la caja de efectivo del tenant (regla EFECTIVO-PALABRA-002:
+    // "efectivo" en el nombre o tipo). Mejor una caja de efectivo real que un
+    // movimiento huérfano.
+    if (!cajaId && /efectivo/i.test(formaPago || '')) {
+      const cajasSnap = await db.collection('cajas').where('userId', '==', userId).get();
+      const cajaEfectivo = cajasSnap.docs.find(d => {
+        const c = d.data();
+        return c.activa !== false &&
+          (/efectivo/i.test(c.nombre || '') || /efectivo/i.test(c.tipo || ''));
+      });
+      if (cajaEfectivo) cajaId = cajaEfectivo.id;
+    }
+
     if (!cajaId) {
       console.warn(`Sin caja mapeada para forma de pago: ${formaPago}`);
       await db.collection('movimientos').add({
         userId, cajaId: 'sin_asignar', tipo: 'ingreso',
         concepto: `Pago ${numeroOrden} — ${clienteNombre}`,
         monto, referencia: numeroOrden, ordenId, formaPago,
-        alerta: 'sin_caja_mapeada', creadoPor: usuarioEmail,
+        alerta: 'sin_caja_mapeada',
+        pendienteAsignar: true, // ✅ FIX CAJA-002: visible en Caja para asignarlo
+        creadoPor: usuarioEmail,
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       });
-      return { tipo: 'sin_caja', mensaje: 'Movimiento sin caja asignada — configura el mapeo en Mi Empresa' };
+      // ✅ FIX CAJA-002: NO se marca dineroEnCaja — el dinero aún no está en
+      // ninguna caja real. La orden sigue viva en el flujo hasta resolverlo.
+      return { tipo: 'sin_caja', pendiente: true, mensaje: 'Pago registrado SIN caja asignada — asígnalo a una caja desde el módulo Caja' };
+    }
+
+    // ── CANDADO ANTI-DOBLE-SUMA (transacción atómica) ─────────────────────────
+    // ✅ FIX CAJA-002: el candado corre DESPUÉS de resolver la caja destino.
+    if (ordenId) {
+      const ordenRef = db.collection('orders').doc(ordenId);
+      const yaRegistrado = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ordenRef);
+        if (snap.exists && snap.data().dineroEnCaja === true) return true;
+        if (snap.exists) {
+          tx.update(ordenRef, {
+            dineroEnCaja: true,
+            dineroEnCajaFecha: new Date().toISOString(),
+            dineroEnCajaPor: usuarioEmail || userId
+          });
+        }
+        return false;
+      });
+      if (yaRegistrado) {
+        return { tipo: 'duplicado', mensaje: 'El dinero de esta orden ya estaba en caja (no se duplicó)' };
+      }
     }
 
     const cajaRef = db.collection('cajas').doc(cajaId);

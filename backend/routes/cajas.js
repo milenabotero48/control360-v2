@@ -345,6 +345,124 @@ router.get('/movimientos/todos', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ✅ FIX CAJA-002: MOVIMIENTOS HUÉRFANOS (dinero registrado sin caja destino)
+// ───────────────────────────────────────────────────────────────────────────────
+// Cuando un pago se registró sin caja mapeada, el movimiento quedaba con
+// cajaId 'sin_asignar' e INVISIBLE en todas las pantallas: el dinero existía
+// pero el sistema lo perdía de vista (caso real OS-0187). Estos endpoints lo
+// hacen visible y permiten al admin asignarlo a la caja correcta, con candado
+// anti-doble-suma: si el dinero de esa orden ya entró por otra vía (cuadre),
+// el movimiento se marca duplicado y NO se suma dos veces.
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get('/movimientos/sin-asignar', async (req, res) => {
+  try {
+    // Solo admin gestiona dinero huérfano
+    if (!ROLES_VEN_TODO.includes(req.user?.role)) return res.json([]);
+    const snap = await db.collection('movimientos')
+      .where('userId', '==', req.adminId || req.user.uid)
+      .where('cajaId', '==', 'sin_asignar')
+      .get();
+    const movs = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(m => m.resuelto !== true);
+    movs.sort((a, b) =>
+      (b.createdAt?.seconds || b.createdAt?._seconds || 0) -
+      (a.createdAt?.seconds || a.createdAt?._seconds || 0));
+    res.json(movs);
+  } catch (e) {
+    console.error('GET movimientos/sin-asignar:', e);
+    res.status(500).json({ error: 'Error al obtener movimientos sin asignar' });
+  }
+});
+
+router.put('/movimientos/:id/asignar', async (req, res) => {
+  try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el administrador puede asignar movimientos huérfanos a una caja' });
+    }
+    const { cajaId } = req.body;
+    if (!cajaId) return res.status(400).json({ error: 'cajaId requerido' });
+    const adminId = req.adminId || req.user.uid;
+
+    const cajaRef = db.collection('cajas').doc(cajaId);
+    const movRef = db.collection('movimientos').doc(req.params.id);
+
+    const resultado = await db.runTransaction(async (tx) => {
+      const [cajaDoc, movDoc] = await Promise.all([tx.get(cajaRef), tx.get(movRef)]);
+      if (!cajaDoc.exists || cajaDoc.data().userId !== adminId) {
+        return { ok: false, status: 404, error: 'Caja no encontrada o de otro suscriptor' };
+      }
+      if (!movDoc.exists || movDoc.data().userId !== adminId) {
+        return { ok: false, status: 404, error: 'Movimiento no encontrado' };
+      }
+      const mov = movDoc.data();
+      if (mov.cajaId !== 'sin_asignar' || mov.resuelto === true) {
+        return { ok: false, status: 409, error: 'Este movimiento ya fue asignado o resuelto' };
+      }
+
+      // Candado anti-doble-suma: si la orden ya tiene el dinero en caja
+      // (entró por cuadre u otra vía), NO se suma de nuevo — se archiva.
+      if (mov.ordenId) {
+        const ordenDoc = await tx.get(db.collection('orders').doc(mov.ordenId));
+        if (ordenDoc.exists && ordenDoc.data().dineroEnCaja === true) {
+          tx.update(movRef, {
+            resuelto: true,
+            resolucion: 'duplicado_no_sumado',
+            resueltoPor: req.user.email,
+            resueltoEn: new Date().toISOString(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          return { ok: true, duplicado: true };
+        }
+        // La orden aún no tiene el dinero en caja: se marca ahora (mismo
+        // efecto del candado de registrarIngresoEnCaja).
+        if (ordenDoc.exists) {
+          tx.update(ordenDoc.ref, {
+            dineroEnCaja: true,
+            dineroEnCajaFecha: new Date().toISOString(),
+            dineroEnCajaPor: req.user.email
+          });
+        }
+      }
+
+      const monto = Number(mov.monto) || 0;
+      tx.update(cajaRef, {
+        saldo: admin.firestore.FieldValue.increment(mov.tipo === 'egreso' ? -monto : monto),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      tx.update(movRef, {
+        cajaId,
+        cajaNombre: cajaDoc.data().nombre || '',
+        pendienteAsignar: false,
+        resuelto: true,
+        resolucion: 'asignado_a_caja',
+        resueltoPor: req.user.email,
+        resueltoEn: new Date().toISOString(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      return { ok: true, duplicado: false, monto, cajaNombre: cajaDoc.data().nombre || '' };
+    });
+
+    if (!resultado.ok) return res.status(resultado.status).json({ error: resultado.error });
+
+    await registrarAuditoria({
+      accion: resultado.duplicado ? 'MOV_HUERFANO_DUPLICADO' : 'MOV_HUERFANO_ASIGNADO',
+      modulo: 'caja',
+      descripcion: resultado.duplicado
+        ? `${req.user.email} archivó movimiento huérfano ${req.params.id} (el dinero ya estaba en caja — no se duplicó)`
+        : `${req.user.email} asignó movimiento huérfano ${req.params.id} a caja "${resultado.cajaNombre}" por $${(resultado.monto || 0).toLocaleString('es-CO')}`,
+      usuarioId: req.user.uid || req.user.id,
+      usuarioEmail: req.user.email
+    });
+
+    res.json(resultado);
+  } catch (e) {
+    console.error('PUT movimientos/asignar:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // GET /api/cajas/cierre-diario?fecha=YYYY-MM-DD  (Ola 3 — Cuadre diario)
 // ───────────────────────────────────────────────────────────────────────────────
 // Consolidado COMBINADO de todas las cajas del suscriptor para un día
