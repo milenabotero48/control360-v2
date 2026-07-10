@@ -6,6 +6,16 @@ require('dotenv').config();
 require('./config/firebase');
 
 const app = express();
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FIX PROXY-001: Railway corre la app detrás de un proxy inverso que agrega
+// el header X-Forwarded-For. Sin trust proxy, express-rate-limit no puede
+// identificar la IP real del visitante (error ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+// en los logs) y el límite de intentos de login se aplicaría a la IP del
+// proxy en vez de la del atacante.
+// ═════════════════════════════════════════════════════════════════════════════
+app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
@@ -17,11 +27,6 @@ const { authenticate, validarTenant } = require('./middleware/auth.js');
 // RATE LIMITING — solo en el endpoint de login
 // ─────────────────────────────────────────────────────────────────────────────
 // Máximo 20 intentos por IP en una ventana de 15 minutos.
-// Frena ataques de fuerza bruta automatizados ANTES de que lleguen
-// a la lógica de Firestore. express-rate-limit ya está en el proyecto
-// (se instaló en Ola 1 de seguridad). Si Railway reinicia el proceso,
-// la ventana se resetea — para persistencia real usar Redis, pero para
-// el volumen actual de Control360 es más que suficiente en memoria.
 // ═════════════════════════════════════════════════════════════════════════════
 const rateLimit = require('express-rate-limit');
 
@@ -86,9 +91,6 @@ app.use('/api/llamadas-ia', authenticate, llamadasIARouter);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // FIX ANNY-GATE-002: montar rutas de WhatsApp IA Anny.
-// El authenticate va POR RUTA dentro de routes/anny.js (mismo patrón
-// que /api/whatsapp), y el gate requireAnnyActivo valida el módulo
-// 'anny_ia' en users/{adminId}.modulos (solo lo activa el SuperAdmin).
 // ═════════════════════════════════════════════════════════════════════════════
 app.use('/api/anny', require('./routes/anny'));
 
@@ -113,8 +115,7 @@ app.listen(PORT, () => {
 
   // ═══════════════════════════════════════════════════════════════════════════
   // FIX ANNY-NOTIF-001: cobranza CxC viernes 9 AM Colombia.
-  // FIX ANNY-VENC-001: rondas de vencimientos en días configurables
-  // por empresa (annyConfig.diasRondaVencimientos).
+  // FIX ANNY-VENC-001: rondas de vencimientos en días configurables.
   // ═══════════════════════════════════════════════════════════════════════════
   const { iniciarCronCobranzaAnny, iniciarCronRondasVencimientos } = require('./services/annyNotificaciones');
   iniciarCronCobranzaAnny();

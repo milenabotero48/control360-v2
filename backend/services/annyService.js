@@ -2,6 +2,7 @@
 // Control360 — Servicio WhatsApp IA Anny
 // Ubicación: backend/services/annyService.js
 // FIX ANNY-BOOT-001 + ANNY-LEARN-002 + ANNY-CTX-001 + ANNY-PEDIDOS-001
+// + FIX ANNY-CFG-002 (guardado de config con undefined)
 // ============================================================
 // PRINCIPIOS:
 // 1. Procesa mensajes entrantes de WhatsApp (vía Baileys)
@@ -148,8 +149,6 @@ async function obtenerHistorialReciente(adminId, telefono, limite = 8) {
 
 // ============================================================
 // Consultar Claude — vendedora con memoria, conocimiento y cierre
-// FIX ANNY-PEDIDOS-001: detecta pedidos confirmados con datos
-// completos y los devuelve estructurados en `pedido`.
 // ============================================================
 async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = []) {
   try {
@@ -336,7 +335,6 @@ async function actualizarMetricas(adminId, tipo) {
 
 // ============================================================
 // FUNCIÓN PRINCIPAL: Procesar mensaje entrante
-// Retorna { procesado, tipo, accion, respuesta, pedido?, notificarA? }
 // ============================================================
 async function procesarMensajeEntrante(props) {
   const { adminId, telefono, nombreCliente, mensajeTexto } = props;
@@ -538,13 +536,19 @@ async function obtenerConfig(adminId) {
 
 // ============================================================
 // Crear/actualizar configuración OPERATIVA
-// FIX ANNY-PEDIDOS-001: acepta notificarPedidosA y los campos de
-// ronda de vencimientos. `activo` se sigue descartando siempre.
+// FIX ANNY-CFG-002: Firestore rechaza `undefined` como valor. El
+// panel ya no envía whatsappNumber (lo escribe Baileys al conectar)
+// y llegaba undefined — TODO el guardado de configuración fallaba.
+// Se eliminan las claves undefined antes de escribir; con merge,
+// cada quien guarda solo lo que envía sin pisar lo demás.
 // ============================================================
 async function actualizarConfig(adminId, datos) {
   try {
     const { activo, ...datosPermitidos } = datos; // activo se ignora siempre
-    await db.collection('annyConfig').doc(adminId).set(datosPermitidos, { merge: true });
+    const datosLimpios = Object.fromEntries(
+      Object.entries(datosPermitidos).filter(([, v]) => v !== undefined)
+    );
+    await db.collection('annyConfig').doc(adminId).set(datosLimpios, { merge: true });
     return { ok: true };
   } catch (err) {
     console.error('[ANNY] Error actualizando config:', err.message);
