@@ -1,7 +1,7 @@
 // ============================================================
 // Control360 — Servicio Baileys (WhatsApp Web) para Anny
 // Ubicación: backend/services/baileysService.js
-// FIX ANNY-QR-001 + FIX ANNY-QR-003
+// FIX ANNY-QR-001 + FIX ANNY-QR-003 + FIX ANNY-QR-004
 // ============================================================
 // PRINCIPIOS:
 // 1. Una sesión de WhatsApp por tenant (adminId) — multi-tenant
@@ -13,6 +13,9 @@
 // 6. FIX ANNY-LEARN-001: respuestas manuales de la admin (fromMe)
 //    se registran como ADMIN_MANUAL para futuro aprendizaje
 // 7. Reconexión automática con tope de reintentos
+// 8. FIX ANNY-QR-004: getMessage + almacén de enviados para que
+//    los reintentos de cifrado no dejen al cliente viendo
+//    "Esperando el mensaje..."
 // ============================================================
 
 const qrcode = require('qrcode');
@@ -26,9 +29,7 @@ const annyService = require('./annyService');
 // FIX ANNY-QR-003: Baileys moderno es ESM-only — require() lanza
 // ERR_REQUIRE_ESM y tumbaba el server al arrancar. Se carga con
 // import() dinámico y PEREZOSO (solo cuando alguien conecta).
-// Detecta la forma del módulo para ser compatible con v6 y v7:
-// en unas versiones makeWASocket es el export default (función),
-// en otras es export nombrado.
+// Detecta la forma del módulo para ser compatible con v6 y v7.
 // ============================================================
 let _baileys = null;
 async function cargarBaileys() {
@@ -58,11 +59,47 @@ async function cargarBaileys() {
 // En Railway: Volume montado en /data y env var BAILEYS_DIR=/data/baileys
 const BAILEYS_DIR = process.env.BAILEYS_DIR || path.join(__dirname, '..', 'baileys_sessions');
 
+// ============================================================
+// FIX ANNY-QR-004: almacén de mensajes enviados para reintentos.
+// Cuando el celular del cliente no logra descifrar un mensaje,
+// WhatsApp pide reenvío vía getMessage(key). Sin esto, el cliente
+// ve "Esperando el mensaje. Esto puede tomar tiempo." para siempre.
+// Se guardan los últimos MAX_MENSAJES_STORE en memoria (los
+// reintentos llegan en segundos, no hace falta persistirlos).
+// ============================================================
+const mensajesEnviados = new Map(); // msgId -> contenido del mensaje
+const MAX_MENSAJES_STORE = 1000;
+
+function guardarMensajeEnviado(id, message) {
+  if (!id || !message) return;
+  mensajesEnviados.set(id, message);
+  if (mensajesEnviados.size > MAX_MENSAJES_STORE) {
+    // borrar el más antiguo (Map conserva orden de inserción)
+    const primero = mensajesEnviados.keys().next().value;
+    mensajesEnviados.delete(primero);
+  }
+}
+
 // adminId -> { sock, estado, qr, numero, reintentos }
 // estados: 'conectando' | 'esperando_qr' | 'conectado' | 'reconectando' | 'desconectado'
 const sesiones = new Map();
 
 const MAX_REINTENTOS = 10;
+
+// ============================================================
+// Enviar mensaje registrándolo en el almacén de reintentos
+// (FIX ANNY-QR-004: usar SIEMPRE esta función, nunca sendMessage
+// directo, para que getMessage pueda responder los reintentos)
+// ============================================================
+async function enviarMensaje(adminId, jid, texto) {
+  const ses = sesiones.get(adminId);
+  if (!ses?.sock) return null;
+  const enviado = await ses.sock.sendMessage(jid, { text: texto });
+  if (enviado?.key?.id && enviado.message) {
+    guardarMensajeEnviado(enviado.key.id, enviado.message);
+  }
+  return enviado;
+}
 
 // ============================================================
 // Guardar estado de conexión en annyConfig (solo datos operativos)
@@ -96,7 +133,6 @@ function extraerTexto(message) {
 
 // ============================================================
 // Anti-colisión: ¿hay caso escalado PENDIENTE de este teléfono?
-// (equality-only query — no requiere índice compuesto)
 // ============================================================
 async function hayCasoPendiente(adminId, telefono) {
   try {
@@ -130,8 +166,7 @@ async function procesarMensaje(adminId, msg) {
   const telefono = jid.split('@')[0];
 
   // FIX ANNY-LEARN-001: mensaje enviado por la admin desde su celular.
-  // Se registra en el historial (respondidoPor: ADMIN_MANUAL) — esta es
-  // la materia prima del futuro módulo de aprendizaje de Anny.
+  // Se registra como ADMIN_MANUAL — materia prima del aprendizaje.
   if (msg.key.fromMe) {
     await annyService.registrarConversacion(adminId, {
       telefono,
@@ -146,7 +181,6 @@ async function procesarMensaje(adminId, msg) {
   }
 
   // Anti-colisión: caso escalado pendiente = la admin está atendiendo.
-  // Anny registra el mensaje pero NO responde.
   const enManosDeAdmin = await hayCasoPendiente(adminId, telefono);
   if (enManosDeAdmin) {
     await annyService.registrarConversacion(adminId, {
@@ -169,10 +203,8 @@ async function procesarMensaje(adminId, msg) {
   });
 
   if (resultado?.accion === 'enviar_mensaje' && resultado.respuesta) {
-    const ses = sesiones.get(adminId);
-    if (ses?.sock) {
-      await ses.sock.sendMessage(jid, { text: resultado.respuesta });
-    }
+    // FIX ANNY-QR-004: enviar registrando para reintentos
+    await enviarMensaje(adminId, jid, resultado.respuesta);
   }
 }
 
@@ -199,7 +231,13 @@ async function iniciarSesion(adminId) {
     auth: state,
     logger: pino({ level: 'silent' }),
     markOnlineOnConnect: false,
-    browser: ['Control360', 'Chrome', '1.0']
+    browser: ['Control360', 'Chrome', '1.0'],
+    // FIX ANNY-QR-004: responder solicitudes de reenvío/reintento.
+    // Sin esto, los mensajes que el cliente no logra descifrar se
+    // quedan en "Esperando el mensaje..." para siempre.
+    getMessage: async (key) => {
+      return mensajesEnviados.get(key?.id) || undefined;
+    }
   });
 
   const ses = {
@@ -319,8 +357,6 @@ function getQR(adminId) {
 
 // ============================================================
 // Restaurar sesiones al arrancar el server (post-deploy)
-// Solo tenants que estaban 'conectado' — la sesión vive en el
-// Volume, así que reconectan sin re-escanear el QR.
 // ============================================================
 async function restaurarSesiones() {
   try {
@@ -349,6 +385,7 @@ module.exports = {
   desconectar,
   getEstado,
   getQR,
+  enviarMensaje,
   restaurarSesiones
 };
 // FIN baileysService.js
