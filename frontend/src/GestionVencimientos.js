@@ -4,6 +4,7 @@
 // ACTUALIZADO: Agrega Anny + adminId dinámico (multi-tenant seguro)
 // ============================================================
 
+// ✅ FIX TEL-CO-001: enlaces de llamada con indicativo +57 (antes marcaban a Holanda)
 import React, { useState, useEffect, useCallback } from 'react';
 import LlamadasIA from './LlamadasIA';
 import VencimientosAnny from './VencimientosAnny';
@@ -400,7 +401,7 @@ export default function GestionVencimientos({ user, onNavegar }) {
                               <div>
                                 <div style={{ fontWeight:700, fontSize:13, color:est.color }}>{c.nombre}</div>
                                 {c.telefono && (
-                                  <a href={`tel:+${c.telefono}`} onClick={e => e.stopPropagation()} style={{ fontSize:11, color:est.color, textDecoration:'none', marginTop:2, display:'inline-block' }}>
+                                  <a href={`tel:+57${String(c.telefono || '').replace(/^57/, '')}`} onClick={e => e.stopPropagation()} style={{ fontSize:11, color:est.color, textDecoration:'none', marginTop:2, display:'inline-block' }}>
                                     📱 {telBonito(c.telefono)}
                                   </a>
                                 )}
@@ -510,7 +511,7 @@ export default function GestionVencimientos({ user, onNavegar }) {
 
                 <div style={{ background:'#f9fafb', borderRadius:10, padding:'12px 14px', marginBottom:14 }}>
                   {detalle.cli.telefono && (
-                    <a href={`tel:+${detalle.cli.telefono}`} style={{ display:'block', fontSize:14, fontWeight:700, color:'#7c3aed', textDecoration:'none', marginBottom:4 }}>
+                    <a href={`tel:+57${String(detalle.cli.telefono || '').replace(/^57/, '')}`} style={{ display:'block', fontSize:14, fontWeight:700, color:'#7c3aed', textDecoration:'none', marginBottom:4 }}>
                       📱 {telBonito(detalle.cli.telefono)}
                     </a>
                   )}
@@ -538,7 +539,7 @@ export default function GestionVencimientos({ user, onNavegar }) {
 
                 <div style={{ display:'flex', gap:8, marginTop:16 }}>
                   {detalle.cli.telefono && (
-                    <a href={`tel:+${detalle.cli.telefono}`} style={{ flex:1, textAlign:'center', background:'#7c3aed', color:'#fff', borderRadius:10, padding:'12px 0', fontWeight:700, fontSize:13, textDecoration:'none' }}>
+                    <a href={`tel:+57${String(detalle.cli.telefono || '').replace(/^57/, '')}`} style={{ flex:1, textAlign:'center', background:'#7c3aed', color:'#fff', borderRadius:10, padding:'12px 0', fontWeight:700, fontSize:13, textDecoration:'none' }}>
                       📞 Llamar
                     </a>
                   )}

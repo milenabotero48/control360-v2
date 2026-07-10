@@ -420,6 +420,9 @@ router.get('/mi-dia', async (req, res) => {
         docs.forEach(d => {
           if (!d.exists || d.data().adminId !== adminId) { porCliente.delete(d.id); return; }
           const c = d.data();
+          // ✅ FIX TELEVENC-NOINT-001: cliente marcado "no interesa" →
+          // fuera de la cola de vencidos hasta la fecha límite
+          if (c.telemercadeoNoInteresa?.hasta && c.telemercadeoNoInteresa.hasta >= hoy) { porCliente.delete(d.id); return; }
           const g = porCliente.get(d.id);
           if (!g) return;
           g.nombre = c.nombre || c.empresa || 'Sin nombre';
@@ -541,7 +544,10 @@ router.post('/vencidos/:clienteId/llamada', async (req, res) => {
     const hoy = hoyColombia();
     const { resultado, notas, proximaLlamada, motivoDescarte, vencimientoIds } = req.body || {};
 
-    if (!['acepta', 'reprogramar', 'no_contesto', 'no_interesa'].includes(resultado)) {
+    // ✅ FIX TELEVENC-YAREC-001: nuevo resultado 'ya_recargo' — el cliente
+    // ya hizo la recarga (con nosotros o con otro): equipos gestionados,
+    // sin motivo obligatorio y SIN contar como conversión.
+    if (!['acepta', 'reprogramar', 'no_contesto', 'no_interesa', 'ya_recargo'].includes(resultado)) {
       return res.status(400).json({ error: 'Resultado inválido' });
     }
     if (resultado === 'reprogramar' && !esFecha(proximaLlamada?.fecha)) {
@@ -612,12 +618,34 @@ router.post('/vencidos/:clienteId/llamada', async (req, res) => {
         update.gestionadoPor = uid;
         update.gestionadoPorNombre = req.user?.nombre || req.user?.email || null;
         update.fechaGestion = hoy;
+      } else if (resultado === 'ya_recargo') {
+        // ✅ FIX TELEVENC-YAREC-001: al día — sale de la cola sin ser venta
+        update.gestionado = true;
+        update.canalGestion = 'telemercadeo';
+        update.yaRecargo = true;
+        update.gestionadoPor = uid;
+        update.gestionadoPorNombre = req.user?.nombre || req.user?.email || null;
+        update.fechaGestion = hoy;
       }
 
       batch.update(d.ref, update);
     });
 
     if (objetivo.length) await batch.commit();
+
+    // ✅ FIX TELEVENC-NOINT-001: recordar en el CLIENTE que no está
+    // interesado (6 meses). Sin esto, cualquier vencimiento nuevo del
+    // mismo cliente (renovación, re-importación, equipo no seleccionado)
+    // lo devolvía a la cola de llamadas.
+    if (resultado === 'no_interesa') {
+      try {
+        const base = new Date(hoy + 'T12:00:00');
+        base.setMonth(base.getMonth() + 6);
+        await db.collection('clients').doc(req.params.clienteId).update({
+          telemercadeoNoInteresa: { motivo: motivoDescarte, fecha: hoy, hasta: base.toISOString().slice(0, 10) }
+        });
+      } catch (eNI) { console.warn('TELEVENC-NOINT-001:', eNI.message); }
+    }
 
     // Log plano para métricas y META DIARIA — origen 'vencimiento' separa
     // retención (recompra) de captación (prospectos) en los reportes.
@@ -690,7 +718,9 @@ router.post('/prospectos/:id/llamada', async (req, res) => {
     if (p.adminId !== adminId) return res.status(403).json({ error: 'No autorizado' });
 
     const update = {
-      notasUltimaLlamada: (req.body && req.body.notas) || null,
+      // ✅ FIX TELEVENC-NOTAS-001: una llamada SIN notas ya NO borra la
+      // nota de la llamada anterior (antes escribía null y se perdían)
+      notasUltimaLlamada: notas || p.notasUltimaLlamada || null,
       totalLlamadas: (p.totalLlamadas || 0) + 1,
       ultimaLlamada: hoy,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -1162,6 +1192,9 @@ router.get('/metricas', async (req, res) => {
       if (l.origen === 'vencimiento') v.llamadasRetencion++; else v.llamadasCaptacion++;
       if (l.resultado === 'no_contesto') v.noContestadas++; else v.contactadas++;
       if (l.resultado === 'no_interesa') v.descartes++;
+      // ✅ FIX TELEVENC-CONV-001: la venta de RETENCIÓN (vencido que acepta)
+      // también es conversión — antes solo contaban prospectos convertidos
+      if (l.origen === 'vencimiento' && l.resultado === 'acepta') v.conversiones++;
       v.diasActivos.add(l.fecha);
     });
     conversiones.forEach(c => {
@@ -1285,6 +1318,8 @@ router.get('/reporte-telemercadeo', async (req, res) => {
       else if (l.resultado === 'reprogramar') v.reprogramadas++;
       else if (l.resultado === 'no_interesa') { v.descartadas++; v.contactadas++; }
       else v.contactadas++;
+      // ✅ FIX TELEVENC-CONV-001: retención (vencido acepta) suma conversión
+      if (l.origen === 'vencimiento' && l.resultado === 'acepta') v.conversiones++;
       v.diasActivos.add(l.fecha);
     });
 

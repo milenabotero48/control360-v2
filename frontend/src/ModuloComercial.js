@@ -22,6 +22,7 @@
 // Sin dependencias nuevas: importación por CSV (consistente con exportExcel.js)
 // ============================================================
 
+// ✅ FIX TEL-CO-001: enlaces de llamada con indicativo +57 (antes marcaban a Holanda)
 import React, { useState, useEffect, useCallback } from 'react';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
@@ -356,7 +357,7 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar, clientesRecargado
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-              <a href={`tel:+${p.telefono}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>
+              <a href={`tel:+57${String(p.telefono || '').replace(/^57/, '')}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>
                 📱 {telBonito(p.telefono)}
               </a>
               {p.sucursal && <span style={{ fontSize: 11, color: '#9ca3af' }}>📍 {p.sucursal}</span>}
@@ -444,7 +445,7 @@ function SeccionVencidos({ lista = [], onLlamar }) {
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-              <a href={`tel:+${v.telefono}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>
+              <a href={`tel:+57${String(v.telefono || '').replace(/^57/, '')}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>
                 📱 {telBonito(v.telefono)}
               </a>
               {v.telefonoPorVerificar && (
@@ -507,6 +508,7 @@ function ModalLlamadaVencido({ vencido, onCerrar, onCrearOrden }) {
     { value: 'reprogramar', label: '📅 Llamar después',     bg: '#fef3c7', color: '#b45309' },
     { value: 'no_contesto', label: '📵 No contestó',        bg: '#f3f4f6', color: '#6b7280' },
     { value: 'no_interesa', label: '❌ No le interesa',     bg: '#fee2e2', color: '#b91c1c' },
+    { value: 'ya_recargo',  label: '♻️ Ya recargó',         bg: '#e0f2fe', color: '#0369a1' }, // ✅ FIX TELEVENC-YAREC-001
   ];
 
   const toggleEquipo = (id) => {
@@ -522,7 +524,7 @@ function ModalLlamadaVencido({ vencido, onCerrar, onCrearOrden }) {
     if (!resultado) return setError('Selecciona el resultado de la llamada');
     if (resultado === 'reprogramar' && !fecha) return setError('Indica la fecha de la próxima llamada');
     if (resultado === 'no_interesa' && !motivo) return setError('Indica el motivo');
-    if ((resultado === 'acepta' || resultado === 'no_interesa') && !seleccion.size) {
+    if ((resultado === 'acepta' || resultado === 'no_interesa' || resultado === 'ya_recargo') && !seleccion.size) {
       return setError('Selecciona al menos un equipo');
     }
 
@@ -535,7 +537,7 @@ function ModalLlamadaVencido({ vencido, onCerrar, onCrearOrden }) {
         motivoDescarte: resultado === 'no_interesa' ? motivo : undefined,
         // Con acepta / no_interesa aplica a los equipos marcados;
         // con reprogramar / no_contesto el seguimiento cubre todos.
-        vencimientoIds: (resultado === 'acepta' || resultado === 'no_interesa') ? [...seleccion] : undefined,
+        vencimientoIds: (resultado === 'acepta' || resultado === 'no_interesa' || resultado === 'ya_recargo') ? [...seleccion] : undefined,
       };
       const res = await fetch(`${API}/comercial/vencidos/${vencido.clienteId}/llamada`, {
         method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
@@ -549,7 +551,7 @@ function ModalLlamadaVencido({ vencido, onCerrar, onCrearOrden }) {
         setGuardando(false);
         return; // muestra botones — no se cierra solo
       }
-      setExito('✓ Llamada registrada');
+      setExito(resultado === 'ya_recargo' ? '♻️ Listo — equipos marcados como ya recargados (al día)' : '✓ Llamada registrada');
       setTimeout(() => onCerrar(true), 1400);
     } catch (e) {
       setError(e.message);
@@ -567,7 +569,7 @@ function ModalLlamadaVencido({ vencido, onCerrar, onCrearOrden }) {
           <div>
             <div style={{ fontSize: 10.5, fontWeight: 800, color: '#b91c1c', letterSpacing: 0.5 }}>🔥 RETENCIÓN — CLIENTE VENCIDO</div>
             <div style={{ fontWeight: 800, fontSize: 16, color: '#1a1a2e' }}>{vencido.nombre}</div>
-            <a href={`tel:+${vencido.telefono}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>📱 {telBonito(vencido.telefono)}</a>
+            <a href={`tel:+57${String(vencido.telefono || '').replace(/^57/, '')}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>📱 {telBonito(vencido.telefono)}</a>
           </div>
           <button onClick={() => onCerrar(false)} style={{ border: 'none', background: '#f3f4f6', borderRadius: 8, width: 32, height: 32, cursor: 'pointer', fontSize: 14 }}>✕</button>
         </div>
@@ -829,7 +831,7 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
           <div>
             <div style={{ fontWeight: 800, fontSize: 16, color: '#1a1a2e' }}>{prospecto.nombre}</div>
-            <a href={`tel:+${prospecto.telefono}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>📱 {telBonito(prospecto.telefono)}</a>
+            <a href={`tel:+57${String(prospecto.telefono || '').replace(/^57/, '')}`} style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed', textDecoration: 'none' }}>📱 {telBonito(prospecto.telefono)}</a>
           </div>
           <button onClick={() => onCerrar(false)} style={{ border: 'none', background: '#f3f4f6', borderRadius: 8, width: 32, height: 32, cursor: 'pointer', fontSize: 14 }}>✕</button>
         </div>
