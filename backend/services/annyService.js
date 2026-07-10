@@ -1,11 +1,12 @@
 // ============================================================
 // Control360 — Servicio WhatsApp IA Anny
 // Ubicación: backend/services/annyService.js
+// FIX ANNY-BOOT-001 + FIX ANNY-LEARN-002
 // ============================================================
 // PRINCIPIOS:
 // 1. Procesa mensajes entrantes de WhatsApp (vía Baileys)
-// 2. Consulta respuestas pre-configuradas
-// 3. Usa Claude API para decisiones inteligentes
+// 2. Consulta respuestas configuradas POR EMPRESA (Firestore)
+// 3. Usa Claude API con la base de conocimiento del tenant
 // 4. Registra conversaciones para aprendizaje
 // 5. Escala casos complejos a admin
 // 6. NUNCA bloquea el flujo principal (fire-and-forget)
@@ -16,11 +17,8 @@ const Anthropic = require('@anthropic-ai/sdk');
 
 // ============================================================
 // FIX ANNY-BOOT-001: inicialización PEREZOSA del cliente Anthropic.
-// `new Anthropic()` lanza excepción al cargar el módulo si la env
-// var ANTHROPIC_API_KEY no existe — eso tumbaría TODO el backend en
-// Railway al arrancar (crash loop), igual que pasó con la ruta
-// faltante. Con lazy-init, el server siempre arranca; si falta la
-// clave, solo falla claudeDecide() y aplica el fallback seguro.
+// Si falta ANTHROPIC_API_KEY el server arranca igual; solo falla
+// claudeDecide() y aplica el fallback seguro.
 // ============================================================
 let _client = null;
 function getClaudeClient() {
@@ -31,7 +29,7 @@ function getClaudeClient() {
 }
 
 // ============================================================
-// Inicializar respuestas pre-configuradas (6 base)
+// Respuestas base (semilla para tenants sin configuración propia)
 // ============================================================
 const RESPUESTAS_BASE = {
   'precio_abc_5lb': {
@@ -67,39 +65,53 @@ const RESPUESTAS_BASE = {
 };
 
 // ============================================================
-// FIX ANNY-GATE-001: igual patrón que Lucy (llamadasIAService.js).
-// El módulo 'anny_ia' SOLO se activa si el SuperAdmin lo agrega
-// explícitamente al array `modulos` del documento del admin en
-// la colección `users` (Panel Suscriptores → botón "Módulos").
-// La convención modulos===[] ("ve todo") NO aplica a módulos
-// premium — deben estar EXPLÍCITAMENTE en el array.
-// Esto es la ÚNICA fuente de verdad de si Anny está activo.
-// El suscriptor NUNCA puede activarlo por su cuenta.
+// FIX ANNY-LEARN-002: respuestas configuradas POR TENANT.
+// Antes el motor solo leía RESPUESTAS_BASE (fijas en el código) —
+// lo que la empresa configuraba en Firestore nunca se usaba.
+// Ahora: se lee respuestasAnny/{adminId} con caché en memoria de
+// 5 minutos (invalidada al editar), y RESPUESTAS_BASE es solo el
+// fallback para tenants que aún no configuran nada.
 // ============================================================
-async function tenantTieneAnnyActiva(adminId) {
+const _cacheRespuestas = new Map(); // adminId -> { data, ts }
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function obtenerRespuestasTenant(adminId) {
+  const cached = _cacheRespuestas.get(adminId);
+  if (cached && (Date.now() - cached.ts) < CACHE_TTL_MS) {
+    return cached.data;
+  }
   try {
-    const userDoc = await db.collection('users').doc(adminId).get();
-    if (!userDoc.exists) return false;
-    const modulos = userDoc.data().modulos || [];
-    return modulos.includes('anny_ia');
+    const doc = await db.collection('respuestasAnny').doc(adminId).get();
+    const data = doc.exists ? doc.data() : RESPUESTAS_BASE;
+    _cacheRespuestas.set(adminId, { data, ts: Date.now() });
+    return data;
   } catch (err) {
-    console.error('[ANNY] Error verificando módulo anny_ia:', err.message);
-    return false;
+    console.error('[ANNY] Error leyendo respuestas del tenant:', err.message);
+    return RESPUESTAS_BASE;
   }
 }
 
+// Invalidar caché cuando la empresa edita sus respuestas (llamado
+// desde routes/anny.js en PUT/DELETE /respuestas)
+function invalidarCacheRespuestas(adminId) {
+  _cacheRespuestas.delete(adminId);
+}
+
 // ============================================================
-// Buscar respuesta pre-configurada
+// Buscar respuesta configurada del tenant
+// FIX ANNY-LEARN-002: recibe las respuestas del tenant (ya no
+// usa solo las fijas del código)
 // ============================================================
-function buscarRespuestaConfigura(mensajeTexto) {
+function buscarRespuestaConfigura(mensajeTexto, respuestas) {
   const texto = mensajeTexto.toLowerCase();
 
-  for (const [key, config] of Object.entries(RESPUESTAS_BASE)) {
-    if (config.patrones.some(p => texto.includes(p))) {
+  for (const [key, config] of Object.entries(respuestas || {})) {
+    if (!config || !Array.isArray(config.patrones)) continue;
+    if (config.patrones.some(p => p && texto.includes(String(p).toLowerCase()))) {
       return {
         encontrada: true,
         respuesta: config.respuesta,
-        tipo: config.tipo,
+        tipo: config.tipo || 'CUSTOM',
         key
       };
     }
@@ -110,46 +122,53 @@ function buscarRespuestaConfigura(mensajeTexto) {
 
 // ============================================================
 // Consultar Claude para decisiones inteligentes
-// Retorna: { escalado, tipo, respuesta?, razon? }
-// FIX ANNY-BOOT-001: modelo corregido a 'claude-haiku-4-5-20251001'
-// (el anterior 'claude-opus-4-6' no es un identificador válido de
-// la API y todas las llamadas fallaban). Haiku = rápido y económico,
-// ideal para clasificación/respuesta corta por WhatsApp.
+// FIX ANNY-LEARN-002: el prompt incluye la BASE DE CONOCIMIENTO
+// del tenant (sus respuestas configuradas) — Claude responde con
+// la información real de la empresa y tiene PROHIBIDO inventar
+// precios o datos que no estén en la base.
 // ============================================================
-async function claudeDecide(adminId, clienteNombre, mensajeTexto, contexto = {}) {
+async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}) {
   try {
+    const conocimiento = Object.entries(respuestas || {})
+      .filter(([, c]) => c && c.respuesta)
+      .map(([key, c]) => `- [${key}] ${(c.patrones || []).join(', ')}: ${c.respuesta}`)
+      .join('\n');
+
     const prompt = `
-Eres un asistente comercial para Extintores del Valle SAS (empresa de recarga y venta de extintores en Cali, Colombia).
+Eres Anny, asistente comercial por WhatsApp de una empresa de venta, recarga y mantenimiento de extintores y seguridad industrial en Colombia.
 
 Un cliente escribió: "${mensajeTexto}"
 
 Contexto:
 - Cliente: ${clienteNombre}
-- Empresa de extintores (recargas, venta, certificación)
-- Ubicada en Cali, domicilio en zona local
+
+BASE DE CONOCIMIENTO DE LA EMPRESA (única fuente válida de precios y datos):
+${conocimiento || '(sin datos configurados)'}
 
 DECIDE:
-1. ¿Esta pregunta REQUIERE intervención del admin (Milena)?
+1. ¿Esta pregunta REQUIERE intervención del admin?
 2. O ¿PUEDO responder automáticamente?
 
-ESCALABLE A ADMIN si:
+RESPONDER AUTOMATICAMENTE si:
+- La respuesta está en la BASE DE CONOCIMIENTO (usa los datos EXACTOS, ej: si pregunta por el extintor del carro y la base tiene recarga ABC 5 lb, esa es la respuesta)
+- Es pregunta simple (horario, ubicación, domicilio) cubierta por la base
+- Es solicitud de datos para cotización
+
+ESCALAR A ADMIN si:
 - Solicita descuento/promoción especial
-- Pide cambio de fecha/horario
-- Pregunta por producto NO en catálogo
+- Pide cambio de fecha/horario de un servicio
+- Pregunta por precio o producto que NO está en la base de conocimiento
 - Requiere capacitación
 - Tiene queja/problema
 - Pregunta sobre facturación legal/documentos
 
-RESPONDER AUTOMATICAMENTE si:
-- Es pregunta simple (precio, horario, domicilio)
-- Es solicitud de datos para cotización
-- Es pregunta sobre ubicación
+REGLA CRÍTICA: NUNCA inventes precios, direcciones ni datos que no estén en la base de conocimiento. Si el dato no está, escala.
 
 Responde SOLO en JSON (sin markdown):
 {
   "escalado": boolean,
   "tipo": "PRECIO|SERVICIO|DATOS|NEGOCIACION|CAPACITACION|PROBLEMA|OTRO",
-  "respuesta": "tu respuesta si NO escalado",
+  "respuesta": "tu respuesta si NO escalado (tono cálido, breve, español colombiano)",
   "razon": "por qué escalas (si escalado)"
 }
     `;
@@ -176,7 +195,7 @@ Responde SOLO en JSON (sin markdown):
     return {
       escalado: false,
       tipo: 'ERROR',
-      respuesta: 'Gracias por tu mensaje. Milena te responderá pronto.',
+      respuesta: 'Gracias por tu mensaje. Te responderemos pronto.',
       razon: 'error_claude'
     };
   }
@@ -254,16 +273,16 @@ async function procesarMensajeEntrante(props) {
 
   try {
     // PASO 1: Verificar que Anny está activo para este admin
-    // FIX ANNY-GATE-001: el gate es el array `modulos` (control exclusivo
-    // de Milena vía Panel Suscriptores), no un campo que el suscriptor
-    // pudiera tocar desde su propia config.
+    // FIX ANNY-GATE-001: el gate es el array `modulos` (control
+    // exclusivo del SuperAdmin vía Panel Suscriptores).
     const activo = await tenantTieneAnnyActiva(adminId);
     if (!activo) {
       return { procesado: false, error: 'anny_inactivo' };
     }
 
-    // PASO 2: Buscar respuesta pre-configurada
-    const respuestaConfig = buscarRespuestaConfigura(mensajeTexto);
+    // PASO 2: Respuestas configuradas DEL TENANT (FIX ANNY-LEARN-002)
+    const respuestas = await obtenerRespuestasTenant(adminId);
+    const respuestaConfig = buscarRespuestaConfigura(mensajeTexto, respuestas);
 
     if (respuestaConfig.encontrada) {
       // RESPONDER AUTOMÁTICO
@@ -288,8 +307,8 @@ async function procesarMensajeEntrante(props) {
       };
     }
 
-    // PASO 3: Consultar Claude para decidir
-    const decision = await claudeDecide(adminId, nombreCliente, mensajeTexto);
+    // PASO 3: Claude decide, con la base de conocimiento del tenant
+    const decision = await claudeDecide(adminId, nombreCliente, mensajeTexto, respuestas);
 
     if (decision.escalado) {
       // ESCALAR A ADMIN
@@ -306,7 +325,7 @@ async function procesarMensajeEntrante(props) {
         telefono,
         nombreCliente,
         mensajeCliente: mensajeTexto,
-        respuestaAgente: '⚠️ Perfecto, Milena te contactará en breve ✓',
+        respuestaAgente: '⚠️ Perfecto, en breve te contactamos personalmente ✓',
         respondidoPor: 'ESCALADO_A_ADMIN',
         tipo: decision.tipo,
         escalado: true,
@@ -319,7 +338,7 @@ async function procesarMensajeEntrante(props) {
         procesado: true,
         tipo: 'CASO_ESCALADO',
         accion: 'enviar_mensaje',
-        respuesta: '⚠️ Perfecto, Milena te contactará en breve ✓',
+        respuesta: '⚠️ Perfecto, en breve te contactamos personalmente ✓',
         caseId
       };
     }
@@ -348,6 +367,23 @@ async function procesarMensajeEntrante(props) {
   } catch (err) {
     console.error('[ANNY] Error procesando mensaje:', err.message);
     return { procesado: false, error: err.message };
+  }
+}
+
+// ============================================================
+// FIX ANNY-GATE-001: gate del módulo — única fuente de verdad es
+// el array `modulos` del admin (solo lo edita el SuperAdmin).
+// La convención modulos===[] ("ve todo") NO aplica a premium.
+// ============================================================
+async function tenantTieneAnnyActiva(adminId) {
+  try {
+    const userDoc = await db.collection('users').doc(adminId).get();
+    if (!userDoc.exists) return false;
+    const modulos = userDoc.data().modulos || [];
+    return modulos.includes('anny_ia');
+  } catch (err) {
+    console.error('[ANNY] Error verificando módulo anny_ia:', err.message);
+    return false;
   }
 }
 
@@ -383,10 +419,7 @@ async function obtenerMetricasHoy(adminId) {
 
 // ============================================================
 // Obtener configuración de Anny para admin
-// FIX ANNY-GATE-001: `activo` SIEMPRE viene del array `modulos`
-// (fuente única de verdad, igual que Lucy). El documento annyConfig
-// solo guarda datos operativos (número, horario, estado de conexión
-// de Baileys) — nunca decide si el módulo está prendido o apagado.
+// FIX ANNY-GATE-001: `activo` SIEMPRE viene del array `modulos`.
 // ============================================================
 async function obtenerConfig(adminId) {
   try {
@@ -394,8 +427,7 @@ async function obtenerConfig(adminId) {
     const doc = await db.collection('annyConfig').doc(adminId).get();
     const operativo = doc.exists ? doc.data() : {};
 
-    // Nunca devolver campos internos de Baileys (qrCode) en bruto aquí;
-    // el endpoint dedicado /qr/:adminId es quien lo expone como imagen.
+    // Nunca devolver campos internos de Baileys (qrCode) en bruto aquí
     const { qrCode, ...resto } = operativo;
 
     return {
@@ -410,10 +442,8 @@ async function obtenerConfig(adminId) {
 
 // ============================================================
 // Crear/actualizar configuración OPERATIVA (número, horario, etc.)
-// FIX ANNY-GATE-001: se descarta explícitamente cualquier intento
-// de mandar `activo` desde este endpoint — ese campo solo lo cambia
-// Milena desde Panel Suscriptores → Módulos (array `modulos` en
-// la colección `users`), nunca el propio suscriptor.
+// FIX ANNY-GATE-001: `activo` se descarta siempre — solo lo cambia
+// el SuperAdmin vía Panel Suscriptores → Módulos.
 // ============================================================
 async function actualizarConfig(adminId, datos) {
   try {
@@ -434,5 +464,8 @@ module.exports = {
   registrarConversacion,
   registrarCasoEscalado,
   tenantTieneAnnyActiva,
+  obtenerRespuestasTenant,
+  invalidarCacheRespuestas,
   RESPUESTAS_BASE
 };
+// FIN annyService.js

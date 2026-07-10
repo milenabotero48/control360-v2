@@ -8,6 +8,7 @@
 // Prefijo: /api/anny/*
 // Todas las rutas requieren autenticación
 // FIX ANNY-QR-001: endpoints de conexión WhatsApp (Baileys)
+// FIX ANNY-LEARN-002: gestión de respuestas de entrenamiento
 // ============================================================
 
 const express = require('express');
@@ -20,12 +21,9 @@ const baileysService = require('../services/baileysService');
 
 // ============================================================
 // FIX ANNY-GATE-001: middleware de acceso al módulo.
-// Mismo patrón de seguridad que 'qr' y 'llamadas_ia' (Lucy):
-// el módulo 'anny_ia' SOLO existe si Milena lo agregó al array
-// `modulos` del suscriptor desde Panel Suscriptores → Módulos.
-// Se aplica a TODAS las rutas de datos — NO a GET /config, que
-// debe responder siempre (con activo:false) para que el frontend
-// pueda mostrar el aviso "módulo no activo" en vez de un error 403.
+// El módulo 'anny_ia' SOLO existe si el SuperAdmin lo agregó al
+// array `modulos` del suscriptor. Se aplica a TODAS las rutas de
+// datos — NO a GET /config, que debe responder siempre.
 // ============================================================
 async function requireAnnyActivo(req, res, next) {
   try {
@@ -40,19 +38,17 @@ async function requireAnnyActivo(req, res, next) {
   }
 }
 
-// FIX ANNY-QR-001: conectar/desconectar WhatsApp es acción sensible —
-// solo el rol admin del tenant puede hacerlo (no sub-usuarios).
+// FIX ANNY-QR-001: acciones sensibles — solo rol admin del tenant
 function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Solo admin puede gestionar la conexión de WhatsApp' });
+    return res.status(403).json({ error: 'Solo admin puede realizar esta acción' });
   }
   next();
 }
 
 // ============================================================
 // 1. GET /api/anny/config — Obtener configuración
-// SIN gate: siempre responde (incluye activo:true/false) para que
-// el frontend decida qué mostrar.
+// SIN gate: siempre responde (incluye activo:true/false)
 // ============================================================
 router.get('/config', authenticate, async (req, res) => {
   try {
@@ -66,9 +62,7 @@ router.get('/config', authenticate, async (req, res) => {
 
 // ============================================================
 // 2. PUT /api/anny/config — Actualizar configuración OPERATIVA
-// Body: { whatsappNumber, diasAntes, horaEnvio }
-// FIX ANNY-GATE-001: ya NO acepta `activo` — ese campo solo lo
-// cambia Milena vía Panel Suscriptores.
+// FIX ANNY-GATE-001: ya NO acepta `activo`
 // ============================================================
 router.put('/config', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -103,7 +97,6 @@ router.get('/metricas', authenticate, requireAnnyActivo, async (req, res) => {
 
 // ============================================================
 // 4. GET /api/anny/conversaciones — Últimas conversaciones
-// Query: ?limit=50&estado=escalado|automatico|ia|todas
 // ============================================================
 router.get('/conversaciones', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -138,7 +131,6 @@ router.get('/conversaciones', authenticate, requireAnnyActivo, async (req, res) 
 
 // ============================================================
 // 5. GET /api/anny/casos-escalados — Casos pendientes
-// Query: ?estado=pendiente|resuelto|todos
 // ============================================================
 router.get('/casos-escalados', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -169,7 +161,6 @@ router.get('/casos-escalados', authenticate, requireAnnyActivo, async (req, res)
 
 // ============================================================
 // 6. PUT /api/anny/casos/:caseId — Actualizar estado caso
-// Body: { estado, respuestaAdmin, notas }
 // ============================================================
 router.put('/casos/:caseId', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -197,30 +188,27 @@ router.put('/casos/:caseId', authenticate, requireAnnyActivo, async (req, res) =
 });
 
 // ============================================================
-// 7. GET /api/anny/respuestas — Obtener respuestas pre-configuradas
+// 7. GET /api/anny/respuestas — Respuestas configuradas del tenant
+// FIX ANNY-LEARN-002: usa el servicio (con caché) — misma fuente
+// que consulta el motor al responder mensajes.
 // ============================================================
 router.get('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
-
-    const doc = await db.collection('respuestasAnny').doc(adminId).get();
-
-    if (!doc.exists) {
-      // Devolver las 6 base como fallback
-      return res.json(annyService.RESPUESTAS_BASE);
-    }
-
-    return res.json(doc.data());
+    const respuestas = await annyService.obtenerRespuestasTenant(adminId);
+    return res.json(respuestas);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 });
 
 // ============================================================
-// 8. PUT /api/anny/respuestas — Actualizar respuesta configurada
+// 8. PUT /api/anny/respuestas — Crear/actualizar respuesta
 // Body: { key, patrones[], respuesta, tipo }
+// FIX ANNY-LEARN-002: normaliza patrones a minúsculas e invalida
+// la caché del motor para que aplique de inmediato.
 // ============================================================
-router.put('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
+router.put('/respuestas', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
     const { key, patrones, respuesta, tipo } = req.body;
@@ -229,16 +217,53 @@ router.put('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
       return res.status(400).json({ error: 'Falta key o respuesta' });
     }
 
+    const patronesLimpios = (Array.isArray(patrones) ? patrones : [])
+      .map(p => String(p).toLowerCase().trim())
+      .filter(p => p.length > 1);
+
+    if (patronesLimpios.length === 0) {
+      return res.status(400).json({ error: 'Agrega al menos un patrón (frase que escribe el cliente)' });
+    }
+
     const doc = await db.collection('respuestasAnny').doc(adminId).get();
-    const respuestas = doc.exists ? doc.data() : annyService.RESPUESTAS_BASE;
+    const respuestas = doc.exists ? doc.data() : { ...annyService.RESPUESTAS_BASE };
 
     respuestas[key] = {
-      patrones: patrones || [],
+      patrones: patronesLimpios,
       respuesta,
       tipo: tipo || 'CUSTOM'
     };
 
     await db.collection('respuestasAnny').doc(adminId).set(respuestas);
+    annyService.invalidarCacheRespuestas(adminId);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 8b. DELETE /api/anny/respuestas/:key — Eliminar respuesta
+// FIX ANNY-LEARN-002: si el tenant aún no tiene doc propio, se
+// materializa desde RESPUESTAS_BASE y se elimina la key pedida.
+// ============================================================
+router.delete('/respuestas/:key', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const { key } = req.params;
+
+    const docRef = db.collection('respuestasAnny').doc(adminId);
+    const doc = await docRef.get();
+    const respuestas = doc.exists ? doc.data() : { ...annyService.RESPUESTAS_BASE };
+
+    if (!respuestas[key]) {
+      return res.status(404).json({ error: 'Respuesta no encontrada' });
+    }
+
+    delete respuestas[key];
+    await docRef.set(respuestas);
+    annyService.invalidarCacheRespuestas(adminId);
 
     return res.json({ ok: true });
   } catch (err) {
@@ -248,7 +273,6 @@ router.put('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
 
 // ============================================================
 // 9. GET /api/anny/estadisticas — Estadísticas completas
-// Query: ?desde=YYYY-MM-DD&hasta=YYYY-MM-DD
 // ============================================================
 router.get('/estadisticas', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -304,8 +328,7 @@ router.get('/estadisticas', authenticate, requireAnnyActivo, async (req, res) =>
 });
 
 // ============================================================
-// 10. POST /api/anny/test — Enviar mensaje de prueba
-// Body: { telefono, mensaje } (solo para testing)
+// 10. POST /api/anny/test — Enviar mensaje de prueba (solo admin)
 // ============================================================
 router.post('/test', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
   try {
