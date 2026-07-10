@@ -1,10 +1,10 @@
 // ============================================================
 // Control360 — WhatsApp IA Anny Dashboard
 // Ubicación: frontend/src/VencimientosAnny.js
-// Uso: Importar en GestionVencimientos.js
-// FIX ANNY-GATE-002: gate fail-closed (solo muestra si activo===true)
-// FIX ANNY-QR-001: sección Conexión WhatsApp (Baileys) con QR
-// FIX ANNY-LEARN-002: pestaña 🧠 Entrenamiento + "Enseñar a Anny"
+// FIX ANNY-GATE-002: gate fail-closed
+// FIX ANNY-QR-001: conexión WhatsApp (Baileys) con QR
+// FIX ANNY-LEARN-002: pestaña 🧠 Entrenamiento
+// FIX ANNY-UI-001: conversaciones agrupadas por cliente (chats)
 // ============================================================
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -18,7 +18,6 @@ const authHeaders = () => ({
 
 export default function VencimientosAnny() {
   const [metricas, setMetricas] = useState(null);
-  const [conversaciones, setConversaciones] = useState([]);
   const [casos, setCasos] = useState([]);
   const [config, setConfig] = useState(null);
   const [activo, setActivo] = useState(null);
@@ -28,18 +27,24 @@ export default function VencimientosAnny() {
   const [horaEnvio, setHoraEnvio] = useState('09:00');
   const [guardando, setGuardando] = useState(false);
 
-  // FIX ANNY-QR-001: estado de conexión WhatsApp
+  // FIX ANNY-QR-001: conexión WhatsApp
   const [conexion, setConexion] = useState({ estado: 'desconectado', numero: null });
   const [qrImg, setQrImg] = useState(null);
   const [conectando, setConectando] = useState(false);
   const pollRef = useRef(null);
 
-  // FIX ANNY-LEARN-002: entrenamiento (respuestas frecuentes)
+  // FIX ANNY-LEARN-002: entrenamiento
   const [respuestas, setRespuestas] = useState({});
-  const [formKey, setFormKey] = useState(null);       // null = sin formulario; 'nueva' o key existente
+  const [formKey, setFormKey] = useState(null);
   const [formPatrones, setFormPatrones] = useState('');
   const [formRespuesta, setFormRespuesta] = useState('');
   const [guardandoResp, setGuardandoResp] = useState(false);
+
+  // FIX ANNY-UI-001: chats agrupados por cliente
+  const [chats, setChats] = useState([]);
+  const [chatAbierto, setChatAbierto] = useState(null); // teléfono del chat abierto
+  const [hilo, setHilo] = useState([]);
+  const [cargandoHilo, setCargandoHilo] = useState(false);
 
   useEffect(() => {
     cargarDatos();
@@ -49,6 +54,14 @@ export default function VencimientosAnny() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
+
+  // FIX ANNY-UI-001: cargar y refrescar el hilo del chat abierto
+  useEffect(() => {
+    if (!chatAbierto) return;
+    cargarHilo(chatAbierto);
+    const t = setInterval(() => cargarHilo(chatAbierto), 15000);
+    return () => clearInterval(t);
+  }, [chatAbierto]);
 
   const cargarDatos = async () => {
     try {
@@ -74,16 +87,16 @@ export default function VencimientosAnny() {
         return;
       }
 
-      const [m, c, cas, est, resp] = await Promise.all([
+      const [m, ch, cas, est, resp] = await Promise.all([
         fetch(`${API}/anny/metricas`, { headers: authHeaders() }).then(r => r.json()),
-        fetch(`${API}/anny/conversaciones?limit=20`, { headers: authHeaders() }).then(r => r.json()),
+        fetch(`${API}/anny/chats`, { headers: authHeaders() }).then(r => r.ok ? r.json() : []), // FIX ANNY-UI-001
         fetch(`${API}/anny/casos-escalados?estado=pendiente`, { headers: authHeaders() }).then(r => r.json()),
         fetch(`${API}/anny/estado`, { headers: authHeaders() }).then(r => r.ok ? r.json() : null),
-        fetch(`${API}/anny/respuestas`, { headers: authHeaders() }).then(r => r.ok ? r.json() : {}), // FIX ANNY-LEARN-002
+        fetch(`${API}/anny/respuestas`, { headers: authHeaders() }).then(r => r.ok ? r.json() : {}),
       ]);
 
       setMetricas(m);
-      setConversaciones(Array.isArray(c) ? c : []);
+      setChats(Array.isArray(ch) ? ch : []);
       setCasos(Array.isArray(cas) ? cas : []);
       if (est) setConexion(est);
       if (resp && typeof resp === 'object') setRespuestas(resp);
@@ -92,6 +105,21 @@ export default function VencimientosAnny() {
       setActivo(false);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const cargarHilo = async (telefono) => {
+    setCargandoHilo(true);
+    try {
+      const r = await fetch(`${API}/anny/chats/${telefono}`, { headers: authHeaders() });
+      if (r.ok) {
+        const data = await r.json();
+        setHilo(Array.isArray(data) ? data : []);
+      }
+    } catch (err) {
+      console.error('Error cargando hilo:', err);
+    } finally {
+      setCargandoHilo(false);
     }
   };
 
@@ -154,7 +182,7 @@ export default function VencimientosAnny() {
   };
 
   // ============================================================
-  // FIX ANNY-LEARN-002: gestión de respuestas frecuentes
+  // FIX ANNY-LEARN-002: entrenamiento
   // ============================================================
   const abrirFormNueva = () => {
     setFormKey('nueva');
@@ -170,8 +198,6 @@ export default function VencimientosAnny() {
     setFormRespuesta(r.respuesta || '');
   };
 
-  // "Enseñar a Anny" desde un caso escalado: pre-carga la pregunta
-  // del cliente como patrón y abre el formulario de entrenamiento
   const ensenarAnny = (caso) => {
     setFormKey('nueva');
     setFormPatrones((caso.mensajeCliente || '').toLowerCase());
@@ -289,6 +315,12 @@ export default function VencimientosAnny() {
   const pendientes = casos.filter(c => c.estado === 'PENDIENTE');
   const conectado = conexion.estado === 'conectado';
   const listaRespuestas = Object.entries(respuestas || {});
+  const chatActual = chats.find(c => c.telefono === chatAbierto);
+
+  const fmtFecha = (createdAt) =>
+    createdAt?.seconds ? new Date(createdAt.seconds * 1000).toLocaleString() : '';
+  const fmtHora = (createdAt) =>
+    createdAt?.seconds ? new Date(createdAt.seconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 
   return (
     <div style={{ padding: 20 }}>
@@ -352,7 +384,7 @@ export default function VencimientosAnny() {
       {/* =============== TAB: MÉTRICAS =============== */}
       {activeTab === 'metricas' && (
         <div>
-          {/* FIX ANNY-QR-001: Conexión WhatsApp */}
+          {/* Conexión WhatsApp */}
           <div style={{ background: conectado ? '#f0fdf4' : '#fefce8', border: `1px solid ${conectado ? '#86efac' : '#fde047'}`, borderRadius: 12, padding: 20, marginBottom: 24 }}>
             <h3 style={{ fontSize: 14, fontWeight: 800, color: '#1a1a2e', marginBottom: 12 }}>
               📱 Conexión WhatsApp
@@ -503,57 +535,106 @@ export default function VencimientosAnny() {
         </div>
       )}
 
-      {/* =============== TAB: CONVERSACIONES =============== */}
+      {/* =============== TAB: CONVERSACIONES (FIX ANNY-UI-001) =============== */}
       {activeTab === 'conversaciones' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {conversaciones.length === 0 ? (
-            <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>
-              Sin conversaciones aún
-            </div>
-          ) : (
-            conversaciones.map((conv, i) => (
-              <div key={i} style={{
-                background: '#f9fafb',
-                border: '1px solid #e5e7eb',
-                borderRadius: 10,
-                padding: 14,
-                borderLeft: '4px solid #7c3aed'
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: '#1a1a2e' }}>
-                    {conv.nombreCliente || conv.telefono}
+        <div>
+          {chatAbierto ? (
+            /* ---------- VISTA DE HILO (chat abierto) ---------- */
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+                <button
+                  onClick={() => { setChatAbierto(null); setHilo([]); }}
+                  style={{ padding: '8px 14px', border: '1px solid #d1d5db', borderRadius: 8, background: '#fff', color: '#374151', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}
+                >
+                  ‹ Volver
+                </button>
+                <div>
+                  <div style={{ fontWeight: 800, fontSize: 14, color: '#1a1a2e' }}>
+                    {chatActual?.nombreCliente || chatAbierto}
                   </div>
-                  <div style={{ fontSize: 11, color: '#9ca3af' }}>
-                    {conv.createdAt?.seconds ? new Date(conv.createdAt.seconds * 1000).toLocaleString() : ''}
-                  </div>
-                </div>
-
-                <div style={{ background: '#fff', borderRadius: 6, padding: 10, marginBottom: 8 }}>
-                  {conv.mensajeCliente ? (
-                    <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>
-                      <strong>Cliente:</strong> {conv.mensajeCliente}
-                    </div>
-                  ) : null}
-                  {conv.respuestaAgente ? (
-                    <div style={{ fontSize: 12, color: conv.respondidoPor === 'ADMIN_MANUAL' ? '#0369a1' : '#15803d' }}>
-                      <strong>{conv.respondidoPor === 'ADMIN_MANUAL' ? 'Tú:' : 'Anny:'}</strong> {conv.respuestaAgente}
-                    </div>
-                  ) : null}
-                </div>
-
-                <div style={{
-                  display: 'inline-block',
-                  fontSize: 10,
-                  fontWeight: 700,
-                  padding: '4px 8px',
-                  borderRadius: 6,
-                  background: conv.respondidoPor === 'ADMIN_MANUAL' ? '#dbeafe' : conv.escalado ? '#fed7aa' : '#dcfce7',
-                  color: conv.respondidoPor === 'ADMIN_MANUAL' ? '#0369a1' : conv.escalado ? '#b45309' : '#15803d'
-                }}>
-                  {conv.respondidoPor === 'ADMIN_MANUAL' ? '👤 Manual' : conv.escalado ? '⚠️ Escalado' : '✓ Automático'}
+                  <div style={{ fontSize: 11, color: '#9ca3af' }}>{chatAbierto}</div>
                 </div>
               </div>
-            ))
+
+              <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 12, padding: 16, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {cargandoHilo && hilo.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>Cargando conversación...</div>
+                ) : hilo.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>Sin mensajes</div>
+                ) : (
+                  hilo.map((c, i) => (
+                    <React.Fragment key={c.id || i}>
+                      {c.mensajeCliente ? (
+                        <div style={{ alignSelf: 'flex-start', maxWidth: '75%', background: '#fff', border: '1px solid #e5e7eb', borderRadius: '12px 12px 12px 4px', padding: '8px 12px' }}>
+                          <div style={{ fontSize: 13, color: '#374151' }}>{c.mensajeCliente}</div>
+                          <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 4 }}>{fmtHora(c.createdAt)}</div>
+                        </div>
+                      ) : null}
+                      {c.respuestaAgente ? (
+                        <div style={{
+                          alignSelf: 'flex-end',
+                          maxWidth: '75%',
+                          background: c.respondidoPor === 'ADMIN_MANUAL' ? '#dbeafe' : '#ede9fe',
+                          border: `1px solid ${c.respondidoPor === 'ADMIN_MANUAL' ? '#93c5fd' : '#ddd6fe'}`,
+                          borderRadius: '12px 12px 4px 12px',
+                          padding: '8px 12px'
+                        }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: c.respondidoPor === 'ADMIN_MANUAL' ? '#0369a1' : '#6d28d9', marginBottom: 2 }}>
+                            {c.respondidoPor === 'ADMIN_MANUAL' ? '👤 Tú' : '🤖 Anny'}
+                          </div>
+                          <div style={{ fontSize: 13, color: '#374151', whiteSpace: 'pre-wrap' }}>{c.respuestaAgente}</div>
+                          <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 4, textAlign: 'right' }}>{fmtHora(c.createdAt)}</div>
+                        </div>
+                      ) : null}
+                    </React.Fragment>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : (
+            /* ---------- LISTA DE CHATS ---------- */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {chats.length === 0 ? (
+                <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>
+                  Sin conversaciones aún
+                </div>
+              ) : (
+                chats.map((chat) => (
+                  <div
+                    key={chat.telefono}
+                    onClick={() => setChatAbierto(chat.telefono)}
+                    style={{
+                      background: '#f9fafb',
+                      border: '1px solid #e5e7eb',
+                      borderRadius: 10,
+                      padding: 14,
+                      borderLeft: `4px solid ${chat.escalado ? '#f59e0b' : '#7c3aed'}`,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 12
+                    }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13, color: '#1a1a2e' }}>
+                        {chat.nombreCliente || chat.telefono}
+                        {chat.escalado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#fed7aa', color: '#b45309' }}>⚠️ Escalado</span> : null}
+                      </div>
+                      <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 480 }}>
+                        {chat.ultimoTexto}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      <div style={{ fontSize: 11, color: '#9ca3af' }}>{fmtFecha(chat.ultimaFecha)}</div>
+                      <div style={{ fontSize: 11, color: '#7c3aed', fontWeight: 700, marginTop: 4 }}>
+                        {chat.mensajes} mensaje{chat.mensajes === 1 ? '' : 's'} ›
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           )}
         </div>
       )}
@@ -580,7 +661,7 @@ export default function VencimientosAnny() {
                       {caso.nombreCliente}
                     </div>
                     <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
-                      {caso.createdAt?.seconds ? new Date(caso.createdAt.seconds * 1000).toLocaleString() : ''}
+                      {fmtFecha(caso.createdAt)}
                     </div>
                   </div>
                   <div style={{
@@ -618,7 +699,6 @@ export default function VencimientosAnny() {
                   >
                     ✓ Resuelto
                   </button>
-                  {/* FIX ANNY-LEARN-002: convertir este caso en respuesta frecuente */}
                   <button
                     onClick={() => ensenarAnny(caso)}
                     style={{
@@ -642,7 +722,7 @@ export default function VencimientosAnny() {
         </div>
       )}
 
-      {/* =============== TAB: ENTRENAMIENTO (FIX ANNY-LEARN-002) =============== */}
+      {/* =============== TAB: ENTRENAMIENTO =============== */}
       {activeTab === 'entrenamiento' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
@@ -659,7 +739,6 @@ export default function VencimientosAnny() {
             </button>
           </div>
 
-          {/* Formulario crear/editar */}
           {formKey !== null && (
             <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 12, padding: 20, marginBottom: 20 }}>
               <h3 style={{ fontSize: 14, fontWeight: 800, color: '#1a1a2e', marginBottom: 12 }}>
@@ -706,7 +785,6 @@ export default function VencimientosAnny() {
             </div>
           )}
 
-          {/* Lista de respuestas */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {listaRespuestas.length === 0 ? (
               <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>

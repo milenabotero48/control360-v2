@@ -1,12 +1,13 @@
 // ============================================================
 // Control360 — Servicio WhatsApp IA Anny
 // Ubicación: backend/services/annyService.js
-// FIX ANNY-BOOT-001 + FIX ANNY-LEARN-002
+// FIX ANNY-BOOT-001 + FIX ANNY-LEARN-002 + FIX ANNY-CTX-001
 // ============================================================
 // PRINCIPIOS:
 // 1. Procesa mensajes entrantes de WhatsApp (vía Baileys)
 // 2. Consulta respuestas configuradas POR EMPRESA (Firestore)
 // 3. Usa Claude API con la base de conocimiento del tenant
+//    Y el historial reciente de la conversación (memoria)
 // 4. Registra conversaciones para aprendizaje
 // 5. Escala casos complejos a admin
 // 6. NUNCA bloquea el flujo principal (fire-and-forget)
@@ -16,9 +17,7 @@ const { db, admin } = require('../config/firebase');
 const Anthropic = require('@anthropic-ai/sdk');
 
 // ============================================================
-// FIX ANNY-BOOT-001: inicialización PEREZOSA del cliente Anthropic.
-// Si falta ANTHROPIC_API_KEY el server arranca igual; solo falla
-// claudeDecide() y aplica el fallback seguro.
+// FIX ANNY-BOOT-001: cliente Anthropic perezoso
 // ============================================================
 let _client = null;
 function getClaudeClient() {
@@ -65,12 +64,7 @@ const RESPUESTAS_BASE = {
 };
 
 // ============================================================
-// FIX ANNY-LEARN-002: respuestas configuradas POR TENANT.
-// Antes el motor solo leía RESPUESTAS_BASE (fijas en el código) —
-// lo que la empresa configuraba en Firestore nunca se usaba.
-// Ahora: se lee respuestasAnny/{adminId} con caché en memoria de
-// 5 minutos (invalidada al editar), y RESPUESTAS_BASE es solo el
-// fallback para tenants que aún no configuran nada.
+// FIX ANNY-LEARN-002: respuestas configuradas POR TENANT con caché
 // ============================================================
 const _cacheRespuestas = new Map(); // adminId -> { data, ts }
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -91,16 +85,12 @@ async function obtenerRespuestasTenant(adminId) {
   }
 }
 
-// Invalidar caché cuando la empresa edita sus respuestas (llamado
-// desde routes/anny.js en PUT/DELETE /respuestas)
 function invalidarCacheRespuestas(adminId) {
   _cacheRespuestas.delete(adminId);
 }
 
 // ============================================================
 // Buscar respuesta configurada del tenant
-// FIX ANNY-LEARN-002: recibe las respuestas del tenant (ya no
-// usa solo las fijas del código)
 // ============================================================
 function buscarRespuestaConfigura(mensajeTexto, respuestas) {
   const texto = mensajeTexto.toLowerCase();
@@ -121,42 +111,91 @@ function buscarRespuestaConfigura(mensajeTexto, respuestas) {
 }
 
 // ============================================================
-// Consultar Claude para decisiones inteligentes
-// FIX ANNY-LEARN-002: el prompt incluye la BASE DE CONOCIMIENTO
-// del tenant (sus respuestas configuradas) — Claude responde con
-// la información real de la empresa y tiene PROHIBIDO inventar
-// precios o datos que no estén en la base.
+// FIX ANNY-CTX-001: historial reciente de un teléfono (memoria).
+// Query solo con igualdad (sin índice compuesto); orden en memoria.
+// Devuelve turnos cronológicos: [{rol, texto, ts}]
 // ============================================================
-async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}) {
+async function obtenerHistorialReciente(adminId, telefono, limite = 8) {
+  try {
+    const snap = await db.collection('conversacionesAnny')
+      .doc(adminId)
+      .collection('conversaciones')
+      .where('telefono', '==', telefono)
+      .limit(40)
+      .get();
+
+    const docs = snap.docs
+      .map(d => d.data())
+      .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+      .slice(0, limite)
+      .reverse(); // cronológico: viejo → nuevo
+
+    const turnos = [];
+    for (const c of docs) {
+      const ts = (c.createdAt?.seconds || 0) * 1000;
+      if (c.mensajeCliente) turnos.push({ rol: 'cliente', texto: c.mensajeCliente, ts });
+      if (c.respuestaAgente) {
+        turnos.push({
+          rol: c.respondidoPor === 'ADMIN_MANUAL' ? 'admin' : 'anny',
+          texto: c.respuestaAgente,
+          ts
+        });
+      }
+    }
+    return turnos;
+  } catch (err) {
+    console.error('[ANNY] Error leyendo historial:', err.message);
+    return [];
+  }
+}
+
+// ============================================================
+// Consultar Claude para decisiones inteligentes
+// FIX ANNY-LEARN-002: con base de conocimiento del tenant
+// FIX ANNY-CTX-001: con historial de la conversación (memoria)
+// ============================================================
+async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = []) {
   try {
     const conocimiento = Object.entries(respuestas || {})
       .filter(([, c]) => c && c.respuesta)
       .map(([key, c]) => `- [${key}] ${(c.patrones || []).join(', ')}: ${c.respuesta}`)
       .join('\n');
 
+    const hilo = (historial || [])
+      .map(t => {
+        const quien = t.rol === 'cliente' ? 'Cliente' : (t.rol === 'admin' ? 'Asesora (humana)' : 'Anny (tú)');
+        return `${quien}: ${t.texto}`;
+      })
+      .join('\n');
+
     const prompt = `
 Eres Anny, asistente comercial por WhatsApp de una empresa de venta, recarga y mantenimiento de extintores y seguridad industrial en Colombia.
 
-Un cliente escribió: "${mensajeTexto}"
+HISTORIAL RECIENTE DE LA CONVERSACIÓN (viejo → nuevo):
+${hilo || '(primera interacción con este cliente)'}
 
-Contexto:
-- Cliente: ${clienteNombre}
+NUEVO MENSAJE del cliente ${clienteNombre}: "${mensajeTexto}"
 
 BASE DE CONOCIMIENTO DE LA EMPRESA (única fuente válida de precios y datos):
 ${conocimiento || '(sin datos configurados)'}
+
+REGLAS DE CONVERSACIÓN:
+- CONTINÚA el hilo: si el historial muestra que le preguntaste algo (ej: "¿a qué sector?"), interpreta la respuesta corta del cliente en ese contexto.
+- NO saludes de nuevo si la conversación ya está en curso.
+- Sé breve, cálida y natural (español colombiano, tono WhatsApp).
 
 DECIDE:
 1. ¿Esta pregunta REQUIERE intervención del admin?
 2. O ¿PUEDO responder automáticamente?
 
 RESPONDER AUTOMATICAMENTE si:
-- La respuesta está en la BASE DE CONOCIMIENTO (usa los datos EXACTOS, ej: si pregunta por el extintor del carro y la base tiene recarga ABC 5 lb, esa es la respuesta)
-- Es pregunta simple (horario, ubicación, domicilio) cubierta por la base
+- La respuesta está en la BASE DE CONOCIMIENTO (usa los datos EXACTOS)
+- Es continuación natural del hilo (confirmar sector, capacidad del extintor, agendar recogida con los datos de la base)
 - Es solicitud de datos para cotización
 
 ESCALAR A ADMIN si:
 - Solicita descuento/promoción especial
-- Pide cambio de fecha/horario de un servicio
+- Pide cambio de fecha/horario de un servicio ya agendado
 - Pregunta por precio o producto que NO está en la base de conocimiento
 - Requiere capacitación
 - Tiene queja/problema
@@ -168,7 +207,7 @@ Responde SOLO en JSON (sin markdown):
 {
   "escalado": boolean,
   "tipo": "PRECIO|SERVICIO|DATOS|NEGOCIACION|CAPACITACION|PROBLEMA|OTRO",
-  "respuesta": "tu respuesta si NO escalado (tono cálido, breve, español colombiano)",
+  "respuesta": "tu respuesta si NO escalado",
   "razon": "por qué escalas (si escalado)"
 }
     `;
@@ -273,42 +312,53 @@ async function procesarMensajeEntrante(props) {
 
   try {
     // PASO 1: Verificar que Anny está activo para este admin
-    // FIX ANNY-GATE-001: el gate es el array `modulos` (control
-    // exclusivo del SuperAdmin vía Panel Suscriptores).
     const activo = await tenantTieneAnnyActiva(adminId);
     if (!activo) {
       return { procesado: false, error: 'anny_inactivo' };
     }
 
-    // PASO 2: Respuestas configuradas DEL TENANT (FIX ANNY-LEARN-002)
-    const respuestas = await obtenerRespuestasTenant(adminId);
-    const respuestaConfig = buscarRespuestaConfigura(mensajeTexto, respuestas);
+    // PASO 2: Cargar respuestas del tenant + historial del cliente
+    const [respuestas, historial] = await Promise.all([
+      obtenerRespuestasTenant(adminId),
+      obtenerHistorialReciente(adminId, telefono)
+    ]);
 
-    if (respuestaConfig.encontrada) {
-      // RESPONDER AUTOMÁTICO
-      await registrarConversacion(adminId, {
-        telefono,
-        nombreCliente,
-        mensajeCliente: mensajeTexto,
-        respuestaAgente: respuestaConfig.respuesta,
-        respondidoPor: 'AGENTE_AUTOMATICO',
-        tipo: respuestaConfig.tipo,
-        escalado: false,
-        caseId: null
-      });
+    // FIX ANNY-CTX-001: si la conversación está ACTIVA (último turno
+    // hace <10 min), NO usar atajos de patrones — un "si necesito
+    // domicilio" en medio de un hilo no debe disparar la respuesta
+    // genérica de domicilio. En hilo activo decide la IA con memoria.
+    const ultimoTs = historial.length ? historial[historial.length - 1].ts : 0;
+    const conversacionActiva = ultimoTs > 0 && (Date.now() - ultimoTs) < 10 * 60 * 1000;
 
-      await actualizarMetricas(adminId, 'respuestas_automaticas');
+    if (!conversacionActiva) {
+      const respuestaConfig = buscarRespuestaConfigura(mensajeTexto, respuestas);
 
-      return {
-        procesado: true,
-        tipo: 'RESPUESTA_AUTOMATICA',
-        accion: 'enviar_mensaje',
-        respuesta: respuestaConfig.respuesta
-      };
+      if (respuestaConfig.encontrada) {
+        // RESPONDER AUTOMÁTICO (primer contacto / conversación fría)
+        await registrarConversacion(adminId, {
+          telefono,
+          nombreCliente,
+          mensajeCliente: mensajeTexto,
+          respuestaAgente: respuestaConfig.respuesta,
+          respondidoPor: 'AGENTE_AUTOMATICO',
+          tipo: respuestaConfig.tipo,
+          escalado: false,
+          caseId: null
+        });
+
+        await actualizarMetricas(adminId, 'respuestas_automaticas');
+
+        return {
+          procesado: true,
+          tipo: 'RESPUESTA_AUTOMATICA',
+          accion: 'enviar_mensaje',
+          respuesta: respuestaConfig.respuesta
+        };
+      }
     }
 
-    // PASO 3: Claude decide, con la base de conocimiento del tenant
-    const decision = await claudeDecide(adminId, nombreCliente, mensajeTexto, respuestas);
+    // PASO 3: Claude decide, con conocimiento del tenant + memoria
+    const decision = await claudeDecide(adminId, nombreCliente, mensajeTexto, respuestas, historial);
 
     if (decision.escalado) {
       // ESCALAR A ADMIN
@@ -373,7 +423,6 @@ async function procesarMensajeEntrante(props) {
 // ============================================================
 // FIX ANNY-GATE-001: gate del módulo — única fuente de verdad es
 // el array `modulos` del admin (solo lo edita el SuperAdmin).
-// La convención modulos===[] ("ve todo") NO aplica a premium.
 // ============================================================
 async function tenantTieneAnnyActiva(adminId) {
   try {
@@ -419,7 +468,6 @@ async function obtenerMetricasHoy(adminId) {
 
 // ============================================================
 // Obtener configuración de Anny para admin
-// FIX ANNY-GATE-001: `activo` SIEMPRE viene del array `modulos`.
 // ============================================================
 async function obtenerConfig(adminId) {
   try {
@@ -427,12 +475,11 @@ async function obtenerConfig(adminId) {
     const doc = await db.collection('annyConfig').doc(adminId).get();
     const operativo = doc.exists ? doc.data() : {};
 
-    // Nunca devolver campos internos de Baileys (qrCode) en bruto aquí
     const { qrCode, ...resto } = operativo;
 
     return {
       ...resto,
-      activo, // <- siempre pisa cualquier valor viejo que pudiera existir en el doc
+      activo,
     };
   } catch (err) {
     console.error('[ANNY] Error leyendo config:', err.message);
@@ -441,9 +488,7 @@ async function obtenerConfig(adminId) {
 }
 
 // ============================================================
-// Crear/actualizar configuración OPERATIVA (número, horario, etc.)
-// FIX ANNY-GATE-001: `activo` se descarta siempre — solo lo cambia
-// el SuperAdmin vía Panel Suscriptores → Módulos.
+// Crear/actualizar configuración OPERATIVA
 // ============================================================
 async function actualizarConfig(adminId, datos) {
   try {
@@ -465,6 +510,7 @@ module.exports = {
   registrarCasoEscalado,
   tenantTieneAnnyActiva,
   obtenerRespuestasTenant,
+  obtenerHistorialReciente,
   invalidarCacheRespuestas,
   RESPUESTAS_BASE
 };
