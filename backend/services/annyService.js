@@ -14,7 +14,21 @@
 const { db, admin } = require('../config/firebase');
 const Anthropic = require('@anthropic-ai/sdk');
 
-const client = new Anthropic();
+// ============================================================
+// FIX ANNY-BOOT-001: inicialización PEREZOSA del cliente Anthropic.
+// `new Anthropic()` lanza excepción al cargar el módulo si la env
+// var ANTHROPIC_API_KEY no existe — eso tumbaría TODO el backend en
+// Railway al arrancar (crash loop), igual que pasó con la ruta
+// faltante. Con lazy-init, el server siempre arranca; si falta la
+// clave, solo falla claudeDecide() y aplica el fallback seguro.
+// ============================================================
+let _client = null;
+function getClaudeClient() {
+  if (!_client) {
+    _client = new Anthropic(); // lee ANTHROPIC_API_KEY del entorno
+  }
+  return _client;
+}
 
 // ============================================================
 // Inicializar respuestas pre-configuradas (6 base)
@@ -97,6 +111,10 @@ function buscarRespuestaConfigura(mensajeTexto) {
 // ============================================================
 // Consultar Claude para decisiones inteligentes
 // Retorna: { escalado, tipo, respuesta?, razon? }
+// FIX ANNY-BOOT-001: modelo corregido a 'claude-haiku-4-5-20251001'
+// (el anterior 'claude-opus-4-6' no es un identificador válido de
+// la API y todas las llamadas fallaban). Haiku = rápido y económico,
+// ideal para clasificación/respuesta corta por WhatsApp.
 // ============================================================
 async function claudeDecide(adminId, clienteNombre, mensajeTexto, contexto = {}) {
   try {
@@ -136,8 +154,8 @@ Responde SOLO en JSON (sin markdown):
 }
     `;
 
-    const message = await client.messages.create({
-      model: 'claude-opus-4-6',
+    const message = await getClaudeClient().messages.create({
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 300,
       messages: [
         { role: 'user', content: prompt }
@@ -145,10 +163,10 @@ Responde SOLO en JSON (sin markdown):
     });
 
     const respuestaTexto = message.content[0].text;
-    
+
     // Limpiar markdown si viene envuelto
     let jsonLimpio = respuestaTexto.replace(/```json|```/g, '').trim();
-    
+
     const decision = JSON.parse(jsonLimpio);
     return decision;
 
