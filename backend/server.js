@@ -86,8 +86,6 @@ app.use('/api/llamadas-ia', authenticate, llamadasIARouter);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // FIX ANNY-GATE-002: montar rutas de WhatsApp IA Anny.
-// Esta línea FALTABA — sin ella /api/anny/config devolvía 404 y el
-// frontend (fail-open) mostraba el dashboard a TODOS los suscriptores.
 // El authenticate va POR RUTA dentro de routes/anny.js (mismo patrón
 // que /api/whatsapp), y el gate requireAnnyActivo valida el módulo
 // 'anny_ia' en users/{adminId}.modulos (solo lo activa el SuperAdmin).
@@ -115,5 +113,13 @@ app.listen(PORT, () => {
   // ═══════════════════════════════════════════════════════════════════════════
   const { restaurarSesiones } = require('./services/baileysService');
   restaurarSesiones();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FIX ANNY-NOTIF-001: cron de cobranza CxC vía Anny.
+  // Viernes 9:00 AM Colombia — órdenes en cartera con más de 10 días
+  // de completadas reciben recordatorio de pago por WhatsApp.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const { iniciarCronCobranzaAnny } = require('./services/annyNotificaciones');
+  iniciarCronCobranzaAnny();
 });
 // FIN server.js

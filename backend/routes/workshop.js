@@ -10,6 +10,11 @@ const construirFlujo = ordersRouter.construirFlujo;
 // Servicio central de vencimientos (trigger por categoría)
 const { crearVencimientosDeOrden } = require('../services/vencimientosService');
 
+// ✅ FIX ANNY-NOTIF-001: notificaciones al cliente vía la línea de Anny.
+// Fire-and-forget: si el tenant no tiene anny_ia o no está conectado,
+// se omite en silencio — NUNCA afecta al módulo que llama.
+const { notificarClienteWhatsApp } = require('../services/annyNotificaciones');
+
 // Filtro de taller: SOLO recarga, mantenimiento y prueba hidrostática cuentan
 // como equipo procesado. Un botiquín, chaleco o domicilio NO cuentan aunque
 // estén en la orden (son venta, no servicio de taller). Lista blanca.
@@ -567,6 +572,7 @@ router.post('/ordenes/:ordenId/defecto', async (req, res) => {
     // Notificación WhatsApp al cliente (preparar mensaje)
     const celular = orden.clienteCelular?.replace(/\D/g, '');
     let whatsappUrl = null;
+    let notificadoPorAnny = false; // ✅ FIX ANNY-NOTIF-001
     if (celular) {
       // ✅ TALLER-REPUESTOS-001: mensaje desglosado repuesto por repuesto
       let detalle = '';
@@ -578,6 +584,12 @@ router.post('/ordenes/:ordenId/defecto', async (req, res) => {
       }
       const msg = `Hola ${orden.clienteNombre}, le informamos que durante la revisión de su extintor en la orden ${orden.numeroOrden} encontramos el siguiente defecto:\n\n🔧 ${descripcion}${detalle}\n\n💰 Costo total de la reparación: $${costoFinal.toLocaleString('es-CO')}\n\n¿Autoriza la reparación? Responda SÍ o NO.\n\nGracias.`;
       whatsappUrl = `https://wa.me/57${celular}?text=${encodeURIComponent(msg)}`;
+
+      // ✅ FIX ANNY-NOTIF-001: envío AUTOMÁTICO por la línea de Anny.
+      // Antes solo se generaba el enlace wa.me y el técnico debía abrirlo
+      // a mano — muchos mensajes nunca salían. Si Anny no está conectada,
+      // notificadoPorAnny queda en false y el enlace manual es el respaldo.
+      notificadoPorAnny = await notificarClienteWhatsApp(orden.adminId || adminId, celular, msg);
     }
 
     await auditar({
@@ -588,7 +600,7 @@ router.post('/ordenes/:ordenId/defecto', async (req, res) => {
       datos: { ordenId, descripcion, costoReparacion: costoFinal, repuestos: repuestosLimpios.map(r => ({ nombre: r.nombre, cantidad: r.cantidad, precio: r.precioUnitario })) }
     });
 
-    res.json({ message: 'Defecto registrado', defecto, whatsappUrl });
+    res.json({ message: 'Defecto registrado', defecto, whatsappUrl, notificadoPorAnny });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

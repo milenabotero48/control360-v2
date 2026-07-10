@@ -7,6 +7,11 @@ const { authenticate, validarTenant } = require('../middleware/auth');
 // Servicio de vencimientos — hook por categoría (RECARGA Y MANTENIMIENTO / EXTINTORES)
 const { crearVencimientosDeOrden } = require('../services/vencimientosService');
 
+// ✅ FIX ANNY-NOTIF-001: notificaciones al cliente vía la línea de Anny.
+// Fire-and-forget: si el tenant no tiene anny_ia o no está conectado,
+// se omite en silencio — NUNCA afecta al módulo que llama.
+const { notificarClienteWhatsApp } = require('../services/annyNotificaciones');
+
 // ─── ESTADOS VÁLIDOS ──────────────────────────────────────────────────────────
 const ESTADOS = [
   'programada', 'en_ruta_recogida', 'en_taller', 'listo_entregar', 'facturado',
@@ -1101,6 +1106,22 @@ router.post('/', authenticate, async (req, res) => {
         id: ref.id,
         clienteTelefono: nuevaOrden.clienteCelular || null,
       }).catch(() => {});
+    }
+
+    // ✅ FIX ANNY-NOTIF-001: aviso al cliente de que su pedido quedó creado.
+    // Solo órdenes con cliente real que NO son de oficina (el cliente está
+    // presente) ni internas/producción (no hay cliente). Fire-and-forget:
+    // si Anny no está conectada, no pasa nada y la orden se crea normal.
+    if (tipoFinal !== 'interna' && tipoFinal !== 'produccion' &&
+        lugarNorm !== 'oficina' && nuevaOrden.clienteCelular) {
+      const dirNotif = sucursalDireccion || nuevaOrden.clienteDireccionPrincipal || '';
+      const msgOrden = `✅ ¡Hola ${clienteNombre}! Tu pedido quedó registrado:\n\n` +
+        `📋 Orden: ${numeroOrden}\n` +
+        (dirNotif ? `📍 Dirección: ${dirNotif}\n` : '') +
+        `💰 Valor: $${Math.round(total).toLocaleString('es-CO')}\n\n` +
+        `Te mantendremos informado del avance. ¡Gracias por confiar en nosotros! 🙌`;
+      notificarClienteWhatsApp(nuevaOrden.adminId, nuevaOrden.clienteCelular, msgOrden)
+        .catch(() => {});
     }
 
     res.status(201).json({ id: ref.id, ...nuevaOrden });
