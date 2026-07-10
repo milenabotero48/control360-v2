@@ -1,7 +1,7 @@
 // ============================================================
 // Control360 — Servicio Baileys (WhatsApp Web) para Anny
 // Ubicación: backend/services/baileysService.js
-// FIX ANNY-QR-001
+// FIX ANNY-QR-001 + FIX ANNY-QR-003
 // ============================================================
 // PRINCIPIOS:
 // 1. Una sesión de WhatsApp por tenant (adminId) — multi-tenant
@@ -15,12 +15,6 @@
 // 7. Reconexión automática con tope de reintentos
 // ============================================================
 
-const makeWASocket = require('@whiskeysockets/baileys').default;
-const {
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode');
 const pino = require('pino');
 const path = require('path');
@@ -28,7 +22,40 @@ const fs = require('fs');
 const { db, admin } = require('../config/firebase');
 const annyService = require('./annyService');
 
-// En Railway: crear Volume montado en /data y env var BAILEYS_DIR=/data/baileys
+// ============================================================
+// FIX ANNY-QR-003: Baileys moderno es ESM-only — require() lanza
+// ERR_REQUIRE_ESM y tumbaba el server al arrancar. Se carga con
+// import() dinámico y PEREZOSO (solo cuando alguien conecta).
+// Detecta la forma del módulo para ser compatible con v6 y v7:
+// en unas versiones makeWASocket es el export default (función),
+// en otras es export nombrado.
+// ============================================================
+let _baileys = null;
+async function cargarBaileys() {
+  if (_baileys) return _baileys;
+
+  const mod = await import('@whiskeysockets/baileys');
+  const raiz = (mod.default && typeof mod.default === 'object') ? mod.default : mod;
+
+  _baileys = {
+    makeWASocket:
+      (typeof mod.default === 'function' && mod.default) ||
+      mod.makeWASocket ||
+      raiz.makeWASocket,
+    useMultiFileAuthState: mod.useMultiFileAuthState || raiz.useMultiFileAuthState,
+    DisconnectReason: mod.DisconnectReason || raiz.DisconnectReason,
+    fetchLatestBaileysVersion: mod.fetchLatestBaileysVersion || raiz.fetchLatestBaileysVersion
+  };
+
+  if (typeof _baileys.makeWASocket !== 'function') {
+    _baileys = null;
+    throw new Error('No se pudo resolver makeWASocket en @whiskeysockets/baileys');
+  }
+
+  return _baileys;
+}
+
+// En Railway: Volume montado en /data y env var BAILEYS_DIR=/data/baileys
 const BAILEYS_DIR = process.env.BAILEYS_DIR || path.join(__dirname, '..', 'baileys_sessions');
 
 // adminId -> { sock, estado, qr, numero, reintentos }
@@ -157,6 +184,9 @@ async function iniciarSesion(adminId) {
   if (existente && ['conectado', 'esperando_qr', 'conectando'].includes(existente.estado)) {
     return { estado: existente.estado };
   }
+
+  // FIX ANNY-QR-003: carga perezosa de Baileys (ESM)
+  const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = await cargarBaileys();
 
   const dir = path.join(BAILEYS_DIR, adminId);
   fs.mkdirSync(dir, { recursive: true });
@@ -321,3 +351,4 @@ module.exports = {
   getQR,
   restaurarSesiones
 };
+// FIN baileysService.js
