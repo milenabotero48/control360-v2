@@ -107,19 +107,17 @@ app.listen(PORT, () => {
 
   // ═══════════════════════════════════════════════════════════════════════════
   // FIX ANNY-QR-001: restaurar sesiones Baileys después de cada deploy.
-  // Los tenants que estaban 'conectado' reconectan automáticamente usando
-  // la sesión persistida en el Volume (BAILEYS_DIR) — sin re-escanear QR.
-  // Fire-and-forget: si falla, el server sigue corriendo normal.
   // ═══════════════════════════════════════════════════════════════════════════
   const { restaurarSesiones } = require('./services/baileysService');
   restaurarSesiones();
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // FIX ANNY-NOTIF-001: cron de cobranza CxC vía Anny.
-  // Viernes 9:00 AM Colombia — órdenes en cartera con más de 10 días
-  // de completadas reciben recordatorio de pago por WhatsApp.
+  // FIX ANNY-NOTIF-001: cobranza CxC viernes 9 AM Colombia.
+  // FIX ANNY-VENC-001: rondas de vencimientos en días configurables
+  // por empresa (annyConfig.diasRondaVencimientos).
   // ═══════════════════════════════════════════════════════════════════════════
-  const { iniciarCronCobranzaAnny } = require('./services/annyNotificaciones');
+  const { iniciarCronCobranzaAnny, iniciarCronRondasVencimientos } = require('./services/annyNotificaciones');
   iniciarCronCobranzaAnny();
+  iniciarCronRondasVencimientos();
 });
 // FIN server.js

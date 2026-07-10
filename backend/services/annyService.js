@@ -1,15 +1,14 @@
 // ============================================================
 // Control360 — Servicio WhatsApp IA Anny
 // Ubicación: backend/services/annyService.js
-// FIX ANNY-BOOT-001 + FIX ANNY-LEARN-002 + FIX ANNY-CTX-001
+// FIX ANNY-BOOT-001 + ANNY-LEARN-002 + ANNY-CTX-001 + ANNY-PEDIDOS-001
 // ============================================================
 // PRINCIPIOS:
 // 1. Procesa mensajes entrantes de WhatsApp (vía Baileys)
 // 2. Consulta respuestas configuradas POR EMPRESA (Firestore)
-// 3. Usa Claude API con la base de conocimiento del tenant
-//    Y el historial reciente de la conversación (memoria)
-// 4. Registra conversaciones para aprendizaje
-// 5. Escala casos complejos a admin
+// 3. Usa Claude API con conocimiento del tenant + memoria del hilo
+// 4. VENDEDORA: nunca suelta al cliente, pide datos, cierra ventas
+// 5. Pedidos confirmados → bandeja pedidosAnny + aviso a la admin
 // 6. NUNCA bloquea el flujo principal (fire-and-forget)
 // ============================================================
 
@@ -53,7 +52,7 @@ const RESPUESTAS_BASE = {
   },
   'datos_cotizacion': {
     patrones: ['cotizacion', 'presupuesto', 'cuanto me cuesta', 'cotizar'],
-    respuesta: 'Perfecto, envíame estos datos:\n✅ Nombre:\n✅ Empresa:\n✅ NIT:\n✅ Dirección:\n✅ Barrio:\n✅ Celular:',
+    respuesta: 'Perfecto, envíame estos datos:\n✅ Nombre:\n✅ Cédula o NIT:\n✅ Correo:\n✅ Dirección y barrio:\n✅ Celular:',
     tipo: 'SOLICITUD_DATOS'
   },
   'ubicacion': {
@@ -64,7 +63,7 @@ const RESPUESTAS_BASE = {
 };
 
 // ============================================================
-// FIX ANNY-LEARN-002: respuestas configuradas POR TENANT con caché
+// FIX ANNY-LEARN-002: respuestas por tenant con caché
 // ============================================================
 const _cacheRespuestas = new Map(); // adminId -> { data, ts }
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -111,9 +110,7 @@ function buscarRespuestaConfigura(mensajeTexto, respuestas) {
 }
 
 // ============================================================
-// FIX ANNY-CTX-001: historial reciente de un teléfono (memoria).
-// Query solo con igualdad (sin índice compuesto); orden en memoria.
-// Devuelve turnos cronológicos: [{rol, texto, ts}]
+// FIX ANNY-CTX-001: historial reciente (memoria del hilo)
 // ============================================================
 async function obtenerHistorialReciente(adminId, telefono, limite = 8) {
   try {
@@ -150,9 +147,9 @@ async function obtenerHistorialReciente(adminId, telefono, limite = 8) {
 }
 
 // ============================================================
-// Consultar Claude para decisiones inteligentes
-// FIX ANNY-LEARN-002: con base de conocimiento del tenant
-// FIX ANNY-CTX-001: con historial de la conversación (memoria)
+// Consultar Claude — vendedora con memoria, conocimiento y cierre
+// FIX ANNY-PEDIDOS-001: detecta pedidos confirmados con datos
+// completos y los devuelve estructurados en `pedido`.
 // ============================================================
 async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = []) {
   try {
@@ -169,7 +166,7 @@ async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {
       .join('\n');
 
     const prompt = `
-Eres Anny, asistente comercial por WhatsApp de una empresa de venta, recarga y mantenimiento de extintores y seguridad industrial en Colombia.
+Eres Anny, VENDEDORA por WhatsApp de una empresa de venta, recarga y mantenimiento de extintores y seguridad industrial en Colombia. Tu meta es CERRAR VENTAS sin dejar perder ningún cliente.
 
 HISTORIAL RECIENTE DE LA CONVERSACIÓN (viejo → nuevo):
 ${hilo || '(primera interacción con este cliente)'}
@@ -179,19 +176,23 @@ NUEVO MENSAJE del cliente ${clienteNombre}: "${mensajeTexto}"
 BASE DE CONOCIMIENTO DE LA EMPRESA (única fuente válida de precios y datos):
 ${conocimiento || '(sin datos configurados)'}
 
-REGLAS DE CONVERSACIÓN:
-- CONTINÚA el hilo: si el historial muestra que le preguntaste algo (ej: "¿a qué sector?"), interpreta la respuesta corta del cliente en ese contexto.
-- NO saludes de nuevo si la conversación ya está en curso.
+REGLAS DE VENTA (críticas):
+- NUNCA dejes al cliente sin siguiente paso: cada respuesta tuya termina con una pregunta o acción concreta que avance hacia el cierre.
+- Si el cliente muestra interés (necesita recarga, pide precio, pregunta por producto), tu misión es capturar sus datos y cerrar — no le mandes información y lo abandones.
+- Pide los datos que falten de a UNO o DOS por mensaje (no bombardees con formularios).
+- CONTINÚA el hilo: interpreta respuestas cortas según el contexto. NO saludes de nuevo en conversación en curso.
 - Sé breve, cálida y natural (español colombiano, tono WhatsApp).
 
-DECIDE:
-1. ¿Esta pregunta REQUIERE intervención del admin?
-2. O ¿PUEDO responder automáticamente?
+DATOS OBLIGATORIOS antes de confirmar un pedido:
+1. Nombre completo
+2. Cédula (o si es empresa: razón social y NIT)
+3. Correo electrónico (para enviar la factura)
+4. Dirección completa con barrio
+5. Teléfono de contacto
+6. Fecha/franja preferida
+NO confirmes ningún pedido si falta alguno — pídelo primero.
 
-RESPONDER AUTOMATICAMENTE si:
-- La respuesta está en la BASE DE CONOCIMIENTO (usa los datos EXACTOS)
-- Es continuación natural del hilo (confirmar sector, capacidad del extintor, agendar recogida con los datos de la base)
-- Es solicitud de datos para cotización
+DECIDE si respondes automáticamente o escalas:
 
 ESCALAR A ADMIN si:
 - Solicita descuento/promoción especial
@@ -203,18 +204,32 @@ ESCALAR A ADMIN si:
 
 REGLA CRÍTICA: NUNCA inventes precios, direcciones ni datos que no estén en la base de conocimiento. Si el dato no está, escala.
 
+PEDIDO CONFIRMADO: cuando el cliente haya confirmado la compra Y tengas TODOS los datos obligatorios, incluye el objeto "pedido" en tu respuesta JSON. Si aún falta algún dato o falta confirmación, "pedido" debe ser null.
+
 Responde SOLO en JSON (sin markdown):
 {
   "escalado": boolean,
-  "tipo": "PRECIO|SERVICIO|DATOS|NEGOCIACION|CAPACITACION|PROBLEMA|OTRO",
+  "tipo": "PRECIO|SERVICIO|DATOS|NEGOCIACION|CAPACITACION|PROBLEMA|VENTA|OTRO",
   "respuesta": "tu respuesta si NO escalado",
-  "razon": "por qué escalas (si escalado)"
+  "razon": "por qué escalas (si escalado)",
+  "pedido": null | {
+    "producto": "descripción del producto/servicio",
+    "cantidad": número,
+    "total": "valor total con domicilio si aplica",
+    "nombreCliente": "nombre completo",
+    "cedulaNit": "cédula o NIT",
+    "correo": "email",
+    "direccion": "dirección completa",
+    "barrio": "barrio",
+    "telefonoContacto": "teléfono",
+    "fecha": "fecha/franja acordada"
+  }
 }
     `;
 
     const message = await getClaudeClient().messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 300,
+      max_tokens: 500,
       messages: [
         { role: 'user', content: prompt }
       ]
@@ -235,7 +250,8 @@ Responde SOLO en JSON (sin markdown):
       escalado: false,
       tipo: 'ERROR',
       respuesta: 'Gracias por tu mensaje. Te responderemos pronto.',
-      razon: 'error_claude'
+      razon: 'error_claude',
+      pedido: null
     };
   }
 }
@@ -279,6 +295,27 @@ async function registrarCasoEscalado(adminId, data) {
 }
 
 // ============================================================
+// FIX ANNY-PEDIDOS-001: registrar pedido confirmado en la bandeja
+// ============================================================
+async function registrarPedido(adminId, telefono, pedido) {
+  try {
+    const ref = await db.collection('pedidosAnny')
+      .doc(adminId)
+      .collection('pedidos')
+      .add({
+        ...pedido,
+        telefono,
+        estado: 'NUEVO', // NUEVO → ORDEN_CREADA
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    return ref.id;
+  } catch (err) {
+    console.error('[ANNY] Error registrando pedido:', err.message);
+    return null;
+  }
+}
+
+// ============================================================
 // Actualizar métricas del día
 // ============================================================
 async function actualizarMetricas(adminId, tipo) {
@@ -299,34 +336,30 @@ async function actualizarMetricas(adminId, tipo) {
 
 // ============================================================
 // FUNCIÓN PRINCIPAL: Procesar mensaje entrante
-// Retorna { procesado, tipo, accion } — NUNCA lanza excepción
+// Retorna { procesado, tipo, accion, respuesta, pedido?, notificarA? }
 // ============================================================
 async function procesarMensajeEntrante(props) {
   const { adminId, telefono, nombreCliente, mensajeTexto } = props;
 
-  // Guard: validaciones básicas
   if (!adminId || !telefono || !mensajeTexto) {
     console.warn('[ANNY] Datos incompletos:', { adminId, telefono, mensajeTexto });
     return { procesado: false, error: 'datos_incompletos' };
   }
 
   try {
-    // PASO 1: Verificar que Anny está activo para este admin
+    // PASO 1: gate del módulo
     const activo = await tenantTieneAnnyActiva(adminId);
     if (!activo) {
       return { procesado: false, error: 'anny_inactivo' };
     }
 
-    // PASO 2: Cargar respuestas del tenant + historial del cliente
+    // PASO 2: respuestas del tenant + historial del cliente
     const [respuestas, historial] = await Promise.all([
       obtenerRespuestasTenant(adminId),
       obtenerHistorialReciente(adminId, telefono)
     ]);
 
-    // FIX ANNY-CTX-001: si la conversación está ACTIVA (último turno
-    // hace <10 min), NO usar atajos de patrones — un "si necesito
-    // domicilio" en medio de un hilo no debe disparar la respuesta
-    // genérica de domicilio. En hilo activo decide la IA con memoria.
+    // FIX ANNY-CTX-001: en hilo activo (<10 min) decide la IA con memoria
     const ultimoTs = historial.length ? historial[historial.length - 1].ts : 0;
     const conversacionActiva = ultimoTs > 0 && (Date.now() - ultimoTs) < 10 * 60 * 1000;
 
@@ -334,7 +367,6 @@ async function procesarMensajeEntrante(props) {
       const respuestaConfig = buscarRespuestaConfigura(mensajeTexto, respuestas);
 
       if (respuestaConfig.encontrada) {
-        // RESPONDER AUTOMÁTICO (primer contacto / conversación fría)
         await registrarConversacion(adminId, {
           telefono,
           nombreCliente,
@@ -357,11 +389,10 @@ async function procesarMensajeEntrante(props) {
       }
     }
 
-    // PASO 3: Claude decide, con conocimiento del tenant + memoria
+    // PASO 3: Claude decide (conocimiento + memoria + reglas de venta)
     const decision = await claudeDecide(adminId, nombreCliente, mensajeTexto, respuestas, historial);
 
     if (decision.escalado) {
-      // ESCALAR A ADMIN
       const caseId = await registrarCasoEscalado(adminId, {
         telefono,
         nombreCliente,
@@ -407,11 +438,28 @@ async function procesarMensajeEntrante(props) {
 
     await actualizarMetricas(adminId, 'respuestas_ia');
 
+    // FIX ANNY-PEDIDOS-001: pedido confirmado → bandeja + aviso a la admin
+    let notificarA = null;
+    if (decision.pedido && typeof decision.pedido === 'object') {
+      await registrarPedido(adminId, telefono, decision.pedido);
+      await actualizarMetricas(adminId, 'pedidos');
+
+      try {
+        const cfgDoc = await db.collection('annyConfig').doc(adminId).get();
+        notificarA = cfgDoc.exists ? (cfgDoc.data().notificarPedidosA || null) : null;
+      } catch (e) {
+        notificarA = null;
+      }
+    }
+
     return {
       procesado: true,
-      tipo: 'RESPUESTA_IA',
+      tipo: decision.pedido ? 'PEDIDO_CONFIRMADO' : 'RESPUESTA_IA',
       accion: 'enviar_mensaje',
-      respuesta: decision.respuesta
+      respuesta: decision.respuesta,
+      pedido: decision.pedido || null,
+      notificarA,
+      telefonoCliente: telefono
     };
 
   } catch (err) {
@@ -421,8 +469,7 @@ async function procesarMensajeEntrante(props) {
 }
 
 // ============================================================
-// FIX ANNY-GATE-001: gate del módulo — única fuente de verdad es
-// el array `modulos` del admin (solo lo edita el SuperAdmin).
+// FIX ANNY-GATE-001: gate del módulo 'anny_ia'
 // ============================================================
 async function tenantTieneAnnyActiva(adminId) {
   try {
@@ -449,6 +496,7 @@ async function obtenerMetricasHoy(adminId) {
         respuestas_automaticas: 0,
         respuestas_ia: 0,
         casos_escalados: 0,
+        pedidos: 0,
         total: 0
       };
     }
@@ -458,6 +506,7 @@ async function obtenerMetricasHoy(adminId) {
       respuestas_automaticas: data.respuestas_automaticas || 0,
       respuestas_ia: data.respuestas_ia || 0,
       casos_escalados: data.casos_escalados || 0,
+      pedidos: data.pedidos || 0,
       total: (data.respuestas_automaticas || 0) + (data.respuestas_ia || 0) + (data.casos_escalados || 0)
     };
   } catch (err) {
@@ -489,6 +538,8 @@ async function obtenerConfig(adminId) {
 
 // ============================================================
 // Crear/actualizar configuración OPERATIVA
+// FIX ANNY-PEDIDOS-001: acepta notificarPedidosA y los campos de
+// ronda de vencimientos. `activo` se sigue descartando siempre.
 // ============================================================
 async function actualizarConfig(adminId, datos) {
   try {
@@ -508,6 +559,7 @@ module.exports = {
   actualizarConfig,
   registrarConversacion,
   registrarCasoEscalado,
+  registrarPedido,
   tenantTieneAnnyActiva,
   obtenerRespuestasTenant,
   obtenerHistorialReciente,

@@ -1,10 +1,9 @@
 // ============================================================
 // Control360 — WhatsApp IA Anny Dashboard
 // Ubicación: frontend/src/VencimientosAnny.js
-// FIX ANNY-GATE-002: gate fail-closed
-// FIX ANNY-QR-001: conexión WhatsApp (Baileys) con QR
-// FIX ANNY-LEARN-002: pestaña 🧠 Entrenamiento
-// FIX ANNY-UI-001: conversaciones agrupadas por cliente (chats)
+// FIX ANNY-GATE-002 + ANNY-QR-001 + ANNY-LEARN-002 + ANNY-UI-001
+// FIX ANNY-PEDIDOS-001: pestaña 🛒 Pedidos + aviso configurable
+// FIX ANNY-VENC-001: ronda de vencimientos + días configurables
 // ============================================================
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -22,10 +21,15 @@ export default function VencimientosAnny() {
   const [config, setConfig] = useState(null);
   const [activo, setActivo] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('metricas'); // metricas | conversaciones | casos | entrenamiento
+  const [activeTab, setActiveTab] = useState('metricas'); // metricas | conversaciones | pedidos | casos | entrenamiento
   const [diasAntes, setDiasAntes] = useState(30);
   const [horaEnvio, setHoraEnvio] = useState('09:00');
   const [guardando, setGuardando] = useState(false);
+
+  // FIX ANNY-PEDIDOS-001 / ANNY-VENC-001: configuración extendida
+  const [notificarPedidosA, setNotificarPedidosA] = useState('');
+  const [diasRonda, setDiasRonda] = useState('');
+  const [topeRonda, setTopeRonda] = useState(60);
 
   // FIX ANNY-QR-001: conexión WhatsApp
   const [conexion, setConexion] = useState({ estado: 'desconectado', numero: null });
@@ -40,11 +44,17 @@ export default function VencimientosAnny() {
   const [formRespuesta, setFormRespuesta] = useState('');
   const [guardandoResp, setGuardandoResp] = useState(false);
 
-  // FIX ANNY-UI-001: chats agrupados por cliente
+  // FIX ANNY-UI-001: chats agrupados
   const [chats, setChats] = useState([]);
-  const [chatAbierto, setChatAbierto] = useState(null); // teléfono del chat abierto
+  const [chatAbierto, setChatAbierto] = useState(null);
   const [hilo, setHilo] = useState([]);
   const [cargandoHilo, setCargandoHilo] = useState(false);
+
+  // FIX ANNY-PEDIDOS-001: bandeja de pedidos
+  const [pedidos, setPedidos] = useState([]);
+
+  // FIX ANNY-VENC-001: ronda de vencimientos
+  const [enviandoRonda, setEnviandoRonda] = useState(false);
 
   useEffect(() => {
     cargarDatos();
@@ -55,7 +65,6 @@ export default function VencimientosAnny() {
     };
   }, []);
 
-  // FIX ANNY-UI-001: cargar y refrescar el hilo del chat abierto
   useEffect(() => {
     if (!chatAbierto) return;
     cargarHilo(chatAbierto);
@@ -80,6 +89,9 @@ export default function VencimientosAnny() {
       if (cfg) {
         setDiasAntes(cfg.diasAntes || 30);
         setHoraEnvio(cfg.horaEnvio || '09:00');
+        setNotificarPedidosA(cfg.notificarPedidosA || '');
+        setDiasRonda(cfg.diasRondaVencimientos || '');
+        setTopeRonda(cfg.topeDiarioRonda || 60);
       }
 
       if (cfg?.activo !== true) {
@@ -87,12 +99,13 @@ export default function VencimientosAnny() {
         return;
       }
 
-      const [m, ch, cas, est, resp] = await Promise.all([
+      const [m, ch, cas, est, resp, ped] = await Promise.all([
         fetch(`${API}/anny/metricas`, { headers: authHeaders() }).then(r => r.json()),
-        fetch(`${API}/anny/chats`, { headers: authHeaders() }).then(r => r.ok ? r.json() : []), // FIX ANNY-UI-001
+        fetch(`${API}/anny/chats`, { headers: authHeaders() }).then(r => r.ok ? r.json() : []),
         fetch(`${API}/anny/casos-escalados?estado=pendiente`, { headers: authHeaders() }).then(r => r.json()),
         fetch(`${API}/anny/estado`, { headers: authHeaders() }).then(r => r.ok ? r.json() : null),
         fetch(`${API}/anny/respuestas`, { headers: authHeaders() }).then(r => r.ok ? r.json() : {}),
+        fetch(`${API}/anny/pedidos?estado=todos`, { headers: authHeaders() }).then(r => r.ok ? r.json() : []), // FIX ANNY-PEDIDOS-001
       ]);
 
       setMetricas(m);
@@ -100,6 +113,7 @@ export default function VencimientosAnny() {
       setCasos(Array.isArray(cas) ? cas : []);
       if (est) setConexion(est);
       if (resp && typeof resp === 'object') setRespuestas(resp);
+      setPedidos(Array.isArray(ped) ? ped : []);
     } catch (err) {
       console.error('Error cargando datos Anny:', err);
       setActivo(false);
@@ -182,6 +196,45 @@ export default function VencimientosAnny() {
   };
 
   // ============================================================
+  // FIX ANNY-VENC-001: ronda de vencimientos manual
+  // ============================================================
+  const enviarRondaAhora = async () => {
+    if (!window.confirm(`¿Enviar ronda de vencimientos AHORA?\n\nSe enviarán máximo ${topeRonda} mensajes (1 cada 45 segundos) a clientes con equipos vencidos sin gestionar. Cada cliente recibe máximo una ronda cada 12 días.`)) return;
+
+    setEnviandoRonda(true);
+    try {
+      const res = await fetch(`${API}/anny/vencimientos/ronda`, { method: 'POST', headers: authHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        alert(`📤 ${data.mensaje || `Ronda iniciada: ${data.encolados} mensajes en cola.`}`);
+      } else {
+        alert(`❌ ${data.mensaje || data.error || 'Error iniciando la ronda'}`);
+      }
+    } catch (err) {
+      console.error('Error iniciando ronda:', err);
+      alert('❌ Error iniciando la ronda');
+    } finally {
+      setEnviandoRonda(false);
+    }
+  };
+
+  // ============================================================
+  // FIX ANNY-PEDIDOS-001: gestión de pedidos
+  // ============================================================
+  const actualizarPedido = async (id, estado) => {
+    try {
+      const res = await fetch(`${API}/anny/pedidos/${id}`, {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify({ estado })
+      });
+      if (res.ok) await cargarDatos();
+    } catch (err) {
+      console.error('Error actualizando pedido:', err);
+    }
+  };
+
+  // ============================================================
   // FIX ANNY-LEARN-002: entrenamiento
   // ============================================================
   const abrirFormNueva = () => {
@@ -255,7 +308,10 @@ export default function VencimientosAnny() {
         headers: authHeaders(),
         body: JSON.stringify({
           diasAntes: Number(diasAntes),
-          horaEnvio
+          horaEnvio,
+          notificarPedidosA,
+          diasRondaVencimientos: diasRonda,
+          topeDiarioRonda: Number(topeRonda)
         })
       });
 
@@ -313,6 +369,7 @@ export default function VencimientosAnny() {
   }
 
   const pendientes = casos.filter(c => c.estado === 'PENDIENTE');
+  const pedidosNuevos = pedidos.filter(p => p.estado === 'NUEVO');
   const conectado = conexion.estado === 'conectado';
   const listaRespuestas = Object.entries(respuestas || {});
   const chatActual = chats.find(c => c.telefono === chatAbierto);
@@ -321,6 +378,9 @@ export default function VencimientosAnny() {
     createdAt?.seconds ? new Date(createdAt.seconds * 1000).toLocaleString() : '';
   const fmtHora = (createdAt) =>
     createdAt?.seconds ? new Date(createdAt.seconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+
+  const inputStyle = { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13 };
+  const labelStyle = { display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 };
 
   return (
     <div style={{ padding: 20 }}>
@@ -339,6 +399,7 @@ export default function VencimientosAnny() {
         {[
           { id: 'metricas', label: '📊 Métricas' },
           { id: 'conversaciones', label: '💬 Conversaciones' },
+          { id: 'pedidos', label: '🛒 Pedidos', badge: pedidosNuevos.length },
           { id: 'casos', label: '⚠️ Casos Escalados', badge: pendientes.length },
           { id: 'entrenamiento', label: '🧠 Entrenamiento' }
         ].map(tab => (
@@ -430,8 +491,31 @@ export default function VencimientosAnny() {
             )}
           </div>
 
+          {/* FIX ANNY-VENC-001: Ronda de vencimientos */}
+          <div style={{ background: '#eff6ff', border: '1px solid #93c5fd', borderRadius: 12, padding: 20, marginBottom: 24 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+              <div style={{ maxWidth: 520 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 800, color: '#1a1a2e', marginBottom: 6 }}>
+                  📤 Ronda de vencimientos
+                </h3>
+                <div style={{ fontSize: 12, color: '#6b7280', lineHeight: 1.5 }}>
+                  Envía recordatorio a clientes con equipos <strong>vencidos sin gestionar</strong>.
+                  Automática los días {diasRonda || '(configura los días abajo)'} a las {horaEnvio}, o dispárala ahora.
+                  Tope: {topeRonda}/día, 1 mensaje cada 45s, máximo una ronda cada 12 días por cliente.
+                </div>
+              </div>
+              <button
+                onClick={enviarRondaAhora}
+                disabled={enviandoRonda || !conectado}
+                style={{ padding: '12px 20px', border: 'none', borderRadius: 8, background: conectado ? '#2563eb' : '#9ca3af', color: '#fff', fontWeight: 700, fontSize: 13, cursor: conectado ? 'pointer' : 'not-allowed', opacity: enviandoRonda ? 0.6 : 1 }}
+              >
+                {enviandoRonda ? 'Iniciando...' : '📤 Enviar ronda ahora'}
+              </button>
+            </div>
+          </div>
+
           {/* Cards de métricas */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 24 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16, marginBottom: 24 }}>
             <div style={{ background: '#dcfce7', border: '1px solid #86efac', borderRadius: 12, padding: 16 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: '#15803d', textTransform: 'uppercase', marginBottom: 8 }}>
                 Automáticas
@@ -459,6 +543,15 @@ export default function VencimientosAnny() {
               </div>
             </div>
 
+            <div style={{ background: '#fce7f3', border: '1px solid #f9a8d4', borderRadius: 12, padding: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#be185d', textTransform: 'uppercase', marginBottom: 8 }}>
+                🛒 Pedidos hoy
+              </div>
+              <div style={{ fontSize: 28, fontWeight: 800, color: '#be185d' }}>
+                {metricas?.pedidos || 0}
+              </div>
+            </div>
+
             <div style={{ background: '#e9d5ff', border: '1px solid #d8b4fe', borderRadius: 12, padding: 16 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: '#6d28d9', textTransform: 'uppercase', marginBottom: 8 }}>
                 Total hoy
@@ -477,38 +570,48 @@ export default function VencimientosAnny() {
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
               <div>
-                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>
-                  Días antes de recordar
-                </label>
+                <label style={labelStyle}>Días antes de recordar</label>
+                <input type="number" value={diasAntes} onChange={e => setDiasAntes(e.target.value)} style={inputStyle} />
+              </div>
+
+              <div>
+                <label style={labelStyle}>Hora de envío</label>
+                <input type="time" value={horaEnvio} onChange={e => setHoraEnvio(e.target.value)} style={inputStyle} />
+              </div>
+
+              {/* FIX ANNY-PEDIDOS-001 */}
+              <div>
+                <label style={labelStyle}>📲 WhatsApp para avisos de venta (pedidos)</label>
                 <input
-                  type="number"
-                  value={diasAntes}
-                  onChange={e => setDiasAntes(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '8px 12px',
-                    border: '1px solid #d1d5db',
-                    borderRadius: 8,
-                    fontSize: 13
-                  }}
+                  type="text"
+                  value={notificarPedidosA}
+                  onChange={e => setNotificarPedidosA(e.target.value)}
+                  placeholder="ej: 3117762773"
+                  style={inputStyle}
+                />
+              </div>
+
+              {/* FIX ANNY-VENC-001 */}
+              <div>
+                <label style={labelStyle}>📤 Días de ronda de vencimientos (del mes)</label>
+                <input
+                  type="text"
+                  value={diasRonda}
+                  onChange={e => setDiasRonda(e.target.value)}
+                  placeholder="ej: 1,20 (separados por coma)"
+                  style={inputStyle}
                 />
               </div>
 
               <div>
-                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>
-                  Hora de envío
-                </label>
+                <label style={labelStyle}>Tope de mensajes por ronda/día</label>
                 <input
-                  type="time"
-                  value={horaEnvio}
-                  onChange={e => setHoraEnvio(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '8px 12px',
-                    border: '1px solid #d1d5db',
-                    borderRadius: 8,
-                    fontSize: 13
-                  }}
+                  type="number"
+                  value={topeRonda}
+                  onChange={e => setTopeRonda(e.target.value)}
+                  min={10}
+                  max={150}
+                  style={inputStyle}
                 />
               </div>
             </div>
@@ -535,11 +638,10 @@ export default function VencimientosAnny() {
         </div>
       )}
 
-      {/* =============== TAB: CONVERSACIONES (FIX ANNY-UI-001) =============== */}
+      {/* =============== TAB: CONVERSACIONES =============== */}
       {activeTab === 'conversaciones' && (
         <div>
           {chatAbierto ? (
-            /* ---------- VISTA DE HILO (chat abierto) ---------- */
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
                 <button
@@ -574,13 +676,13 @@ export default function VencimientosAnny() {
                         <div style={{
                           alignSelf: 'flex-end',
                           maxWidth: '75%',
-                          background: c.respondidoPor === 'ADMIN_MANUAL' ? '#dbeafe' : '#ede9fe',
-                          border: `1px solid ${c.respondidoPor === 'ADMIN_MANUAL' ? '#93c5fd' : '#ddd6fe'}`,
+                          background: c.respondidoPor === 'ADMIN_MANUAL' ? '#dbeafe' : c.respondidoPor === 'NOTIFICACION_SISTEMA' ? '#fef9c3' : '#ede9fe',
+                          border: `1px solid ${c.respondidoPor === 'ADMIN_MANUAL' ? '#93c5fd' : c.respondidoPor === 'NOTIFICACION_SISTEMA' ? '#fde047' : '#ddd6fe'}`,
                           borderRadius: '12px 12px 4px 12px',
                           padding: '8px 12px'
                         }}>
-                          <div style={{ fontSize: 10, fontWeight: 700, color: c.respondidoPor === 'ADMIN_MANUAL' ? '#0369a1' : '#6d28d9', marginBottom: 2 }}>
-                            {c.respondidoPor === 'ADMIN_MANUAL' ? '👤 Tú' : '🤖 Anny'}
+                          <div style={{ fontSize: 10, fontWeight: 700, color: c.respondidoPor === 'ADMIN_MANUAL' ? '#0369a1' : c.respondidoPor === 'NOTIFICACION_SISTEMA' ? '#a16207' : '#6d28d9', marginBottom: 2 }}>
+                            {c.respondidoPor === 'ADMIN_MANUAL' ? '👤 Tú' : c.respondidoPor === 'NOTIFICACION_SISTEMA' ? '🔔 Sistema' : '🤖 Anny'}
                           </div>
                           <div style={{ fontSize: 13, color: '#374151', whiteSpace: 'pre-wrap' }}>{c.respuestaAgente}</div>
                           <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 4, textAlign: 'right' }}>{fmtHora(c.createdAt)}</div>
@@ -592,7 +694,6 @@ export default function VencimientosAnny() {
               </div>
             </div>
           ) : (
-            /* ---------- LISTA DE CHATS ---------- */
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {chats.length === 0 ? (
                 <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>
@@ -635,6 +736,72 @@ export default function VencimientosAnny() {
                 ))
               )}
             </div>
+          )}
+        </div>
+      )}
+
+      {/* =============== TAB: PEDIDOS (FIX ANNY-PEDIDOS-001) =============== */}
+      {activeTab === 'pedidos' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {pedidos.length === 0 ? (
+            <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>
+              Sin pedidos aún — cuando Anny cierre una venta con datos completos, aparecerá aquí
+            </div>
+          ) : (
+            pedidos.map((p) => (
+              <div key={p.id} style={{
+                background: p.estado === 'NUEVO' ? '#fdf2f8' : '#f9fafb',
+                border: `1px solid ${p.estado === 'NUEVO' ? '#f9a8d4' : '#e5e7eb'}`,
+                borderRadius: 10,
+                padding: 16,
+                borderLeft: `4px solid ${p.estado === 'NUEVO' ? '#ec4899' : p.estado === 'ORDEN_CREADA' ? '#16a34a' : '#9ca3af'}`
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+                  <div>
+                    <div style={{ fontWeight: 800, fontSize: 14, color: '#1a1a2e' }}>
+                      🛒 {p.producto || 'Pedido'}{p.cantidad > 1 ? ` x${p.cantidad}` : ''}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>{fmtFecha(p.createdAt)}</div>
+                  </div>
+                  <div style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    padding: '4px 10px',
+                    borderRadius: 999,
+                    background: p.estado === 'NUEVO' ? '#fce7f3' : p.estado === 'ORDEN_CREADA' ? '#dcfce7' : '#f3f4f6',
+                    color: p.estado === 'NUEVO' ? '#be185d' : p.estado === 'ORDEN_CREADA' ? '#15803d' : '#6b7280'
+                  }}>
+                    {p.estado === 'NUEVO' ? '🆕 Nuevo' : p.estado === 'ORDEN_CREADA' ? '✓ Orden creada' : 'Descartado'}
+                  </div>
+                </div>
+
+                <div style={{ background: '#fff', borderRadius: 8, padding: 12, fontSize: 12, color: '#374151', lineHeight: 1.7, marginBottom: 10 }}>
+                  <div>💰 <strong>Total:</strong> {p.total || '—'}</div>
+                  <div>👤 <strong>Cliente:</strong> {p.nombreCliente || '—'} — {p.telefonoContacto || p.telefono || '—'}</div>
+                  <div>🪪 <strong>Cédula/NIT:</strong> {p.cedulaNit || '—'}</div>
+                  <div>📧 <strong>Correo:</strong> {p.correo || '—'}</div>
+                  <div>📍 <strong>Dirección:</strong> {p.direccion || '—'}{p.barrio ? `, ${p.barrio}` : ''}</div>
+                  <div>📅 <strong>Fecha:</strong> {p.fecha || '—'}</div>
+                </div>
+
+                {p.estado === 'NUEVO' ? (
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={() => actualizarPedido(p.id, 'ORDEN_CREADA')}
+                      style={{ flex: 1, padding: '10px 12px', border: 'none', borderRadius: 6, background: '#dcfce7', color: '#15803d', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
+                    >
+                      ✓ Ya creé la orden
+                    </button>
+                    <button
+                      onClick={() => actualizarPedido(p.id, 'DESCARTADO')}
+                      style={{ padding: '10px 16px', border: '1px solid #e5e7eb', borderRadius: 6, background: '#fff', color: '#6b7280', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
+                    >
+                      Descartar
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ))
           )}
         </div>
       )}
@@ -745,26 +912,22 @@ export default function VencimientosAnny() {
                 {formKey === 'nueva' ? '🧠 Enseñar nueva respuesta a Anny' : '✏️ Editar respuesta'}
               </h3>
 
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>
-                Frases del cliente (separadas por coma)
-              </label>
+              <label style={labelStyle}>Frases del cliente (separadas por coma)</label>
               <input
                 type="text"
                 value={formPatrones}
                 onChange={e => setFormPatrones(e.target.value)}
                 placeholder="ej: extintor del carro, extintor de carro, extintor vehicular"
-                style={{ width: '100%', padding: '10px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, marginBottom: 12 }}
+                style={{ ...inputStyle, marginBottom: 12 }}
               />
 
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>
-                Respuesta de Anny
-              </label>
+              <label style={labelStyle}>Respuesta de Anny</label>
               <textarea
                 value={formRespuesta}
                 onChange={e => setFormRespuesta(e.target.value)}
                 rows={4}
                 placeholder="ej: Para el extintor de tu carro es una recarga ABC 5 lb: $19.000. ¿Te lo recogemos a domicilio?"
-                style={{ width: '100%', padding: '10px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, marginBottom: 12, fontFamily: 'inherit', resize: 'vertical' }}
+                style={{ ...inputStyle, marginBottom: 12, fontFamily: 'inherit', resize: 'vertical' }}
               />
 
               <div style={{ display: 'flex', gap: 8 }}>

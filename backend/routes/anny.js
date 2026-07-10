@@ -5,9 +5,11 @@
 // MONTAJE en server.js (FIX ANNY-GATE-002):
 //   app.use('/api/anny', require('./routes/anny'));
 //
-// FIX ANNY-QR-001: endpoints de conexión WhatsApp (Baileys)
-// FIX ANNY-LEARN-002: gestión de respuestas de entrenamiento
-// FIX ANNY-UI-001: chats agrupados por número + hilo por cliente
+// FIX ANNY-QR-001: conexión WhatsApp (Baileys)
+// FIX ANNY-LEARN-002: respuestas de entrenamiento
+// FIX ANNY-UI-001: chats agrupados + hilo por cliente
+// FIX ANNY-PEDIDOS-001: bandeja de pedidos cerrados por Anny
+// FIX ANNY-VENC-001: ronda de vencimientos manual
 // ============================================================
 
 const express = require('express');
@@ -16,6 +18,7 @@ const { db, admin } = require('../config/firebase');
 const { authenticate } = require('../middleware/auth');
 const annyService = require('../services/annyService');
 const baileysService = require('../services/baileysService');
+const annyNotificaciones = require('../services/annyNotificaciones');
 
 // ============================================================
 // FIX ANNY-GATE-001: gate del módulo 'anny_ia'
@@ -33,7 +36,7 @@ async function requireAnnyActivo(req, res, next) {
   }
 }
 
-// FIX ANNY-QR-001: acciones sensibles — solo rol admin del tenant
+// Acciones sensibles — solo rol admin del tenant
 function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Solo admin puede realizar esta acción' });
@@ -56,16 +59,32 @@ router.get('/config', authenticate, async (req, res) => {
 
 // ============================================================
 // 2. PUT /api/anny/config — Configuración operativa
+// FIX ANNY-PEDIDOS-001 / ANNY-VENC-001: acepta notificarPedidosA,
+// diasRondaVencimientos ("1,20") y topeDiarioRonda.
 // ============================================================
 router.put('/config', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
-    const { whatsappNumber, diasAntes = 30, horaEnvio = '09:00' } = req.body;
+    const {
+      whatsappNumber,
+      diasAntes = 30,
+      horaEnvio = '09:00',
+      notificarPedidosA = '',
+      diasRondaVencimientos = '',
+      topeDiarioRonda = 60
+    } = req.body;
 
     const resultado = await annyService.actualizarConfig(adminId, {
       whatsappNumber,
       diasAntes: Number(diasAntes),
       horaEnvio,
+      notificarPedidosA: String(notificarPedidosA).replace(/\D/g, ''),
+      diasRondaVencimientos: String(diasRondaVencimientos)
+        .split(',')
+        .map(s => parseInt(s.trim()))
+        .filter(n => n >= 1 && n <= 31)
+        .join(','),
+      topeDiarioRonda: Math.min(Math.max(parseInt(topeDiarioRonda) || 60, 10), 150),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -89,8 +108,7 @@ router.get('/metricas', authenticate, requireAnnyActivo, async (req, res) => {
 });
 
 // ============================================================
-// 4. GET /api/anny/conversaciones — (legado, se mantiene por
-// compatibilidad; el panel ahora usa /chats)
+// 4. GET /api/anny/conversaciones — (legado; el panel usa /chats)
 // ============================================================
 router.get('/conversaciones', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -182,9 +200,84 @@ router.get('/chats/:telefono', authenticate, requireAnnyActivo, async (req, res)
 
     const hilo = snap.docs
       .map(d => ({ id: d.id, ...d.data() }))
-      .sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0)); // cronológico
+      .sort((a, b) => (a.createdAt?.seconds || 0) - (b.createdAt?.seconds || 0));
 
     return res.json(hilo);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// FIX ANNY-PEDIDOS-001 — Bandeja de pedidos cerrados por Anny
+// ============================================================
+
+// 4d. GET /api/anny/pedidos — Lista de pedidos (?estado=NUEVO|todos)
+router.get('/pedidos', authenticate, requireAnnyActivo, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const estado = req.query.estado || 'todos';
+
+    let query = db.collection('pedidosAnny')
+      .doc(adminId)
+      .collection('pedidos');
+
+    if (estado !== 'todos') {
+      query = query.where('estado', '==', estado);
+    }
+
+    const snap = await query.limit(200).get();
+
+    const pedidos = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+
+    return res.json(pedidos);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// 4e. PUT /api/anny/pedidos/:id — Actualizar estado del pedido
+// Body: { estado: 'ORDEN_CREADA' | 'NUEVO' | 'DESCARTADO', notas? }
+router.put('/pedidos/:id', authenticate, requireAnnyActivo, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const { id } = req.params;
+    const { estado, notas } = req.body;
+
+    const estadosValidos = ['NUEVO', 'ORDEN_CREADA', 'DESCARTADO'];
+    if (!estadosValidos.includes(estado)) {
+      return res.status(400).json({ error: 'Estado inválido' });
+    }
+
+    await db.collection('pedidosAnny')
+      .doc(adminId)
+      .collection('pedidos')
+      .doc(id)
+      .update({
+        estado,
+        notas: notas || '',
+        gestionadoPor: req.user.nombre || req.user.email,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// FIX ANNY-VENC-001 — Ronda de vencimientos manual
+// ============================================================
+
+// 4f. POST /api/anny/vencimientos/ronda — Disparar ronda AHORA
+router.post('/vencimientos/ronda', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const resultado = await annyNotificaciones.ejecutarRondaVencimientos(adminId);
+    return res.json(resultado);
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -263,7 +356,6 @@ router.get('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
 
 // ============================================================
 // 8. PUT /api/anny/respuestas — Crear/actualizar respuesta
-// FIX ANNY-LEARN-002
 // ============================================================
 router.put('/respuestas', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
   try {
@@ -302,7 +394,6 @@ router.put('/respuestas', authenticate, requireAnnyActivo, requireAdmin, async (
 
 // ============================================================
 // 8b. DELETE /api/anny/respuestas/:key — Eliminar respuesta
-// FIX ANNY-LEARN-002
 // ============================================================
 router.delete('/respuestas/:key', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
   try {

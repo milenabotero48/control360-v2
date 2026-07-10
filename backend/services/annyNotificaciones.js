@@ -1,24 +1,29 @@
 // ============================================================
 // Control360 — Notificaciones salientes vía Anny (Baileys)
 // Ubicación: backend/services/annyNotificaciones.js
-// FIX ANNY-NOTIF-001
+// FIX ANNY-NOTIF-001 + FIX ANNY-VENC-001
 // ============================================================
-// PROPÓSITO: que los módulos operativos (taller, órdenes, CxC)
-// puedan avisar al cliente por WhatsApp a través de la línea
-// conectada de Anny, SIN acoplarse a Baileys directamente.
+// PROPÓSITO: que los módulos operativos (taller, órdenes, CxC,
+// vencimientos) avisen al cliente por WhatsApp a través de la
+// línea conectada de Anny, SIN acoplarse a Baileys directamente.
 //
 // PRINCIPIOS:
 // 1. Fire-and-forget: si Anny no está activa o conectada, se
 //    omite el envío en silencio — NUNCA rompe el módulo que llama.
 // 2. Gate multi-tenant: solo envía si el tenant tiene 'anny_ia'.
-// 3. Cobranza CxC: cron los viernes 9:00 AM Colombia, órdenes en
-//    CxC con más de 10 días de completadas, dosificado (1 msg / 4s)
-//    y con marca ultimaCobranzaAnny para no duplicar el mismo día.
+// 3. Cobranza CxC: viernes 9:00 AM Colombia, >10 días completadas.
+// 4. FIX ANNY-VENC-001: rondas de vencimientos en días configurables
+//    del mes + disparo manual desde el panel. Tope diario (default
+//    60) y dosificación de 45s entre mensajes — protección crítica
+//    contra bloqueo de la línea. Cada cliente recibe máximo una
+//    ronda cada 12 días.
 // ============================================================
 
-const { db } = require('../config/firebase');
+const { db, admin } = require('../config/firebase');
 const annyService = require('./annyService');
 const baileysService = require('./baileysService');
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ─── Helper: fecha Firestore/ISO → ISO string ────────────────
 function aISO(f) {
@@ -30,10 +35,19 @@ function aISO(f) {
   return null;
 }
 
+const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+
+// "2026-07-01" → "julio 2026"
+function formatearMes(fechaVenc) {
+  try {
+    const [anio, mes] = String(fechaVenc).split('-');
+    return `${MESES[parseInt(mes) - 1] || mes} ${anio}`;
+  } catch { return String(fechaVenc || ''); }
+}
+
 // ============================================================
 // Enviar un WhatsApp a un cliente por la línea de Anny.
-// Retorna true si se envió, false si se omitió (sin conexión,
-// módulo inactivo, celular inválido) — nunca lanza excepción.
 // ============================================================
 async function notificarClienteWhatsApp(adminId, celular, texto) {
   try {
@@ -74,7 +88,6 @@ async function ejecutarCobranzaCxC() {
   let enviados = 0;
 
   try {
-    // Solo tenants con Anny conectada
     const cfgSnap = await db.collection('annyConfig')
       .where('conexionEstado', '==', 'conectado')
       .get();
@@ -87,7 +100,6 @@ async function ejecutarCobranzaCxC() {
       const activo = await annyService.tenantTieneAnnyActiva(adminId);
       if (!activo) continue;
 
-      // Órdenes en cartera del tenant
       const snap = await db.collection('orders')
         .where('adminId', '==', adminId)
         .where('estado', '==', 'cxc')
@@ -103,8 +115,6 @@ async function ejecutarCobranzaCxC() {
           const celular = (o.clienteCelular || '').replace(/\D/g, '');
           if (celular.length < 10) continue;
 
-          // Días desde que la orden se completó (mismo criterio de
-          // cartera que cxc.js: fecha de factura como respaldo)
           const fechaCompletada =
             (o.historialEstados || []).find(h => h.estado === 'completada')?.fecha ||
             (o.historialEstados || []).find(h => h.estado === 'cxc')?.fecha ||
@@ -115,7 +125,6 @@ async function ejecutarCobranzaCxC() {
           const dias = Math.floor((Date.now() - new Date(fechaCompletada).getTime()) / 86400000);
           if (dias <= 10) continue;
 
-          // No duplicar si ya se envió hoy (protege contra reinicios)
           if (o.ultimaCobranzaAnny === hoyStr) continue;
 
           const msg = `Hola ${o.clienteNombre || ''} 👋\n\n` +
@@ -131,8 +140,7 @@ async function ejecutarCobranzaCxC() {
             await doc.ref.update({ ultimaCobranzaAnny: hoyStr });
           }
 
-          // Dosificar envíos (anti-bloqueo de la línea): 1 cada 4 segundos
-          await new Promise(r => setTimeout(r, 4000));
+          await sleep(4000);
         } catch (errOrden) {
           console.error('[ANNY-NOTIF] Error en orden de cobranza:', errOrden.message);
         }
@@ -148,8 +156,168 @@ async function ejecutarCobranzaCxC() {
 }
 
 // ============================================================
-// Cron: viernes 9:00 AM Colombia (mismo patrón que suscripcionCron:
-// setInterval de 15 min + una sola ejecución por día)
+// FIX ANNY-VENC-001 — RONDA DE VENCIMIENTOS
+// Candidatos: vencimientos del tenant NO gestionados, con teléfono,
+// cuyo mes de vencimiento ya llegó o pasó, y que no hayan recibido
+// ronda en los últimos 12 días. Más antiguos primero.
+// ============================================================
+
+// Control de rondas en curso (evita disparar dos a la vez por tenant)
+const rondasEnCurso = new Set();
+
+async function ejecutarRondaVencimientos(adminId) {
+  if (rondasEnCurso.has(adminId)) {
+    return { ok: false, error: 'ronda_en_curso', mensaje: 'Ya hay una ronda enviándose para esta empresa.' };
+  }
+
+  const activo = await annyService.tenantTieneAnnyActiva(adminId);
+  if (!activo) return { ok: false, error: 'anny_inactivo' };
+
+  const cfgDoc = await db.collection('annyConfig').doc(adminId).get();
+  const cfg = cfgDoc.exists ? cfgDoc.data() : {};
+  if (cfg.conexionEstado !== 'conectado') {
+    return { ok: false, error: 'whatsapp_desconectado', mensaje: 'Conecta WhatsApp antes de enviar una ronda.' };
+  }
+
+  const tope = Number(cfg.topeDiarioRonda) || 60;
+
+  // Primer día del mes actual (Colombia) — "vencido" = mes <= actual
+  const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
+  const inicioMesActual = `${ahoraCO.toISOString().slice(0, 7)}-01`;
+
+  const snap = await db.collection('vencimientos')
+    .where('adminId', '==', adminId)
+    .where('gestionado', '==', false)
+    .get();
+
+  const hoyMs = Date.now();
+  const candidatos = snap.docs
+    .map(d => ({ id: d.id, ref: d.ref, ...d.data() }))
+    .filter(v => v.telefono && v.fechaVencimiento && v.fechaVencimiento <= inicioMesActual)
+    .filter(v => !v.ultimaRondaAnny || (hoyMs - new Date(v.ultimaRondaAnny).getTime()) > 12 * 86400000)
+    .sort((a, b) => String(a.fechaVencimiento).localeCompare(String(b.fechaVencimiento)));
+
+  const lote = candidatos.slice(0, tope);
+  const pendientesDespues = candidatos.length - lote.length;
+
+  if (lote.length === 0) {
+    return { ok: true, encolados: 0, pendientesDespues: 0, mensaje: 'No hay vencimientos pendientes de ronda.' };
+  }
+
+  // Procesar en segundo plano (dosificado) — la respuesta HTTP no espera
+  rondasEnCurso.add(adminId);
+  procesarLoteRonda(adminId, lote)
+    .catch(err => console.error('[ANNY-VENC] Error en lote de ronda:', err.message))
+    .finally(() => rondasEnCurso.delete(adminId));
+
+  return {
+    ok: true,
+    encolados: lote.length,
+    pendientesDespues,
+    mensaje: `Ronda iniciada: ${lote.length} mensajes en cola (1 cada 45 segundos ≈ ${Math.ceil(lote.length * 45 / 60)} minutos).` +
+      (pendientesDespues > 0 ? ` Quedan ${pendientesDespues} para próximas rondas (tope diario: ${tope}).` : '')
+  };
+}
+
+async function procesarLoteRonda(adminId, lote) {
+  console.log(`[ANNY-VENC] Ronda tenant ${adminId}: ${lote.length} mensajes`);
+  let enviados = 0;
+
+  for (const v of lote) {
+    try {
+      // Nombre del cliente (si hay ficha)
+      let nombre = '';
+      if (v.clienteId) {
+        try {
+          const cliDoc = await db.collection('clients').doc(v.clienteId).get();
+          if (cliDoc.exists) {
+            const c = cliDoc.data();
+            nombre = c.nombre || c.nombreCompleto || c.razonSocial || '';
+          }
+        } catch { /* sin nombre, saludo genérico */ }
+      }
+
+      const mesTxt = formatearMes(v.fechaVencimiento);
+      const equipoTxt = v.descripcionEquipo || 'extintor';
+      const plural = (v.cantidad || 1) > 1;
+
+      const msg = `Hola${nombre ? ' ' + nombre : ''} 👋\n\n` +
+        `Te recordamos que ${plural ? `tus ${v.cantidad} equipos` : 'tu equipo'} ` +
+        `*${equipoTxt}* ${plural ? 'vencieron' : 'venció'} su recarga en *${mesTxt}*. ` +
+        `Un extintor vencido no te protege en una emergencia 🧯\n\n` +
+        `¿Agendamos la recarga? Tenemos servicio a domicilio — responde este mensaje y te atendemos de una vez 😊`;
+
+      const ok = await notificarClienteWhatsApp(adminId, v.telefono, msg);
+      if (ok) {
+        enviados += 1;
+        await v.ref.update({
+          ultimaRondaAnny: new Date().toISOString(),
+          rondasEnviadas: admin.firestore.FieldValue.increment(1)
+        });
+      }
+
+      // Dosificación anti-bloqueo: 45 segundos entre mensajes
+      await sleep(45000);
+    } catch (errV) {
+      console.error('[ANNY-VENC] Error enviando a', v.telefono, errV.message);
+    }
+  }
+
+  console.log(`[ANNY-VENC] Ronda tenant ${adminId} terminada — ${enviados}/${lote.length} enviados`);
+}
+
+// ============================================================
+// Cron rondas de vencimientos: revisa cada 15 min. Para cada tenant
+// conectado, si HOY (Colombia) es uno de sus días configurados
+// (annyConfig.diasRondaVencimientos, ej: "1,20") y ya pasó su hora
+// de envío, dispara la ronda — una sola vez por día (persistido en
+// annyConfig.ultimaRondaFecha, sobrevive reinicios del server).
+// ============================================================
+function iniciarCronRondasVencimientos() {
+  const verificarYEjecutar = async () => {
+    try {
+      const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
+      const diaMes = ahoraCO.getUTCDate();
+      const horaCO = ahoraCO.getUTCHours();
+      const fechaHoy = ahoraCO.toISOString().slice(0, 10);
+
+      const cfgSnap = await db.collection('annyConfig')
+        .where('conexionEstado', '==', 'conectado')
+        .get();
+
+      for (const doc of cfgSnap.docs) {
+        const cfg = doc.data();
+
+        const dias = String(cfg.diasRondaVencimientos || '')
+          .split(',')
+          .map(s => parseInt(s.trim()))
+          .filter(n => n >= 1 && n <= 31);
+
+        if (!dias.includes(diaMes)) continue;
+
+        const horaCfg = parseInt(String(cfg.horaEnvio || '09:00').split(':')[0]) || 9;
+        if (!(horaCO >= horaCfg && horaCO < horaCfg + 3)) continue;
+
+        if (cfg.ultimaRondaFecha === fechaHoy) continue;
+
+        await doc.ref.update({ ultimaRondaFecha: fechaHoy });
+        console.log(`[ANNY-VENC] Cron dispara ronda para tenant ${doc.id} (día ${diaMes})`);
+        ejecutarRondaVencimientos(doc.id).catch(err =>
+          console.error('[ANNY-VENC] Error en ronda programada:', err.message)
+        );
+      }
+    } catch (err) {
+      console.error('[ANNY-VENC] Error en cron de rondas:', err.message);
+    }
+  };
+
+  setInterval(verificarYEjecutar, 15 * 60 * 1000);
+  verificarYEjecutar();
+  console.log('✅ Cron rondas de vencimientos Anny activo — días configurables por empresa');
+}
+
+// ============================================================
+// Cron cobranza: viernes 9:00 AM Colombia
 // ============================================================
 let ultimaCobranza = null;
 
@@ -176,6 +344,8 @@ function iniciarCronCobranzaAnny() {
 module.exports = {
   notificarClienteWhatsApp,
   ejecutarCobranzaCxC,
-  iniciarCronCobranzaAnny
+  iniciarCronCobranzaAnny,
+  ejecutarRondaVencimientos,
+  iniciarCronRondasVencimientos
 };
 // FIN annyNotificaciones.js
