@@ -10,6 +10,10 @@ const registrarIngresoEnCaja = ordersRouter.registrarIngresoEnCaja;
 // Verificador de PIN por usuario (Ola 1 — sustituye al PIN de empresa).
 const verificarPinUsuario = ordersRouter.verificarPinUsuario;
 const { authenticate, validarTenant } = require('../middleware/auth');
+// ✅ FIX FECHA-CO-001: "hoy" siempre en fecha Colombia (America/Bogota).
+// new Date().toISOString() es UTC: después de las 7 pm en Colombia ya es
+// "mañana" y las órdenes/asignaciones quedaban con fecha corrida un día.
+const { hoyEnCO } = require('./_helpers');
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 // ✅ FIX LOGISTICA-004 (2026-06-30): valida que un mensajeroId pertenezca al
@@ -54,7 +58,7 @@ router.get('/ordenes', async (req, res) => {
       .get();
 
     const estadosLogistica = ['programada', 'despacho', 'en_ruta_recogida', 'en_ruta_entrega', 'entrega_cobranza'];
-    const hoy = new Date().toISOString().split('T')[0];
+    const hoy = hoyEnCO(); // ✅ FIX FECHA-CO-001
     const ordenes = [];
 
     snap.forEach(doc => {
@@ -127,7 +131,7 @@ router.post('/asignar', async (req, res) => {
     }
 
     const batch = db.batch();
-    const hoy = new Date().toISOString().split('T')[0];
+    const hoy = hoyEnCO(); // ✅ FIX FECHA-CO-001
 
     for (const ordenId of ordenIds) {
       const ref = db.collection('orders').doc(ordenId);
@@ -161,10 +165,25 @@ router.post('/asignar', async (req, res) => {
       const tieneRecogerReal = (ordData.items || []).some(
         it => esRecargaMant(it) && !it.esCambio
       );
-      const cambiaEstado = ordData.estado === 'programada';
-      const estadoAsignado = cambiaEstado
-        ? (tieneRecogerReal ? 'en_ruta_recogida' : 'en_ruta_entrega')
-        : ordData.estado;
+      // ✅ FIX ASIGNAR-FLUJO-001: la máquina de estados manda TAMBIÉN aquí.
+      // ANTES: se escribía en_ruta_recogida/en_ruta_entrega a ciegas según los
+      // items. Una orden INTERNA (flujo: programada → interna_proceso) o de
+      // COBRANZA (programada → en_ruta_recogida) caía en un estado que NO
+      // existe en su flujo y quedaba atascada para siempre sin siguiente paso
+      // (caso real OI-0005). AHORA: solo se avanza si el paso de salida de
+      // 'programada' en el flujo de ESTA orden es la asignación ('asignar'),
+      // y al estado que el flujo diga. En cualquier otro caso la asignación
+      // solo registra el mensajero y el estado queda intacto.
+      let cambiaEstado = false;
+      let estadoAsignado = ordData.estado;
+      if (ordData.estado === 'programada' && typeof construirFlujo === 'function') {
+        const flujoAsig = construirFlujo(ordData.lugarAtencion, ordData.requiereFactura, tieneRecogerReal);
+        const pasoProg = flujoAsig['programada'];
+        if (pasoProg && pasoProg.accion === 'asignar' && pasoProg.siguiente) {
+          cambiaEstado = true;
+          estadoAsignado = pasoProg.siguiente;
+        }
+      }
 
       batch.update(ref, {
         mensajeroId,
@@ -178,10 +197,10 @@ router.post('/asignar', async (req, res) => {
           usuarioId: req.user.uid || req.user.id,
           usuarioNombre: req.user.email,
           nota: cambiaEstado
-            ? (tieneRecogerReal
+            ? (estadoAsignado === 'en_ruta_recogida'
                 ? `Asignada a ${mensajeroNombre} — recoge equipo para taller`
                 : `Asignada a ${mensajeroNombre} — lleva equipo (cambio/venta), va a entrega`)
-            : `Mensajero asignado: ${mensajeroNombre} — la orden conserva su estado actual (ASIGNAR-ESTADO-001)`
+            : `Mensajero asignado: ${mensajeroNombre} — la orden conserva su estado actual (ASIGNAR-FLUJO-001)`
         })
       });
     }
@@ -863,12 +882,60 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
       }
     }
 
+    // ✅ FIX LOGISTICA-005: 'cuadre_dinero' SIN mensajero no tiene a quién
+    // cuadrar con PIN — la orden se cierra sola (mismo criterio que orders.js):
+    //   - pagada (o dinero ya en caja) → completada; si fue efectivo y aún no
+    //     está en caja, el ingreso se registra abajo con el candado único.
+    //   - sin pago → cxc (queda en cartera, jamás "completada sin cobrar").
+    let cierreSinMensajero = false;
+    if ((update.estado || nuevoEstado) === 'cuadre_dinero'
+        && !orden.mensajeroId && !orden.trabajadorAsignadoId) {
+      cierreSinMensajero = true;
+      const quedoPagada = orden.pagado === true || orden.dineroEnCaja === true
+        || (update.pagado === true);
+      update.estado = quedoPagada ? 'completada' : 'cxc';
+    }
+
     // ── Ola 3 Bloque 2: si la orden quedó completada, registrar fechaCompletada ──
     if (update.estado === 'completada' && !orden.fechaCompletada) {
       update.fechaCompletada = new Date().toISOString();
     }
 
     await ordenRef.update(update);
+
+    // ✅ FIX LOGISTICA-005: huella del cierre sin mensajero + dinero a caja
+    if (cierreSinMensajero) {
+      try {
+        await ordenRef.update({
+          historialEstados: admin.firestore.FieldValue.arrayUnion({
+            estado: update.estado, fecha: new Date().toISOString(),
+            usuarioId: req.user.uid || req.user.id,
+            usuarioNombre: req.user.nombre || req.user.email,
+            nota: update.estado === 'completada'
+              ? 'Cierre automático (sin mensajero — no requiere cuadre)'
+              : 'Sin pago y sin mensajero — queda en cartera (CxC)'
+          })
+        });
+        const fpCierre = update.formaPagoRecaudo || orden.formaPagoRecaudo || update.formaPago || orden.formaPago || '';
+        const montoCierre = Number(update.montoRecaudado ?? orden.montoRecaudado) || Number(orden.montoPagado) || Number(orden.total) || 0;
+        if (update.estado === 'completada' && orden.dineroEnCaja !== true
+            && /efectivo/i.test(fpCierre) && montoCierre > 0
+            && typeof registrarIngresoEnCaja === 'function') {
+          await registrarIngresoEnCaja({
+            userId: req.adminId || req.user.uid || req.user.id,
+            ordenId: req.params.id,
+            numeroOrden: orden.numeroOrden,
+            clienteNombre: orden.clienteNombre,
+            monto: montoCierre,
+            formaPago: fpCierre || 'Efectivo',
+            usuarioEmail: req.user.email,
+            numeroFactura: orden.numeroFactura || ''
+          });
+        }
+      } catch (eCierre) {
+        console.error('LOGISTICA-005: error en cierre sin mensajero:', eCierre.message);
+      }
+    }
 
     // ── Ola 2.5: marcar préstamos devueltos en bulk ───────────────────────────
     // El mensajero marcó qué préstamos recogió en la entrega. Cambiamos cada

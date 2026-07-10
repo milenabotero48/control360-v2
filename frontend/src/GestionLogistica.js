@@ -338,7 +338,12 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
   // dice "avanzar" (nuevoEstado: 'auto') y el backend decide el paso legal.
   // Esto elimina el bug de pantallas sin refrescar que retrocedían órdenes.
   const esCobranza = orden.tipoOrden === 'cxc' || orden.lugarAtencion === 'cobranza';
-  const ESTADOS_MODAL = ['programada', 'en_ruta_recogida', 'despacho', 'en_ruta_entrega'];
+  // ✅ FIX LOGISTICA-005: 'entrega_cobranza' YA se puede avanzar desde aquí.
+  // ANTES no estaba en la lista y esas órdenes quedaban visibles en logística
+  // pero sin salida ("no tiene siguiente estado disponible" — caso OS-0141).
+  // El backend decide el paso legal: con mensajero → cuadre_dinero (sale al
+  // cuadre); sin mensajero → se cierra sola (completada, o CxC si no pagó).
+  const ESTADOS_MODAL = ['programada', 'en_ruta_recogida', 'despacho', 'en_ruta_entrega', 'entrega_cobranza'];
   const puedeAvanzar = ESTADOS_MODAL.includes(orden.estado);
 
   const necesitaFotoRecogida = orden.estado === 'en_ruta_recogida';

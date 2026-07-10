@@ -88,7 +88,8 @@ router.get('/admin', async (req, res) => {
     const snap = await db.collection('orders').where('adminId', '==', adminId)
       .select('estado', 'createdAt', 'total', 'subtotal', 'lugarAtencion',
               'mensajeroId', 'montoPagado', 'clienteId', 'clienteNombre',
-              'numeroOrden', 'fechaCompletada', 'completadaEn', 'items')
+              'numeroOrden', 'fechaCompletada', 'completadaEn', 'items',
+              'tipoOrden', 'anulada') // ✅ FIX VENTAS-UNIF-001: para causación
       .get();
     ordenes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (e) { warnings.push('orders: ' + e.message); }
@@ -97,11 +98,23 @@ router.get('/admin', async (req, res) => {
   const ordenesHoy = ordenes.filter(o => dentroDeRango(o.createdAt, hoy.inicioISO, hoy.finISO));
   const ordenesMes = ordenes.filter(o => dentroDeRango(o.createdAt, mes.inicioISO, mes.finISO));
 
-  // Completadas (vendido)
+  // Completadas (para KPIs operativos: domicilios, extintores recargados)
   const completadasMes = ordenesMes.filter(o =>
     ['completada', 'cuadre_dinero', 'cxc'].includes(o.estado)
   );
-  const ventasMes = completadasMes.reduce((s, o) => s + (Number(o.subtotal) || Number(o.total) || 0), 0);
+
+  // ✅ FIX VENTAS-UNIF-001: ventas del mes por CAUSACIÓN — la MISMA definición
+  // del ERI. ANTES el dashboard solo sumaba completada/cuadre_dinero/cxc: toda
+  // orden aún en taller o en ruta contaba en el ERI pero NO aquí, y las ventas
+  // del dashboard salían mucho menores que las del ERI (dos "verdades"
+  // distintas). AHORA: toda orden elaborada en el mes cuenta como venta, sin
+  // importar su estado operativo — excepto anuladas, internas y producción
+  // (igual que eri.js, ERI-CAUSACION-001). Una sola definición de ventas.
+  const ventasCausadasMes = ordenesMes.filter(o =>
+    o.estado !== 'anulada' && o.anulada !== true &&
+    o.tipoOrden !== 'interna' && o.tipoOrden !== 'produccion'
+  );
+  const ventasMes = ventasCausadasMes.reduce((s, o) => s + (Number(o.subtotal) || Number(o.total) || 0), 0);
 
   // Domicilios completados del mes
   const domiciliosMes = completadasMes.filter(o => o.lugarAtencion === 'domicilio').length;

@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { db, admin } = require('../config/firebase');
+// ✅ FIX FECHA-CO-001: la fecha del egreso siempre en día Colombia. Antes se
+// usaba toISOString() (UTC): todo egreso digitado después de las 7 pm quedaba
+// con fecha del DÍA SIGUIENTE (causa real del reporte de fechas corridas).
+const { hoyEnCO } = require('./_helpers');
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,7 +192,7 @@ router.post('/', async (req, res) => {
       formaPago: formaPago || '',
       cajaId: cajaId || '',
       empresaId: empresaId || '',
-      fecha: fecha || new Date().toISOString().slice(0, 10),
+      fecha: fecha || hoyEnCO(), // ✅ FIX FECHA-CO-001
       notas: notas || '',
       productosCompra: productosCompra || [],
       // Campos provisional / orden interna
@@ -410,7 +414,7 @@ router.post('/:provisionalId/cuadrar-definitivo', async (req, res) => {
       formaPago: formaPago || provisional.formaPago || '',
       cajaId: cajaIdFinal,
       empresaId: provisional.empresaId || '',
-      fecha: new Date().toISOString().slice(0, 10),
+      fecha: hoyEnCO(), // ✅ FIX FECHA-CO-001
       notas: notas || '',
       facturaAdjunta: facturaAdjunta || '',
       tipo: 'definitivo',
