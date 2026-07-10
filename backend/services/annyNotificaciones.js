@@ -1,22 +1,20 @@
 // ============================================================
 // Control360 — Notificaciones salientes vía Anny (Baileys)
 // Ubicación: backend/services/annyNotificaciones.js
-// FIX ANNY-NOTIF-001 + FIX ANNY-VENC-001
+// FIX ANNY-NOTIF-001 + ANNY-VENC-001 + ANNY-VENC-002
 // ============================================================
-// PROPÓSITO: que los módulos operativos (taller, órdenes, CxC,
-// vencimientos) avisen al cliente por WhatsApp a través de la
-// línea conectada de Anny, SIN acoplarse a Baileys directamente.
-//
 // PRINCIPIOS:
-// 1. Fire-and-forget: si Anny no está activa o conectada, se
-//    omite el envío en silencio — NUNCA rompe el módulo que llama.
+// 1. Fire-and-forget: si Anny no está activa/conectada se omite
+//    en silencio — NUNCA rompe el módulo que llama.
 // 2. Gate multi-tenant: solo envía si el tenant tiene 'anny_ia'.
 // 3. Cobranza CxC: viernes 9:00 AM Colombia, >10 días completadas.
-// 4. FIX ANNY-VENC-001: rondas de vencimientos en días configurables
-//    del mes + disparo manual desde el panel. Tope diario (default
-//    60) y dosificación de 45s entre mensajes — protección crítica
-//    contra bloqueo de la línea. Cada cliente recibe máximo una
-//    ronda cada 12 días.
+// 4. Rondas de vencimientos: días configurables + disparo manual,
+//    tope diario, 45s entre mensajes, una ronda cada 12 días por
+//    cliente.
+// 5. FIX ANNY-VENC-002: los vencimientos IMPORTADOS por Excel
+//    pueden no traer el campo `gestionado` — la query por igualdad
+//    los excluía a TODOS (por eso la ronda enviaba 0). Ahora se
+//    consulta por adminId y se filtra en memoria (gestionado !== true).
 // ============================================================
 
 const { db, admin } = require('../config/firebase');
@@ -62,7 +60,6 @@ async function notificarClienteWhatsApp(adminId, celular, texto) {
 
     const enviado = await baileysService.enviarMensaje(adminId, jid, texto);
     if (enviado) {
-      // Registrar en el historial para que quede visible en el panel
       await annyService.registrarConversacion(adminId, {
         telefono: num.startsWith('57') ? num : '57' + num,
         nombreCliente: null,
@@ -156,13 +153,9 @@ async function ejecutarCobranzaCxC() {
 }
 
 // ============================================================
-// FIX ANNY-VENC-001 — RONDA DE VENCIMIENTOS
-// Candidatos: vencimientos del tenant NO gestionados, con teléfono,
-// cuyo mes de vencimiento ya llegó o pasó, y que no hayan recibido
-// ronda en los últimos 12 días. Más antiguos primero.
+// RONDA DE VENCIMIENTOS
 // ============================================================
 
-// Control de rondas en curso (evita disparar dos a la vez por tenant)
 const rondasEnCurso = new Set();
 
 async function ejecutarRondaVencimientos(adminId) {
@@ -181,30 +174,34 @@ async function ejecutarRondaVencimientos(adminId) {
 
   const tope = Number(cfg.topeDiarioRonda) || 60;
 
-  // Primer día del mes actual (Colombia) — "vencido" = mes <= actual
   const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
   const inicioMesActual = `${ahoraCO.toISOString().slice(0, 7)}-01`;
 
+  // FIX ANNY-VENC-002: query SOLO por adminId — el filtro de
+  // gestionado va en memoria para incluir docs importados que no
+  // traen el campo (la igualdad ==false los excluía a todos).
   const snap = await db.collection('vencimientos')
     .where('adminId', '==', adminId)
-    .where('gestionado', '==', false)
     .get();
 
   const hoyMs = Date.now();
-  const candidatos = snap.docs
-    .map(d => ({ id: d.id, ref: d.ref, ...d.data() }))
-    .filter(v => v.telefono && v.fechaVencimiento && v.fechaVencimiento <= inicioMesActual)
+  const todos = snap.docs.map(d => ({ id: d.id, ref: d.ref, ...d.data() }));
+
+  const candidatos = todos
+    .filter(v => v.gestionado !== true) // incluye importados sin el campo
+    .filter(v => v.telefono && v.fechaVencimiento && String(v.fechaVencimiento) <= inicioMesActual)
     .filter(v => !v.ultimaRondaAnny || (hoyMs - new Date(v.ultimaRondaAnny).getTime()) > 12 * 86400000)
     .sort((a, b) => String(a.fechaVencimiento).localeCompare(String(b.fechaVencimiento)));
+
+  console.log(`[ANNY-VENC] Tenant ${adminId}: ${todos.length} vencimientos totales, ${candidatos.length} candidatos a ronda`);
 
   const lote = candidatos.slice(0, tope);
   const pendientesDespues = candidatos.length - lote.length;
 
   if (lote.length === 0) {
-    return { ok: true, encolados: 0, pendientesDespues: 0, mensaje: 'No hay vencimientos pendientes de ronda.' };
+    return { ok: true, encolados: 0, pendientesDespues: 0, mensaje: 'No hay vencimientos pendientes de ronda (revisa que tengan teléfono y mes vencido).' };
   }
 
-  // Procesar en segundo plano (dosificado) — la respuesta HTTP no espera
   rondasEnCurso.add(adminId);
   procesarLoteRonda(adminId, lote)
     .catch(err => console.error('[ANNY-VENC] Error en lote de ronda:', err.message))
@@ -225,7 +222,6 @@ async function procesarLoteRonda(adminId, lote) {
 
   for (const v of lote) {
     try {
-      // Nombre del cliente (si hay ficha)
       let nombre = '';
       if (v.clienteId) {
         try {
@@ -256,7 +252,6 @@ async function procesarLoteRonda(adminId, lote) {
         });
       }
 
-      // Dosificación anti-bloqueo: 45 segundos entre mensajes
       await sleep(45000);
     } catch (errV) {
       console.error('[ANNY-VENC] Error enviando a', v.telefono, errV.message);
@@ -267,11 +262,7 @@ async function procesarLoteRonda(adminId, lote) {
 }
 
 // ============================================================
-// Cron rondas de vencimientos: revisa cada 15 min. Para cada tenant
-// conectado, si HOY (Colombia) es uno de sus días configurados
-// (annyConfig.diasRondaVencimientos, ej: "1,20") y ya pasó su hora
-// de envío, dispara la ronda — una sola vez por día (persistido en
-// annyConfig.ultimaRondaFecha, sobrevive reinicios del server).
+// Cron rondas de vencimientos: días configurables por empresa
 // ============================================================
 function iniciarCronRondasVencimientos() {
   const verificarYEjecutar = async () => {

@@ -2,8 +2,8 @@
 // Control360 — WhatsApp IA Anny Dashboard
 // Ubicación: frontend/src/VencimientosAnny.js
 // FIX ANNY-GATE-002 + ANNY-QR-001 + ANNY-LEARN-002 + ANNY-UI-001
-// FIX ANNY-PEDIDOS-001: pestaña 🛒 Pedidos + aviso configurable
-// FIX ANNY-VENC-001: ronda de vencimientos + días configurables
+// + ANNY-PEDIDOS-001 + ANNY-VENC-001
+// FIX ANNY-SILENCIO-001: silenciar Anny por chat (internos)
 // ============================================================
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -21,39 +21,32 @@ export default function VencimientosAnny() {
   const [config, setConfig] = useState(null);
   const [activo, setActivo] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('metricas'); // metricas | conversaciones | pedidos | casos | entrenamiento
+  const [activeTab, setActiveTab] = useState('metricas');
   const [diasAntes, setDiasAntes] = useState(30);
   const [horaEnvio, setHoraEnvio] = useState('09:00');
   const [guardando, setGuardando] = useState(false);
 
-  // FIX ANNY-PEDIDOS-001 / ANNY-VENC-001: configuración extendida
   const [notificarPedidosA, setNotificarPedidosA] = useState('');
   const [diasRonda, setDiasRonda] = useState('');
   const [topeRonda, setTopeRonda] = useState(60);
 
-  // FIX ANNY-QR-001: conexión WhatsApp
   const [conexion, setConexion] = useState({ estado: 'desconectado', numero: null });
   const [qrImg, setQrImg] = useState(null);
   const [conectando, setConectando] = useState(false);
   const pollRef = useRef(null);
 
-  // FIX ANNY-LEARN-002: entrenamiento
   const [respuestas, setRespuestas] = useState({});
   const [formKey, setFormKey] = useState(null);
   const [formPatrones, setFormPatrones] = useState('');
   const [formRespuesta, setFormRespuesta] = useState('');
   const [guardandoResp, setGuardandoResp] = useState(false);
 
-  // FIX ANNY-UI-001: chats agrupados
   const [chats, setChats] = useState([]);
   const [chatAbierto, setChatAbierto] = useState(null);
   const [hilo, setHilo] = useState([]);
   const [cargandoHilo, setCargandoHilo] = useState(false);
 
-  // FIX ANNY-PEDIDOS-001: bandeja de pedidos
   const [pedidos, setPedidos] = useState([]);
-
-  // FIX ANNY-VENC-001: ronda de vencimientos
   const [enviandoRonda, setEnviandoRonda] = useState(false);
 
   useEffect(() => {
@@ -105,7 +98,7 @@ export default function VencimientosAnny() {
         fetch(`${API}/anny/casos-escalados?estado=pendiente`, { headers: authHeaders() }).then(r => r.json()),
         fetch(`${API}/anny/estado`, { headers: authHeaders() }).then(r => r.ok ? r.json() : null),
         fetch(`${API}/anny/respuestas`, { headers: authHeaders() }).then(r => r.ok ? r.json() : {}),
-        fetch(`${API}/anny/pedidos?estado=todos`, { headers: authHeaders() }).then(r => r.ok ? r.json() : []), // FIX ANNY-PEDIDOS-001
+        fetch(`${API}/anny/pedidos?estado=todos`, { headers: authHeaders() }).then(r => r.ok ? r.json() : []),
       ]);
 
       setMetricas(m);
@@ -138,8 +131,32 @@ export default function VencimientosAnny() {
   };
 
   // ============================================================
-  // FIX ANNY-QR-001: conexión WhatsApp
+  // FIX ANNY-SILENCIO-001: silenciar/activar Anny en un chat
   // ============================================================
+  const toggleSilencio = async (telefono, silenciado) => {
+    const msgConfirm = silenciado
+      ? '¿Silenciar Anny en este chat?\n\nAnny dejará de responder y de registrar este número (ideal para conversaciones internas del equipo).'
+      : '¿Reactivar Anny en este chat?\n\nAnny volverá a responder los mensajes de este número.';
+    if (!window.confirm(msgConfirm)) return;
+
+    try {
+      const res = await fetch(`${API}/anny/chats/${telefono}/silencio`, {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify({ silenciado })
+      });
+      if (res.ok) {
+        await cargarDatos();
+        alert(silenciado ? '🔕 Anny silenciada en este chat' : '🔔 Anny reactivada en este chat');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`❌ ${err.error || 'Error actualizando'}`);
+      }
+    } catch (err) {
+      console.error('Error cambiando silencio:', err);
+    }
+  };
+
   const conectarWhatsApp = async () => {
     setConectando(true);
     setQrImg(null);
@@ -195,9 +212,6 @@ export default function VencimientosAnny() {
     }
   };
 
-  // ============================================================
-  // FIX ANNY-VENC-001: ronda de vencimientos manual
-  // ============================================================
   const enviarRondaAhora = async () => {
     if (!window.confirm(`¿Enviar ronda de vencimientos AHORA?\n\nSe enviarán máximo ${topeRonda} mensajes (1 cada 45 segundos) a clientes con equipos vencidos sin gestionar. Cada cliente recibe máximo una ronda cada 12 días.`)) return;
 
@@ -218,9 +232,6 @@ export default function VencimientosAnny() {
     }
   };
 
-  // ============================================================
-  // FIX ANNY-PEDIDOS-001: gestión de pedidos
-  // ============================================================
   const actualizarPedido = async (id, estado) => {
     try {
       const res = await fetch(`${API}/anny/pedidos/${id}`, {
@@ -234,9 +245,6 @@ export default function VencimientosAnny() {
     }
   };
 
-  // ============================================================
-  // FIX ANNY-LEARN-002: entrenamiento
-  // ============================================================
   const abrirFormNueva = () => {
     setFormKey('nueva');
     setFormPatrones('');
@@ -318,6 +326,9 @@ export default function VencimientosAnny() {
       if (res.ok) {
         await cargarDatos();
         alert('✅ Configuración actualizada');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`❌ ${err.error || 'Error guardando configuración'}`);
       }
     } catch (err) {
       console.error('Error actualizando:', err);
@@ -340,6 +351,10 @@ export default function VencimientosAnny() {
 
       if (res.ok) {
         await cargarDatos();
+        alert('✅ Caso marcado como resuelto — Anny vuelve a atender a este cliente');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`❌ ${err.error || 'Error marcando el caso'}`);
       }
     } catch (err) {
       console.error('Error marcando resuelto:', err);
@@ -491,7 +506,7 @@ export default function VencimientosAnny() {
             )}
           </div>
 
-          {/* FIX ANNY-VENC-001: Ronda de vencimientos */}
+          {/* Ronda de vencimientos */}
           <div style={{ background: '#eff6ff', border: '1px solid #93c5fd', borderRadius: 12, padding: 20, marginBottom: 24 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
               <div style={{ maxWidth: 520 }}>
@@ -579,7 +594,6 @@ export default function VencimientosAnny() {
                 <input type="time" value={horaEnvio} onChange={e => setHoraEnvio(e.target.value)} style={inputStyle} />
               </div>
 
-              {/* FIX ANNY-PEDIDOS-001 */}
               <div>
                 <label style={labelStyle}>📲 WhatsApp para avisos de venta (pedidos)</label>
                 <input
@@ -591,7 +605,6 @@ export default function VencimientosAnny() {
                 />
               </div>
 
-              {/* FIX ANNY-VENC-001 */}
               <div>
                 <label style={labelStyle}>📤 Días de ronda de vencimientos (del mes)</label>
                 <input
@@ -643,19 +656,38 @@ export default function VencimientosAnny() {
         <div>
           {chatAbierto ? (
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-                <button
-                  onClick={() => { setChatAbierto(null); setHilo([]); }}
-                  style={{ padding: '8px 14px', border: '1px solid #d1d5db', borderRadius: 8, background: '#fff', color: '#374151', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}
-                >
-                  ‹ Volver
-                </button>
-                <div>
-                  <div style={{ fontWeight: 800, fontSize: 14, color: '#1a1a2e' }}>
-                    {chatActual?.nombreCliente || chatAbierto}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button
+                    onClick={() => { setChatAbierto(null); setHilo([]); }}
+                    style={{ padding: '8px 14px', border: '1px solid #d1d5db', borderRadius: 8, background: '#fff', color: '#374151', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}
+                  >
+                    ‹ Volver
+                  </button>
+                  <div>
+                    <div style={{ fontWeight: 800, fontSize: 14, color: '#1a1a2e' }}>
+                      {chatActual?.nombreCliente || chatAbierto}
+                      {chatActual?.silenciado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#f3f4f6', color: '#6b7280' }}>🔕 Silenciado</span> : null}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#9ca3af' }}>{chatAbierto}</div>
                   </div>
-                  <div style={{ fontSize: 11, color: '#9ca3af' }}>{chatAbierto}</div>
                 </div>
+                {/* FIX ANNY-SILENCIO-001 */}
+                <button
+                  onClick={() => toggleSilencio(chatAbierto, !(chatActual?.silenciado))}
+                  style={{
+                    padding: '8px 16px',
+                    border: `1px solid ${chatActual?.silenciado ? '#86efac' : '#e5e7eb'}`,
+                    borderRadius: 8,
+                    background: chatActual?.silenciado ? '#f0fdf4' : '#f9fafb',
+                    color: chatActual?.silenciado ? '#15803d' : '#6b7280',
+                    fontWeight: 700,
+                    fontSize: 12,
+                    cursor: 'pointer'
+                  }}
+                >
+                  {chatActual?.silenciado ? '🔔 Reactivar Anny' : '🔕 Silenciar Anny en este chat'}
+                </button>
               </div>
 
               <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 12, padding: 16, maxHeight: 520, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -705,22 +737,24 @@ export default function VencimientosAnny() {
                     key={chat.telefono}
                     onClick={() => setChatAbierto(chat.telefono)}
                     style={{
-                      background: '#f9fafb',
+                      background: chat.silenciado ? '#f3f4f6' : '#f9fafb',
                       border: '1px solid #e5e7eb',
                       borderRadius: 10,
                       padding: 14,
-                      borderLeft: `4px solid ${chat.escalado ? '#f59e0b' : '#7c3aed'}`,
+                      borderLeft: `4px solid ${chat.silenciado ? '#9ca3af' : chat.escalado ? '#f59e0b' : '#7c3aed'}`,
                       cursor: 'pointer',
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'center',
-                      gap: 12
+                      gap: 12,
+                      opacity: chat.silenciado ? 0.7 : 1
                     }}
                   >
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontWeight: 700, fontSize: 13, color: '#1a1a2e' }}>
                         {chat.nombreCliente || chat.telefono}
-                        {chat.escalado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#fed7aa', color: '#b45309' }}>⚠️ Escalado</span> : null}
+                        {chat.silenciado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#e5e7eb', color: '#6b7280' }}>🔕</span> : null}
+                        {chat.escalado && !chat.silenciado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#fed7aa', color: '#b45309' }}>⚠️ Escalado</span> : null}
                       </div>
                       <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 480 }}>
                         {chat.ultimoTexto}
@@ -740,7 +774,7 @@ export default function VencimientosAnny() {
         </div>
       )}
 
-      {/* =============== TAB: PEDIDOS (FIX ANNY-PEDIDOS-001) =============== */}
+      {/* =============== TAB: PEDIDOS =============== */}
       {activeTab === 'pedidos' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {pedidos.length === 0 ? (
@@ -815,7 +849,7 @@ export default function VencimientosAnny() {
             </div>
           ) : (
             pendientes.map((caso, i) => (
-              <div key={i} style={{
+              <div key={caso.id || i} style={{
                 background: '#fef2f2',
                 border: '1px solid #fecaca',
                 borderRadius: 10,

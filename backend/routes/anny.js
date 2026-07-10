@@ -2,14 +2,13 @@
 // Control360 — Rutas API Anny
 // Ubicación: backend/routes/anny.js
 // ============================================================
-// MONTAJE en server.js (FIX ANNY-GATE-002):
-//   app.use('/api/anny', require('./routes/anny'));
-//
 // FIX ANNY-QR-001: conexión WhatsApp (Baileys)
 // FIX ANNY-LEARN-002: respuestas de entrenamiento
 // FIX ANNY-UI-001: chats agrupados + hilo por cliente
-// FIX ANNY-PEDIDOS-001: bandeja de pedidos cerrados por Anny
+// FIX ANNY-PEDIDOS-001: bandeja de pedidos
 // FIX ANNY-VENC-001: ronda de vencimientos manual
+// FIX ANNY-CASO-002: PUT /casos fallaba por undefined (botón Resuelto)
+// FIX ANNY-SILENCIO-001: silenciar Anny por chat (conversaciones internas)
 // ============================================================
 
 const express = require('express');
@@ -36,7 +35,6 @@ async function requireAnnyActivo(req, res, next) {
   }
 }
 
-// Acciones sensibles — solo rol admin del tenant
 function requireAdmin(req, res, next) {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Solo admin puede realizar esta acción' });
@@ -59,8 +57,6 @@ router.get('/config', authenticate, async (req, res) => {
 
 // ============================================================
 // 2. PUT /api/anny/config — Configuración operativa
-// FIX ANNY-PEDIDOS-001 / ANNY-VENC-001: acepta notificarPedidosA,
-// diasRondaVencimientos ("1,20") y topeDiarioRonda.
 // ============================================================
 router.put('/config', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -142,19 +138,23 @@ router.get('/conversaciones', authenticate, requireAnnyActivo, async (req, res) 
 });
 
 // ============================================================
-// FIX ANNY-UI-001 — Chats agrupados por número
-// ============================================================
-
 // 4b. GET /api/anny/chats — Lista de chats (uno por cliente)
+// FIX ANNY-SILENCIO-001: incluye el flag silenciado por chat
+// ============================================================
 router.get('/chats', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
 
-    const snap = await db.collection('conversacionesAnny')
-      .doc(adminId)
-      .collection('conversaciones')
-      .limit(500)
-      .get();
+    const [snap, cfgDoc] = await Promise.all([
+      db.collection('conversacionesAnny')
+        .doc(adminId)
+        .collection('conversaciones')
+        .limit(500)
+        .get(),
+      db.collection('annyConfig').doc(adminId).get()
+    ]);
+
+    const silenciados = (cfgDoc.exists && cfgDoc.data().chatsSilenciados) || {};
 
     const docs = snap.docs
       .map(d => d.data())
@@ -170,7 +170,8 @@ router.get('/chats', authenticate, requireAnnyActivo, async (req, res) => {
           ultimoTexto: c.mensajeCliente || c.respuestaAgente || '',
           ultimaFecha: c.createdAt || null,
           mensajes: 0,
-          escalado: false
+          escalado: false,
+          silenciado: silenciados[c.telefono] === true
         });
       }
       const chat = chats.get(c.telefono);
@@ -209,10 +210,36 @@ router.get('/chats/:telefono', authenticate, requireAnnyActivo, async (req, res)
 });
 
 // ============================================================
-// FIX ANNY-PEDIDOS-001 — Bandeja de pedidos cerrados por Anny
+// 4c2. PUT /api/anny/chats/:telefono/silencio — FIX ANNY-SILENCIO-001
+// Body: { silenciado: true|false }. Con silenciado=true, Anny IGNORA
+// por completo ese número: no responde, no registra, no gasta IA.
+// Para conversaciones internas del equipo.
 // ============================================================
+router.put('/chats/:telefono/silencio', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const telefono = String(req.params.telefono).replace(/\D/g, '');
+    const { silenciado } = req.body;
 
-// 4d. GET /api/anny/pedidos — Lista de pedidos (?estado=NUEVO|todos)
+    if (!telefono) return res.status(400).json({ error: 'Teléfono inválido' });
+
+    const campo = `chatsSilenciados.${telefono}`;
+    await db.collection('annyConfig').doc(adminId).set({}, { merge: true }); // asegurar doc
+    await db.collection('annyConfig').doc(adminId).update({
+      [campo]: silenciado === true ? true : admin.firestore.FieldValue.delete()
+    });
+
+    baileysService.invalidarCacheSilencio(adminId);
+
+    return res.json({ ok: true, telefono, silenciado: silenciado === true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// 4d. GET /api/anny/pedidos — Lista de pedidos
+// ============================================================
 router.get('/pedidos', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
@@ -239,7 +266,6 @@ router.get('/pedidos', authenticate, requireAnnyActivo, async (req, res) => {
 });
 
 // 4e. PUT /api/anny/pedidos/:id — Actualizar estado del pedido
-// Body: { estado: 'ORDEN_CREADA' | 'NUEVO' | 'DESCARTADO', notas? }
 router.put('/pedidos/:id', authenticate, requireAnnyActivo, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
@@ -269,10 +295,8 @@ router.put('/pedidos/:id', authenticate, requireAnnyActivo, async (req, res) => 
 });
 
 // ============================================================
-// FIX ANNY-VENC-001 — Ronda de vencimientos manual
-// ============================================================
-
 // 4f. POST /api/anny/vencimientos/ronda — Disparar ronda AHORA
+// ============================================================
 router.post('/vencimientos/ronda', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;
@@ -315,6 +339,9 @@ router.get('/casos-escalados', authenticate, requireAnnyActivo, async (req, res)
 
 // ============================================================
 // 6. PUT /api/anny/casos/:caseId — Actualizar estado caso
+// FIX ANNY-CASO-002: respuestaAdmin/notas llegaban undefined y
+// Firestore rechazaba TODA la actualización — el botón "Resuelto"
+// no hacía nada. Ahora solo se escriben los campos que llegan.
 // ============================================================
 router.put('/casos/:caseId', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -324,10 +351,10 @@ router.put('/casos/:caseId', authenticate, requireAnnyActivo, async (req, res) =
 
     const update = {
       estado: estado || 'RESUELTO',
-      respuestaAdmin,
-      notas,
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     };
+    if (respuestaAdmin !== undefined) update.respuestaAdmin = respuestaAdmin;
+    if (notas !== undefined) update.notas = notas;
 
     await db.collection('casosEscaladosAnny')
       .doc(adminId)

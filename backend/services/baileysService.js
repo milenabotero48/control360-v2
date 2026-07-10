@@ -2,6 +2,7 @@
 // Control360 — Servicio Baileys (WhatsApp Web) para Anny
 // Ubicación: backend/services/baileysService.js
 // FIX ANNY-QR-001 + ANNY-QR-003 + ANNY-QR-004 + ANNY-PEDIDOS-001
+// + FIX ANNY-SILENCIO-001 (chats silenciados / internos)
 // ============================================================
 // PRINCIPIOS:
 // 1. Una sesión de WhatsApp por tenant (adminId) — multi-tenant
@@ -12,8 +13,11 @@
 // 6. Respuestas manuales de la admin (fromMe) → ADMIN_MANUAL
 // 7. Reconexión automática con tope de reintentos
 // 8. getMessage + almacén de enviados (reintentos de cifrado)
-// 9. FIX ANNY-PEDIDOS-001: pedido cerrado → aviso al WhatsApp de
-//    la admin (annyConfig.notificarPedidosA)
+// 9. Pedido cerrado → aviso al WhatsApp de la admin
+// 10. FIX ANNY-SILENCIO-001: chats marcados como silenciados
+//     (annyConfig.chatsSilenciados) se IGNORAN por completo:
+//     ni respuesta, ni registro, ni gasto de IA — para
+//     conversaciones internas del equipo.
 // ============================================================
 
 const qrcode = require('qrcode');
@@ -24,8 +28,7 @@ const { db, admin } = require('../config/firebase');
 const annyService = require('./annyService');
 
 // ============================================================
-// FIX ANNY-QR-003: Baileys es ESM-only — carga con import()
-// dinámico y perezoso, compatible con v6 y v7.
+// FIX ANNY-QR-003: Baileys es ESM-only — import() dinámico
 // ============================================================
 let _baileys = null;
 async function cargarBaileys() {
@@ -57,7 +60,6 @@ const BAILEYS_DIR = process.env.BAILEYS_DIR || path.join(__dirname, '..', 'baile
 
 // ============================================================
 // FIX ANNY-QR-004: almacén de mensajes enviados para reintentos
-// de cifrado (sin esto el cliente ve "Esperando el mensaje...")
 // ============================================================
 const mensajesEnviados = new Map(); // msgId -> contenido del mensaje
 const MAX_MENSAJES_STORE = 1000;
@@ -69,6 +71,30 @@ function guardarMensajeEnviado(id, message) {
     const primero = mensajesEnviados.keys().next().value;
     mensajesEnviados.delete(primero);
   }
+}
+
+// ============================================================
+// FIX ANNY-SILENCIO-001: caché de chats silenciados (TTL 60s)
+// ============================================================
+const _cacheSilencio = new Map(); // adminId -> { data, ts }
+const SILENCIO_TTL_MS = 60 * 1000;
+
+async function estaSilenciado(adminId, telefono) {
+  try {
+    let entry = _cacheSilencio.get(adminId);
+    if (!entry || (Date.now() - entry.ts) > SILENCIO_TTL_MS) {
+      const doc = await db.collection('annyConfig').doc(adminId).get();
+      entry = { data: (doc.exists && doc.data().chatsSilenciados) || {}, ts: Date.now() };
+      _cacheSilencio.set(adminId, entry);
+    }
+    return entry.data[telefono] === true;
+  } catch (err) {
+    return false;
+  }
+}
+
+function invalidarCacheSilencio(adminId) {
+  _cacheSilencio.delete(adminId);
 }
 
 // adminId -> { sock, estado, qr, numero, reintentos }
@@ -152,6 +178,11 @@ async function procesarMensaje(adminId, msg) {
 
   const telefono = jid.split('@')[0];
 
+  // FIX ANNY-SILENCIO-001: chat silenciado → Anny lo ignora por
+  // completo (ni responde, ni registra, ni gasta IA). Para
+  // conversaciones internas del equipo.
+  if (await estaSilenciado(adminId, telefono)) return;
+
   // Respuesta manual de la admin → historial (aprendizaje)
   if (msg.key.fromMe) {
     await annyService.registrarConversacion(adminId, {
@@ -192,10 +223,7 @@ async function procesarMensaje(adminId, msg) {
     await enviarMensaje(adminId, jid, resultado.respuesta);
   }
 
-  // ============================================================
   // FIX ANNY-PEDIDOS-001: Anny cerró una venta → avisar a la admin
-  // en el número configurado (annyConfig.notificarPedidosA)
-  // ============================================================
   if (resultado?.pedido && resultado?.notificarA) {
     try {
       const numAdmin = String(resultado.notificarA).replace(/\D/g, '');
@@ -242,7 +270,6 @@ async function iniciarSesion(adminId) {
     logger: pino({ level: 'silent' }),
     markOnlineOnConnect: false,
     browser: ['Control360', 'Chrome', '1.0'],
-    // FIX ANNY-QR-004: responder solicitudes de reenvío/reintento
     getMessage: async (key) => {
       return mensajesEnviados.get(key?.id) || undefined;
     }
@@ -390,6 +417,7 @@ module.exports = {
   getEstado,
   getQR,
   enviarMensaje,
+  invalidarCacheSilencio,
   restaurarSesiones
 };
 // FIN baileysService.js
