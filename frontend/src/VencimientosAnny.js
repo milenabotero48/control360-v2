@@ -18,8 +18,11 @@ export default function VencimientosAnny() {
   const [conversaciones, setConversaciones] = useState([]);
   const [casos, setCasos] = useState([]);
   const [config, setConfig] = useState(null);
-  // FIX ANNY-GATE-001: null = aún no se sabe, true/false una vez cargado
-  // (mismo patrón que `activa` en LlamadasIA.js)
+  // FIX ANNY-GATE-002: null = aún no se sabe. El dashboard SOLO se
+  // muestra cuando activo === true (fail-closed). Antes el gate era
+  // `activo === false`, y si /api/anny/config fallaba (404 porque la
+  // ruta no estaba montada en server.js), activo quedaba en null y
+  // TODOS los suscriptores veían el dashboard completo.
   const [activo, setActivo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('metricas'); // metricas | conversaciones | casos
@@ -29,11 +32,10 @@ export default function VencimientosAnny() {
 
   // ============================================================
   // Cargar datos
-  // FIX ANNY-GATE-001: primero se consulta /config (nunca da 403,
-  // siempre responde con { activo: true|false }). Si el módulo NO
-  // está activo para este suscriptor, no se golpean los demás
-  // endpoints (que ahora responden 403) — se corta ahí, igual que
-  // hace LlamadasIA.js con Lucy.
+  // FIX ANNY-GATE-002: primero se consulta /config validando res.ok.
+  // Si el endpoint falla (404/500/red) o responde activo:false, se
+  // corta ahí: activo=false, no se golpean los demás endpoints y el
+  // suscriptor ve el aviso "módulo no activo" — nunca el dashboard.
   // ============================================================
   useEffect(() => {
     cargarDatos();
@@ -43,16 +45,25 @@ export default function VencimientosAnny() {
 
   const cargarDatos = async () => {
     try {
-      const cfg = await fetch(`${API}/anny/config`, { headers: authHeaders() }).then(r => r.json());
+      const res = await fetch(`${API}/anny/config`, { headers: authHeaders() });
+
+      // FIX ANNY-GATE-002: si el backend no responde OK, fail-closed
+      if (!res.ok) {
+        setActivo(false);
+        setLoading(false);
+        return;
+      }
+
+      const cfg = await res.json();
       setConfig(cfg);
-      setActivo(!!cfg?.activo);
+      setActivo(cfg?.activo === true);
 
       if (cfg) {
         setDiasAntes(cfg.diasAntes || 30);
         setHoraEnvio(cfg.horaEnvio || '09:00');
       }
 
-      if (!cfg?.activo) {
+      if (cfg?.activo !== true) {
         setLoading(false);
         return; // módulo no activo: no pedir el resto
       }
@@ -68,6 +79,8 @@ export default function VencimientosAnny() {
       setCasos(Array.isArray(cas) ? cas : []);
     } catch (err) {
       console.error('Error cargando datos Anny:', err);
+      // FIX ANNY-GATE-002: ante cualquier error, fail-closed
+      setActivo(false);
     } finally {
       setLoading(false);
     }
@@ -125,12 +138,12 @@ export default function VencimientosAnny() {
   }
 
   // ============================================================
-  // FIX ANNY-GATE-001: módulo no activo para este suscriptor.
-  // Mismo mensaje/patrón visual que Lucy (LlamadasIA.js) — el
-  // suscriptor entiende que es Milena quien lo activa, no un switch
-  // propio.
+  // FIX ANNY-GATE-002: gate fail-closed. Solo se pasa de aquí si
+  // activo === true (confirmado por el backend contra el array
+  // `modulos` del suscriptor). null, false o error = bloqueado.
+  // Mismo mensaje/patrón visual que Lucy (LlamadasIA.js).
   // ============================================================
-  if (activo === false) {
+  if (activo !== true) {
     return (
       <div style={{ padding: '12px 12px 80px', maxWidth: 1100, margin: '0 auto' }}>
         <div style={{ background: '#fff', border: '1.5px solid #e5e7eb', borderRadius: 12, padding: 40, textAlign: 'center' }}>

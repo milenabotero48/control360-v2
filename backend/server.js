@@ -84,6 +84,16 @@ const { router: llamadasIARouter, routerPublico: llamadasIAPublico } = require('
 app.use('/api/llamadas-ia/publico', llamadasIAPublico);
 app.use('/api/llamadas-ia', authenticate, llamadasIARouter);
 
+// ═════════════════════════════════════════════════════════════════════════════
+// FIX ANNY-GATE-002: montar rutas de WhatsApp IA Anny.
+// Esta línea FALTABA — sin ella /api/anny/config devolvía 404 y el
+// frontend (fail-open) mostraba el dashboard a TODOS los suscriptores.
+// El authenticate va POR RUTA dentro de routes/anny.js (mismo patrón
+// que /api/whatsapp), y el gate requireAnnyActivo valida el módulo
+// 'anny_ia' en users/{adminId}.modulos (solo lo activa el SuperAdmin).
+// ═════════════════════════════════════════════════════════════════════════════
+app.use('/api/anny', require('./routes/anny'));
+
 // Panel de Suscriptores — solo superAdmin
 app.use('/api/superadmin', require('./routes/superadmin'));
 
