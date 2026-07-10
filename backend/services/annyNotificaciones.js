@@ -1,20 +1,14 @@
 // ============================================================
 // Control360 — Notificaciones salientes vía Anny (Baileys)
 // Ubicación: backend/services/annyNotificaciones.js
-// FIX ANNY-NOTIF-001 + ANNY-VENC-001 + ANNY-VENC-002
+// FIX ANNY-NOTIF-001 + ANNY-VENC-001 + ANNY-VENC-002 + ANNY-VENC-003
 // ============================================================
-// PRINCIPIOS:
-// 1. Fire-and-forget: si Anny no está activa/conectada se omite
-//    en silencio — NUNCA rompe el módulo que llama.
-// 2. Gate multi-tenant: solo envía si el tenant tiene 'anny_ia'.
-// 3. Cobranza CxC: viernes 9:00 AM Colombia, >10 días completadas.
-// 4. Rondas de vencimientos: días configurables + disparo manual,
-//    tope diario, 45s entre mensajes, una ronda cada 12 días por
-//    cliente.
-// 5. FIX ANNY-VENC-002: los vencimientos IMPORTADOS por Excel
-//    pueden no traer el campo `gestionado` — la query por igualdad
-//    los excluía a TODOS (por eso la ronda enviaba 0). Ahora se
-//    consulta por adminId y se filtra en memoria (gestionado !== true).
+// FIX ANNY-VENC-003: los 320 vencimientos daban 0 candidatos.
+// Causa probable: fechaVencimiento importada como Timestamp de
+// Firestore (no string) — la comparación de texto fallaba en el
+// 100%. Ahora: (1) lectura de fecha ROBUSTA (string 'YYYY-MM-DD',
+// 'YYYY-MM', Timestamp o Date), y (2) log de diagnóstico
+// desglosado por motivo de descarte.
 // ============================================================
 
 const { db, admin } = require('../config/firebase');
@@ -33,15 +27,29 @@ function aISO(f) {
   return null;
 }
 
+// ─── FIX ANNY-VENC-003: mes 'YYYY-MM' desde cualquier formato ─
+function mesDeFecha(f) {
+  if (!f) return null;
+  if (typeof f === 'string') {
+    const m = f.match(/^(\d{4})-(\d{2})/);
+    return m ? `${m[1]}-${m[2]}` : null;
+  }
+  if (f.toDate) return f.toDate().toISOString().slice(0, 7);
+  if (f._seconds) return new Date(f._seconds * 1000).toISOString().slice(0, 7);
+  if (f.seconds) return new Date(f.seconds * 1000).toISOString().slice(0, 7);
+  if (f instanceof Date) return f.toISOString().slice(0, 7);
+  return null;
+}
+
 const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
   'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 
-// "2026-07-01" → "julio 2026"
-function formatearMes(fechaVenc) {
+// 'YYYY-MM' → "julio 2026"
+function formatearMes(mesStr) {
   try {
-    const [anio, mes] = String(fechaVenc).split('-');
+    const [anio, mes] = String(mesStr).split('-');
     return `${MESES[parseInt(mes) - 1] || mes} ${anio}`;
-  } catch { return String(fechaVenc || ''); }
+  } catch { return String(mesStr || ''); }
 }
 
 // ============================================================
@@ -175,11 +183,8 @@ async function ejecutarRondaVencimientos(adminId) {
   const tope = Number(cfg.topeDiarioRonda) || 60;
 
   const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
-  const inicioMesActual = `${ahoraCO.toISOString().slice(0, 7)}-01`;
+  const mesActual = ahoraCO.toISOString().slice(0, 7); // 'YYYY-MM'
 
-  // FIX ANNY-VENC-002: query SOLO por adminId — el filtro de
-  // gestionado va en memoria para incluir docs importados que no
-  // traen el campo (la igualdad ==false los excluía a todos).
   const snap = await db.collection('vencimientos')
     .where('adminId', '==', adminId)
     .get();
@@ -187,19 +192,45 @@ async function ejecutarRondaVencimientos(adminId) {
   const hoyMs = Date.now();
   const todos = snap.docs.map(d => ({ id: d.id, ref: d.ref, ...d.data() }));
 
-  const candidatos = todos
-    .filter(v => v.gestionado !== true) // incluye importados sin el campo
-    .filter(v => v.telefono && v.fechaVencimiento && String(v.fechaVencimiento) <= inicioMesActual)
-    .filter(v => !v.ultimaRondaAnny || (hoyMs - new Date(v.ultimaRondaAnny).getTime()) > 12 * 86400000)
-    .sort((a, b) => String(a.fechaVencimiento).localeCompare(String(b.fechaVencimiento)));
+  // FIX ANNY-VENC-003: filtrado con desglose de motivos + fecha robusta
+  const stats = { gestionados: 0, sinTelefono: 0, mesNoVencido: 0, sinFecha: 0, enEspera12d: 0 };
+  const candidatos = [];
 
-  console.log(`[ANNY-VENC] Tenant ${adminId}: ${todos.length} vencimientos totales, ${candidatos.length} candidatos a ronda`);
+  for (const v of todos) {
+    if (v.gestionado === true) { stats.gestionados++; continue; }
+    if (!v.telefono) { stats.sinTelefono++; continue; }
+
+    const mesV = mesDeFecha(v.fechaVencimiento);
+    if (!mesV) { stats.sinFecha++; continue; }
+    if (mesV > mesActual) { stats.mesNoVencido++; continue; }
+
+    if (v.ultimaRondaAnny && (hoyMs - new Date(v.ultimaRondaAnny).getTime()) <= 12 * 86400000) {
+      stats.enEspera12d++;
+      continue;
+    }
+
+    candidatos.push({ ...v, _mesVencimiento: mesV });
+  }
+
+  candidatos.sort((a, b) => a._mesVencimiento.localeCompare(b._mesVencimiento));
+
+  console.log(
+    `[ANNY-VENC] Tenant ${adminId}: ${todos.length} totales → candidatos=${candidatos.length} | ` +
+    `gestionados=${stats.gestionados} sinTelefono=${stats.sinTelefono} ` +
+    `mesNoVencido=${stats.mesNoVencido} sinFecha=${stats.sinFecha} enEspera12d=${stats.enEspera12d}`
+  );
 
   const lote = candidatos.slice(0, tope);
   const pendientesDespues = candidatos.length - lote.length;
 
   if (lote.length === 0) {
-    return { ok: true, encolados: 0, pendientesDespues: 0, mensaje: 'No hay vencimientos pendientes de ronda (revisa que tengan teléfono y mes vencido).' };
+    return {
+      ok: true,
+      encolados: 0,
+      pendientesDespues: 0,
+      mensaje: `Sin candidatos. Desglose: ${stats.gestionados} gestionados, ${stats.sinTelefono} sin teléfono, ` +
+        `${stats.mesNoVencido} aún no vencidos, ${stats.sinFecha} sin fecha, ${stats.enEspera12d} recibieron ronda hace <12 días.`
+    };
   }
 
   rondasEnCurso.add(adminId);
@@ -233,7 +264,7 @@ async function procesarLoteRonda(adminId, lote) {
         } catch { /* sin nombre, saludo genérico */ }
       }
 
-      const mesTxt = formatearMes(v.fechaVencimiento);
+      const mesTxt = formatearMes(v._mesVencimiento || mesDeFecha(v.fechaVencimiento));
       const equipoTxt = v.descripcionEquipo || 'extintor';
       const plural = (v.cantidad || 1) > 1;
 
