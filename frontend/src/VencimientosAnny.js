@@ -2,9 +2,11 @@
 // Control360 — WhatsApp IA Anny Dashboard
 // Ubicación: frontend/src/VencimientosAnny.js
 // Uso: Importar en GestionVencimientos.js
+// FIX ANNY-GATE-002: gate fail-closed (solo muestra si activo===true)
+// FIX ANNY-QR-001: sección Conexión WhatsApp (Baileys) con QR
 // ============================================================
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -19,10 +21,7 @@ export default function VencimientosAnny() {
   const [casos, setCasos] = useState([]);
   const [config, setConfig] = useState(null);
   // FIX ANNY-GATE-002: null = aún no se sabe. El dashboard SOLO se
-  // muestra cuando activo === true (fail-closed). Antes el gate era
-  // `activo === false`, y si /api/anny/config fallaba (404 porque la
-  // ruta no estaba montada en server.js), activo quedaba en null y
-  // TODOS los suscriptores veían el dashboard completo.
+  // muestra cuando activo === true (fail-closed).
   const [activo, setActivo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('metricas'); // metricas | conversaciones | casos
@@ -30,17 +29,24 @@ export default function VencimientosAnny() {
   const [horaEnvio, setHoraEnvio] = useState('09:00');
   const [guardando, setGuardando] = useState(false);
 
+  // FIX ANNY-QR-001: estado de conexión WhatsApp
+  const [conexion, setConexion] = useState({ estado: 'desconectado', numero: null });
+  const [qrImg, setQrImg] = useState(null);
+  const [conectando, setConectando] = useState(false);
+  const pollRef = useRef(null);
+
   // ============================================================
   // Cargar datos
-  // FIX ANNY-GATE-002: primero se consulta /config validando res.ok.
-  // Si el endpoint falla (404/500/red) o responde activo:false, se
-  // corta ahí: activo=false, no se golpean los demás endpoints y el
-  // suscriptor ve el aviso "módulo no activo" — nunca el dashboard.
+  // FIX ANNY-GATE-002: primero /config validando res.ok. Si falla
+  // (404/500/red) o activo:false → fail-closed, aviso bloqueado.
   // ============================================================
   useEffect(() => {
     cargarDatos();
     const interval = setInterval(cargarDatos, 30000); // Actualizar cada 30s
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (pollRef.current) clearInterval(pollRef.current); // FIX ANNY-QR-001
+    };
   }, []);
 
   const cargarDatos = async () => {
@@ -68,21 +74,83 @@ export default function VencimientosAnny() {
         return; // módulo no activo: no pedir el resto
       }
 
-      const [m, c, cas] = await Promise.all([
+      const [m, c, cas, est] = await Promise.all([
         fetch(`${API}/anny/metricas`, { headers: authHeaders() }).then(r => r.json()),
         fetch(`${API}/anny/conversaciones?limit=20`, { headers: authHeaders() }).then(r => r.json()),
         fetch(`${API}/anny/casos-escalados?estado=pendiente`, { headers: authHeaders() }).then(r => r.json()),
+        fetch(`${API}/anny/estado`, { headers: authHeaders() }).then(r => r.ok ? r.json() : null), // FIX ANNY-QR-001
       ]);
 
       setMetricas(m);
       setConversaciones(Array.isArray(c) ? c : []);
       setCasos(Array.isArray(cas) ? cas : []);
+      if (est) setConexion(est);
     } catch (err) {
       console.error('Error cargando datos Anny:', err);
       // FIX ANNY-GATE-002: ante cualquier error, fail-closed
       setActivo(false);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // ============================================================
+  // FIX ANNY-QR-001: conectar WhatsApp — genera QR y hace polling
+  // hasta que el celular lo escanee (estado 'conectado')
+  // ============================================================
+  const conectarWhatsApp = async () => {
+    setConectando(true);
+    setQrImg(null);
+    try {
+      const res = await fetch(`${API}/anny/conectar`, { method: 'POST', headers: authHeaders() });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`❌ ${err.error || 'Error iniciando conexión'}`);
+        setConectando(false);
+        return;
+      }
+
+      // Polling cada 3s: pedir QR / detectar conexión
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(async () => {
+        try {
+          const r = await fetch(`${API}/anny/qr`, { headers: authHeaders() });
+          if (!r.ok) return;
+          const data = await r.json();
+
+          if (data.estado === 'conectado') {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+            setQrImg(null);
+            setConectando(false);
+            const est = await fetch(`${API}/anny/estado`, { headers: authHeaders() }).then(x => x.ok ? x.json() : null);
+            if (est) setConexion(est);
+            alert('✅ WhatsApp conectado');
+          } else if (data.qr) {
+            setQrImg(data.qr);
+            setConexion(prev => ({ ...prev, estado: data.estado }));
+          }
+        } catch (e) {
+          console.error('Error polling QR:', e);
+        }
+      }, 3000);
+    } catch (err) {
+      console.error('Error conectando:', err);
+      setConectando(false);
+    }
+  };
+
+  const desconectarWhatsApp = async () => {
+    if (!window.confirm('¿Desconectar WhatsApp? Anny dejará de responder mensajes y tendrás que escanear el QR de nuevo para reconectar.')) return;
+    try {
+      const res = await fetch(`${API}/anny/desconectar`, { method: 'POST', headers: authHeaders() });
+      if (res.ok) {
+        setConexion({ estado: 'desconectado', numero: null });
+        setQrImg(null);
+        alert('✅ WhatsApp desconectado');
+      }
+    } catch (err) {
+      console.error('Error desconectando:', err);
     }
   };
 
@@ -141,7 +209,6 @@ export default function VencimientosAnny() {
   // FIX ANNY-GATE-002: gate fail-closed. Solo se pasa de aquí si
   // activo === true (confirmado por el backend contra el array
   // `modulos` del suscriptor). null, false o error = bloqueado.
-  // Mismo mensaje/patrón visual que Lucy (LlamadasIA.js).
   // ============================================================
   if (activo !== true) {
     return (
@@ -158,6 +225,7 @@ export default function VencimientosAnny() {
   }
 
   const pendientes = casos.filter(c => c.estado === 'PENDIENTE');
+  const conectado = conexion.estado === 'conectado';
 
   return (
     <div style={{ padding: 20 }}>
@@ -167,7 +235,7 @@ export default function VencimientosAnny() {
           🤖 WhatsApp IA Anny
         </h1>
         <p style={{ fontSize: 13, color: '#9ca3af' }}>
-          {config?.activo ? '🟢 ACTIVO' : '⚪ INACTIVO'} • Número: {config?.whatsappNumber || 'No configurado'}
+          {conectado ? '🟢 CONECTADO' : '⚪ DESCONECTADO'} • Número: {conexion.numero || config?.whatsappNumber || 'No configurado'}
         </p>
       </div>
 
@@ -220,6 +288,52 @@ export default function VencimientosAnny() {
       {/* =============== TAB: MÉTRICAS =============== */}
       {activeTab === 'metricas' && (
         <div>
+          {/* FIX ANNY-QR-001: Conexión WhatsApp */}
+          <div style={{ background: conectado ? '#f0fdf4' : '#fefce8', border: `1px solid ${conectado ? '#86efac' : '#fde047'}`, borderRadius: 12, padding: 20, marginBottom: 24 }}>
+            <h3 style={{ fontSize: 14, fontWeight: 800, color: '#1a1a2e', marginBottom: 12 }}>
+              📱 Conexión WhatsApp
+            </h3>
+
+            {conectado ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+                <div style={{ fontSize: 13, color: '#15803d', fontWeight: 700 }}>
+                  🟢 Conectado — {conexion.numero}
+                </div>
+                <button
+                  onClick={desconectarWhatsApp}
+                  style={{ padding: '10px 16px', border: '1px solid #fecaca', borderRadius: 8, background: '#fef2f2', color: '#b91c1c', fontWeight: 700, fontSize: 12, cursor: 'pointer' }}
+                >
+                  Desconectar
+                </button>
+              </div>
+            ) : qrImg ? (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 12 }}>
+                  Escanea este QR desde el celular de la línea de WhatsApp:
+                </div>
+                <img src={qrImg} alt="QR WhatsApp" style={{ width: 240, height: 240, borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff' }} />
+                <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 12, lineHeight: 1.5 }}>
+                  WhatsApp → ⋮ Menú → <strong>Dispositivos vinculados</strong> → <strong>Vincular un dispositivo</strong><br />
+                  El QR se renueva automáticamente. Esta pantalla detectará cuando conectes.
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+                <div style={{ fontSize: 12, color: '#6b7280', maxWidth: 480, lineHeight: 1.5 }}>
+                  Anny necesita vincularse a una línea de WhatsApp como dispositivo adicional.
+                  Al conectar se genera un código QR que escaneas desde el celular de esa línea.
+                </div>
+                <button
+                  onClick={conectarWhatsApp}
+                  disabled={conectando}
+                  style={{ padding: '12px 20px', border: 'none', borderRadius: 8, background: '#16a34a', color: '#fff', fontWeight: 700, fontSize: 13, cursor: 'pointer', opacity: conectando ? 0.6 : 1 }}
+                >
+                  {conectando ? 'Generando QR...' : '📱 Conectar WhatsApp'}
+                </button>
+              </div>
+            )}
+          </div>
+
           {/* Cards de métricas */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 24 }}>
             <div style={{ background: '#dcfce7', border: '1px solid #86efac', borderRadius: 12, padding: 16 }}>
@@ -346,17 +460,21 @@ export default function VencimientosAnny() {
                     {conv.nombreCliente || conv.telefono}
                   </div>
                   <div style={{ fontSize: 11, color: '#9ca3af' }}>
-                    {new Date(conv.createdAt).toLocaleString()}
+                    {conv.createdAt?.seconds ? new Date(conv.createdAt.seconds * 1000).toLocaleString() : ''}
                   </div>
                 </div>
 
                 <div style={{ background: '#fff', borderRadius: 6, padding: 10, marginBottom: 8 }}>
-                  <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>
-                    <strong>Cliente:</strong> {conv.mensajeCliente}
-                  </div>
-                  <div style={{ fontSize: 12, color: '#15803d' }}>
-                    <strong>Anny:</strong> {conv.respuestaAgente}
-                  </div>
+                  {conv.mensajeCliente ? (
+                    <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 4 }}>
+                      <strong>Cliente:</strong> {conv.mensajeCliente}
+                    </div>
+                  ) : null}
+                  {conv.respuestaAgente ? (
+                    <div style={{ fontSize: 12, color: conv.respondidoPor === 'ADMIN_MANUAL' ? '#0369a1' : '#15803d' }}>
+                      <strong>{conv.respondidoPor === 'ADMIN_MANUAL' ? 'Tú:' : 'Anny:'}</strong> {conv.respuestaAgente}
+                    </div>
+                  ) : null}
                 </div>
 
                 <div style={{
@@ -365,10 +483,10 @@ export default function VencimientosAnny() {
                   fontWeight: 700,
                   padding: '4px 8px',
                   borderRadius: 6,
-                  background: conv.escalado ? '#fed7aa' : '#dcfce7',
-                  color: conv.escalado ? '#b45309' : '#15803d'
+                  background: conv.respondidoPor === 'ADMIN_MANUAL' ? '#dbeafe' : conv.escalado ? '#fed7aa' : '#dcfce7',
+                  color: conv.respondidoPor === 'ADMIN_MANUAL' ? '#0369a1' : conv.escalado ? '#b45309' : '#15803d'
                 }}>
-                  {conv.escalado ? '⚠️ Escalado' : '✓ Automático'}
+                  {conv.respondidoPor === 'ADMIN_MANUAL' ? '👤 Manual' : conv.escalado ? '⚠️ Escalado' : '✓ Automático'}
                 </div>
               </div>
             ))
@@ -398,7 +516,7 @@ export default function VencimientosAnny() {
                       {caso.nombreCliente}
                     </div>
                     <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
-                      {new Date(caso.createdAt).toLocaleString()}
+                      {caso.createdAt?.seconds ? new Date(caso.createdAt.seconds * 1000).toLocaleString() : ''}
                     </div>
                   </div>
                   <div style={{
@@ -445,3 +563,4 @@ export default function VencimientosAnny() {
     </div>
   );
 }
+// FIN VencimientosAnny.js

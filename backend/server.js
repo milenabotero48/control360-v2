@@ -106,4 +106,14 @@ app.listen(PORT, () => {
   iniciarCronWhatsapp();
   const { iniciarCronLlamadasIA } = require('./services/llamadasIAService');
   iniciarCronLlamadasIA();
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FIX ANNY-QR-001: restaurar sesiones Baileys después de cada deploy.
+  // Los tenants que estaban 'conectado' reconectan automáticamente usando
+  // la sesión persistida en el Volume (BAILEYS_DIR) — sin re-escanear QR.
+  // Fire-and-forget: si falla, el server sigue corriendo normal.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const { restaurarSesiones } = require('./services/baileysService');
+  restaurarSesiones();
 });
+// FIN server.js

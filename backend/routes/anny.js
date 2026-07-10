@@ -7,6 +7,7 @@
 //
 // Prefijo: /api/anny/*
 // Todas las rutas requieren autenticación
+// FIX ANNY-QR-001: endpoints de conexión WhatsApp (Baileys)
 // ============================================================
 
 const express = require('express');
@@ -14,6 +15,8 @@ const router = express.Router();
 const { db, admin } = require('../config/firebase');
 const { authenticate } = require('../middleware/auth');
 const annyService = require('../services/annyService');
+// FIX ANNY-QR-001: conexión WhatsApp vía Baileys
+const baileysService = require('../services/baileysService');
 
 // ============================================================
 // FIX ANNY-GATE-001: middleware de acceso al módulo.
@@ -37,6 +40,15 @@ async function requireAnnyActivo(req, res, next) {
   }
 }
 
+// FIX ANNY-QR-001: conectar/desconectar WhatsApp es acción sensible —
+// solo el rol admin del tenant puede hacerlo (no sub-usuarios).
+function requireAdmin(req, res, next) {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Solo admin puede gestionar la conexión de WhatsApp' });
+  }
+  next();
+}
+
 // ============================================================
 // 1. GET /api/anny/config — Obtener configuración
 // SIN gate: siempre responde (incluye activo:true/false) para que
@@ -56,8 +68,7 @@ router.get('/config', authenticate, async (req, res) => {
 // 2. PUT /api/anny/config — Actualizar configuración OPERATIVA
 // Body: { whatsappNumber, diasAntes, horaEnvio }
 // FIX ANNY-GATE-001: ya NO acepta `activo` — ese campo solo lo
-// cambia Milena vía Panel Suscriptores. Si el módulo no está
-// activo, ni siquiera deja configurar el número (gate aplicado).
+// cambia Milena vía Panel Suscriptores.
 // ============================================================
 router.put('/config', authenticate, requireAnnyActivo, async (req, res) => {
   try {
@@ -296,13 +307,8 @@ router.get('/estadisticas', authenticate, requireAnnyActivo, async (req, res) =>
 // 10. POST /api/anny/test — Enviar mensaje de prueba
 // Body: { telefono, mensaje } (solo para testing)
 // ============================================================
-router.post('/test', authenticate, requireAnnyActivo, async (req, res) => {
+router.post('/test', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
   try {
-    // Solo admin puede hacer pruebas
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Solo admin' });
-    }
-
     const adminId = req.user.adminId || req.user.uid;
     const { telefono, mensaje, nombreCliente = 'Cliente Test' } = req.body;
 
@@ -323,4 +329,53 @@ router.post('/test', authenticate, requireAnnyActivo, async (req, res) => {
   }
 });
 
+// ============================================================
+// FIX ANNY-QR-001 — Endpoints de conexión WhatsApp (Baileys)
+// ============================================================
+
+// 11. POST /api/anny/conectar — Iniciar sesión y generar QR
+router.post('/conectar', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const resultado = await baileysService.iniciarSesion(adminId);
+    return res.json(resultado);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// 12. GET /api/anny/qr — Obtener QR pendiente (dataURL) + estado
+router.get('/qr', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const resultado = baileysService.getQR(adminId);
+    return res.json(resultado);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// 13. GET /api/anny/estado — Estado de conexión WhatsApp
+router.get('/estado', authenticate, requireAnnyActivo, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const resultado = await baileysService.getEstado(adminId);
+    return res.json(resultado);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// 14. POST /api/anny/desconectar — Cerrar y borrar sesión
+router.post('/desconectar', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const resultado = await baileysService.desconectar(adminId);
+    return res.json(resultado);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
+// FIN anny.js
