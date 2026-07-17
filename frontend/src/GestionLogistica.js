@@ -43,15 +43,29 @@ const ModalAsignar = ({ ordenes, mensajeros, onAsignar, onCerrar }) => {
   const [seleccionadas, setSeleccionadas] = useState({});
   const [guardando, setGuardando]       = useState(false);
   const [error, setError]               = useState('');
+  // ✅ BUSCAR-LOGISTICA-001: buscador dentro del modal — con muchas órdenes
+  // tocaba bajar buscando a ojo. Filtra por cliente, número de orden o dirección.
+  const [busqueda, setBusqueda]         = useState('');
+
+  const q = busqueda.trim().toLowerCase();
+  const ordenesFiltradas = !q ? ordenes : ordenes.filter(o =>
+    (o.clienteNombre || '').toLowerCase().includes(q) ||
+    (o.numeroOrden || '').toLowerCase().includes(q) ||
+    (o.direccionTarea || o.sucursalDireccion || o.clienteDireccion || '').toLowerCase().includes(q)
+  );
 
   const mensajeroSel = mensajeros.find(m => m.id === mensajeroId);
   const idsSeleccionados = Object.keys(seleccionadas).filter(k => seleccionadas[k]);
   const totalSeleccionado = ordenes.filter(o => seleccionadas[o.id]).reduce((s, o) => s + (o.total || 0), 0);
-  const todasSeleccionadas = ordenes.length > 0 && idsSeleccionados.length === ordenes.length;
+  const todasSeleccionadas = ordenesFiltradas.length > 0 && ordenesFiltradas.every(o => seleccionadas[o.id]);
 
   const toggleTodas = () => {
-    if (todasSeleccionadas) setSeleccionadas({});
-    else { const n = {}; ordenes.forEach(o => { n[o.id] = true; }); setSeleccionadas(n); }
+    // Selecciona/deselecciona lo VISIBLE (respeta el filtro de búsqueda)
+    if (todasSeleccionadas) {
+      setSeleccionadas(p => { const n = { ...p }; ordenesFiltradas.forEach(o => { delete n[o.id]; }); return n; });
+    } else {
+      setSeleccionadas(p => { const n = { ...p }; ordenesFiltradas.forEach(o => { n[o.id] = true; }); return n; });
+    }
   };
 
   const handleAsignar = async () => {
@@ -101,6 +115,16 @@ const ModalAsignar = ({ ordenes, mensajeros, onAsignar, onCerrar }) => {
             )}
           </div>
 
+          {/* ✅ BUSCAR-LOGISTICA-001: buscador del modal */}
+          <input value={busqueda} onChange={e => setBusqueda(e.target.value)}
+            placeholder="🔍 Buscar por cliente, orden o dirección..."
+            style={{ ...s.input, width: '100%', marginBottom: 8, boxSizing: 'border-box' }} />
+          {q && (
+            <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 6 }}>
+              {ordenesFiltradas.length} de {ordenes.length} órdenes coinciden
+            </div>
+          )}
+
           <div style={{ border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
@@ -112,7 +136,7 @@ const ModalAsignar = ({ ordenes, mensajeros, onAsignar, onCerrar }) => {
                 </tr>
               </thead>
               <tbody>
-                {ordenes.map((o, i) => (
+                {ordenesFiltradas.map((o, i) => (
                   <tr key={o.id} onClick={() => setSeleccionadas(p => ({ ...p, [o.id]: !p[o.id] }))}
                     style={{ background: seleccionadas[o.id] ? '#f0fdf4' : i % 2 === 0 ? '#fff' : '#f9fafb', cursor: 'pointer' }}>
                     <td style={{ ...s.td, textAlign: 'center' }}>
@@ -1044,6 +1068,10 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
 const ModalHistorialCuadres = ({ mensajeroId, mensajeroNombre, headers, onCerrar }) => {
   const [arqueos, setArqueos] = useState(null);
   const [error, setError] = useState('');
+  // ✅ HISTORICO-DETALLE-001: arqueo expandido — clic en la tarjeta muestra el
+  // detalle congelado completo (órdenes con monto y caja, pendientes en ruta,
+  // extintores devueltos). Antes solo se veía el resumen.
+  const [abierto, setAbierto] = useState(null);
 
   useEffect(() => {
     axios.get(`${API}/logistica/cuadres-historial?mensajeroId=${mensajeroId}`, { headers })
@@ -1075,11 +1103,18 @@ const ModalHistorialCuadres = ({ mensajeroId, mensajeroNombre, headers, onCerrar
           {arqueos && arqueos.length === 0 && (
             <div style={s.empty}><p style={{ fontSize: 40 }}>📭</p><p>Aún no hay cuadres registrados para este mensajero</p></div>
           )}
-          {arqueos && arqueos.map((a, i) => (
-            <div key={a.id || i} style={{ border: '1px solid #e5e7eb', borderRadius: 10, padding: '12px 14px', marginBottom: 10, background: a.descuadre !== 0 ? '#fffbeb' : '#fff' }}>
+          {arqueos && arqueos.map((a, i) => {
+            const expandido = abierto === (a.id || i);
+            return (
+            <div key={a.id || i}
+              onClick={() => setAbierto(expandido ? null : (a.id || i))}
+              style={{ border: expandido ? '1px solid #a5b4fc' : '1px solid #e5e7eb', borderRadius: 10, padding: '12px 14px', marginBottom: 10, cursor: 'pointer', background: a.descuadre !== 0 ? '#fffbeb' : '#fff' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 6 }}>
                 <div style={{ fontSize: 13, fontWeight: 700 }}>{fmtFechaHora(a.fecha)}</div>
-                <div style={{ fontSize: 12, color: '#6b7280' }}>Autorizó: {a.autorizadoPorEmail || '—'}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ fontSize: 12, color: '#6b7280' }}>Autorizó: {a.autorizadoPorEmail || '—'}</div>
+                  <span style={{ fontSize: 11, color: '#6366f1', fontWeight: 700 }}>{expandido ? '▲ Cerrar' : '▼ Ver detalle'}</span>
+                </div>
               </div>
               <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 8, fontSize: 13 }}>
                 <span>Esperado: <strong>{fmt(a.efectivoEsperado)}</strong></span>
@@ -1094,13 +1129,61 @@ const ModalHistorialCuadres = ({ mensajeroId, mensajeroNombre, headers, onCerrar
                   {a.motivoDescuadre ? ` — ${a.motivoDescuadre}` : ''}
                 </div>
               )}
-              {(a.ordenesCuadradas || []).length > 0 && (
+              {!expandido && (a.ordenesCuadradas || []).length > 0 && (
                 <div style={{ marginTop: 8, fontSize: 12, color: '#6b7280' }}>
                   {a.ordenesCuadradas.length} orden(es): {a.ordenesCuadradas.map(o => o.numeroOrden).join(', ')}
                 </div>
               )}
+
+              {/* ✅ HISTORICO-DETALLE-001: detalle congelado del arqueo */}
+              {expandido && (
+                <div style={{ marginTop: 10, borderTop: '1px dashed #e5e7eb', paddingTop: 10 }} onClick={e => e.stopPropagation()}>
+                  {(a.ordenesCuadradas || []).length > 0 && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: '#475569', marginBottom: 4 }}>ÓRDENES CUADRADAS ({a.ordenesCuadradas.length})</div>
+                      <div style={{ border: '1px solid #f1f5f9', borderRadius: 8, overflow: 'hidden' }}>
+                        {a.ordenesCuadradas.map((o, j) => (
+                          <div key={j} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '6px 10px', fontSize: 12, borderTop: j > 0 ? '1px solid #f8fafc' : 'none' }}>
+                            <span><code style={{ color: '#6b7280' }}>{o.numeroOrden}</code>{o.cajaNombre ? <span style={{ color: '#94a3b8', marginLeft: 6 }}>→ {o.cajaNombre}</span> : null}</span>
+                            <strong style={{ color: '#16a34a' }}>{fmt(o.monto)}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {(a.cajasDestino || []).length > 0 && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: '#475569', marginBottom: 4 }}>EFECTIVO POR CAJA</div>
+                      {a.cajasDestino.map((c, j) => (
+                        <div key={j} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '3px 0' }}>
+                          <span>🏦 {c.cajaNombre || c.cajaId}</span>
+                          <strong>{fmt(c.monto)}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {(a.ordenesPendientesRuta || []).length > 0 && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: '#475569', marginBottom: 4 }}>QUEDARON EN RUTA (NO CUADRADAS)</div>
+                      {a.ordenesPendientesRuta.map((o, j) => (
+                        <div key={j} style={{ fontSize: 12, color: '#6b7280', padding: '2px 0' }}>
+                          🚚 <code>{o.numeroOrden}</code> · {o.clienteNombre || ''} <span style={{ color: '#94a3b8' }}>({o.estado})</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {(a.extintoresDevueltos || []).length > 0 && (
+                    <div style={{ fontSize: 12, color: '#92400e' }}>
+                      🧯 {a.extintoresDevueltos.length} extintor(es) de préstamo devuelto(s) en este cuadre
+                    </div>
+                  )}
+                  {(a.ordenesCuadradas || []).length === 0 && (a.cajasDestino || []).length === 0 && (a.ordenesPendientesRuta || []).length === 0 && (a.extintoresDevueltos || []).length === 0 && (
+                    <div style={{ fontSize: 12, color: '#9ca3af' }}>Este arqueo no tiene detalle adicional registrado.</div>
+                  )}
+                </div>
+              )}
             </div>
-          ))}
+          ); })}
         </div>
       </div>
     </div>
@@ -1123,6 +1206,12 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
   // destino. Se listan solo las cajas de efectivo del tenant.
   const [cajasEfectivo, setCajasEfectivo] = useState([]);
   const [cajaEfectivoId, setCajaEfectivoId] = useState('');
+  // ✅ CUADRE-CAJA-002: caja destino POR ORDEN. cajasPorOrden = { ordenId:
+  // cajaId } para efectivo (si difiere de la caja general); cajasVirtualesPorOrden
+  // = caja banco sugerida para cada pago virtual (la usa tesorería al validar).
+  const [cajasBanco, setCajasBanco] = useState([]);
+  const [cajasPorOrden, setCajasPorOrden] = useState({});
+  const [cajasVirtualesPorOrden, setCajasVirtualesPorOrden] = useState({});
 
   useEffect(() => {
     axios.get(`${API}/logistica/cuadre/${mensajeroId}`, { headers })
@@ -1134,15 +1223,17 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
       })
       .catch(() => setError('Error al cargar cuadre'));
 
-    // ✅ CUADRE-CAJA-001: cargar cajas de efectivo (tipo o nombre con "efectivo")
+    // ✅ CUADRE-CAJA-001/002: cargar cajas del tenant y separarlas —
+    // efectivo (tipo o nombre con "efectivo") vs bancos/billeteras (el resto).
     axios.get(`${API}/cajas`, { headers })
       .then(r => {
-        const efec = (r.data || []).filter(c =>
-          c.activa !== false &&
-          ((c.tipo || '').toLowerCase().includes('efectivo') ||
-           (c.nombre || '').toLowerCase().includes('efectivo'))
-        );
+        const activas = (r.data || []).filter(c => c.activa !== false);
+        const esEfectivo = c =>
+          (c.tipo || '').toLowerCase().includes('efectivo') ||
+          (c.nombre || '').toLowerCase().includes('efectivo');
+        const efec = activas.filter(esEfectivo);
         setCajasEfectivo(efec);
+        setCajasBanco(activas.filter(c => !esEfectivo(c)));
         if (efec.length === 1) setCajaEfectivoId(efec[0].id); // única: preseleccionar
       })
       .catch(() => {});
@@ -1170,11 +1261,19 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
     }
     setGuardando(true); setError('');
     try {
+      // ✅ CUADRE-CAJA-002: enviar solo las selecciones con valor
+      const limpiar = (obj) => {
+        const out = {};
+        Object.keys(obj || {}).forEach(k => { if (obj[k]) out[k] = obj[k]; });
+        return Object.keys(out).length > 0 ? out : undefined;
+      };
       await onConfirmar({
         pin,
         montoRecibido: recibidoNum,
         motivoDescuadre: motivoDescuadre.trim() || undefined,
         cajaEfectivoId: cajaEfectivoId || undefined, // ✅ CUADRE-CAJA-001
+        cajasPorOrden: limpiar(cajasPorOrden),               // ✅ CUADRE-CAJA-002
+        cajasVirtualesPorOrden: limpiar(cajasVirtualesPorOrden), // ✅ CUADRE-CAJA-002
         extintoresDevueltos: Object.keys(extDevueltos).filter(k => extDevueltos[k])
       });
     } catch (e) { setError(e.response?.data?.error || 'Error al confirmar cuadre'); }
@@ -1235,23 +1334,69 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                 </div>
               )}
 
-              {/* Órdenes cobradas */}
+              {/* Órdenes cobradas (efectivo) — ✅ CUADRE-CAJA-002: cada orden
+                  puede entrar a una caja distinta; sin selección va a la caja
+                  general del cuadre. Cero traslados manuales después. */}
               {cuadre.ordenesCobro?.length > 0 && (
                 <div style={{ marginBottom: 16 }}>
-                  <label style={s.label}>Cobros del día</label>
+                  <label style={s.label}>Cobros del día (efectivo)</label>
                   <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden' }}>
                     {cuadre.ordenesCobro.map((o, i) => (
-                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid #f3f4f6', background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
-                        <div>
+                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '8px 12px', borderBottom: '1px solid #f3f4f6', background: i % 2 === 0 ? '#fff' : '#f9fafb' }}>
+                        <div style={{ minWidth: 140 }}>
                           <code style={{ fontSize: 12, color: '#6b7280' }}>{o.numeroOrden}</code>
                           <span style={{ fontSize: 13, marginLeft: 8 }}>{o.clienteNombre}</span>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {cajasEfectivo.length > 1 && (
+                            <select value={cajasPorOrden[o.id] || ''}
+                              onChange={e => setCajasPorOrden(p => ({ ...p, [o.id]: e.target.value }))}
+                              style={{ ...s.input, padding: '6px 8px', fontSize: 12, width: 'auto', maxWidth: 150 }}>
+                              <option value="">Caja general</option>
+                              {cajasEfectivo.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                            </select>
+                          )}
                           {o.fotoTransferencia && <a href={o.fotoTransferencia} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#0284c7' }}>📷 Ver</a>}
                           <span style={{ fontWeight: 700, color: '#16a34a' }}>{fmt(o.monto)}</span>
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {/* ✅ CUADRE-CAJA-002: pagos VIRTUALES de la ruta — antes eran
+                  invisibles en el cuadre. No entran a caja aquí (esperan
+                  validación de tesorería), pero el receptor elige a qué banco
+                  deben entrar; esa caja queda sugerida en la validación. */}
+              {cuadre.ordenesVirtual?.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={s.label}>Pagos virtuales — por validar en tesorería</label>
+                  <div style={{ border: '1px solid #bfdbfe', borderRadius: 8, background: '#eff6ff', overflow: 'hidden' }}>
+                    {cuadre.ordenesVirtual.map((o, i) => (
+                      <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '8px 12px', borderBottom: '1px solid #dbeafe' }}>
+                        <div style={{ minWidth: 140 }}>
+                          <code style={{ fontSize: 12, color: '#1d4ed8' }}>{o.numeroOrden}</code>
+                          <span style={{ fontSize: 13, marginLeft: 8 }}>{o.clienteNombre}</span>
+                          {o.formaPago && <span style={{ fontSize: 11, color: '#60a5fa', marginLeft: 6 }}>{o.formaPago}</span>}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {cajasBanco.length > 0 && (
+                            <select value={cajasVirtualesPorOrden[o.id] || ''}
+                              onChange={e => setCajasVirtualesPorOrden(p => ({ ...p, [o.id]: e.target.value }))}
+                              style={{ ...s.input, padding: '6px 8px', fontSize: 12, width: 'auto', maxWidth: 150 }}>
+                              <option value="">— Banco destino —</option>
+                              {cajasBanco.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                            </select>
+                          )}
+                          {o.fotoTransferencia && <a href={o.fotoTransferencia} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: '#0284c7' }}>📷 Ver</a>}
+                          <span style={{ fontWeight: 700, color: '#1d4ed8' }}>{fmt(o.monto)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#1d4ed8', marginTop: 4 }}>
+                    Este dinero entra a caja cuando tesorería valide el comprobante — el banco elegido aquí queda sugerido en esa validación.
                   </div>
                 </div>
               )}
@@ -1301,11 +1446,12 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                 </div>
               )}
 
-              {/* ✅ CUADRE-BARRIDO-001: órdenes aún EN RUTA — el cuadre NO las
-                  toca. Conservan su estado para el día siguiente o reasignación. */}
-              {(cuadre.rutaDetalle || []).filter(o => ['en_ruta_recogida', 'en_ruta_entrega'].includes(o.estado)).length > 0 && (
+              {/* ✅ CUADRE-BARRIDO-001 + COBRO-RECOGIDA-001: órdenes aún EN RUTA
+                  sin cobro — el cuadre NO las toca. Las cobradas en ruta SÍ
+                  entran (solo el dinero; el servicio sigue su flujo). */}
+              {(cuadre.rutaDetalle || []).filter(o => ['en_ruta_recogida', 'en_ruta_entrega', 'en_taller'].includes(o.estado) && !o.cobrado).length > 0 && (
                 <div style={{ marginBottom: 16, padding: '10px 12px', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, fontSize: 12, color: '#1d4ed8' }}>
-                  🚚 <strong>{(cuadre.rutaDetalle || []).filter(o => ['en_ruta_recogida', 'en_ruta_entrega'].includes(o.estado)).length} orden(es) siguen en ruta</strong> y NO entran en este cuadre: conservan su estado y quedan listas para la próxima ruta o para reasignar.
+                  🚚 <strong>{(cuadre.rutaDetalle || []).filter(o => ['en_ruta_recogida', 'en_ruta_entrega', 'en_taller'].includes(o.estado) && !o.cobrado).length} orden(es) siguen en ruta/taller sin cobro</strong> y NO entran en este cuadre: conservan su estado y quedan listas para la próxima ruta o para reasignar. Las cobradas en recogida/ruta SÍ entran: se recibe el dinero y el servicio sigue su flujo.
                 </div>
               )}
 
@@ -1422,6 +1568,12 @@ const GestionLogistica = ({ user }) => {
   const [modalAsignarSector, setModalAsignarSector] = useState(null);
   // Modal detalle orden (ver info completa desde logística)
   const [modalDetalleOrden, setModalDetalleOrden] = useState(null);
+  // ✅ BUSCAR-LOGISTICA-001: buscador y filtros de la lista de órdenes —
+  // pedido directo de mensajeros y logística: encontrar una orden sin bajar
+  // recorriendo todos los sectores a ojo.
+  const [busquedaOrdenes, setBusquedaOrdenes] = useState('');
+  const [filtroEstadoLista, setFiltroEstadoLista] = useState('');
+  const [filtroMensajeroLista, setFiltroMensajeroLista] = useState('');
 
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
@@ -1463,11 +1615,25 @@ const GestionLogistica = ({ user }) => {
   }, [token]);
 
   // Mini-Ola 2.6: agrupar órdenes por sector
+  // ✅ BUSCAR-LOGISTICA-001: aplicar búsqueda y filtros ANTES de agrupar por
+  // sector. Busca en cliente, número de orden, dirección y teléfono.
+  const qOrdenes = busquedaOrdenes.trim().toLowerCase();
+  const ordenesVisibles = ordenes.filter(o => {
+    if (filtroEstadoLista && o.estado !== filtroEstadoLista) return false;
+    if (filtroMensajeroLista === '_sin_asignar' ? o.mensajeroId : (filtroMensajeroLista && o.mensajeroId !== filtroMensajeroLista)) return false;
+    if (!qOrdenes) return true;
+    return (o.clienteNombre || '').toLowerCase().includes(qOrdenes) ||
+      (o.numeroOrden || '').toLowerCase().includes(qOrdenes) ||
+      (o.direccionTarea || o.sucursalDireccion || o.clienteDireccion || '').toLowerCase().includes(qOrdenes) ||
+      (o.clienteTelefono || o.telefono || '').toLowerCase().includes(qOrdenes);
+  });
+  const hayFiltroActivo = !!(qOrdenes || filtroEstadoLista || filtroMensajeroLista);
+
   const ordenesPorSector = (() => {
     const grupos = {};
     sectores.forEach(s => { grupos[s.id] = { sector: s, ordenes: [] }; });
     grupos['_sin_asignar'] = { sector: { id: '_sin_asignar', etiqueta: 'Sin Asignar', color: '#9ca3af' }, ordenes: [] };
-    ordenes.forEach(o => {
+    ordenesVisibles.forEach(o => {
       const sid = o.sectorId || '_sin_asignar';
       if (grupos[sid]) grupos[sid].ordenes.push(o);
       else grupos['_sin_asignar'].ordenes.push(o);
@@ -1603,9 +1769,44 @@ const GestionLogistica = ({ user }) => {
           {/* ── ÓRDENES (Admin + Mensajero) ── */}
           {(tab === 'ordenes' || isMensajero) && (
             <div style={s.tableWrap}>
+              {/* ✅ BUSCAR-LOGISTICA-001: buscador + filtros de la lista */}
+              {ordenes.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
+                  <input value={busquedaOrdenes} onChange={e => setBusquedaOrdenes(e.target.value)}
+                    placeholder="🔍 Buscar cliente, orden, dirección o teléfono..."
+                    style={{ ...s.input, flex: '1 1 220px', minWidth: 180, boxSizing: 'border-box' }} />
+                  <select value={filtroEstadoLista} onChange={e => setFiltroEstadoLista(e.target.value)}
+                    style={{ ...s.input, width: 'auto', minWidth: 140 }}>
+                    <option value="">Todos los estados</option>
+                    <option value="programada">Programada</option>
+                    <option value="despacho">Despacho</option>
+                    <option value="en_ruta_recogida">En Ruta Recogida</option>
+                    <option value="en_ruta_entrega">En Ruta Entrega</option>
+                    <option value="entrega_cobranza">Entrega/Cobranza</option>
+                  </select>
+                  {!isMensajero && mensajeros.length > 0 && (
+                    <select value={filtroMensajeroLista} onChange={e => setFiltroMensajeroLista(e.target.value)}
+                      style={{ ...s.input, width: 'auto', minWidth: 140 }}>
+                      <option value="">Todos los mensajeros</option>
+                      <option value="_sin_asignar">Sin asignar</option>
+                      {mensajeros.map(m => <option key={m.id} value={m.id}>{m.nombre}</option>)}
+                    </select>
+                  )}
+                  {hayFiltroActivo && (
+                    <button onClick={() => { setBusquedaOrdenes(''); setFiltroEstadoLista(''); setFiltroMensajeroLista(''); }}
+                      style={{ padding: '9px 14px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#6b7280' }}>
+                      ✕ Limpiar ({ordenesVisibles.length} de {ordenes.length})
+                    </button>
+                  )}
+                </div>
+              )}
               {ordenes.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>
                   {isMensajero ? 'No tienes órdenes asignadas hoy' : 'No hay órdenes pendientes de logística'}
+                </div>
+              ) : ordenesVisibles.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>
+                  🔍 Ninguna orden coincide con la búsqueda o los filtros
                 </div>
               ) : ordenesPorSector.map(({ sector, ordenes: ordsGrupo }) => (
                 <div key={sector.id} style={{ marginBottom: 24 }}>
@@ -1891,9 +2092,11 @@ const GestionLogistica = ({ user }) => {
       )}
 
       {/* MODALES */}
+      {/* ✅ FIX ASIGNAR-LISTA-001: faltaba 'en_ruta_recogida' — las órdenes
+          en ruta de recogida no aparecían para (re)asignar (9 de 10). */}
       {modalAsignar && (
         <ModalAsignar
-          ordenes={ordenes.filter(o => ['programada', 'despacho', 'en_ruta_entrega', 'entrega_cobranza'].includes(o.estado))}
+          ordenes={ordenes.filter(o => ['programada', 'despacho', 'en_ruta_recogida', 'en_ruta_entrega', 'entrega_cobranza'].includes(o.estado))}
           mensajeros={mensajeros}
           onAsignar={asignarRuta}
           onCerrar={() => setModalAsignar(false)}

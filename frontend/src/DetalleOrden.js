@@ -330,7 +330,12 @@ const cargarConfigCerts = async () => {
               (c.nombre || '').toLowerCase().includes('efectivo'))
           );
           setCajasDisp(noEfectivo);
-          if (noEfectivo.length === 1) setCajaValidacionId(noEfectivo[0].id);
+          // ✅ CUADRE-CAJA-002: si en el cuadre se eligió un banco destino para
+          // este pago, viene sugerido en la orden — se preselecciona aquí.
+          const sugerida = orden?.cajaSugeridaId && noEfectivo.some(c => c.id === orden.cajaSugeridaId)
+            ? orden.cajaSugeridaId : '';
+          if (sugerida) setCajaValidacionId(sugerida);
+          else if (noEfectivo.length === 1) setCajaValidacionId(noEfectivo[0].id);
         })
         .catch(() => setCajasDisp([]));
     }

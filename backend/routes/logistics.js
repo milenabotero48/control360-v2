@@ -986,6 +986,19 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
       } catch (eAlerta) { console.warn('No se pudo crear alerta cuadre:', eAlerta.message); }
     }
 
+    // ✅ COBRO-RECOGIDA-001: huella de auditoría del COBRO en el momento en
+    // que el mensajero lo reporta (quién cobró, cuánto, cómo y en qué punto
+    // del flujo). Antes solo quedaba el cambio de estado; si el cliente pagaba
+    // en la recogida, no había constancia auditable del cobro hasta el cuadre.
+    if (mensajeroCobro) {
+      await auditar({
+        accion: 'COBRO_MENSAJERO',
+        descripcion: `${orden.mensajeroNombre || req.user.email} cobró $${(Number(update.montoRecaudado) || 0).toLocaleString('es-CO')} (${update.formaPagoRecaudo || 'Efectivo'}) en orden ${orden.numeroOrden} — ${orden.clienteNombre || ''} — estado: ${orden.estado}`,
+        usuarioId: req.user.uid || req.user.id,
+        usuarioEmail: req.user.email
+      });
+    }
+
     await auditar({
       accion: 'ESTADO_ORDEN_LOGISTICA',
       descripcion: `Orden ${orden.numeroOrden} → ${update.estado || nuevoEstado}`,
@@ -1079,9 +1092,16 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
       return res.status(403).json({ error: 'No autorizado para consultar este mensajero' });
     }
 
+    // ✅ COBRO-RECOGIDA-001: se incluyen TAMBIÉN en_ruta_recogida y en_taller.
+    // ANTES: si el cliente pagaba al momento de la recogida, la orden pasaba a
+    // taller y el dinero DESAPARECÍA del cuadre (el mensajero lo tenía en el
+    // bolsillo pero el sistema no dejaba recibirlo — workaround real: sacar el
+    // equipo del taller y marcar entregado solo para poder cuadrar). AHORA el
+    // cuadre ve todo cobro del mensajero sin importar el estado operativo.
+    // Este universo de estados DEBE ser el mismo del POST /confirmar.
     const snapOrdenes = await db.collection('orders')
       .where('mensajeroId', '==', mensajeroId)
-      .where('estado', 'in', ['en_ruta_entrega', 'entrega_cobranza', 'cuadre_dinero', 'completada'])
+      .where('estado', 'in', ['en_ruta_recogida', 'en_ruta_entrega', 'en_taller', 'entrega_cobranza', 'cuadre_dinero', 'completada'])
       .get();
 
     let totalEfectivo = 0;   // lo carga el mensajero → a entregar
@@ -1219,7 +1239,11 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
     // destino (segregación de funciones: el mensajero declara, el receptor
     // clasifica). Antes el backend tomaba a ciegas la primera caja tipo
     // 'Efectivo' — origen de cajas erradas y traslados para cuadrar.
-    const { pin, montoRecibido, extintoresDevueltos, cajaEfectivoId } = req.body;
+    // ✅ CUADRE-CAJA-002: cajasPorOrden = { ordenId: cajaId } para el EFECTIVO
+    // (cada orden puede entrar a una caja distinta); cajasVirtualesPorOrden
+    // = { ordenId: cajaId } como caja SUGERIDA para validar el pago virtual.
+    const { pin, montoRecibido, extintoresDevueltos, cajaEfectivoId,
+            cajasPorOrden, cajasVirtualesPorOrden } = req.body;
     const { mensajeroId } = req.params;
     const adminId = req.adminId || req.user?.uid || req.user?.id;
 
@@ -1279,17 +1303,20 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       }
     }
     // ── Marcar órdenes cuadradas + registrar dinero SOLO una vez ─────────────
-    // ✅ FIX CUADRE-BARRIDO-001: el cuadre YA NO incluye 'en_ruta_entrega'.
-    // ANTES: la consulta barría también las órdenes aún EN RUTA (sin entregar)
-    // y les forzaba un cierre: sin monto → CxC. Cuando al mensajero no le
-    // alcanzaba el día, sus órdenes pendientes saltaban a cartera sin entrega,
-    // sin foto y sin cobranza real (causa raíz de las órdenes atascadas).
-    // AHORA: el cuadre solo procesa órdenes que el mensajero YA declaró con el
-    // modal de entrega (entrega_cobranza / cuadre_dinero) o ya completadas.
-    // Las que sigan en ruta conservan su estado, listas para el día siguiente.
+    // ✅ FIX CUADRE-BARRIDO-001 + ✅ COBRO-RECOGIDA-001: pago y estado son DOS
+    // dimensiones separadas (regla raíz Ola 2.5).
+    //  - Órdenes en estado de COBRANZA (entrega_cobranza/cuadre_dinero/
+    //    completada): se cierran como siempre (completada o cxc).
+    //  - Órdenes OPERATIVAS (en_ruta_recogida/en_ruta_entrega/en_taller):
+    //    · CON cobro → solo se recibe el DINERO (cuadrado + dineroEnCaja);
+    //      el estado NO se toca y el equipo sigue su flujo de taller/entrega.
+    //    · SIN cobro → NO se tocan (conservan su estado, listas para mañana).
+    // Este universo de estados es el MISMO del GET /cuadre — antes el GET
+    // mostraba cobros (en_ruta_entrega) que el confirmar nunca procesaba.
+    const ESTADOS_COBRANZA = ['entrega_cobranza', 'cuadre_dinero', 'completada'];
     const snapOrdenes = await db.collection('orders')
       .where('mensajeroId', '==', mensajeroId)
-      .where('estado', 'in', ['entrega_cobranza', 'cuadre_dinero', 'completada'])
+      .where('estado', 'in', ['en_ruta_recogida', 'en_ruta_entrega', 'en_taller', 'entrega_cobranza', 'cuadre_dinero', 'completada'])
       .get();
 
     // ✅ CUADRE-BARRIDO-001: contar las que quedan en ruta (solo informativo,
@@ -1350,10 +1377,16 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
         || (/transfer|nequi|banco|consign|qr/i.test(o.formaPagoRecaudo || '') ? 'virtual' : 'efectivo');
       const esCredito = tipo === 'credito' || /cr.dito|cxc|fiado/i.test(o.formaPagoRecaudo || '');
 
-      // Al cuadrar, la orden se CIERRA SOLA según el resultado del cobro:
+      // ✅ COBRO-RECOGIDA-001: orden OPERATIVA = aún en recogida/taller/entrega.
+      const esOperativa = !ESTADOS_COBRANZA.includes(o.estado);
+      // Operativa SIN cobro real → NO se toca (conserva su estado y su flujo).
+      if (esOperativa && (esCredito || monto <= 0)) return;
+
+      // Al cuadrar una orden de COBRANZA, se CIERRA SOLA según el cobro:
       //  - Pago (efectivo/virtual)  -> completada (el dinero ya está en caja)
       //  - Sin pago / a crédito      -> cxc (queda en cartera)
-      // Así el mensajero no tiene que avanzar nada a mano.
+      // Una orden OPERATIVA cobrada NO cambia de estado: solo se recibe el
+      // dinero; el equipo sigue su flujo de taller/entrega con normalidad.
       const estadoFinal = (esCredito || monto <= 0) ? 'cxc' : 'completada';
 
       // CANDADO ANTI-DOBLE-SUMA: solo suma a caja si NO entró ya
@@ -1362,20 +1395,28 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       const yaEnCaja = o.dineroEnCaja === true;
       const sumaCaja = !esCredito && monto > 0 && !yaEnCaja && tipo !== 'virtual';
 
+      // ✅ CUADRE-CAJA-002: caja destino elegida POR ORDEN (efectivo) y caja
+      // sugerida para pagos virtuales (la usa tesorería al validar).
+      const cajaOrdenId = (cajasPorOrden && cajasPorOrden[doc.id]) || null;
+      const cajaVirtualSugeridaId = (cajasVirtualesPorOrden && cajasVirtualesPorOrden[doc.id]) || null;
+
       batch.update(doc.ref, {
         cuadrado: true,
         fechaCuadre: new Date().toISOString(),
         cuadradoPor: req.user.email,
-        estado: estadoFinal,
-        // Ola 3: si queda en cartera, los flags de pago quedan LIMPIOS para
-        // que CxC muestre el saldo completo y nadie crea que ya se cobró.
-        ...(estadoFinal === 'cxc' ? {
-          pagado: false,
-          montoPagado: 0,
-          montoRecaudado: 0,
-          formaPagoRecaudo: 'A crédito (CxC)',
-          tipoCobro: 'credito'
-        } : {}),
+        // ✅ COBRO-RECOGIDA-001: el estado SOLO se cierra en órdenes de cobranza.
+        ...(esOperativa ? {} : {
+          estado: estadoFinal,
+          // Ola 3: si queda en cartera, los flags de pago quedan LIMPIOS para
+          // que CxC muestre el saldo completo y nadie crea que ya se cobró.
+          ...(estadoFinal === 'cxc' ? {
+            pagado: false,
+            montoPagado: 0,
+            montoRecaudado: 0,
+            formaPagoRecaudo: 'A crédito (CxC)',
+            tipoCobro: 'credito'
+          } : {})
+        }),
         ...(sumaCaja ? {
           dineroEnCaja: true,
           dineroEnCajaFecha: new Date().toISOString(),
@@ -1386,13 +1427,18 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
           pagoVirtualPendienteValidar: true,
           pagoValidado: false
         } : {}),
+        // ✅ CUADRE-CAJA-002: caja sugerida para que tesorería valide al banco correcto.
+        ...(tipo === 'virtual' && !esCredito && cajaVirtualSugeridaId ? {
+          cajaSugeridaId: cajaVirtualSugeridaId
+        } : {}),
         historialEstados: admin.firestore.FieldValue.arrayUnion({
-          estado: estadoFinal,
+          estado: esOperativa ? o.estado : estadoFinal,
           fecha: new Date().toISOString(),
           usuarioId: req.user.uid || req.user.id,
           usuarioNombre: req.user.email,
           nota: esCredito ? 'Cuadre: queda en cartera (CxC)'
               : tipo === 'virtual' ? 'Cuadre: pago virtual pendiente de validar'
+              : esOperativa ? `Cuadre: dinero recibido en caja — el servicio sigue su flujo (${o.estado})`
               : 'Cuadre: dinero confirmado en caja'
         }),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -1400,7 +1446,7 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
 
       if (sumaCaja) {
         sumaEfectivo += monto;
-        ordenesParaCaja.push({ numeroOrden: o.numeroOrden, monto, tipo });
+        ordenesParaCaja.push({ ordenId: doc.id, numeroOrden: o.numeroOrden, monto, tipo, cajaId: cajaOrdenId });
       }
     });
 
@@ -1421,59 +1467,74 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       if (!alertas.empty) await b2.commit();
     } catch (eCerrar) { console.warn('No se pudo cerrar alerta cuadre:', eCerrar.message); }
 
-    // ── Registrar ingreso: efectivo→Efectivo, virtual→Bancos ─────────────────
-    const refOrdenes = ordenesParaCaja.map(o => o.numeroOrden).join(', ') || 'Cuadre';
-    const registrarEnCaja = async (monto, tipoCaja, concepto) => {
-      if (monto <= 0) return;
-
-      // ✅ CUADRE-CAJA-001: si el receptor eligió caja para el EFECTIVO,
-      // esa caja manda (validando que exista y pertenezca al tenant).
-      let cajaDestinoRef = null;
-      let cajaDestinoId = null;
-      if (tipoCaja === 'Efectivo' && cajaEfectivoId) {
-        const cajaSelDoc = await db.collection('cajas').doc(cajaEfectivoId).get();
-        if (cajaSelDoc.exists && cajaSelDoc.data().userId === adminId) {
-          cajaDestinoRef = cajaSelDoc.ref;
-          cajaDestinoId = cajaSelDoc.id;
-        } else {
-          console.warn('CUADRE-CAJA-001: caja seleccionada inválida o de otro tenant — se usa fallback');
-        }
+    // ── Registrar ingresos de EFECTIVO agrupados POR CAJA destino ────────────
+    // ✅ CUADRE-CAJA-002: cada orden puede entrar a una caja distinta (elegida
+    // por el receptor en el cuadre). Las órdenes sin caja propia van a la caja
+    // general del cuadre (cajaEfectivoId) o, en último caso, a la primera caja
+    // tipo 'Efectivo' del tenant (comportamiento histórico). Un movimiento por
+    // caja, con las órdenes como referencia — trazabilidad completa, cero
+    // traslados manuales después del cuadre.
+    const resolverCajaValida = async (cid) => {
+      if (!cid) return null;
+      const d = await db.collection('cajas').doc(cid).get();
+      if (d.exists && d.data().userId === adminId) {
+        return { ref: d.ref, id: d.id, nombre: d.data().nombre || '' };
       }
+      console.warn('CUADRE-CAJA-002: caja seleccionada inválida o de otro tenant — se usa fallback');
+      return null;
+    };
 
-      if (!cajaDestinoRef) {
-        // Fallback (comportamiento histórico): primera caja del tipo.
-        // ✅ CUADRE-CAJA-001: se busca por adminId (antes req.user.uid — si
-        // tesorería confirmaba el cuadre, no encontraba las cajas del tenant).
-        const snapCajas = await db.collection('cajas')
-          .where('userId', '==', adminId)
-          .where('tipo', '==', tipoCaja)
-          .limit(1).get();
-        if (snapCajas.empty) {
-          console.warn(`Cuadre: no se encontró caja tipo ${tipoCaja}`);
-          return;
-        }
-        cajaDestinoRef = snapCajas.docs[0].ref;
-        cajaDestinoId = snapCajas.docs[0].id;
+    let cajaDefault = await resolverCajaValida(cajaEfectivoId);
+    if (!cajaDefault && sumaEfectivo > 0) {
+      // Fallback (comportamiento histórico): primera caja tipo Efectivo.
+      // ✅ CUADRE-CAJA-001: se busca por adminId (antes req.user.uid — si
+      // tesorería confirmaba el cuadre, no encontraba las cajas del tenant).
+      const snapCajas = await db.collection('cajas')
+        .where('userId', '==', adminId)
+        .where('tipo', '==', 'Efectivo')
+        .limit(1).get();
+      if (!snapCajas.empty) {
+        const d = snapCajas.docs[0];
+        cajaDefault = { ref: d.ref, id: d.id, nombre: d.data().nombre || '' };
+      } else {
+        console.warn('Cuadre: no se encontró caja tipo Efectivo');
       }
+    }
 
-      await cajaDestinoRef.update({
-        saldo: admin.firestore.FieldValue.increment(monto),
+    const gruposPorCaja = new Map(); // cajaId → { caja, monto, ordenes[] }
+    for (const o of ordenesParaCaja) {
+      let destino = null;
+      if (o.cajaId && o.cajaId !== (cajaDefault && cajaDefault.id)) {
+        destino = await resolverCajaValida(o.cajaId);
+      }
+      if (!destino) destino = cajaDefault;
+      if (!destino) continue; // sin caja resoluble: no registrar a ciegas
+      o.cajaId = destino.id;          // queda congelado en el arqueo
+      o.cajaNombre = destino.nombre;  // para el histórico legible
+      const g = gruposPorCaja.get(destino.id) || { caja: destino, monto: 0, ordenes: [] };
+      g.monto += o.monto;
+      g.ordenes.push(o.numeroOrden);
+      gruposPorCaja.set(destino.id, g);
+    }
+
+    const cajasDestinoArqueo = []; // resumen para el arqueo inmutable
+    for (const [, g] of gruposPorCaja) {
+      await g.caja.ref.update({
+        saldo: admin.firestore.FieldValue.increment(g.monto),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
       await db.collection('movimientos').add({
         userId: adminId,
-        cajaId: cajaDestinoId,
+        cajaId: g.caja.id,
         tipo: 'ingreso',
-        concepto,
-        monto,
-        referencia: refOrdenes,
+        concepto: 'Cuadre mensajero (efectivo)',
+        monto: g.monto,
+        referencia: g.ordenes.join(', ') || 'Cuadre',
         creadoPor: req.user.email,
         createdAt: admin.firestore.FieldValue.serverTimestamp()
       });
-    };
-
-    await registrarEnCaja(sumaEfectivo, 'Efectivo', 'Cuadre mensajero (efectivo)');
-    await registrarEnCaja(sumaVirtual, 'Bancos', 'Cuadre mensajero (pagos virtuales validados)');
+      cajasDestinoArqueo.push({ cajaId: g.caja.id, cajaNombre: g.caja.nombre, monto: g.monto, ordenes: g.ordenes });
+    }
 
     await auditar({
       accion: 'CUADRE_CONFIRMADO',
@@ -1518,6 +1579,8 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
         ordenesPendientesRuta,
         // ✅ CUADRE-CAJA-001: caja de efectivo elegida por el receptor
         cajaEfectivoId: cajaEfectivoId || null,
+        // ✅ CUADRE-CAJA-002: resumen de cajas destino (efectivo por caja)
+        cajasDestino: cajasDestinoArqueo,
         extintoresDevueltos: Array.isArray(extintoresDevueltos) ? extintoresDevueltos : [],
         // Estado del arqueo
         anulado: false
