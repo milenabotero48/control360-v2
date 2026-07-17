@@ -228,7 +228,15 @@ const cargarConfigCerts = async () => {
     if (!formaPago) return setError('Selecciona la forma de pago');
     try {
       setRegPago(true);
-      const monto = orden.total;
+      // ✅ SALDO-UNICO-001 + ABONOS: se cobra sobre el SALDO real.
+      // - Efectivo: el campo monto es "paga con" (calculadora de vuelto) →
+      //   se registra el saldo completo.
+      // - Otras formas: un monto menor al saldo queda como ABONO parcial.
+      const saldoReal = Math.max(0, (orden.total || 0) - (orden.montoPagado || 0));
+      const montoDigitado = parseFloat(montoPago) || 0;
+      const monto = (formaPago === 'Efectivo')
+        ? saldoReal
+        : (montoDigitado > 0 ? Math.min(montoDigitado, saldoReal) : saldoReal);
       const res = await axios.post(`${API}/orders/${ordenId}/pago`, {
         montoPagado: monto,
         formaPago,
@@ -238,7 +246,9 @@ const cargarConfigCerts = async () => {
       }, { headers });
 
       const caja = res.data.caja;
-      if (caja?.tipo === 'cxc') {
+      if (res.data.abonoParcial) {
+        setExito(`🟡 Abono registrado — saldo pendiente ${formatCOP(res.data.saldoRestante || 0)}`);
+      } else if (caja?.tipo === 'cxc') {
         setExito('✅ Pago registrado — CxC creada');
       } else if (caja?.tipo === 'duplicado') {
         setExito('ℹ️ Esta orden ya estaba pagada (no se duplicó)');
@@ -796,12 +806,31 @@ const cargarConfigCerts = async () => {
               <div style={{ ...s.totalRow, fontWeight: 800, fontSize: '16px', borderTop: '2px solid #e5e7eb', paddingTop: '8px', marginTop: '4px' }}>
                 <span>TOTAL</span><strong style={{ color: '#16a34a' }}>{formatCOP(orden.total)}</strong>
               </div>
-              {orden.pagado && (
-                <div style={{ marginTop: '8px', padding: '8px 12px', background: '#f0fdf4', borderRadius: '6px', fontSize: '13px', color: '#16a34a', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>✅ Pagado — {orden.formaPago}</span>
-                  <strong>{formatCOP(orden.montoPagado)}</strong>
-                </div>
-              )}
+              {/* ✅ SALDO-UNICO-001: el banner refleja el SALDO real, no la
+                  bandera. Pagada solo si saldo 0; si hay abonos muestra
+                  cuánto va pagado y cuánto se debe. */}
+              {(() => {
+                const saldoReal = Math.max(0, (orden.total || 0) - (orden.montoPagado || 0));
+                if ((orden.montoPagado || 0) <= 0) return null;
+                if (saldoReal <= 1) return (
+                  <div style={{ marginTop: '8px', padding: '8px 12px', background: '#f0fdf4', borderRadius: '6px', fontSize: '13px', color: '#16a34a', display: 'flex', justifyContent: 'space-between' }}>
+                    <span>✅ Pagado — {orden.formaPago}</span>
+                    <strong>{formatCOP(orden.montoPagado)}</strong>
+                  </div>
+                );
+                return (
+                  <div style={{ marginTop: '8px', padding: '8px 12px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '6px', fontSize: '13px', color: '#92400e' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span>🟡 Abonado — {orden.formaPago}</span>
+                      <strong>{formatCOP(orden.montoPagado)}</strong>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2, fontWeight: 800 }}>
+                      <span>Saldo pendiente</span>
+                      <span style={{ color: '#dc2626' }}>{formatCOP(saldoReal)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           </div>
 
@@ -990,7 +1019,10 @@ const cargarConfigCerts = async () => {
               {!mostrarPago ? (
                 <div>
                   <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 12 }}>
-                    Total a cobrar: <strong style={{ color: '#111', fontSize: 16 }}>{formatCOP(orden.total)}</strong>
+                    {/* ✅ SALDO-UNICO-001: se cobra el saldo, no el total a ciegas */}
+                    {(orden.montoPagado || 0) > 0
+                      ? <>Saldo a cobrar: <strong style={{ color: '#dc2626', fontSize: 16 }}>{formatCOP(Math.max(0, (orden.total || 0) - (orden.montoPagado || 0)))}</strong> <span style={{ color: '#9ca3af' }}>(abonado {formatCOP(orden.montoPagado)})</span></>
+                      : <>Total a cobrar: <strong style={{ color: '#111', fontSize: 16 }}>{formatCOP(orden.total)}</strong></>}
                   </div>
                   {puedeRegistrarPago ? (
                     <button onClick={() => setMostrarPago(true)} style={s.btnPrimario}>
@@ -1003,7 +1035,7 @@ const cargarConfigCerts = async () => {
               ) : (
                 <div>
                   <div style={{ fontSize: 13, color: '#6b7280', marginBottom: 12 }}>
-                    Total: <strong style={{ color: '#16a34a', fontSize: 16 }}>{formatCOP(orden.total)}</strong>
+                    Saldo: <strong style={{ color: '#16a34a', fontSize: 16 }}>{formatCOP(Math.max(0, (orden.total || 0) - (orden.montoPagado || 0)))}</strong>
                   </div>
 
                   {/* Formas de pago como botones visuales */}
@@ -1023,10 +1055,13 @@ const cargarConfigCerts = async () => {
                     </div>
                   </div>
 
-                  {/* Monto — solo si difiere del total */}
+                  {/* ✅ ABONOS: en formas distintas a efectivo, un monto menor
+                      al saldo queda registrado como ABONO parcial */}
                   <div style={s.campo}>
-                    <label style={s.label}>Monto recibido <span style={{ color: '#9ca3af', fontWeight: 400 }}>(opcional — por defecto el total)</span></label>
-                    <input type="number" style={s.input} placeholder={orden.total?.toString()}
+                    <label style={s.label}>Monto recibido <span style={{ color: '#9ca3af', fontWeight: 400 }}>
+                      {formaPago === 'Efectivo' ? '(paga con — para calcular el vuelto)' : '(vacío = saldo completo · un valor menor queda como abono)'}
+                    </span></label>
+                    <input type="number" style={s.input} placeholder={String(Math.max(0, (orden.total || 0) - (orden.montoPagado || 0)))}
                       value={montoPago} onChange={e => setMontoPago(e.target.value)} />
                   </div>
 

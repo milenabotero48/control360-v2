@@ -28,6 +28,20 @@ const fechaISO = (f) => {
   return isNaN(d.getTime()) ? null : d.toISOString();
 };
 
+// ─── ✅ SALDO-UNICO-001: misma regla que orders.js ────────────────────────────
+// saldo = total − montoPagado; "pagada" solo con saldo 0. Fuente única.
+const saldoRealDe = (o) => Math.max(0, Math.round(Number(o.total) || 0) - Math.round(Number(o.montoPagado) || 0));
+
+// ✅ ABONO-PERMISO-001: abonos parciales para quien tiene el módulo 'caja'
+const puedeManejarCaja = async (req) => {
+  if (['admin', 'tesoreria'].includes(req.user.role)) return true;
+  try {
+    const uid = req.user.uid || req.user.id;
+    const u = await db.collection('users').doc(uid).get();
+    return u.exists && Array.isArray(u.data().modulos) && u.data().modulos.includes('caja');
+  } catch { return false; }
+};
+
 // ══════════════════════════════════════════════════════════════════════════════
 // GET /api/cxc — Listar todas las CXC agrupadas por cliente
 // ══════════════════════════════════════════════════════════════════════════════
@@ -44,17 +58,21 @@ router.get('/', authenticate, async (req, res) => {
     // Traer órdenes en estado CXC o con forma de pago CxC no pagadas
     // AISLAMIENTO SAAS: filtrar por adminId (sin orderBy para evitar índice compuesto)
     // ✅ FIX: incluir todas las variantes de formaPago CxC
-const [snapEstado, snapFP1, snapFP2, snapFP3] = await Promise.all([
+// ✅ SALDO-UNICO-001: además de estado/formaPago crédito, se incluye TODA
+// orden con cxcEstado 'parcial' — abonos y saldos generados por taller
+// (caso OS-192) sin importar su estado operativo o su forma de pago original.
+const [snapEstado, snapFP1, snapFP2, snapFP3, snapParcial] = await Promise.all([
   db.collection('orders').where('adminId', '==', userId).where('estado', '==', 'cxc').get(),
   db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'CXC').where('pagado', '==', false).get(),
   db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'A crédito (CxC)').where('pagado', '==', false).get(),
   db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'A crédito').where('pagado', '==', false).get(),
+  db.collection('orders').where('adminId', '==', userId).where('cxcEstado', '==', 'parcial').get(),
 ]);
 
 // Combinar sin duplicados
 const docsVistos = new Set();
 const snap = { forEach: (fn) => {
-  [...snapEstado.docs, ...snapFP1.docs, ...snapFP2.docs, ...snapFP3.docs].forEach(doc => {
+  [...snapEstado.docs, ...snapFP1.docs, ...snapFP2.docs, ...snapFP3.docs, ...snapParcial.docs].forEach(doc => {
     if (!docsVistos.has(doc.id)) { docsVistos.add(doc.id); fn(doc); }
   });
 }};
@@ -259,26 +277,36 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
     if (!ordenDoc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
 
     const orden = ordenDoc.data();
-    // ✅ FIX: aceptar órdenes en estado 'cxc' O 'completada' con formaPago CxC sin pagar
-    const esCxcValida = orden.estado === 'cxc' ||
-      (orden.estado === 'completada' && orden.pagado === false &&
-       ['A crédito (CxC)', 'A crédito', 'CXC', 'Cuenta por Pagar'].includes(orden.formaPago));
-    if (!esCxcValida) {
-      return res.status(400).json({ error: 'La orden no tiene saldo pendiente por cobrar' });
+
+    // ✅ Aislamiento multi-tenant (antes este endpoint no lo validaba)
+    const adminId = req.adminId || req.user.uid || req.user.id;
+    if (orden.adminId && orden.adminId !== adminId) {
+      return res.status(403).json({ error: 'No tienes acceso a esta orden' });
     }
 
-    // Anti-doble-suma: si ya entró a caja completamente, no se cobra de nuevo
-    if (orden.dineroEnCaja === true && orden.pagado === true) {
-      return res.status(409).json({ error: 'Esta CxC ya fue pagada completamente.', yaPagada: true });
+    // ✅ SALDO-UNICO-001: la validez de la CxC es el SALDO REAL, no el estado
+    // ni la bandera. Antes: el saldo se calculaba distinto aquí y en la lista
+    // (cxcSaldo desactualizado vs total−pagado) — pagabas y la orden seguía
+    // apareciendo, y al re-registrar por Órdenes el ingreso a caja se duplicaba.
+    const saldoActual = saldoRealDe(orden);
+    if (orden.estado === 'anulada' || saldoActual <= 0) {
+      return res.status(409).json({ error: 'Esta orden no tiene saldo pendiente por cobrar.', yaPagada: true });
     }
 
     const montoRetencion = Number(retencion) || 0;
-    // ✅ FIX: usar montoAbono si se envía (abono parcial), si no usar total
-    const saldoActual = orden.cxcSaldo !== undefined ? orden.cxcSaldo : (orden.total - (orden.montoPagado || 0));
+    // ✅ FIX: usar montoAbono si se envía (abono parcial), si no usar el saldo
     const montoAbonoSolicitado = req.body.montoAbono ? Number(req.body.montoAbono) : null;
     const montoAPagar = montoAbonoSolicitado
-      ? Math.min(montoAbonoSolicitado - montoRetencion, saldoActual)
+      ? Math.min(montoAbonoSolicitado - montoRetencion, saldoActual - montoRetencion)
       : (saldoActual - montoRetencion);
+    if (montoAPagar <= 0) {
+      return res.status(400).json({ error: 'El monto a ingresar debe ser mayor a 0 (revisa monto y retención).' });
+    }
+    // ✅ ABONO-PERMISO-001
+    const esAbonoParcialCxc = (montoAPagar + montoRetencion) < saldoActual - 1;
+    if (esAbonoParcialCxc && !(await puedeManejarCaja(req))) {
+      return res.status(403).json({ error: 'Los abonos parciales solo los puede registrar un usuario con el módulo Caja en su perfil (o admin/tesorería).' });
+    }
     const facturaLimpia = numeroFactura ? numeroFactura.trim().toUpperCase() : (orden.numeroFactura || '');
 
     // 1. Actualizar saldo de caja
@@ -294,12 +322,16 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
     });
 
     // 2. Actualizar orden — si quedó saldo 0 marcar completada, si no dejar como abono parcial
+    // ✅ SALDO-UNICO-001: la retención TAMBIÉN es pago del cliente (la practica
+    // por impuesto). Antes solo se sumaba el efectivo a montoPagado y la orden
+    // quedaba con "saldo" igual a la retención para siempre — por eso las
+    // órdenes pagadas con retefuente no se quitaban de la lista de CxC.
     const nuevoSaldo = Math.max(0, saldoActual - montoAPagar - montoRetencion);
-    const quedoPagada = nuevoSaldo === 0;
+    const quedoPagada = nuevoSaldo <= 1;
     const ordenUpdate = {
       cxcSaldo: nuevoSaldo,
       cxcEstado: quedoPagada ? 'pagada' : 'parcial',
-      montoPagado: admin.firestore.FieldValue.increment(montoAPagar),
+      montoPagado: admin.firestore.FieldValue.increment(montoAPagar + montoRetencion),
       fechaPago: quedoPagada ? (fechaPago || new Date().toISOString()) : undefined,
       cajaId: quedoPagada ? cajaId : undefined,
       numeroFactura: facturaLimpia || undefined,
@@ -338,6 +370,21 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
     batch.update(ordenRef, ordenUpdate);
 
     await batch.commit();
+
+    // ✅ SALDO-UNICO-001: cerrar también el documento de la colección cxc
+    // (se crea al nacer la orden a crédito y antes nadie lo marcaba pagado).
+    if (quedoPagada) {
+      try {
+        const cxcSnap = await db.collection('cxc').where('ordenId', '==', ordenId).limit(1).get();
+        if (!cxcSnap.empty) {
+          await cxcSnap.docs[0].ref.update({
+            estado: 'pagada',
+            fechaPago: new Date().toISOString(),
+            pagadaPor: req.user.email
+          });
+        }
+      } catch (eCxcDoc) { console.warn('CxC doc no actualizado:', eCxcDoc.message); }
+    }
 
     // 3. Registrar movimiento en caja
     await db.collection('movimientos').add({
@@ -486,7 +533,8 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
       }
 
       const orden = ordenDoc.data();
-      const saldo = (orden.cxcSaldo !== undefined ? orden.cxcSaldo : (orden.total - (orden.montoPagado || 0))) || 0;
+      // ✅ SALDO-UNICO-001: saldo real = total − montoPagado (fuente única)
+      const saldo = saldoRealDe(orden);
       if (saldo <= 0) {
         return res.status(400).json({ error: `Orden ${oc.numeroOrden} ya está pagada` });
       }
@@ -530,18 +578,22 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
       const ordenDoc = await ordenRef.get();
       const orden = ordenDoc.data();
 
-      const saldoAnterior = (orden.cxcSaldo !== undefined ? orden.cxcSaldo : (orden.total - (orden.montoPagado || 0))) || 0;
+      // ✅ SALDO-UNICO-001: saldo real y retención como parte del pago.
+      // Antes montoPagado solo sumaba el efectivo: una factura pagada con
+      // retefuente quedaba con "saldo" fantasma (la retención) y la orden
+      // NUNCA salía de la lista de CxC — el bug de cobranza reportado.
+      const saldoAnterior = saldoRealDe(orden);
       const montoEfectivo = Number(oc.monto) || 0;
       const retencionTotal = Number(oc.retencionTotal) || 0;
       const aplicado = montoEfectivo + retencionTotal;
       const nuevoSaldo = Math.max(0, saldoAnterior - aplicado);
 
       // Determinar estado nuevo
-      const yaPagada = nuevoSaldo === 0;
+      const yaPagada = nuevoSaldo <= 1;
       const ordenUpdate = {
         cxcSaldo: nuevoSaldo,
         cxcEstado: yaPagada ? 'pagada' : 'parcial',
-        montoPagado: admin.firestore.FieldValue.increment(montoEfectivo),
+        montoPagado: admin.firestore.FieldValue.increment(aplicado),
         cxcHistorial: admin.firestore.FieldValue.arrayUnion({
           tipo: yaPagada ? 'pago_total' : 'abono_parcial',
           monto: montoEfectivo,
@@ -574,6 +626,20 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
       }
 
       await ordenRef.update(ordenUpdate);
+
+      // ✅ SALDO-UNICO-001: cerrar el documento espejo de la colección cxc
+      if (yaPagada) {
+        try {
+          const cxcSnap = await db.collection('cxc').where('ordenId', '==', oc.ordenId).limit(1).get();
+          if (!cxcSnap.empty) {
+            await cxcSnap.docs[0].ref.update({
+              estado: 'pagada',
+              fechaPago: new Date().toISOString(),
+              pagadaPor: req.user.email
+            });
+          }
+        } catch (eCxcDoc) { console.warn('CxC doc no actualizado:', eCxcDoc.message); }
+      }
 
       saldoTotalPendiente += nuevoSaldo;
       efectivoIngresadoCaja += montoEfectivo;

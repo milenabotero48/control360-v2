@@ -699,6 +699,9 @@ const GestionCxC = ({ user }) => {
   const [modalCobranza, setModalCobranza] = useState(null);
   const [modalGestion, setModalGestion]   = useState(null);
   const [modalConfig, setModalConfig]     = useState(false);
+  // ✅ SALDO-UNICO-001: reparación de pagos históricos (solo admin)
+  const [reparacion, setReparacion]       = useState(null); // resultado de la vista previa
+  const [reparando, setReparando]         = useState(false);
   const [gestiones, setGestiones]         = useState([]);
   const [exito, setExito]                 = useState('');
   const [error, setError]                 = useState('');
@@ -801,9 +804,71 @@ const GestionCxC = ({ user }) => {
           <p style={s.pageSubtitle}>Cartera activa · ordenada por antigüedad</p>
         </div>
         {isAdmin && (
-          <button onClick={() => setModalConfig(true)} style={s.btnSecundario}>⚙️ Configurar</button>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {/* ✅ SALDO-UNICO-001: detecta órdenes con pagos inconsistentes
+                (crédito "pagado", saldos ocultos, ingresos duplicados en caja) */}
+            <button disabled={reparando} onClick={async () => {
+              try {
+                setReparando(true); setError('');
+                const r = await axios.post(`${API}/orders/reparar-pagos`, { aplicar: false }, { headers });
+                setReparacion(r.data);
+              } catch (e) { setError(e.response?.data?.error || 'Error revisando pagos'); }
+              setReparando(false);
+            }} style={s.btnSecundario}>{reparando ? '⏳ Revisando...' : '🩺 Revisar pagos'}</button>
+            <button onClick={() => setModalConfig(true)} style={s.btnSecundario}>⚙️ Configurar</button>
+          </div>
         )}
       </div>
+
+      {/* ✅ SALDO-UNICO-001: modal de reparación de pagos */}
+      {reparacion && (
+        <div style={s.overlay}>
+          <div style={{ ...s.modal, maxWidth: 700 }}>
+            <div style={s.modalHeader}>
+              <div>
+                <h3 style={s.modalTitulo}>🩺 Revisión de pagos</h3>
+                <p style={{ margin: '2px 0 0', fontSize: 13, color: '#6b7280' }}>
+                  {reparacion.modo === 'aplicado' ? 'Correcciones aplicadas' : `${reparacion.total} orden(es) con inconsistencias — vista previa, aún no se ha corregido nada`}
+                </p>
+              </div>
+              <button onClick={() => setReparacion(null)} style={s.btnCerrar}>✕</button>
+            </div>
+            <div style={{ ...s.modalBody, maxHeight: '60vh', overflowY: 'auto' }}>
+              {reparacion.total === 0 && <div style={{ textAlign: 'center', padding: 30, color: '#16a34a', fontWeight: 700 }}>✅ No se encontraron inconsistencias de pago</div>}
+              {(reparacion.hallazgos || []).map((h, i) => (
+                <div key={i} style={{ border: '1px solid #fcd34d', background: '#fffbeb', borderRadius: 10, padding: '10px 14px', marginBottom: 10, fontSize: 13 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+                    <strong>{h.numeroOrden} · {h.clienteNombre}</strong>
+                    <span style={{ color: '#6b7280', fontSize: 12 }}>Total {fmt(h.total)} · Pagado {fmt(h.montoPagado)}{h.ingresosCaja > 0 ? ` · En caja ${fmt(h.ingresosCaja)}` : ''}</span>
+                  </div>
+                  <ul style={{ margin: '6px 0 0', paddingLeft: 18, color: '#92400e' }}>
+                    {(h.problemas || []).map((p, j) => <li key={j}>{p}</li>)}
+                  </ul>
+                  {(h.aplicado || h.ajusteCajaAplicado) && <div style={{ marginTop: 6, color: '#16a34a', fontWeight: 700, fontSize: 12 }}>✅ Corregida</div>}
+                </div>
+              ))}
+            </div>
+            {reparacion.modo !== 'aplicado' && reparacion.total > 0 && (
+              <div style={{ ...s.modalFooter, flexDirection: 'column', gap: 8 }}>
+                <button disabled={reparando} onClick={async () => {
+                  if (!window.confirm(`Se corregirán ${reparacion.total} orden(es) y se ajustarán los ingresos duplicados en caja. Esta acción queda en auditoría. ¿Continuar?`)) return;
+                  try {
+                    setReparando(true); setError('');
+                    const r = await axios.post(`${API}/orders/reparar-pagos`, { aplicar: true, aplicarAjustesCaja: true }, { headers });
+                    setReparacion(r.data);
+                    setExito(`✅ Reparación aplicada: ${r.data.total} orden(es) corregida(s)`);
+                    await cargar();
+                  } catch (e) { setError(e.response?.data?.error || 'Error aplicando reparación'); }
+                  setReparando(false);
+                }} style={{ width: '100%', padding: 14, borderRadius: 10, border: 'none', background: '#dc2626', color: '#fff', fontWeight: 800, cursor: 'pointer' }}>
+                  {reparando ? '⏳ Aplicando...' : `🔧 Aplicar correcciones (${reparacion.total})`}
+                </button>
+                <button onClick={() => setReparacion(null)} style={s.btnCancelar}>Cancelar</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {exito && <div style={s.alertExito}>{exito}</div>}
       {error && <div style={s.alertError}>{error}</div>}

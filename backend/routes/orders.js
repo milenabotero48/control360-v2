@@ -570,6 +570,43 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ✅ SALDO-UNICO-001: REGLA ÚNICA DE PAGO EN TODO EL SISTEMA
+// ─────────────────────────────────────────────────────────────────────────────
+// saldo = total − montoPagado. "Pagada" SOLO cuando el saldo llega a 0.
+// Antes `pagado` era un interruptor que se encendía una vez y nadie recalculaba:
+//  - órdenes a crédito con variantes de texto nacían "pagadas" (caso OS-222),
+//  - el taller agregaba repuestos y la orden seguía "pagada" con saldo
+//    invisible e incobrable (caso OS-192),
+//  - registrar un monto parcial marcaba pagada la orden COMPLETA y bloqueaba
+//    el resto del cobro (no había abonos),
+//  - y el saldo se calculaba distinto en CxC vs Órdenes (doble ingreso a caja).
+// ══════════════════════════════════════════════════════════════════════════════
+const esFormaPagoCredito = (fp) =>
+  /cr[eé]dito|cxc|cuenta\s*por\s*(cobrar|pagar)|fiado/i.test(String(fp || ''));
+
+const estadoPagoDe = (total, montoPagado) => {
+  const t = Math.round(Number(total) || 0);
+  const p = Math.round(Number(montoPagado) || 0);
+  const saldoPendiente = Math.max(0, t - p);
+  return {
+    saldoPendiente,
+    pagado: t > 0 && saldoPendiente <= 1,          // tolerancia $1 por redondeos
+    cxcEstado: (t > 0 && saldoPendiente <= 1) ? 'pagada' : (p > 0 ? 'parcial' : 'pendiente')
+  };
+};
+
+// ✅ ABONO-PERMISO-001: puede registrar abonos parciales quien tenga el módulo
+// 'caja' en su perfil (además de admin/tesorería, que lo tienen por rol).
+const puedeManejarCaja = async (req) => {
+  if (['admin', 'tesoreria'].includes(req.user.role)) return true;
+  try {
+    const uid = req.user.uid || req.user.id;
+    const u = await db.collection('users').doc(uid).get();
+    return u.exists && Array.isArray(u.data().modulos) && u.data().modulos.includes('caja');
+  } catch { return false; }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
 // GET /api/orders — Listar órdenes
 // ══════════════════════════════════════════════════════════════════════════════
 router.get('/', authenticate, async (req, res) => {
@@ -725,7 +762,10 @@ router.post('/', authenticate, async (req, res) => {
     // cartera (que los usa). Antes se declaraban 115 líneas más abajo, causando
     // "Cannot access 'esCxc' before initialization" y bloqueando la creación de
     // TODA orden. Se declaran una sola vez, aquí arriba.
-    const esCxc = formaPago === 'A crédito (CxC)' || formaPago === 'CXC' || formaPago === 'A crédito';
+    // ✅ SALDO-UNICO-001: detección robusta — cualquier variante de crédito/CxC
+    // (mayúsculas, tildes, textos personalizados). Antes solo 3 textos exactos:
+    // una forma de pago tipo "Credito 30 días" nacía "PAGADA" (caso OS-222).
+    const esCxc = esFormaPagoCredito(formaPago);
     // ✅ EFECTIVO-PALABRA-001: es efectivo si el NOMBRE contiene "efectivo"
     // (MAY EFECTIVO, EFECTIVO SAS...). El efectivo se entrega en el cuadre, sin foto.
     const esEfectivo = (formaPago || '').toLowerCase().includes('efectivo');
@@ -1186,6 +1226,42 @@ router.put('/:id', authenticate, async (req, res) => {
       cambios.total = Math.round(subtotal + ivaValor);
       cambios.generaCertificado = requiereCertificado(items);
       cambios.qrPendiente = requiereCertificado(items);
+    }
+
+    // ✅ SALDO-UNICO-001: coherencia de pago al editar.
+    // (a) Si la forma de pago cambia a CRÉDITO y el dinero NO está en caja ni
+    //     validado, la orden deja de estar "pagada" (causa raíz OS-222: nacía
+    //     pagada, la editaban a crédito y el flag quedaba encendido).
+    // (b) Si cambió el total, el saldo se recalcula: si queda saldo, la orden
+    //     pasa a "parcial" y el saldo es cobrable; nunca queda pagado > total.
+    const formaPagoFinalEdit = formaPago !== undefined ? formaPago : actual.formaPago;
+    const cambioACredito = esFormaPagoCredito(formaPagoFinalEdit)
+      && actual.dineroEnCaja !== true && actual.pagoValidado !== true;
+    if (cambioACredito && (actual.pagado === true || (Number(actual.montoPagado) || 0) > 0)) {
+      cambios.pagado = false;
+      cambios.montoPagado = 0;
+      cambios.fechaPago = null;
+      cambios.cxcSaldo = cambios.total !== undefined ? cambios.total : (actual.total || 0);
+      cambios.cxcEstado = 'pendiente';
+      cambios.historialEstados = admin.firestore.FieldValue.arrayUnion({
+        estado: actual.estado,
+        fecha: new Date().toISOString(),
+        usuarioId: req.user.uid || req.user.id,
+        usuarioNombre: req.user.nombre || req.user.email,
+        accion: 'PAGO_RESETEADO_CREDITO',
+        nota: 'La forma de pago cambió a crédito sin dinero en caja — la orden vuelve a estado de deuda (SALDO-UNICO-001)'
+      });
+    } else if (cambios.total !== undefined && cambios.total !== (actual.total || 0)) {
+      const epEdit = estadoPagoDe(cambios.total, actual.montoPagado);
+      const teniaPago = (Number(actual.montoPagado) || 0) > 0 || actual.pagado === true;
+      if (teniaPago) {
+        cambios.pagado = epEdit.pagado;
+        cambios.montoPagado = Math.min(Number(actual.montoPagado) || 0, cambios.total);
+        cambios.cxcSaldo = epEdit.saldoPendiente;
+        cambios.cxcEstado = epEdit.cxcEstado;
+      } else if (actual.estado === 'cxc' || actual.cxcSaldo !== undefined) {
+        cambios.cxcSaldo = epEdit.saldoPendiente;
+      }
     }
 
     if (fechaProgramada !== undefined) cambios.fechaProgramada = ajustarFechaTimezone(fechaProgramada) || null;
@@ -1842,13 +1918,18 @@ router.post('/:id/pago', authenticate, async (req, res) => {
     const usuarioId = req.adminId || req.user.uid || req.user.id;
     const usuarioNombre = req.user.nombre || req.user.email;
 
-    const esCxC = formaPago === 'A crédito (CxC)' || formaPago === 'A crédito'
-      || formaPago === 'credito' || formaPago === 'CXC';
+    const esCxC = esFormaPagoCredito(formaPago); // ✅ SALDO-UNICO-001
 
-    // ── BLOQUEO ANTI-RECOBRO ──────────────────────────────────────────────────
-    if (!esCxC && (actual.pagado === true || actual.dineroEnCaja === true)) {
+    // ── BLOQUEO ANTI-RECOBRO POR SALDO ────────────────────────────────────────
+    // ✅ SALDO-UNICO-001: se bloquea cuando el SALDO real es 0, no por la
+    // bandera 'pagado'. Antes la bandera bloqueaba el cobro del saldo restante
+    // de una orden abonada, y a la inversa una orden con bandera desactualizada
+    // se podía cobrar dos veces (ingresos duplicados en caja).
+    const pagadoPrevio = Math.round(Number(actual.montoPagado) || 0);
+    const saldoAnterior = Math.max(0, Math.round(Number(actual.total) || 0) - pagadoPrevio);
+    if (!esCxC && saldoAnterior <= 0) {
       return res.status(409).json({
-        error: 'Esta orden ya está pagada. No se puede cobrar de nuevo.',
+        error: 'Esta orden ya está pagada completa. No se puede cobrar de nuevo.',
         yaPagada: true, pagado: true
       });
     }
@@ -1865,21 +1946,47 @@ router.post('/:id/pago', authenticate, async (req, res) => {
       });
     }
 
-    const montoFinal = parseFloat(montoPagado) || actual.total;
-    if (montoFinal < actual.total * 0.5 && req.user.role !== 'admin') {
-      return res.status(400).json({ error: 'El monto es muy bajo. Requiere autorización del administrador.' });
+    // ✅ SALDO-UNICO-001 + ABONOS: el monto digitado es un ABONO al saldo.
+    // Sin monto digitado se asume el saldo completo. Nunca se cobra más que
+    // el saldo, y la orden solo queda "pagada" cuando el saldo llega a 0.
+    const montoFinal = esCxC ? 0 : Math.min(
+      Math.round(parseFloat(montoPagado) || saldoAnterior),
+      saldoAnterior
+    );
+    if (!esCxC && montoFinal <= 0) {
+      return res.status(400).json({ error: 'El monto del pago debe ser mayor a 0.' });
+    }
+    const esAbonoParcial = !esCxC && montoFinal < saldoAnterior - 1;
+    // ✅ ABONO-PERMISO-001: abonos parciales solo para quien maneja caja
+    if (esAbonoParcial && !(await puedeManejarCaja(req))) {
+      return res.status(403).json({ error: 'Los abonos parciales solo los puede registrar un usuario con el módulo Caja en su perfil (o admin/tesorería).' });
     }
 
     const facturaLimpia = numeroFactura ? numeroFactura.trim().toUpperCase()
                                         : (actual.numeroFactura || '');
 
+    const acumulado = esCxC ? pagadoPrevio : (pagadoPrevio + montoFinal);
+    const ep = estadoPagoDe(actual.total, acumulado);
+
     const updateOrden = {
-      pagado: !esCxC,
-      montoPagado: esCxC ? 0 : montoFinal,
+      pagado: esCxC ? false : ep.pagado,
+      montoPagado: acumulado,           // ✅ acumula (antes sobreescribía)
+      cxcSaldo: esCxC ? saldoAnterior : ep.saldoPendiente,
+      cxcEstado: esCxC ? (pagadoPrevio > 0 ? 'parcial' : 'pendiente') : ep.cxcEstado,
       formaPago,
       notasPago: notas || '',
-      fechaPago: esCxC ? null : new Date().toISOString(),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      fechaPago: (!esCxC && ep.pagado) ? new Date().toISOString() : (actual.fechaPago || null),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      historialEstados: admin.firestore.FieldValue.arrayUnion({
+        estado: actual.estado,
+        fecha: new Date().toISOString(),
+        usuarioId, usuarioNombre,
+        accion: esCxC ? 'MARCA_CREDITO' : (esAbonoParcial ? 'ABONO_PARCIAL' : 'PAGO_REGISTRADO'),
+        nota: esCxC ? `Forma de pago: ${formaPago}`
+            : esAbonoParcial
+              ? `Abono $${montoFinal.toLocaleString('es-CO')} — saldo restante $${ep.saldoPendiente.toLocaleString('es-CO')}`
+              : `Pago $${montoFinal.toLocaleString('es-CO')} — ${formaPago}`
+      })
     };
     if (facturaLimpia) {
       updateOrden.numeroFactura = facturaLimpia;
@@ -1888,12 +1995,14 @@ router.post('/:id/pago', authenticate, async (req, res) => {
     // Ola 2.5 — NO cambiamos estado aquí. El estado solo se mueve por flujo.
     await ordenRef.update(updateOrden);
 
+    // Para crédito registra la CxC (colección) con el saldo real; para pago
+    // real ingresa a caja SOLO el monto abonado/pagado (nunca el total a ciegas).
     const resultadoCaja = await registrarIngresoEnCaja({
       userId: usuarioId,
       ordenId: id,
       numeroOrden: actual.numeroOrden,
       clienteNombre: actual.clienteNombre,
-      monto: montoFinal,
+      monto: esCxC ? saldoAnterior : montoFinal,
       formaPago,
       usuarioEmail: req.user.email,
       numeroFactura: facturaLimpia
@@ -1907,9 +2016,9 @@ router.post('/:id/pago', authenticate, async (req, res) => {
     // entregó y pidió el dinero), y el pago confirma esa cobranza, entonces
     // sí se completa porque el ciclo operativo terminó.
     let estadoFinal = actual.estado;
-    if (esCxC) {
-      // CxC explícita: marca el flag pero NO cambia estado.
-      // (El estado seguirá moviéndose por el flujo del mensajero.)
+    if (esCxC || esAbonoParcial) {
+      // CxC explícita o ABONO parcial: NO cambia estado — el saldo sigue
+      // pendiente y la orden sigue su flujo (✅ SALDO-UNICO-001).
       estadoFinal = actual.estado;
     } else if (['entrega_cobranza', 'cxc'].includes(actual.estado)) {
       // ✅ FIX PAGO-CIERRA-CXC-001: el pago cierra la orden tanto en cobranza
@@ -1934,15 +2043,17 @@ router.post('/:id/pago', authenticate, async (req, res) => {
     }
 
     await auditar({
-      accion: 'REGISTRAR_PAGO',
-      descripcion: `${usuarioNombre} registró pago $${montoFinal?.toLocaleString()} en ${actual.numeroOrden} — ${formaPago}`,
+      accion: esAbonoParcial ? 'ABONO_PARCIAL' : 'REGISTRAR_PAGO',
+      descripcion: `${usuarioNombre} registró ${esAbonoParcial ? 'ABONO' : 'pago'} $${montoFinal?.toLocaleString()} en ${actual.numeroOrden} — ${formaPago}${esAbonoParcial ? ` — saldo restante $${ep.saldoPendiente.toLocaleString('es-CO')}` : ''}`,
       usuarioId, usuarioNombre, ordenId: id,
-      datos: { montoPagado: montoFinal, formaPago, totalOrden: actual.total, resultadoCaja, estadoFinal }
+      datos: { montoPagado: montoFinal, acumulado, saldoRestante: ep.saldoPendiente, formaPago, totalOrden: actual.total, resultadoCaja, estadoFinal }
     });
 
     res.json({
-      message: 'Pago registrado',
+      message: esAbonoParcial ? 'Abono registrado' : 'Pago registrado',
       montoPagado: montoFinal,
+      abonoParcial: esAbonoParcial,
+      saldoRestante: ep.saldoPendiente,
       formaPago,
       estado: estadoFinal,
       caja: resultadoCaja
@@ -2689,6 +2800,20 @@ const agregarItemsAOrden = async ({
   // ── Descontar inventario solo de los nuevos ──────────────────────────────
   await descontarInventario(itemsSanitizados, ordenId);
 
+  // ✅ SALDO-UNICO-001: al crecer el total, el pago se RE-EVALÚA (caso OS-192:
+  // el taller agregaba repuestos aprobados, el total subía, pero la orden
+  // seguía "pagada" con el monto viejo — el saldo quedaba invisible e
+  // incobrable). Ahora: si hay pagos previos y queda saldo, la orden pasa a
+  // "parcial" y el saldo aparece en CxC hasta que se cobre.
+  const pagadoPrevioItems = Number(orden.montoPagado) || 0;
+  const epItems = estadoPagoDe(Math.round(total), pagadoPrevioItems);
+  const generaSaldo = (orden.pagado === true || pagadoPrevioItems > 0) && epItems.saldoPendiente > 1;
+  const ajustePago = generaSaldo ? {
+    pagado: false,
+    cxcSaldo: epItems.saldoPendiente,
+    cxcEstado: 'parcial'
+  } : ((orden.estado === 'cxc' || orden.cxcSaldo !== undefined) ? { cxcSaldo: epItems.saldoPendiente } : {});
+
   // ── Historial + UN SOLO update atómico (incluye flagsOrden del llamador) ──
   const historial = orden.historialEstados || [];
   historial.push({
@@ -2697,11 +2822,13 @@ const agregarItemsAOrden = async ({
     usuarioId, usuarioNombre,
     accion: accionHistorial,
     notas: `${etiquetaHistorial || usuarioNombre} agregó ${itemsSanitizados.length} item(s)${sufijoHistorial}. Subtotal: ${subtotal.toFixed(0)}`
+      + (generaSaldo ? ` — la orden estaba pagada con $${pagadoPrevioItems.toLocaleString('es-CO')}: queda SALDO PENDIENTE de $${epItems.saldoPendiente.toLocaleString('es-CO')} (pasa a CxC parcial)` : '')
   });
 
   await ordenRef.update({
     items: itemsCompletos,
     subtotal, ivaValor, total,
+    ...ajustePago,
     historialEstados: historial,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     ...flagsOrden
@@ -2813,6 +2940,164 @@ router.post('/:id/agregar-items', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Error agregando items en sitio:', error);
     res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ SALDO-UNICO-001: REPARACIÓN DE DATOS HISTÓRICOS (solo Admin)
+// POST /api/orders/reparar-pagos   Body: { aplicar: bool, aplicarAjustesCaja: bool }
+// ─────────────────────────────────────────────────────────────────────────────
+// Detecta y corrige órdenes dañadas por el modelo de pago anterior:
+//  1. CRÉDITO FANTASMA: a crédito pero marcada "pagada" sin dinero en caja
+//     (caso OS-222) → vuelve a estado real de deuda.
+//  2. SALDO OCULTO: "pagada" con total > monto pagado (caso OS-192: taller
+//     agregó repuestos) → pasa a parcial, saldo cobrable en CxC.
+//  3. SOBREPAGO DE BANDERA: monto pagado > total (total bajó tras editar).
+//  4. cxcSaldo desalineado con (total − montoPagado).
+//  5. INGRESO DUPLICADO EN CAJA: la misma orden sumó a caja más de su total
+//     (pago registrado dos veces) → genera movimiento de ajuste (egreso) en la
+//     caja del ingreso más reciente, solo si aplicarAjustesCaja=true.
+// Con aplicar=false solo LISTA los hallazgos (vista previa, no toca nada).
+// ══════════════════════════════════════════════════════════════════════════════
+router.post('/reparar-pagos', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el administrador puede ejecutar la reparación de pagos' });
+    }
+    const aplicar = req.body?.aplicar === true;
+    const aplicarAjustesCaja = req.body?.aplicarAjustesCaja === true;
+    const adminId = req.adminId || req.user.uid || req.user.id;
+
+    const [snapOrdenes, snapMovs] = await Promise.all([
+      db.collection('orders').where('adminId', '==', adminId).get(),
+      db.collection('movimientos').where('userId', '==', adminId).get()
+    ]);
+
+    // Ingresos a caja agrupados por orden (solo movimientos con ordenId)
+    const ingresosPorOrden = {};
+    snapMovs.forEach(d => {
+      const m = d.data();
+      if (m.tipo !== 'ingreso' || !m.ordenId) return;
+      if (!ingresosPorOrden[m.ordenId]) ingresosPorOrden[m.ordenId] = [];
+      ingresosPorOrden[m.ordenId].push({
+        id: d.id, monto: Number(m.monto) || 0, cajaId: m.cajaId || null,
+        concepto: m.concepto || '', creadoEn: m.createdAt?.toMillis?.() || 0
+      });
+    });
+
+    const hallazgos = [];
+
+    for (const doc of snapOrdenes.docs) {
+      const o = doc.data();
+      if (o.estado === 'anulada') continue;
+
+      const total = Math.round(Number(o.total) || 0);
+      const mp = Math.round(Number(o.montoPagado) || 0);
+      const ingresos = ingresosPorOrden[doc.id] || [];
+      const sumaIngresos = ingresos.reduce((s, m) => s + m.monto, 0);
+      const problemas = [];
+      const fix = {};
+
+      // 1. Crédito fantasma (OS-222)
+      const esCredito = esFormaPagoCredito(o.formaPago) || esFormaPagoCredito(o.formaPagoRecaudo);
+      if (o.pagado === true && esCredito && o.dineroEnCaja !== true
+          && o.pagoValidado !== true && sumaIngresos <= 0) {
+        problemas.push('Crédito marcado como pagado sin dinero en caja');
+        fix.pagado = false; fix.montoPagado = 0; fix.fechaPago = null;
+        fix.cxcSaldo = total; fix.cxcEstado = 'pendiente';
+        if (!esFormaPagoCredito(o.formaPago)) fix.formaPago = 'A crédito (CxC)';
+      } else if (o.pagado === true && total - mp > 1) {
+        // 2. Saldo oculto (OS-192)
+        problemas.push(`"Pagada" con saldo real de $${(total - mp).toLocaleString('es-CO')}`);
+        fix.pagado = false; fix.cxcSaldo = total - mp; fix.cxcEstado = 'parcial';
+      } else if (mp > total + 1) {
+        // 3. Sobrepago de bandera
+        problemas.push(`Monto pagado ($${mp.toLocaleString('es-CO')}) mayor que el total ($${total.toLocaleString('es-CO')})`);
+        fix.montoPagado = total; fix.cxcSaldo = 0; fix.cxcEstado = 'pagada';
+      } else if (o.cxcSaldo !== undefined && Math.round(Number(o.cxcSaldo) || 0) !== Math.max(0, total - mp)) {
+        // 4. cxcSaldo desalineado
+        problemas.push(`cxcSaldo desalineado ($${(Number(o.cxcSaldo) || 0).toLocaleString('es-CO')} vs real $${Math.max(0, total - mp).toLocaleString('es-CO')})`);
+        fix.cxcSaldo = Math.max(0, total - mp);
+        fix.cxcEstado = (total - mp) <= 1 ? 'pagada' : (mp > 0 ? 'parcial' : 'pendiente');
+      }
+
+      // 5. Ingreso duplicado en caja
+      let ajusteCaja = null;
+      if (sumaIngresos > total + 1 && total > 0 && o.ajusteDuplicadoCajaAplicado !== true) {
+        const exceso = sumaIngresos - total;
+        const ultimo = [...ingresos].sort((a, b) => b.creadoEn - a.creadoEn)[0];
+        problemas.push(`Ingresos a caja duplicados: $${sumaIngresos.toLocaleString('es-CO')} contra un total de $${total.toLocaleString('es-CO')} (exceso $${exceso.toLocaleString('es-CO')})`);
+        ajusteCaja = { exceso, cajaId: ultimo?.cajaId || null, movimientos: ingresos };
+      }
+
+      if (problemas.length === 0) continue;
+
+      const hallazgo = {
+        ordenId: doc.id,
+        numeroOrden: o.numeroOrden,
+        clienteNombre: o.clienteNombre || '',
+        estado: o.estado,
+        total, montoPagado: mp, ingresosCaja: sumaIngresos,
+        problemas,
+        correccion: { ...fix },
+        ajusteCaja: ajusteCaja ? { exceso: ajusteCaja.exceso, cajaId: ajusteCaja.cajaId } : null,
+        aplicado: false
+      };
+
+      if (aplicar) {
+        if (Object.keys(fix).length > 0) {
+          await doc.ref.update({
+            ...fix,
+            historialEstados: admin.firestore.FieldValue.arrayUnion({
+              estado: o.estado,
+              fecha: new Date().toISOString(),
+              usuarioId: req.user.uid || req.user.id,
+              usuarioNombre: req.user.nombre || req.user.email,
+              accion: 'REPARACION_PAGOS',
+              nota: `Reparación SALDO-UNICO-001: ${problemas.join(' · ')}`
+            }),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          hallazgo.aplicado = true;
+        }
+        if (ajusteCaja && aplicarAjustesCaja && ajusteCaja.cajaId) {
+          await db.collection('cajas').doc(ajusteCaja.cajaId).update({
+            saldo: admin.firestore.FieldValue.increment(-ajusteCaja.exceso),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          await db.collection('movimientos').add({
+            userId: adminId,
+            cajaId: ajusteCaja.cajaId,
+            tipo: 'egreso',
+            concepto: `Ajuste ingreso duplicado — orden ${o.numeroOrden} (reparación SALDO-UNICO-001)`,
+            monto: ajusteCaja.exceso,
+            referencia: o.numeroOrden,
+            ordenId: doc.id,
+            creadoPor: req.user.email,
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+          });
+          await doc.ref.update({ ajusteDuplicadoCajaAplicado: true });
+          hallazgo.ajusteCajaAplicado = true;
+        }
+      }
+
+      hallazgos.push(hallazgo);
+    }
+
+    if (aplicar && hallazgos.length > 0) {
+      await auditar({
+        accion: 'REPARACION_PAGOS',
+        descripcion: `${req.user.email} ejecutó la reparación de pagos: ${hallazgos.length} orden(es) corregida(s)${aplicarAjustesCaja ? ' (con ajustes de caja)' : ''}`,
+        usuarioId: req.user.uid || req.user.id,
+        usuarioNombre: req.user.nombre || req.user.email,
+        datos: { hallazgos: hallazgos.map(h => ({ numeroOrden: h.numeroOrden, problemas: h.problemas })) }
+      });
+    }
+
+    res.json({ ok: true, modo: aplicar ? 'aplicado' : 'vista_previa', total: hallazgos.length, hallazgos });
+  } catch (e) {
+    console.error('POST reparar-pagos:', e);
+    res.status(500).json({ error: e.message });
   }
 });
 
