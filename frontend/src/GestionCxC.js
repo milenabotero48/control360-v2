@@ -873,6 +873,7 @@ const GestionCxC = ({ user }) => {
                     {(h.problemas || []).map((p, j) => <li key={j}>{p}</li>)}
                   </ul>
                   {(h.aplicado || h.ajusteCajaAplicado) && <div style={{ marginTop: 6, color: '#16a34a', fontWeight: 700, fontSize: 12 }}>✅ Corregida{h.ajusteCajaAplicado ? ' (con ajuste de caja)' : ''}</div>}
+                  {h.conciliada && <div style={{ marginTop: 6, color: '#0284c7', fontWeight: 700, fontSize: 12 }}>🤝 Duplicado conciliado — no volverá a aparecer (cajas sin tocar)</div>}
                   {h.omitida && <div style={{ marginTop: 6, color: '#6b7280', fontWeight: 700, fontSize: 12 }}>⏭️ Omitida — no se tocó</div>}
                   {h.error && <div style={{ marginTop: 6, color: '#dc2626', fontWeight: 700, fontSize: 12 }}>⚠️ No se pudo corregir: {h.error}</div>}
                 </div>
@@ -890,7 +891,7 @@ const GestionCxC = ({ user }) => {
                   <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: '#374151', cursor: 'pointer', padding: '8px 10px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
                     <input type="checkbox" checked={ajustarCajas} onChange={e => setAjustarCajas(e.target.checked)}
                       style={{ width: 16, height: 16, marginTop: 1 }} />
-                    <span><strong>Ajustar también los saldos de caja</strong> (genera un egreso de ajuste por los ingresos duplicados). Déjalo desmarcado si las cajas ya se cuadraron manualmente.</span>
+                    <span><strong>Ajustar también los saldos de caja</strong> (genera un egreso de ajuste por los ingresos duplicados). Si lo dejas desmarcado, los duplicados seleccionados quedan <strong>conciliados</strong> (con constancia en el historial) y no vuelven a aparecer — úsalo cuando las cajas ya se cuadraron manualmente.</span>
                   </label>
                 )}
                 <button disabled={reparando || idsSeleccionados.length === 0} onClick={async () => {

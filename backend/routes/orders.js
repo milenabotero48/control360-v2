@@ -3020,10 +3020,25 @@ router.post('/reparar-pagos', authenticate, async (req, res) => {
         fix.pagado = false; fix.montoPagado = 0; fix.fechaPago = null;
         fix.cxcSaldo = total; fix.cxcEstado = 'pendiente';
         if (!esFormaPagoCredito(o.formaPago)) fix.formaPago = 'A crédito (CxC)';
+      } else if (o.pagado === true && total - mp > 1 && sumaIngresos >= total - 1) {
+        // 2a. ✅ FIX REPARAR-RECONCILIA-001: el dinero YA está en caja — el que
+        // está desactualizado es el monto pagado, NO la deuda. ANTES esto se
+        // mandaba a CxC, el admin volvía a cobrar y el ingreso se duplicaba
+        // (el ciclo reportado). Ahora se reconcilia el pagado con la caja.
+        problemas.push(`Monto pagado desactualizado ($${mp.toLocaleString('es-CO')}) pero el dinero completo ya está en caja — se reconcilia, NO va a CxC`);
+        fix.montoPagado = total; fix.cxcSaldo = 0; fix.cxcEstado = 'pagada';
       } else if (o.pagado === true && total - mp > 1) {
-        // 2. Saldo oculto (OS-192)
-        problemas.push(`"Pagada" con saldo real de $${(total - mp).toLocaleString('es-CO')}`);
-        fix.pagado = false; fix.cxcSaldo = total - mp; fix.cxcEstado = 'parcial';
+        // 2b. Saldo oculto real (OS-192): dinero en caja NO cubre el total
+        if (sumaIngresos > mp) {
+          // Parte del dinero sí entró a caja: reconciliar lo que hay y dejar
+          // como saldo solo la diferencia real.
+          problemas.push(`"Pagada" pero en caja hay $${sumaIngresos.toLocaleString('es-CO')} de un total de $${total.toLocaleString('es-CO')} — queda saldo real de $${(total - sumaIngresos).toLocaleString('es-CO')}`);
+          fix.pagado = false; fix.montoPagado = sumaIngresos;
+          fix.cxcSaldo = total - sumaIngresos; fix.cxcEstado = 'parcial';
+        } else {
+          problemas.push(`"Pagada" con saldo real de $${(total - mp).toLocaleString('es-CO')}`);
+          fix.pagado = false; fix.cxcSaldo = total - mp; fix.cxcEstado = 'parcial';
+        }
       } else if (mp > total + 1) {
         // 3. Sobrepago de bandera
         problemas.push(`Monto pagado ($${mp.toLocaleString('es-CO')}) mayor que el total ($${total.toLocaleString('es-CO')})`);
@@ -3037,7 +3052,8 @@ router.post('/reparar-pagos', authenticate, async (req, res) => {
 
       // 5. Ingreso duplicado en caja
       let ajusteCaja = null;
-      if (sumaIngresos > total + 1 && total > 0 && o.ajusteDuplicadoCajaAplicado !== true) {
+      if (sumaIngresos > total + 1 && total > 0 && o.ajusteDuplicadoCajaAplicado !== true
+          && o.duplicadoCajaConciliado !== true) {
         const exceso = sumaIngresos - total;
         const ultimo = [...ingresos].sort((a, b) => b.creadoEn - a.creadoEn)[0];
         problemas.push(`Ingresos a caja duplicados: $${sumaIngresos.toLocaleString('es-CO')} contra un total de $${total.toLocaleString('es-CO')} (exceso $${exceso.toLocaleString('es-CO')})`);
@@ -3101,6 +3117,23 @@ router.post('/reparar-pagos', authenticate, async (req, res) => {
             });
             await doc.ref.update({ ajusteDuplicadoCajaAplicado: true });
             hallazgo.ajusteCajaAplicado = true;
+          } else if (ajusteCaja && !aplicarAjustesCaja) {
+            // ✅ FIX REPARAR-RECONCILIA-001: el admin decidió NO tocar las cajas
+            // (ya las cuadró a mano). Se marca el duplicado como CONCILIADO para
+            // que no vuelva a aparecer en cada revisión, con constancia.
+            await doc.ref.update({
+              duplicadoCajaConciliado: true,
+              historialEstados: admin.firestore.FieldValue.arrayUnion({
+                estado: o.estado,
+                fecha: new Date().toISOString(),
+                usuarioId: req.user.uid || req.user.id,
+                usuarioNombre: req.user.nombre || req.user.email,
+                accion: 'DUPLICADO_CONCILIADO',
+                nota: `Ingreso duplicado en caja (exceso $${ajusteCaja.exceso.toLocaleString('es-CO')}) conciliado manualmente — el admin indicó que los saldos de caja ya fueron cuadrados a mano`
+              }),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            hallazgo.conciliada = true;
           }
         } catch (eOrden) {
           hallazgo.error = eOrden.message;
