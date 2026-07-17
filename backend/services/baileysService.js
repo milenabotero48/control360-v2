@@ -3,6 +3,7 @@
 // Ubicación: backend/services/baileysService.js
 // FIX ANNY-QR-001 + ANNY-QR-003 + ANNY-QR-004 + ANNY-PEDIDOS-001
 // + FIX ANNY-SILENCIO-001 (chats silenciados / internos)
+// + FIX ANNY-ECO-001 + FIX ANNY-PAUSA-004 (esta versión)
 // ============================================================
 // PRINCIPIOS:
 // 1. Una sesión de WhatsApp por tenant (adminId) — multi-tenant
@@ -18,6 +19,18 @@
 //     (annyConfig.chatsSilenciados) se IGNORAN por completo:
 //     ni respuesta, ni registro, ni gasto de IA — para
 //     conversaciones internas del equipo.
+// 11. FIX ANNY-ECO-001: los mensajes que la PROPIA Anny envía
+//     hacen eco en messages.upsert con fromMe=true. Antes se
+//     registraban como ADMIN_MANUAL — el historial le atribuía
+//     a la "asesora humana" los textos de Anny y contaminaba la
+//     memoria del hilo. Ahora se detectan con el almacén
+//     mensajesEnviados (que ya existía para reintentos) y se
+//     ignoran por completo.
+// 12. FIX ANNY-PAUSA-004: un fromMe que NO es eco = la admin
+//     escribió manualmente desde el teléfono/WhatsApp Web →
+//     se registra ADMIN_MANUAL y se PAUSA Anny 30 minutos en
+//     ese chat. Cada mensaje manual refresca la pausa. Anny
+//     verifica la pausa en annyService antes de responder.
 // ============================================================
 
 const qrcode = require('qrcode');
@@ -183,8 +196,19 @@ async function procesarMensaje(adminId, msg) {
   // conversaciones internas del equipo.
   if (await estaSilenciado(adminId, telefono)) return;
 
-  // Respuesta manual de la admin → historial (aprendizaje)
   if (msg.key.fromMe) {
+    // FIX ANNY-ECO-001: eco de un mensaje enviado por la propia
+    // Anny (está en el almacén de enviados) → ignorar por completo.
+    // Sin este filtro, los textos de Anny se registraban como
+    // ADMIN_MANUAL y el historial se los atribuía a la humana.
+    if (msg.key.id && mensajesEnviados.has(msg.key.id)) {
+      return;
+    }
+
+    // FIX ANNY-PAUSA-004: mensaje manual REAL de la admin →
+    // registrar en historial (aprendizaje) + pausar Anny 30 min
+    // en este chat. Cada mensaje manual refresca la pausa, así
+    // Anny no interrumpe mientras la admin atiende al cliente.
     await annyService.registrarConversacion(adminId, {
       telefono,
       nombreCliente: null,
@@ -194,6 +218,8 @@ async function procesarMensaje(adminId, msg) {
       escalado: false,
       caseId: null
     });
+
+    await annyService.pausarAnny(adminId, telefono, 30, 'intervencion_manual');
     return;
   }
 

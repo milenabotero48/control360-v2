@@ -42,6 +42,7 @@ export default function VencimientosAnny() {
   const [guardandoResp, setGuardandoResp] = useState(false);
 
   const [chats, setChats] = useState([]);
+  const [busquedaChat, setBusquedaChat] = useState(''); // FIX ANNY-UI-002: buscador por número/nombre
   const [chatAbierto, setChatAbierto] = useState(null);
   const [hilo, setHilo] = useState([]);
   const [cargandoHilo, setCargandoHilo] = useState(false);
@@ -394,6 +395,59 @@ export default function VencimientosAnny() {
   const fmtHora = (createdAt) =>
     createdAt?.seconds ? new Date(createdAt.seconds * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 
+  // ============================================================
+  // FIX ANNY-UI-002: experiencia premium en Conversaciones
+  // - etiquetaDia: 'Hoy' / 'Ayer' / fecha legible en español
+  // - búsqueda por número o nombre (busquedaChat)
+  // - agrupación de la lista de chats por día (más reciente arriba)
+  // - separadores de fecha dentro del hilo (con la ventana de 24h
+  //   un hilo puede abarcar varios días)
+  // ============================================================
+  const etiquetaDia = (createdAt) => {
+    if (!createdAt?.seconds) return '';
+    const d = new Date(createdAt.seconds * 1000);
+    const hoy = new Date();
+    const ayer = new Date(); ayer.setDate(hoy.getDate() - 1);
+    const mismaFecha = (a, b) =>
+      a.getDate() === b.getDate() && a.getMonth() === b.getMonth() && a.getFullYear() === b.getFullYear();
+    if (mismaFecha(d, hoy)) return 'Hoy';
+    if (mismaFecha(d, ayer)) return 'Ayer';
+    return d.toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long', year: d.getFullYear() !== hoy.getFullYear() ? 'numeric' : undefined });
+  };
+
+  const inicialesDe = (nombre, telefono) => {
+    const base = (nombre || '').trim();
+    if (base) {
+      const partes = base.split(/\s+/).filter(Boolean);
+      return (partes[0][0] + (partes[1]?.[0] || '')).toUpperCase();
+    }
+    return String(telefono || '#').slice(-2);
+  };
+
+  const chatsFiltrados = chats.filter(c => {
+    const q = busquedaChat.trim().toLowerCase();
+    if (!q) return true;
+    return String(c.telefono || '').includes(q.replace(/\D/g, '') || q) ||
+      String(c.nombreCliente || '').toLowerCase().includes(q);
+  });
+
+  const chatsAgrupados = (() => {
+    const grupos = [];
+    let etiquetaActual = null;
+    const ordenados = [...chatsFiltrados].sort(
+      (a, b) => (b.ultimaFecha?.seconds || 0) - (a.ultimaFecha?.seconds || 0)
+    );
+    for (const c of ordenados) {
+      const et = etiquetaDia(c.ultimaFecha) || 'Anteriores';
+      if (et !== etiquetaActual) {
+        grupos.push({ etiqueta: et, items: [] });
+        etiquetaActual = et;
+      }
+      grupos[grupos.length - 1].items.push(c);
+    }
+    return grupos;
+  })();
+
   const inputStyle = { width: '100%', padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13 };
   const labelStyle = { display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 };
 
@@ -698,6 +752,24 @@ export default function VencimientosAnny() {
                 ) : (
                   hilo.map((c, i) => (
                     <React.Fragment key={c.id || i}>
+                      {/* FIX ANNY-UI-002: separador de fecha cuando cambia el día */}
+                      {(i === 0 || etiquetaDia(c.createdAt) !== etiquetaDia(hilo[i - 1]?.createdAt)) && etiquetaDia(c.createdAt) ? (
+                        <div style={{ alignSelf: 'center', margin: '8px 0 4px' }}>
+                          <span style={{
+                            fontSize: 10,
+                            fontWeight: 800,
+                            color: '#6b7280',
+                            background: '#fff',
+                            border: '1px solid #e5e7eb',
+                            padding: '3px 12px',
+                            borderRadius: 999,
+                            textTransform: 'capitalize',
+                            boxShadow: '0 1px 2px rgba(16,24,40,0.05)'
+                          }}>
+                            {etiquetaDia(c.createdAt)}
+                          </span>
+                        </div>
+                      ) : null}
                       {c.mensajeCliente ? (
                         <div style={{ alignSelf: 'flex-start', maxWidth: '75%', background: '#fff', border: '1px solid #e5e7eb', borderRadius: '12px 12px 12px 4px', padding: '8px 12px' }}>
                           <div style={{ fontSize: 13, color: '#374151' }}>{c.mensajeCliente}</div>
@@ -727,46 +799,127 @@ export default function VencimientosAnny() {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {/* FIX ANNY-UI-002: buscador por número o nombre */}
+              <div style={{ position: 'relative', marginBottom: 4 }}>
+                <span style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', fontSize: 14, color: '#9ca3af' }}>🔍</span>
+                <input
+                  type="text"
+                  value={busquedaChat}
+                  onChange={(e) => setBusquedaChat(e.target.value)}
+                  placeholder="Buscar por número o nombre..."
+                  style={{
+                    width: '100%',
+                    padding: '11px 14px 11px 38px',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: 12,
+                    fontSize: 13,
+                    background: '#fff',
+                    boxShadow: '0 1px 2px rgba(16,24,40,0.04)',
+                    outline: 'none',
+                    boxSizing: 'border-box'
+                  }}
+                />
+                {busquedaChat ? (
+                  <button
+                    onClick={() => setBusquedaChat('')}
+                    style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', border: 'none', background: 'transparent', color: '#9ca3af', cursor: 'pointer', fontSize: 14, fontWeight: 700 }}
+                  >
+                    ✕
+                  </button>
+                ) : null}
+              </div>
+
               {chats.length === 0 ? (
                 <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>
                   Sin conversaciones aún
                 </div>
+              ) : chatsFiltrados.length === 0 ? (
+                <div style={{ textAlign: 'center', color: '#9ca3af', padding: 20 }}>
+                  Sin resultados para "{busquedaChat}"
+                </div>
               ) : (
-                chats.map((chat) => (
-                  <div
-                    key={chat.telefono}
-                    onClick={() => setChatAbierto(chat.telefono)}
-                    style={{
-                      background: chat.silenciado ? '#f3f4f6' : '#f9fafb',
-                      border: '1px solid #e5e7eb',
-                      borderRadius: 10,
-                      padding: 14,
-                      borderLeft: `4px solid ${chat.silenciado ? '#9ca3af' : chat.escalado ? '#f59e0b' : '#7c3aed'}`,
-                      cursor: 'pointer',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      gap: 12,
-                      opacity: chat.silenciado ? 0.7 : 1
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ fontWeight: 700, fontSize: 13, color: '#1a1a2e' }}>
-                        {chat.nombreCliente || chat.telefono}
-                        {chat.silenciado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#e5e7eb', color: '#6b7280' }}>🔕</span> : null}
-                        {chat.escalado && !chat.silenciado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#fed7aa', color: '#b45309' }}>⚠️ Escalado</span> : null}
-                      </div>
-                      <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 480 }}>
-                        {chat.ultimoTexto}
-                      </div>
+                /* FIX ANNY-UI-002: conversaciones agrupadas por día */
+                chatsAgrupados.map((grupo) => (
+                  <React.Fragment key={grupo.etiqueta}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '10px 0 2px' }}>
+                      <span style={{
+                        fontSize: 11,
+                        fontWeight: 800,
+                        color: '#7c3aed',
+                        background: '#f5f3ff',
+                        border: '1px solid #ede9fe',
+                        padding: '4px 12px',
+                        borderRadius: 999,
+                        textTransform: 'capitalize',
+                        letterSpacing: 0.3
+                      }}>
+                        {grupo.etiqueta}
+                      </span>
+                      <div style={{ flex: 1, height: 1, background: '#f3f4f6' }} />
+                      <span style={{ fontSize: 11, color: '#9ca3af', fontWeight: 600 }}>
+                        {grupo.items.length} chat{grupo.items.length === 1 ? '' : 's'}
+                      </span>
                     </div>
-                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                      <div style={{ fontSize: 11, color: '#9ca3af' }}>{fmtFecha(chat.ultimaFecha)}</div>
-                      <div style={{ fontSize: 11, color: '#7c3aed', fontWeight: 700, marginTop: 4 }}>
-                        {chat.mensajes} mensaje{chat.mensajes === 1 ? '' : 's'} ›
+
+                    {grupo.items.map((chat) => (
+                      <div
+                        key={chat.telefono}
+                        onClick={() => setChatAbierto(chat.telefono)}
+                        style={{
+                          background: chat.silenciado ? '#f3f4f6' : '#fff',
+                          border: '1px solid #eef0f4',
+                          borderRadius: 14,
+                          padding: '13px 16px',
+                          borderLeft: `4px solid ${chat.silenciado ? '#9ca3af' : chat.escalado ? '#f59e0b' : '#7c3aed'}`,
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 12,
+                          opacity: chat.silenciado ? 0.7 : 1,
+                          boxShadow: '0 1px 3px rgba(16,24,40,0.06)',
+                          transition: 'box-shadow .15s ease, transform .15s ease'
+                        }}
+                      >
+                        {/* Avatar con iniciales */}
+                        <div style={{
+                          width: 40,
+                          height: 40,
+                          borderRadius: '50%',
+                          flexShrink: 0,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: 13,
+                          fontWeight: 800,
+                          color: chat.silenciado ? '#6b7280' : '#6d28d9',
+                          background: chat.silenciado
+                            ? '#e5e7eb'
+                            : 'linear-gradient(135deg, #ede9fe 0%, #fae8ff 100%)',
+                          border: '1px solid #ede9fe'
+                        }}>
+                          {inicialesDe(chat.nombreCliente, chat.telefono)}
+                        </div>
+
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontWeight: 700, fontSize: 13, color: '#1a1a2e' }}>
+                            {chat.nombreCliente || chat.telefono}
+                            {chat.silenciado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#e5e7eb', color: '#6b7280' }}>🔕</span> : null}
+                            {chat.escalado && !chat.silenciado ? <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#fed7aa', color: '#b45309' }}>⚠️ Escalado</span> : null}
+                          </div>
+                          <div style={{ fontSize: 12, color: '#6b7280', marginTop: 3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {chat.ultimoTexto}
+                          </div>
+                        </div>
+
+                        <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                          <div style={{ fontSize: 11, color: '#9ca3af' }}>{fmtHora(chat.ultimaFecha)}</div>
+                          <div style={{ fontSize: 11, color: '#7c3aed', fontWeight: 700, marginTop: 4 }}>
+                            {chat.mensajes} mensaje{chat.mensajes === 1 ? '' : 's'} ›
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
+                    ))}
+                  </React.Fragment>
                 ))
               )}
             </div>
