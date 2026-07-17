@@ -455,6 +455,7 @@ export default function GestionCaja({ user }) {
   const [filtroCaja, setFiltroCaja] = useState('todas');
   const [filtroDesde, setFiltroDesde] = useState('');
   const [filtroHasta, setFiltroHasta] = useState('');
+  const [busquedaMov, setBusquedaMov] = useState(''); // ✅ BUSCAR-CAJA-001
   // ✅ CAJA-REDISENO-001: vista de detalle por caja, búsqueda por número, mes
   const [cajaDetalle, setCajaDetalle] = useState(null);
   const [buscarMov, setBuscarMov] = useState('');
@@ -652,6 +653,19 @@ export default function GestionCaja({ user }) {
     if (filtroCaja !== 'todas' && m.cajaId !== filtroCaja) return false;
     if (filtroDesde && m.createdAt && new Date(m.createdAt) < new Date(filtroDesde)) return false;
     if (filtroHasta && m.createdAt && new Date(m.createdAt) > new Date(filtroHasta + 'T23:59:59')) return false;
+    // ✅ BUSCAR-CAJA-001: buscar en el consolidado por orden, concepto o quien
+    // lo creó — para saber a qué caja entró el dinero de una orden sin
+    // recorrer caja por caja.
+    if (busquedaMov.trim()) {
+      const q = busquedaMov.trim().toLowerCase();
+      const cajaNombre = (cajas.find(c => c.id === m.cajaId)?.nombre || '').toLowerCase();
+      const coincide = (m.concepto || '').toLowerCase().includes(q) ||
+        (m.referencia || '').toLowerCase().includes(q) ||
+        cajaNombre.includes(q) ||
+        (m.creadoPor || '').toLowerCase().includes(q) ||
+        String(m.monto || '').includes(q.replace(/[.$\s]/g, ''));
+      if (!coincide) return false;
+    }
     return true;
   });
   // ── Opción A (regla de negocio): un no-admin SOLO ve sus cajas de
@@ -711,7 +725,27 @@ export default function GestionCaja({ user }) {
                     headers: h
                   });
                   
-                  exportarExcel(data.movimientos, `Movimientos_${filtroDesde}_${filtroHasta}`);
+                  if (!data.movimientos || data.movimientos.length === 0) {
+                    return alert('No hay movimientos en ese periodo para exportar.');
+                  }
+                  // ✅ FIX EXPORTAR-CAJA-001: exportarExcel exige (datos, columnas,
+                  // nombre) — se llamaba sin columnas y "columnas.map" reventaba
+                  // ("t.map is not a function"). Además la caja se exporta con su
+                  // NOMBRE legible, no con el id.
+                  const columnasExport = [
+                    { label: 'Fecha', key: 'FECHA' },
+                    { label: 'Concepto', key: 'CONCEPTO' },
+                    { label: 'Caja', getValue: (f) => cajas.find(c => c.id === f.CAJA)?.nombre || f.CAJA || '' },
+                    { label: 'Tipo', key: 'TIPO' },
+                    { label: 'Monto', key: 'MONTO' },
+                    { label: 'Referencia', key: 'REFERENCIA' },
+                    { label: 'Método pago', key: 'MÉTODO PAGO' },
+                    { label: 'Creado por', key: 'CREADO POR' }
+                  ];
+                  const nombreCaja = filtroCaja !== 'todas'
+                    ? (cajas.find(c => c.id === filtroCaja)?.nombre || 'Caja').replace(/\s+/g, '_')
+                    : 'Todas';
+                  exportarExcel(data.movimientos, columnasExport, `Movimientos_${nombreCaja}_${filtroDesde}_a_${filtroHasta}`);
                   alert(`✅ Exportados ${data.totalRegistros} movimientos`);
                 } catch (e) {
                   console.error('Error exportando:', e);
@@ -812,8 +846,12 @@ export default function GestionCaja({ user }) {
           </select>
           <input type="date" style={{ ...S.input, maxWidth: 160 }} value={filtroDesde} onChange={e => setFiltroDesde(e.target.value)} title="Desde" />
           <input type="date" style={{ ...S.input, maxWidth: 160 }} value={filtroHasta} onChange={e => setFiltroHasta(e.target.value)} title="Hasta" />
-          {(filtroDesde || filtroHasta || filtroCaja !== 'todas') && (
-            <button onClick={() => { setFiltroDesde(''); setFiltroHasta(''); setFiltroCaja('todas'); }} style={{ padding: '8px 14px', background: '#fee2e2', color: '#991b1b', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>✕ Limpiar</button>
+          {/* ✅ BUSCAR-CAJA-001: buscador del consolidado de movimientos */}
+          <input style={{ ...S.input, flex: '1 1 200px', minWidth: 170 }}
+            placeholder="🔍 Buscar orden, concepto, caja o monto..."
+            value={busquedaMov} onChange={e => setBusquedaMov(e.target.value)} />
+          {(filtroDesde || filtroHasta || filtroCaja !== 'todas' || busquedaMov) && (
+            <button onClick={() => { setFiltroDesde(''); setFiltroHasta(''); setFiltroCaja('todas'); setBusquedaMov(''); }} style={{ padding: '8px 14px', background: '#fee2e2', color: '#991b1b', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>✕ Limpiar</button>
           )}
         </div>
       )}

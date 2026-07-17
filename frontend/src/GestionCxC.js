@@ -702,6 +702,9 @@ const GestionCxC = ({ user }) => {
   // ✅ SALDO-UNICO-001: reparación de pagos históricos (solo admin)
   const [reparacion, setReparacion]       = useState(null); // resultado de la vista previa
   const [reparando, setReparando]         = useState(false);
+  // ✅ REPARAR-SELECTIVO-001: el admin elige qué corregir y qué omitir
+  const [selReparar, setSelReparar]       = useState({});   // { ordenId: bool }
+  const [ajustarCajas, setAjustarCajas]   = useState(false); // tocar saldos de caja: apagado por defecto
   const [gestiones, setGestiones]         = useState([]);
   const [exito, setExito]                 = useState('');
   const [error, setError]                 = useState('');
@@ -812,6 +815,11 @@ const GestionCxC = ({ user }) => {
                 setReparando(true); setError('');
                 const r = await axios.post(`${API}/orders/reparar-pagos`, { aplicar: false }, { headers });
                 setReparacion(r.data);
+                // ✅ REPARAR-SELECTIVO-001: todas marcadas por defecto; cajas NO
+                const sel = {};
+                (r.data.hallazgos || []).forEach(h => { sel[h.ordenId] = true; });
+                setSelReparar(sel);
+                setAjustarCajas(false);
               } catch (e) { setError(e.response?.data?.error || 'Error revisando pagos'); }
               setReparando(false);
             }} style={s.btnSecundario}>{reparando ? '⏳ Revisando...' : '🩺 Revisar pagos'}</button>
@@ -835,37 +843,77 @@ const GestionCxC = ({ user }) => {
             </div>
             <div style={{ ...s.modalBody, maxHeight: '60vh', overflowY: 'auto' }}>
               {reparacion.total === 0 && <div style={{ textAlign: 'center', padding: 30, color: '#16a34a', fontWeight: 700 }}>✅ No se encontraron inconsistencias de pago</div>}
-              {(reparacion.hallazgos || []).map((h, i) => (
-                <div key={i} style={{ border: '1px solid #fcd34d', background: '#fffbeb', borderRadius: 10, padding: '10px 14px', marginBottom: 10, fontSize: 13 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
-                    <strong>{h.numeroOrden} · {h.clienteNombre}</strong>
+              {reparacion.modo !== 'aplicado' && reparacion.total > 0 && (
+                <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10 }}>
+                  Marca las órdenes que quieres corregir y desmarca las que prefieres dejar como están.
+                </div>
+              )}
+              {(reparacion.hallazgos || []).map((h, i) => {
+                const marcada = !!selReparar[h.ordenId];
+                const previa = reparacion.modo !== 'aplicado';
+                return (
+                <div key={i}
+                  onClick={() => previa && setSelReparar(p => ({ ...p, [h.ordenId]: !p[h.ordenId] }))}
+                  style={{ border: h.omitida ? '1px solid #e5e7eb' : marcada || !previa ? '1px solid #fcd34d' : '1px solid #e5e7eb',
+                    background: h.omitida ? '#f9fafb' : marcada || !previa ? '#fffbeb' : '#f9fafb',
+                    opacity: (previa && !marcada) || h.omitida ? 0.6 : 1,
+                    borderRadius: 10, padding: '10px 14px', marginBottom: 10, fontSize: 13,
+                    cursor: previa ? 'pointer' : 'default' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {previa && (
+                        <input type="checkbox" checked={marcada} onChange={() => {}}
+                          style={{ width: 16, height: 16, cursor: 'pointer' }} />
+                      )}
+                      <strong>{h.numeroOrden} · {h.clienteNombre}</strong>
+                    </div>
                     <span style={{ color: '#6b7280', fontSize: 12 }}>Total {fmt(h.total)} · Pagado {fmt(h.montoPagado)}{h.ingresosCaja > 0 ? ` · En caja ${fmt(h.ingresosCaja)}` : ''}</span>
                   </div>
-                  <ul style={{ margin: '6px 0 0', paddingLeft: 18, color: '#92400e' }}>
+                  <ul style={{ margin: '6px 0 0', paddingLeft: previa ? 42 : 18, color: '#92400e' }}>
                     {(h.problemas || []).map((p, j) => <li key={j}>{p}</li>)}
                   </ul>
-                  {(h.aplicado || h.ajusteCajaAplicado) && <div style={{ marginTop: 6, color: '#16a34a', fontWeight: 700, fontSize: 12 }}>✅ Corregida</div>}
+                  {(h.aplicado || h.ajusteCajaAplicado) && <div style={{ marginTop: 6, color: '#16a34a', fontWeight: 700, fontSize: 12 }}>✅ Corregida{h.ajusteCajaAplicado ? ' (con ajuste de caja)' : ''}</div>}
+                  {h.omitida && <div style={{ marginTop: 6, color: '#6b7280', fontWeight: 700, fontSize: 12 }}>⏭️ Omitida — no se tocó</div>}
+                  {h.error && <div style={{ marginTop: 6, color: '#dc2626', fontWeight: 700, fontSize: 12 }}>⚠️ No se pudo corregir: {h.error}</div>}
                 </div>
-              ))}
+              ); })}
             </div>
-            {reparacion.modo !== 'aplicado' && reparacion.total > 0 && (
+            {reparacion.modo !== 'aplicado' && reparacion.total > 0 && (() => {
+              const idsSeleccionados = (reparacion.hallazgos || []).filter(h => selReparar[h.ordenId]).map(h => h.ordenId);
+              const haySeleccionConCaja = (reparacion.hallazgos || []).some(h => selReparar[h.ordenId] && h.ajusteCaja);
+              return (
               <div style={{ ...s.modalFooter, flexDirection: 'column', gap: 8 }}>
-                <button disabled={reparando} onClick={async () => {
-                  if (!window.confirm(`Se corregirán ${reparacion.total} orden(es) y se ajustarán los ingresos duplicados en caja. Esta acción queda en auditoría. ¿Continuar?`)) return;
+                {/* ✅ REPARAR-SELECTIVO-001: los saldos de caja solo se tocan si
+                    el admin lo activa — si ya cuadró las cajas a mano, el
+                    ajuste automático las descuadraría de nuevo. */}
+                {haySeleccionConCaja && (
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12, color: '#374151', cursor: 'pointer', padding: '8px 10px', background: '#f8fafc', borderRadius: 8, border: '1px solid #e2e8f0' }}>
+                    <input type="checkbox" checked={ajustarCajas} onChange={e => setAjustarCajas(e.target.checked)}
+                      style={{ width: 16, height: 16, marginTop: 1 }} />
+                    <span><strong>Ajustar también los saldos de caja</strong> (genera un egreso de ajuste por los ingresos duplicados). Déjalo desmarcado si las cajas ya se cuadraron manualmente.</span>
+                  </label>
+                )}
+                <button disabled={reparando || idsSeleccionados.length === 0} onClick={async () => {
+                  if (!window.confirm(`Se corregirán ${idsSeleccionados.length} orden(es)${ajustarCajas ? ' CON ajuste de saldos de caja' : ' sin tocar los saldos de caja'}. Esta acción queda en auditoría. ¿Continuar?`)) return;
                   try {
                     setReparando(true); setError('');
-                    const r = await axios.post(`${API}/orders/reparar-pagos`, { aplicar: true, aplicarAjustesCaja: true }, { headers });
+                    const r = await axios.post(`${API}/orders/reparar-pagos`, {
+                      aplicar: true,
+                      aplicarAjustesCaja: ajustarCajas,
+                      ordenIds: idsSeleccionados
+                    }, { headers });
                     setReparacion(r.data);
-                    setExito(`✅ Reparación aplicada: ${r.data.total} orden(es) corregida(s)`);
+                    setExito(`✅ Reparación aplicada: ${r.data.corregidas ?? r.data.total} orden(es) corregida(s)`);
                     await cargar();
                   } catch (e) { setError(e.response?.data?.error || 'Error aplicando reparación'); }
                   setReparando(false);
-                }} style={{ width: '100%', padding: 14, borderRadius: 10, border: 'none', background: '#dc2626', color: '#fff', fontWeight: 800, cursor: 'pointer' }}>
-                  {reparando ? '⏳ Aplicando...' : `🔧 Aplicar correcciones (${reparacion.total})`}
+                }} style={{ width: '100%', padding: 14, borderRadius: 10, border: 'none', background: idsSeleccionados.length === 0 ? '#9ca3af' : '#dc2626', color: '#fff', fontWeight: 800, cursor: idsSeleccionados.length === 0 ? 'not-allowed' : 'pointer' }}>
+                  {reparando ? '⏳ Aplicando...' : `🔧 Corregir seleccionadas (${idsSeleccionados.length} de ${reparacion.total})`}
                 </button>
                 <button onClick={() => setReparacion(null)} style={s.btnCancelar}>Cancelar</button>
               </div>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}

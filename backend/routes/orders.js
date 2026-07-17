@@ -2966,21 +2966,35 @@ router.post('/reparar-pagos', authenticate, async (req, res) => {
     }
     const aplicar = req.body?.aplicar === true;
     const aplicarAjustesCaja = req.body?.aplicarAjustesCaja === true;
+    // ✅ REPARAR-SELECTIVO-001: el admin elige QUÉ órdenes corregir. Si envía
+    // ordenIds, solo esas se tocan; las demás quedan omitidas (ej: suscriptores
+    // que ya ajustaron sus cajas a mano y una corrección doble las descuadraría).
+    const ordenIdsSel = Array.isArray(req.body?.ordenIds) && req.body.ordenIds.length > 0
+      ? new Set(req.body.ordenIds)
+      : null;
     const adminId = req.adminId || req.user.uid || req.user.id;
 
-    const [snapOrdenes, snapMovs] = await Promise.all([
+    const [snapOrdenes, snapMovs, snapCajas] = await Promise.all([
       db.collection('orders').where('adminId', '==', adminId).get(),
-      db.collection('movimientos').where('userId', '==', adminId).get()
+      db.collection('movimientos').where('userId', '==', adminId).get(),
+      db.collection('cajas').where('userId', '==', adminId).get()
     ]);
+
+    // ✅ FIX REPARAR-CAJA-001: solo cuentan ingresos hacia cajas REALES del
+    // tenant. Movimientos viejos con cajaId 'sin_asignar' (bug CAJA-002) nunca
+    // sumaron saldo a ninguna caja: no son dinero duplicado y NO se puede
+    // hacer update sobre esa caja inexistente (error 5 NOT_FOUND).
+    const cajasValidas = new Set(snapCajas.docs.map(d => d.id));
 
     // Ingresos a caja agrupados por orden (solo movimientos con ordenId)
     const ingresosPorOrden = {};
     snapMovs.forEach(d => {
       const m = d.data();
       if (m.tipo !== 'ingreso' || !m.ordenId) return;
+      if (!m.cajaId || !cajasValidas.has(m.cajaId)) return; // sin caja real: no sumó saldo
       if (!ingresosPorOrden[m.ordenId]) ingresosPorOrden[m.ordenId] = [];
       ingresosPorOrden[m.ordenId].push({
-        id: d.id, monto: Number(m.monto) || 0, cajaId: m.cajaId || null,
+        id: d.id, monto: Number(m.monto) || 0, cajaId: m.cajaId,
         concepto: m.concepto || '', creadoEn: m.createdAt?.toMillis?.() || 0
       });
     });
@@ -3044,57 +3058,72 @@ router.post('/reparar-pagos', authenticate, async (req, res) => {
         aplicado: false
       };
 
-      if (aplicar) {
-        if (Object.keys(fix).length > 0) {
-          await doc.ref.update({
-            ...fix,
-            historialEstados: admin.firestore.FieldValue.arrayUnion({
-              estado: o.estado,
-              fecha: new Date().toISOString(),
-              usuarioId: req.user.uid || req.user.id,
-              usuarioNombre: req.user.nombre || req.user.email,
-              accion: 'REPARACION_PAGOS',
-              nota: `Reparación SALDO-UNICO-001: ${problemas.join(' · ')}`
-            }),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          });
-          hallazgo.aplicado = true;
-        }
-        if (ajusteCaja && aplicarAjustesCaja && ajusteCaja.cajaId) {
-          await db.collection('cajas').doc(ajusteCaja.cajaId).update({
-            saldo: admin.firestore.FieldValue.increment(-ajusteCaja.exceso),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          });
-          await db.collection('movimientos').add({
-            userId: adminId,
-            cajaId: ajusteCaja.cajaId,
-            tipo: 'egreso',
-            concepto: `Ajuste ingreso duplicado — orden ${o.numeroOrden} (reparación SALDO-UNICO-001)`,
-            monto: ajusteCaja.exceso,
-            referencia: o.numeroOrden,
-            ordenId: doc.id,
-            creadoPor: req.user.email,
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-          });
-          await doc.ref.update({ ajusteDuplicadoCajaAplicado: true });
-          hallazgo.ajusteCajaAplicado = true;
+      // ✅ REPARAR-SELECTIVO-001: no seleccionada → se omite (no se toca nada)
+      const seleccionada = !ordenIdsSel || ordenIdsSel.has(doc.id);
+      if (aplicar && !seleccionada) {
+        hallazgo.omitida = true;
+      }
+
+      if (aplicar && seleccionada) {
+        // ✅ FIX REPARAR-CAJA-001: cada orden se corrige de forma independiente;
+        // si una falla, se reporta en el hallazgo y las demás continúan.
+        try {
+          if (Object.keys(fix).length > 0) {
+            await doc.ref.update({
+              ...fix,
+              historialEstados: admin.firestore.FieldValue.arrayUnion({
+                estado: o.estado,
+                fecha: new Date().toISOString(),
+                usuarioId: req.user.uid || req.user.id,
+                usuarioNombre: req.user.nombre || req.user.email,
+                accion: 'REPARACION_PAGOS',
+                nota: `Reparación SALDO-UNICO-001: ${problemas.join(' · ')}`
+              }),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            hallazgo.aplicado = true;
+          }
+          if (ajusteCaja && aplicarAjustesCaja && ajusteCaja.cajaId && cajasValidas.has(ajusteCaja.cajaId)) {
+            await db.collection('cajas').doc(ajusteCaja.cajaId).update({
+              saldo: admin.firestore.FieldValue.increment(-ajusteCaja.exceso),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            await db.collection('movimientos').add({
+              userId: adminId,
+              cajaId: ajusteCaja.cajaId,
+              tipo: 'egreso',
+              concepto: `Ajuste ingreso duplicado — orden ${o.numeroOrden} (reparación SALDO-UNICO-001)`,
+              monto: ajusteCaja.exceso,
+              referencia: o.numeroOrden,
+              ordenId: doc.id,
+              creadoPor: req.user.email,
+              createdAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+            await doc.ref.update({ ajusteDuplicadoCajaAplicado: true });
+            hallazgo.ajusteCajaAplicado = true;
+          }
+        } catch (eOrden) {
+          hallazgo.error = eOrden.message;
+          console.error(`Reparación ${o.numeroOrden}:`, eOrden.message);
         }
       }
 
       hallazgos.push(hallazgo);
     }
 
-    if (aplicar && hallazgos.length > 0) {
+    const corregidas = hallazgos.filter(h => h.aplicado || h.ajusteCajaAplicado).length;
+    const omitidas = hallazgos.filter(h => h.omitida).length;
+    if (aplicar && corregidas > 0) {
       await auditar({
         accion: 'REPARACION_PAGOS',
-        descripcion: `${req.user.email} ejecutó la reparación de pagos: ${hallazgos.length} orden(es) corregida(s)${aplicarAjustesCaja ? ' (con ajustes de caja)' : ''}`,
+        descripcion: `${req.user.email} ejecutó la reparación de pagos: ${corregidas} orden(es) corregida(s), ${omitidas} omitida(s)${aplicarAjustesCaja ? ' (con ajustes de caja)' : ' (sin tocar saldos de caja)'}`,
         usuarioId: req.user.uid || req.user.id,
         usuarioNombre: req.user.nombre || req.user.email,
-        datos: { hallazgos: hallazgos.map(h => ({ numeroOrden: h.numeroOrden, problemas: h.problemas })) }
+        datos: { hallazgos: hallazgos.map(h => ({ numeroOrden: h.numeroOrden, problemas: h.problemas, aplicado: !!h.aplicado, omitida: !!h.omitida })) }
       });
     }
 
-    res.json({ ok: true, modo: aplicar ? 'aplicado' : 'vista_previa', total: hallazgos.length, hallazgos });
+    res.json({ ok: true, modo: aplicar ? 'aplicado' : 'vista_previa', total: hallazgos.length, corregidas, omitidas, hallazgos });
   } catch (e) {
     console.error('POST reparar-pagos:', e);
     res.status(500).json({ error: e.message });
