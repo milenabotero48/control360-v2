@@ -453,8 +453,17 @@ Responde SOLO en JSON (sin markdown):
 
     const respuestaTexto = message.content[0].text;
 
-    // Limpiar markdown si viene envuelto
+    // FIX ANNY-JSON-001: el modelo a veces agrega texto antes o
+    // después del JSON ("Unexpected non-whitespace character after
+    // JSON") → se extrae SOLO el bloque entre la primera '{' y la
+    // última '}' antes de parsear. Sin esto, el parse fallaba y el
+    // cliente recibía el mensaje genérico de fallback.
     let jsonLimpio = respuestaTexto.replace(/```json|```/g, '').trim();
+    const ini = jsonLimpio.indexOf('{');
+    const fin = jsonLimpio.lastIndexOf('}');
+    if (ini !== -1 && fin > ini) {
+      jsonLimpio = jsonLimpio.slice(ini, fin + 1);
+    }
 
     const decision = JSON.parse(jsonLimpio);
     return decision;

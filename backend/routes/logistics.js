@@ -601,6 +601,11 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
     // caja, un cobro nuevo abre un ciclo de cuadre NUEVO solo por lo nuevo.
     const recaudoVivo = (orden.dineroEnCaja === true || orden.cuadrado === true)
       ? 0 : (Number(orden.montoRecaudado) || 0);
+    // ✅ FIX COBRO-SIN-MENSAJERO-001: monto de efectivo que debe ingresar a
+    // caja de inmediato porque no habrá cuadre (cobro fuera de entrega en
+    // orden sin mensajero). Se llena en el branch de cobro y se ingresa
+    // después de guardar la orden.
+    let ingresoDirectoRecogida = 0;
 
     if (nuevoEstado === 'entrega_cobranza') {
       // Sin saldo pendiente → solo entregar (nada que cobrar).
@@ -860,11 +865,20 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
         update.formaPagoRecaudo = formaPago || 'Transferencia';
         update.montoRecaudado = recaudoVivo + cobroAplicadoR;
         update.tipoCobro = 'virtual';
-        if (orden.mensajeroId) update.pagoVirtualPendienteValidar = true;
+        // ✅ FIX COBRO-SIN-MENSAJERO-001: el pago virtual SIEMPRE espera
+        // validación de tesorería. Antes, sin mensajero asignado, no se
+        // marcaba pendiente y el pago quedaba invisible para validar.
+        update.pagoVirtualPendienteValidar = true;
       } else {
         update.formaPagoRecaudo = formaPago || 'Efectivo';
         update.montoRecaudado = recaudoVivo + cobroAplicadoR;
         update.tipoCobro = 'efectivo';
+        // ✅ FIX COBRO-SIN-MENSAJERO-001 (caso real OS-0185): efectivo cobrado
+        // FUERA de la entrega (ej. en la recogida) en una orden SIN mensajero
+        // asignado. No habrá cuadre que lo ingrese — antes quedaba "pagada"
+        // pero el dinero JAMÁS entraba a caja. Se ingresa de inmediato abajo,
+        // después de guardar la orden (con el candado único anti-duplicados).
+        if (!orden.mensajeroId) ingresoDirectoRecogida = cobroAplicadoR;
       }
       if (!esCredito) {
         // ✅ FIX ABONO-SALDO-001: acumula y solo marca 'pagada' con saldo 0.
@@ -939,6 +953,27 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
     }
 
     await ordenRef.update(update);
+
+    // ✅ FIX COBRO-SIN-MENSAJERO-001 (caso real OS-0185): ingresar YA el
+    // efectivo cobrado fuera de la entrega cuando NO hay mensajero — sin
+    // esto el dinero quedaba "pagado" pero nunca entraba a ninguna caja.
+    // registrarIngresoEnCaja trae el candado atómico anti-duplicados.
+    if (ingresoDirectoRecogida > 0 && typeof registrarIngresoEnCaja === 'function') {
+      try {
+        await registrarIngresoEnCaja({
+          userId: req.adminId || req.user.uid || req.user.id,
+          ordenId: req.params.id,
+          numeroOrden: orden.numeroOrden,
+          clienteNombre: orden.clienteNombre,
+          monto: ingresoDirectoRecogida,
+          formaPago: formaPago || 'Efectivo',
+          usuarioEmail: req.user.email,
+          numeroFactura: orden.numeroFactura || ''
+        });
+      } catch (eIngDir) {
+        console.error('COBRO-SIN-MENSAJERO-001: no se pudo ingresar a caja:', eIngDir.message);
+      }
+    }
 
     // ✅ FIX LOGISTICA-005: huella del cierre sin mensajero + dinero a caja
     if (cierreSinMensajero) {
