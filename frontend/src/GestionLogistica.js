@@ -484,8 +484,10 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
           cobroFinal = undefined;
           formaPagoFinal = 'A crédito (CxC)';
         } else {
-          // Pagó: si no digitó monto, se cobra el total de la orden.
-          cobroFinal = Number(cobro) > 0 ? cobro : String(orden.total || 0);
+          // ✅ FIX ABONO-SALDO-001: si no digitó monto, se cobra el SALDO
+          // (con abonos previos, cobrar "el total" recobraría de más).
+          const saldoPend = Math.max(0, (orden.total || 0) - (orden.montoPagado || 0));
+          cobroFinal = Number(cobro) > 0 ? cobro : String(saldoPend);
           formaPagoFinal = formaPago;
         }
       } else {
@@ -956,7 +958,7 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
                   <label style={s.label}>Resultado del cobro <span style={{ color: '#dc2626' }}>*</span></label>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                     <button type="button"
-                      onClick={() => { setResultadoCobro('pago'); if (!cobro) setCobro(String(orden.total || 0)); }}
+                      onClick={() => { setResultadoCobro('pago'); if (!cobro) setCobro(String(Math.max(0, (orden.total || 0) - (orden.montoPagado || 0)))); }}
                       style={{
                         padding: '14px 8px', borderRadius: 10, cursor: 'pointer', fontWeight: 700, fontSize: 13,
                         border: resultadoCobro === 'pago' ? '2px solid #16a34a' : '1px solid #e5e7eb',
@@ -978,7 +980,7 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
                   </div>
                   {resultadoCobro === 'no_pago' && (
                     <div style={{ marginTop: 8, padding: '10px 12px', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, fontSize: 12, color: '#92400e' }}>
-                      La orden quedará en <strong>Cuentas por Cobrar</strong> con el saldo completo de {fmt(orden.total)}. No suma al cuadre del mensajero.
+                      La orden quedará en <strong>Cuentas por Cobrar</strong> con el saldo pendiente de {fmt(Math.max(0, (orden.total || 0) - (orden.montoPagado || 0)))}. No suma al cuadre del mensajero.
                     </div>
                   )}
                 </div>
@@ -1321,9 +1323,13 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                           </div>
                         </div>
                         <div style={{ textAlign: 'right' }}>
+                          {/* ✅ CUADRE-PAGADA-001: una orden pagada por otra vía (sala de
+                              ventas, anticipo, CxC) se muestra como tal — no "sin cobro" */}
                           {o.cobrado
                             ? <span style={{ fontWeight: 800, color: '#16a34a' }}>{fmt(o.montoRecaudado)}</span>
-                            : <span style={{ fontWeight: 600, color: '#cbd5e1' }}>sin cobro</span>}
+                            : o.pagada
+                              ? <span style={{ fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 6, background: '#dcfce7', color: '#15803d' }}>✔ ya pagada</span>
+                              : <span style={{ fontWeight: 600, color: '#cbd5e1' }}>sin cobro</span>}
                           {o.total > 0 && o.montoRecaudado !== o.total && (
                             <div style={{ fontSize: 10, color: '#94a3b8' }}>de {fmt(o.total)}</div>
                           )}
@@ -1351,8 +1357,11 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                           {cajasEfectivo.length > 1 && (
                             <select value={cajasPorOrden[o.id] || ''}
                               onChange={e => setCajasPorOrden(p => ({ ...p, [o.id]: e.target.value }))}
-                              style={{ ...s.input, padding: '6px 8px', fontSize: 12, width: 'auto', maxWidth: 150 }}>
-                              <option value="">Caja general</option>
+                              style={{ ...s.input, padding: '6px 8px', fontSize: 12, width: 'auto', maxWidth: 170 }}>
+                              {/* ✅ UX: mostrar a cuál caja iría si no elige una específica */}
+                              <option value="">{cajaEfectivoId
+                                ? `Caja general (${(cajasEfectivo.find(c => c.id === cajaEfectivoId) || {}).nombre || ''})`
+                                : 'Caja general (elígela abajo)'}</option>
                               {cajasEfectivo.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
                             </select>
                           )}

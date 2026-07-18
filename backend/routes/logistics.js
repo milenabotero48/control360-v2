@@ -589,18 +589,27 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
     // del mensajero. Ahora: sin pago explícito = queda en cartera (CxC).
     const sinPago = !esCredito && !formaPago && montoCobro <= 0;
 
+    // ✅ FIX ABONO-SALDO-001: TODO cobro se decide por SALDO REAL
+    // (total − montoPagado), nunca por la bandera 'pagado'. Antes un abono
+    // parcial encendía pagado=true y el sistema bloqueaba recibir el resto
+    // del dinero ("Esta orden ya está pagada") en recogida y en entrega.
+    const totalOrden = Math.round(Number(orden.total) || 0);
+    const pagadoPrevio = Math.round(Number(orden.montoPagado) || 0);
+    const saldoPrevio = Math.max(0, totalOrden - pagadoPrevio);
+    // Recaudo "vivo" = dinero de cobros anteriores que AÚN está en manos del
+    // mensajero (ni cuadrado ni en caja). Si el dinero anterior ya entró a
+    // caja, un cobro nuevo abre un ciclo de cuadre NUEVO solo por lo nuevo.
+    const recaudoVivo = (orden.dineroEnCaja === true || orden.cuadrado === true)
+      ? 0 : (Number(orden.montoRecaudado) || 0);
+
     if (nuevoEstado === 'entrega_cobranza') {
-      // Ola 2.5: si la orden YA está pagada (admin la marcó pagada antes, o ya
-      // pasó por validación), NO bloqueamos el avance: simplemente saltamos la
-      // sección de "registrar cobro" porque ya no hay nada que cobrar.
-      // El mensajero solo entrega y se cierra como completada.
-      const ordenYaPagada = (orden.pagado === true || orden.dineroEnCaja === true)
-        && !esCredito;
+      // Sin saldo pendiente → solo entregar (nada que cobrar).
+      const ordenYaPagada = saldoPrevio <= 0 && !esCredito;
       const intentaCobrarDeNuevo = montoCobro > 0 || (formaPago && !esCredito);
 
       if (ordenYaPagada && intentaCobrarDeNuevo) {
         // Caso real recobro: rechazar
-        return res.status(409).json({ error: 'Esta orden ya está pagada.', yaPagada: true });
+        return res.status(409).json({ error: 'Esta orden ya está pagada completa.', yaPagada: true });
       }
 
       if (ordenYaPagada) {
@@ -663,24 +672,39 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
             requiereComprobante: true
           });
         }
+        // ✅ FIX ABONO-SALDO-001: el cobro aplica sobre el SALDO, nunca más.
+        const cobroAplicado = Math.min(montoCobro > 0 ? montoCobro : saldoPrevio, saldoPrevio);
         update.formaPagoRecaudo = formaPago || 'Transferencia';
-        update.montoRecaudado = montoCobro || orden.total || 0;
+        update.montoRecaudado = recaudoVivo + cobroAplicado;
         update.tipoCobro = 'virtual';
         if (hayMensajero) update.pagoVirtualPendienteValidar = true;
       } else {
         // El mensajero eligió una forma de pago en efectivo de forma EXPLÍCITA.
-        // Si no digitó monto, se asume el total de la orden (eligió cobrar).
+        // ✅ FIX ABONO-SALDO-001: sin monto digitado se asume el SALDO (no el
+        // total — con abonos previos el total recobraría de más).
+        const cobroAplicado = Math.min(montoCobro > 0 ? montoCobro : saldoPrevio, saldoPrevio);
         update.formaPagoRecaudo = formaPago || 'Efectivo';
-        update.montoRecaudado = montoCobro || orden.total || 0;
+        update.montoRecaudado = recaudoVivo + cobroAplicado;
         update.tipoCobro = 'efectivo';
       }
 
       if (!esCredito && !sinPago) {
-        update.pagado = true;
-        update.montoPagado = update.montoRecaudado;
-        update.fechaPago = timestampFoto;
+        // ✅ FIX ABONO-SALDO-001: montoPagado ACUMULA; 'pagada' SOLO si el
+        // saldo llega a 0. Un abono parcial deja la orden en 'parcial' y el
+        // sistema sigue aceptando el cobro del resto.
+        const cobroAplicado = Math.min(montoCobro > 0 ? montoCobro : saldoPrevio, saldoPrevio);
+        const acumulado = pagadoPrevio + cobroAplicado;
+        update.montoPagado = acumulado;
+        update.pagado = acumulado >= totalOrden - 1;
+        update.cxcSaldo = Math.max(0, totalOrden - acumulado);
+        update.cxcEstado = update.cxcSaldo <= 1 ? 'pagada' : 'parcial';
+        update.fechaPago = update.pagado ? timestampFoto : (orden.fechaPago || null);
         // Solo se "cobra por mensajero" (espera cuadre) si HAY mensajero.
         update.cobradoPorMensajero = hayMensajero;
+        // Si el dinero anterior ya estaba en caja/cuadrado, este cobro nuevo
+        // reabre el ciclo de cuadre SOLO por el monto nuevo.
+        if (orden.dineroEnCaja === true) update.dineroEnCaja = false;
+        if (orden.cuadrado === true) update.cuadrado = false;
       }
       if (formaPago) update.formaPago = formaPago;
 
@@ -730,10 +754,13 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
             );
           }
         } else {
-          // Pago en EFECTIVO: dinero entra a caja YA. Estado solo cierra si estaba en cobranza.
-          update.dineroEnCaja = true;
-          update.dineroEnCajaFecha = timestampFoto;
-          update.dineroEnCajaPor = req.user.email;
+          // Pago en EFECTIVO: dinero entra a caja YA (abajo, vía
+          // registrarIngresoEnCaja). ✅ FIX CANDADO-PREMATURO-001: NO se
+          // enciende dineroEnCaja aquí — se guardaba ANTES de llamar la
+          // función de ingreso y su candado anti-duplicados veía la bandera
+          // encendida, devolvía "duplicado" y el efectivo NUNCA sumaba a la
+          // caja (el famoso "efectivo que no había entrado a caja" del script
+          // de reparación). La función marca la bandera de forma atómica.
           if (yaEnCobranza) {
             update.estado = 'completada';
             update.historialEstados = admin.firestore.FieldValue.arrayUnion(
@@ -812,9 +839,13 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
       // el cliente le paga ahí mismo). Hay que registrarlo igual que un
       // cobro normal para que entre al cuadre — si no, el dinero se pierde
       // cuando al mensajero se le olvida reportarlo.
-      if (orden.pagado === true || orden.dineroEnCaja === true) {
-        return res.status(409).json({ error: 'Esta orden ya está pagada.', yaPagada: true });
+      // ✅ FIX ABONO-SALDO-001: bloquear SOLO si no queda saldo real. Antes
+      // un abono previo (pagado=true) impedía recibir el resto del dinero
+      // en la recogida — el reporte "no deja recibir el dinero".
+      if (saldoPrevio <= 0) {
+        return res.status(409).json({ error: 'Esta orden ya está pagada completa.', yaPagada: true });
       }
+      const cobroAplicadoR = Math.min(montoCobro, saldoPrevio);
       if (esCredito) {
         update.formaPagoRecaudo = 'A crédito (CxC)';
         update.montoRecaudado = 0;
@@ -827,21 +858,27 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
           });
         }
         update.formaPagoRecaudo = formaPago || 'Transferencia';
-        update.montoRecaudado = montoCobro;
+        update.montoRecaudado = recaudoVivo + cobroAplicadoR;
         update.tipoCobro = 'virtual';
         if (orden.mensajeroId) update.pagoVirtualPendienteValidar = true;
       } else {
         update.formaPagoRecaudo = formaPago || 'Efectivo';
-        update.montoRecaudado = montoCobro;
+        update.montoRecaudado = recaudoVivo + cobroAplicadoR;
         update.tipoCobro = 'efectivo';
       }
       if (!esCredito) {
-        update.pagado = true;
-        update.montoPagado = montoCobro;
-        update.fechaPago = timestampFoto;
+        // ✅ FIX ABONO-SALDO-001: acumula y solo marca 'pagada' con saldo 0.
+        const acumuladoR = pagadoPrevio + cobroAplicadoR;
+        update.montoPagado = acumuladoR;
+        update.pagado = acumuladoR >= totalOrden - 1;
+        update.cxcSaldo = Math.max(0, totalOrden - acumuladoR);
+        update.cxcEstado = update.cxcSaldo <= 1 ? 'pagada' : 'parcial';
+        update.fechaPago = update.pagado ? timestampFoto : (orden.fechaPago || null);
         // Cobró el mensajero en ruta → tiene que cuadrarlo. La alerta a
         // tesorería se dispara más abajo (cobroParaCuadre).
         update.cobradoPorMensajero = !!orden.mensajeroId;
+        if (orden.dineroEnCaja === true) update.dineroEnCaja = false;
+        if (orden.cuadrado === true) update.cuadrado = false;
       }
       if (formaPago) update.formaPago = formaPago;
     }
@@ -1124,6 +1161,11 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
       const o = doc.data();
       if (o.cuadrado === true) return;
       const monto = Number(o.montoRecaudado) || 0;
+      // ✅ FIX CUADRE-PAGADA-001: saldo real de la orden (total − pagado).
+      // Una orden pagada por otra vía (sala de ventas, anticipo, CxC) NO es
+      // cartera aunque el mensajero no le haya cobrado nada.
+      const saldoOrden = Math.max(0, (Math.round(Number(o.total) || 0)) - (Math.round(Number(o.montoPagado) || 0)));
+      const yaPagadaOtraVia = o.pagado === true || o.dineroEnCaja === true || saldoOrden <= 0;
       // Registrar en el detalle de ruta (todas, cobradas o no)
       rutaDetalle.push({
         numeroOrden: o.numeroOrden,
@@ -1133,15 +1175,17 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
         total: Number(o.total) || 0,
         montoRecaudado: monto,
         formaPago: o.formaPagoRecaudo || '',
-        cobrado: monto > 0
+        cobrado: monto > 0,
+        pagada: yaPagadaOtraVia // ✅ para que el receptor vea "ya pagada" y no "sin cobro"
       });
       if (monto <= 0) {
         // Sin cobro real: NO suma al cuadre, pero el Admin debe verla — al
         // confirmar el cuadre pasará a CxC (Ola 3: visibilidad de cartera).
-        if (['entrega_cobranza', 'cuadre_dinero'].includes(o.estado)) {
+        // ✅ FIX CUADRE-PAGADA-001: solo si de verdad hay saldo por cobrar.
+        if (!yaPagadaOtraVia && ['entrega_cobranza', 'cuadre_dinero'].includes(o.estado)) {
           ordenesSinPago.push({
             id: doc.id, numeroOrden: o.numeroOrden, clienteNombre: o.clienteNombre,
-            monto: Number(o.total) || 0
+            monto: saldoOrden // ✅ saldo real (con abonos, no el total)
           });
         }
         return;
@@ -1382,12 +1426,26 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       // Operativa SIN cobro real → NO se toca (conserva su estado y su flujo).
       if (esOperativa && (esCredito || monto <= 0)) return;
 
-      // Al cuadrar una orden de COBRANZA, se CIERRA SOLA según el cobro:
-      //  - Pago (efectivo/virtual)  -> completada (el dinero ya está en caja)
-      //  - Sin pago / a crédito      -> cxc (queda en cartera)
+      // ✅ FIX CUADRE-PAGADA-001 (raíz de los ingresos duplicados): el cierre
+      // se decide por SALDO REAL, no por lo que el mensajero recaudó. Antes,
+      // una orden pagada en sala de ventas/anticipo viajaba con el mensajero,
+      // el barrido la veía "sin cobro" (montoRecaudado=0), la mandaba a CxC y
+      // le BORRABA el pago (pagado:false, montoPagado:0). En cartera aparecía
+      // la deuda completa, la volvían a cobrar → ingreso duplicado 2× exacto.
+      const totalOrden = Math.round(Number(o.total) || 0);
+      const pagadoOrden = Math.round(Number(o.montoPagado) || 0);
+      const saldoReal = Math.max(0, totalOrden - pagadoOrden);
+      const yaPagadaOtraVia = o.pagado === true || o.dineroEnCaja === true || saldoReal <= 0;
+
+      // Al cuadrar una orden de COBRANZA, se CIERRA SOLA según el SALDO:
+      //  - Saldo 0 (pagó al mensajero, en sala o antes) -> completada
+      //  - Saldo > 0 (sin pago, crédito o ABONO parcial) -> cxc con el saldo real
       // Una orden OPERATIVA cobrada NO cambia de estado: solo se recibe el
       // dinero; el equipo sigue su flujo de taller/entrega con normalidad.
-      const estadoFinal = (esCredito || monto <= 0) ? 'cxc' : 'completada';
+      const quedaSaldo = monto > 0
+        ? Math.max(0, saldoReal) > 0 && !yaPagadaOtraVia  // cobró: ¿quedó saldo tras el abono?
+        : !yaPagadaOtraVia;                               // no cobró: ¿de verdad debe?
+      const estadoFinal = quedaSaldo ? 'cxc' : 'completada';
 
       // CANDADO ANTI-DOBLE-SUMA: solo suma a caja si NO entró ya
       // FIX Ola 2.5: dinero virtual NO entra en el cuadre, espera validación
@@ -1407,14 +1465,18 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
         // ✅ COBRO-RECOGIDA-001: el estado SOLO se cierra en órdenes de cobranza.
         ...(esOperativa ? {} : {
           estado: estadoFinal,
-          // Ola 3: si queda en cartera, los flags de pago quedan LIMPIOS para
-          // que CxC muestre el saldo completo y nadie crea que ya se cobró.
+          // ✅ FIX CUADRE-PAGADA-001: si queda en cartera, el saldo es el REAL
+          // (total − montoPagado). NUNCA se borra montoPagado — borrarlo
+          // destruía abonos y pagos previos y provocaba el recobro duplicado.
           ...(estadoFinal === 'cxc' ? {
             pagado: false,
-            montoPagado: 0,
+            cxcSaldo: saldoReal,
+            cxcEstado: pagadoOrden > 0 ? 'parcial' : 'pendiente',
             montoRecaudado: 0,
-            formaPagoRecaudo: 'A crédito (CxC)',
-            tipoCobro: 'credito'
+            ...(pagadoOrden <= 0 ? {
+              formaPagoRecaudo: 'A crédito (CxC)',
+              tipoCobro: 'credito'
+            } : {})
           } : {})
         }),
         ...(sumaCaja ? {
@@ -1436,10 +1498,15 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
           fecha: new Date().toISOString(),
           usuarioId: req.user.uid || req.user.id,
           usuarioNombre: req.user.email,
-          nota: esCredito ? 'Cuadre: queda en cartera (CxC)'
+          nota: estadoFinal === 'cxc'
+              ? (pagadoOrden > 0
+                  ? `Cuadre: abono conservado ($${pagadoOrden.toLocaleString('es-CO')}) — saldo $${saldoReal.toLocaleString('es-CO')} queda en cartera (CxC)`
+                  : 'Cuadre: queda en cartera (CxC)')
               : tipo === 'virtual' ? 'Cuadre: pago virtual pendiente de validar'
               : esOperativa ? `Cuadre: dinero recibido en caja — el servicio sigue su flujo (${o.estado})`
-              : 'Cuadre: dinero confirmado en caja'
+              : (monto <= 0 && yaPagadaOtraVia)
+                ? 'Cuadre: la orden ya estaba pagada por otra vía — se cierra sin tocar el pago'
+                : 'Cuadre: dinero confirmado en caja'
         }),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });

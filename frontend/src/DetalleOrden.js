@@ -101,6 +101,10 @@ const [configCerts, setConfigCerts]   = useState([]);
   const [montoPago, setMontoPago]       = useState('');
   const [registrandoPago, setRegPago]   = useState(false);
   const [formasPago, setFormasPago]     = useState(FORMAS_DEFAULT);
+  // ✅ CAJA-DESTINO-001: caja elegida por quien recibe el pago (EFECTIVO SAS,
+  // EFECTIVO SALA DE VENTAS...). Vacía = mapeo automático de configuración.
+  const [cajasPago, setCajasPago]       = useState([]);
+  const [cajaPagoId, setCajaPagoId]     = useState('');
 
   // Modal de anular (Ola 1: ahora exige PIN además del motivo)
   const [mostrarAnular, setMostrarAnular] = useState(false);
@@ -135,7 +139,15 @@ const [configCerts, setConfigCerts]   = useState([]);
   const puedeAdjuntarFactura = puedeCargaFactura; // alias — mismo valor
   const esMovil = useEsMovil();
 
-  useEffect(() => { cargarOrden(); cargarFormasPago(); cargarConfigCerts(); }, [ordenId]);
+  useEffect(() => { cargarOrden(); cargarFormasPago(); cargarConfigCerts(); cargarCajasPago(); }, [ordenId]);
+
+  // ✅ CAJA-DESTINO-001: cajas activas del tenant para elegir destino del pago
+  const cargarCajasPago = async () => {
+    try {
+      const res = await axios.get(`${API}/cajas`, { headers });
+      setCajasPago((res.data || []).filter(c => c.activa !== false));
+    } catch { setCajasPago([]); }
+  };
 
   // ✅ TALLER-REPUESTOS-001: el cliente aprueba llamando a quien le conteste —
   // admin, comercial o tesorería pueden registrar la respuesta desde aquí.
@@ -242,7 +254,9 @@ const cargarConfigCerts = async () => {
         formaPago,
         // Si ya hay N° de factura digitado, lo enviamos: el backend registra
         // el pago Y avanza la orden en cascada automáticamente.
-        numeroFactura: numeroFactura || undefined
+        numeroFactura: numeroFactura || undefined,
+        // ✅ CAJA-DESTINO-001: caja elegida por quien recibe (manda sobre el mapeo)
+        cajaIdSeleccionada: cajaPagoId || undefined
       }, { headers });
 
       const caja = res.data.caja;
@@ -263,6 +277,7 @@ const cargarConfigCerts = async () => {
       setMostrarPago(false);
       setFormaPago('');
       setMontoPago('');
+      setCajaPagoId(''); // ✅ CAJA-DESTINO-001
       await cargarOrden();
       setTimeout(() => setExito(''), 5000);
     } catch (err) {
@@ -1054,6 +1069,19 @@ const cargarConfigCerts = async () => {
                       ))}
                     </div>
                   </div>
+
+                  {/* ✅ CAJA-DESTINO-001: caja donde ENTRA el dinero. Si hay
+                      más de una caja, quien recibe elige (EFECTIVO SAS,
+                      EFECTIVO SALA DE VENTAS...). Vacío = mapeo automático. */}
+                  {cajasPago.length > 1 && (
+                    <div style={s.campo}>
+                      <label style={s.label}>🏦 Caja donde entra el dinero</label>
+                      <select style={s.input} value={cajaPagoId} onChange={e => setCajaPagoId(e.target.value)}>
+                        <option value="">Automática (según forma de pago)</option>
+                        {cajasPago.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                      </select>
+                    </div>
+                  )}
 
                   {/* ✅ ABONOS: en formas distintas a efectivo, un monto menor
                       al saldo queda registrado como ABONO parcial */}

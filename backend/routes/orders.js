@@ -493,18 +493,29 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
       if (!cajaId && config.mapeoCajas?.[formaPago]) cajaId = config.mapeoCajas[formaPago];
     }
 
-    // ✅ FIX CAJA-002 (respaldo): si el mapeo no resolvió y el pago es en
-    // EFECTIVO, usar la caja de efectivo del tenant (regla EFECTIVO-PALABRA-002:
-    // "efectivo" en el nombre o tipo). Mejor una caja de efectivo real que un
-    // movimiento huérfano.
-    if (!cajaId && /efectivo/i.test(formaPago || '')) {
+    if (!cajaId && formaPago) {
       const cajasSnap = await db.collection('cajas').where('userId', '==', userId).get();
-      const cajaEfectivo = cajasSnap.docs.find(d => {
-        const c = d.data();
-        return c.activa !== false &&
-          (/efectivo/i.test(c.nombre || '') || /efectivo/i.test(c.tipo || ''));
-      });
-      if (cajaEfectivo) cajaId = cajaEfectivo.id;
+      const norm = (s) => (s || '').trim().toLowerCase();
+      // ✅ CAJA-POR-NOMBRE-001: si la forma de pago NOMBRA una caja del tenant
+      // (EFECTIVO SAS, EFECTIVO SALA DE VENTAS, MAY EFECTIVO...), esa caja es
+      // el destino natural. Antes, sin mapeo configurado, el dinero caía a la
+      // PRIMERA caja con "efectivo" del tenant — la caja equivocada (reporte
+      // real: "necesito que entre a EFECTIVO SAS y se va a SALA DE VENTAS").
+      const porNombre = cajasSnap.docs.find(d =>
+        d.data().activa !== false && norm(d.data().nombre) === norm(formaPago));
+      if (porNombre) cajaId = porNombre.id;
+      // ✅ FIX CAJA-002 (respaldo): si el mapeo no resolvió y el pago es en
+      // EFECTIVO, usar la caja de efectivo del tenant (regla EFECTIVO-PALABRA-002:
+      // "efectivo" en el nombre o tipo). Mejor una caja de efectivo real que un
+      // movimiento huérfano.
+      if (!cajaId && /efectivo/i.test(formaPago)) {
+        const cajaEfectivo = cajasSnap.docs.find(d => {
+          const c = d.data();
+          return c.activa !== false &&
+            (/efectivo/i.test(c.nombre || '') || /efectivo/i.test(c.tipo || ''));
+        });
+        if (cajaEfectivo) cajaId = cajaEfectivo.id;
+      }
     }
 
     if (!cajaId) {
@@ -1908,7 +1919,10 @@ router.put('/:id/estado', authenticate, async (req, res) => {
 router.post('/:id/pago', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-    const { montoPagado, formaPago, notas, numeroFactura } = req.body;
+    // ✅ CAJA-DESTINO-001: quien recibe el pago puede elegir la caja destino
+    // (EFECTIVO SAS, EFECTIVO SALA DE VENTAS...). Antes el dinero caía a la
+    // caja del mapeo automático aunque el receptor quisiera otra.
+    const { montoPagado, formaPago, notas, numeroFactura, cajaIdSeleccionada } = req.body;
 
     const ordenRef = db.collection('orders').doc(id);
     const ordenDoc = await ordenRef.get();
@@ -2005,7 +2019,8 @@ router.post('/:id/pago', authenticate, async (req, res) => {
       monto: esCxC ? saldoAnterior : montoFinal,
       formaPago,
       usuarioEmail: req.user.email,
-      numeroFactura: facturaLimpia
+      numeroFactura: facturaLimpia,
+      cajaIdSeleccionada: cajaIdSeleccionada || null // ✅ CAJA-DESTINO-001
     });
 
     // ── Ola 2.5 REGLA RAÍZ: el pago NO mueve el estado del servicio ─────────
