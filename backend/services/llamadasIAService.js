@@ -1,38 +1,51 @@
 // ============================================================
-// Control360 — Servicio de Llamadas IA (Lucy / Vapi)
+// Control360 — Servicio de Llamadas IA (Lucy / ElevenLabs)
 // Ubicación: backend/services/llamadasIAService.js
 // ------------------------------------------------------------
-// EXTENSIÓN del motor de Vencimientos — mismo patrón que
-// vencimientosService.js / el cron de WhatsApp. NO modifica
-// ninguna colección existente (vencimientos, clients, orders).
+// ✅ FIX LUCY-ELEVEN-001 (2026-07-19): migración de proveedor
+// Vapi → ElevenLabs Agents + correcciones de motor:
+//   a) Proveedor: lanzarLlamadaElevenLabs() reemplaza a Vapi.
+//      Las variables dinámicas y el metadata (adminId/registroId)
+//      viajan en conversation_initiation_client_data y vuelven
+//      en el webhook post-llamada.
+//   b) BUG CORREGIDO: registroRef se usaba ANTES de declararse
+//      (Temporal Dead Zone) — cada intento de llamada reventaba
+//      dentro del try y caía al catch. Ahora se declara primero.
+//   c) Motor con alcance por tenant: ejecutarMotorLlamadas ahora
+//      acepta { soloAdminId } — el cron lo llama sin filtro (todos
+//      los tenants ACTIVOS), pero el disparo manual y las corridas
+//      programadas SIEMPRE pasan el tenant. Nunca más una prueba
+//      manual dispara llamadas de otros suscriptores.
+//   d) Tope de minutos por tenant/mes (llamadas_ia_config) — el
+//      costo de ElevenLabs lo paga Control360; el tope protege el
+//      margen y es la base del cobro por consumo del módulo.
+//   e) Corridas programadas: Sandra/el suscriptor eligen día y
+//      hora (igual que Anny) — colección llamadas_ia_programadas,
+//      el cron las revisa cada 15 min y ejecuta las vencidas.
+//   f) Llamada de prueba a un número puntual (lanzarLlamadaPrueba)
+//      para validar guion/voz sin tocar clientes reales.
 //
-// REGLAS DE NEGOCIO (validadas con Sandra, Jun 2026):
-//
-// 1. ACTIVACIÓN: 100% manual por Sandra, por tenant, en la
-//    colección llamadas_ia_config (igual patrón que whatsapp_config).
-//    Si no existe el doc o activo=false → ese tenant nunca entra al cron.
-//
-// 2. DISPARO: día 2 de cada mes (hora Colombia), para los
-//    vencimientos del MES ACTUAL (no el siguiente — ese ya
-//    recibió WhatsApp 5 días hábiles antes).
-//
-// 3. MÁXIMO 2 INTENTOS por cliente/mes. Si tras el intento 2
-//    no contesta → se marca para telemercadeo (no se reintenta).
-//
-// 4. ANTI-DUPLICADO: clienteId + mesVencimiento (igual idea que
-//    vencimientosService, pero la clave es la llamada, no el equipo).
-//
-// 5. AISLAMIENTO: toda operación filtra por adminId (multi-tenant).
-//
+// REGLAS DE NEGOCIO (validadas con Sandra):
+// 1. ACTIVACIÓN: 100% manual por Sandra, por tenant, clave
+//    'llamadas_ia' en users.modulos (modulos===[] NO activa este
+//    módulo — igual que 'qr').
+// 2. DISPARO AUTOMÁTICO: primeros 3 días hábiles del mes, 9 AM CO.
+// 3. MÁXIMO 2 INTENTOS por cliente/mes; luego telemercadeo.
+// 4. ANTI-DUPLICADO: clienteId + mesVencimiento.
+// 5. AISLAMIENTO multi-tenant en toda operación.
 // 6. FIRE-AND-FORGET: errores individuales no detienen el lote.
+// 7. LUCY CIERRA SOLA: precios de lista y agendamiento.
+//    ESCALA AL ASESOR: descuentos, negociaciones, clientes grandes.
 // ============================================================
 
 const { db, admin } = require('../config/firebase');
 
-const VAPI_API_KEY     = process.env.VAPI_API_KEY;
-const VAPI_PHONE_ID    = process.env.VAPI_PHONE_NUMBER_ID;   // ID del número en Vapi (no el número en sí)
-const VAPI_ASSISTANT_ID = process.env.VAPI_ASSISTANT_ID;     // Assistant "Lucy"
-const COSTO_FACTURADO_COP = Number(process.env.LLAMADA_IA_COSTO_COP) || 300; // valor fijo definido por Sandra
+// ─── Config ElevenLabs (Railway) ─────────────────────────────────────────────
+const ELEVEN_API_KEY  = process.env.ELEVENLABS_API_KEY;
+const ELEVEN_AGENT_ID = process.env.ELEVENLABS_AGENT_ID;          // agente "Lucy - Vencimientos"
+const ELEVEN_PHONE_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID;   // id del número (Twilio) importado en ElevenLabs
+const COSTO_FACTURADO_COP = Number(process.env.LLAMADA_IA_COSTO_COP) || 300;
+const TOPE_MINUTOS_DEFAULT = Number(process.env.LLAMADA_IA_TOPE_MINUTOS) || 120; // por tenant/mes si no hay config
 
 // ─── Helpers de fecha (mismo criterio que vencimientosService.js) ────────────
 const mesActualColombia = () => {
@@ -40,37 +53,32 @@ const mesActualColombia = () => {
   return ahoraCO.toISOString().slice(0, 7); // "YYYY-MM"
 };
 
-const hoyColombia = () => {
-  const ahora = new Date(Date.now() - 5 * 60 * 60 * 1000);
-  return ahora.toISOString().slice(0, 10); // "YYYY-MM-DD"
+const ahoraColombiaISO = () => {
+  // "YYYY-MM-DDTHH:mm" en hora Colombia — comparable como string
+  const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
+  return ahoraCO.toISOString().slice(0, 16);
 };
 
-// ─── Helper: normalizar teléfono a formato E.164 para Vapi/Twilio ────────────
-const normalizarParaVapi = (telefono) => {
+// ─── Helper: normalizar teléfono a E.164 (Twilio) ────────────────────────────
+const normalizarParaLlamada = (telefono) => {
   if (!telefono) return null;
   let t = String(telefono).replace(/[\s\-\(\)\.]/g, '');
   if (t.startsWith('+')) return t;
   if (t.startsWith('57') && t.length === 12) return '+' + t;
   if (t.length === 10 && t.startsWith('3')) return '+57' + t;
-  return null; // no se intenta adivinar formatos raros — mejor omitir que llamar mal
+  return null; // no se adivinan formatos raros — mejor omitir que llamar mal
 };
 
-// ─── Helper: nombre de pila (para que Lucy no diga el nombre completo siempre) ─
+// ─── Helper: nombre de pila ──────────────────────────────────────────────────
 const primerNombre = (nombreCompleto) => {
   if (!nombreCompleto) return 'cliente';
   return String(nombreCompleto).trim().split(/\s+/)[0];
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Verifica si un tenant tiene Lucy activada.
-//
-// MISMO PATRÓN QUE 'qr' (ver PanelSuscriptores.js / superadmin.js): el
-// SuperAdmin activa módulos agregando la clave al array `modulos` del
-// documento del usuario admin en la colección `users`. Convención del
-// sistema: modulos === [] significa "todos los módulos" — PERO para
-// 'llamadas_ia', igual que para 'qr', la convención NO aplica: solo se
-// considera activo si la clave está EXPLÍCITAMENTE en el array, porque
-// es un módulo que se habilita uno por uno, nunca por defecto.
+// Activación por tenant — clave EXPLÍCITA en users.modulos (igual que 'qr':
+// modulos === [] significa "todos" para el resto del sistema, pero NO aplica
+// a módulos premium de activación uno-a-uno como este).
 // ═════════════════════════════════════════════════════════════════════════════
 const tenantTieneLucyActiva = async (adminId) => {
   const userDoc = await db.collection('users').doc(adminId).get();
@@ -80,34 +88,55 @@ const tenantTieneLucyActiva = async (adminId) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Construye las variables dinámicas que Vapi inyecta en el system prompt
-// de Lucy ({{nombre_cliente}}, {{mes_vencimiento}}, etc.)
+// Tope de minutos por tenant/mes — llamadas_ia_config/{adminId}
+// { topeMinutosMes: number, consumo: { 'YYYY-MM': minutos } }
+// El consumo lo alimenta procesarResultadoLlamada() con la duración real.
+// ═════════════════════════════════════════════════════════════════════════════
+const obtenerConfigTenant = async (adminId) => {
+  const doc = await db.collection('llamadas_ia_config').doc(adminId).get();
+  const data = doc.exists ? doc.data() : {};
+  const mes = mesActualColombia();
+  return {
+    topeMinutosMes: Number(data.topeMinutosMes) || TOPE_MINUTOS_DEFAULT,
+    minutosConsumidosMes: Number(data.consumo?.[mes]) || 0,
+  };
+};
+
+const registrarConsumoMinutos = async (adminId, segundos) => {
+  if (!adminId || !segundos) return;
+  const minutos = Math.ceil(segundos / 60); // se factura por minuto, igual criterio del proveedor
+  const mes = mesActualColombia();
+  await db.collection('llamadas_ia_config').doc(adminId).set({
+    consumo: { [mes]: admin.firestore.FieldValue.increment(minutos) },
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Variables dinámicas del agente ElevenLabs.
+// NOMENCLATURA ALINEADA con el guion del agente (panel ElevenLabs):
+//   nombre_empresa   → empresa del TENANT (quien llama)
+//   nombre_cliente   → persona a la que Lucy saluda
+//   empresa_cliente  → razón social del CLIENTE
+//   direccion_cliente / telefono_cliente → para CONFIRMAR datos de la
+//   orden en la llamada (no preguntarlos desde cero) — pedido de Sandra.
 //
-// IMPORTANTE: el PRECIO ya no se precalcula aquí (era frágil — "Recarga ABC
-// 5 lbs" vs "Extintor ABC 5 lbs" son productos DISTINTOS con reglas de
-// negocio distintas: 5 lbs vehicular = cambio/despacho, 10 lbs empresa =
-// recarga/domicilio). En su lugar, Lucy consulta el precio EN VIVO durante
-// la llamada mediante la Tool "consultar_precio" (ver routes/llamadasIA.js),
-// que sí aplica un matching más cuidadoso del lado del servidor.
-//
-// TAMPOCO crea la orden — eso quedó deliberadamente fuera del alcance de
-// Lucy por riesgo de negocio (confundir recarga vs. extintor nuevo, tipo
-// de servicio incorrecto contamina inventario/CxC/taller en producción).
-// Lucy solo REGISTRA EL CIERRE; un humano revisa y crea la orden desde
-// la pestaña Llamadas IA, igual patrón que Telemercadeo → NuevaOrden.js.
+// El PRECIO no se precalcula: Lucy usa la Tool consultar_precio en vivo
+// (matching por palabras clave del lado del servidor — "Recarga ABC 5lbs"
+// y "Extintor ABC 5lbs" son productos distintos).
+// Lucy NUNCA crea la orden: registra el cierre y un humano la crea.
 // ═════════════════════════════════════════════════════════════════════════════
 const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, tenantInfo }) => {
   return {
-    adminId,                                                          // para que las Tools sepan de qué tenant es
-    registroId,                                                       // para que registrar_cierre sepa qué doc actualizar
+    adminId:            String(adminId),
+    registroId:         String(registroId),
     nombre_empresa:     tenantInfo.nombre || 'nuestra empresa',
-    // ✅ FIX LUCY-CONTACTO-001 (2026-07-01): si el cliente tiene persona de
-    // contacto, Lucy saluda por nombre propio ("¿hablo con Milena Botero de
-    // la empresa La Monumental?") en vez de "hola La Monumental". La razón
-    // social viaja aparte en empresa_cliente para usarla en el guión de Vapi.
+    // ✅ FIX LUCY-CONTACTO-001: si hay persona de contacto, saluda por nombre propio
     nombre_cliente:     cliente.contacto ? String(cliente.contacto).trim() : primerNombre(cliente.nombre),
     empresa_cliente:    cliente.nombre || '',
     equipos:            vencimiento.descripcionEquipo || 'su extintor',
+    direccion_cliente:  cliente.direccion || 'no registrada',
+    telefono_cliente:   String(vencimiento.telefono || cliente.celular || cliente.telefono || ''),
     tipo_servicio:      cliente.tipoServicioHistorico || 'oficina',
     valor_domicilio:    tenantInfo.valorDomicilio || 'según su sector',
     mes_vencimiento:    vencimiento.fechaVencimiento || '',
@@ -119,62 +148,70 @@ const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, 
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Lanza UNA llamada a través de la API de Vapi
-// Devuelve { ok, vapiCallId, error? }
+// Lanza UNA llamada saliente vía ElevenLabs Agents (número Twilio importado)
+// Devuelve { ok, conversationId, error? }
 // ═════════════════════════════════════════════════════════════════════════════
-const lanzarLlamadaVapi = async ({ telefono, variables, metadata }) => {
+const lanzarLlamadaElevenLabs = async ({ telefono, variables }) => {
   try {
-    const resp = await fetch('https://api.vapi.ai/call', {
+    if (!ELEVEN_API_KEY || !ELEVEN_AGENT_ID || !ELEVEN_PHONE_ID) {
+      return { ok: false, error: 'Faltan variables ELEVENLABS_* en el entorno (Railway)' };
+    }
+    const resp = await fetch('https://api.elevenlabs.io/v1/convai/twilio/outbound-call', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${VAPI_API_KEY}`,
+        'xi-api-key': ELEVEN_API_KEY,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        assistantId: VAPI_ASSISTANT_ID,
-        phoneNumberId: VAPI_PHONE_ID,
-        customer: { number: telefono },
-        assistantOverrides: {
-          variableValues: variables,
+        agent_id: ELEVEN_AGENT_ID,
+        agent_phone_number_id: ELEVEN_PHONE_ID,
+        to_number: telefono,
+        conversation_initiation_client_data: {
+          dynamic_variables: variables, // adminId/registroId incluidos — vuelven en el webhook
         },
-        metadata, // viaja de vuelta en el webhook — aquí va adminId/clienteId/vencimientoId
       }),
     });
 
-    const data = await resp.json();
-    if (!resp.ok) {
-      return { ok: false, error: data?.message || 'Error desconocido de Vapi' };
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.success === false) {
+      return { ok: false, error: data?.detail?.message || data?.message || `HTTP ${resp.status}` };
     }
-    return { ok: true, vapiCallId: data.id };
+    return { ok: true, conversationId: data.conversation_id || data.callSid || null };
   } catch (e) {
     return { ok: false, error: e.message };
   }
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// FUNCIÓN PRINCIPAL — ejecuta el motor para TODOS los tenants activos
-// Llamada desde el cron diario (día 2 del mes, 9 AM Colombia) o manualmente
-// desde /api/llamadas-ia/ejecutar-motor (solo admin, para pruebas).
+// MOTOR PRINCIPAL
+// opciones:
+//   soloAdminId    → limita la corrida a UN tenant (manual/programada). El cron
+//                    no lo pasa y recorre todos los tenants ACTIVOS.
+//   ignorarHorario → true en corridas manuales/programadas (el humano eligió
+//                    el momento); el cron respeta la ventana L-V 8-18 / S 9-12.
 // ═════════════════════════════════════════════════════════════════════════════
-const ejecutarMotorLlamadas = async () => {
+const ejecutarMotorLlamadas = async (opciones = {}) => {
+  const { soloAdminId = null, ignorarHorario = false } = opciones;
   const mesActual = mesActualColombia();
-  const hoy = hoyColombia();
-  console.log(`[LLAMADAS-IA] Iniciando motor — mes ${mesActual}`);
+  console.log(`[LLAMADAS-IA] Motor — mes ${mesActual}${soloAdminId ? ` — SOLO tenant ${soloAdminId}` : ' — todos los tenants activos'}`);
 
   try {
-    // 1) Vencimientos del MES ACTUAL, no gestionados todavía
-    const vencSnap = await db.collection('vencimientos')
+    // 1) Vencimientos del MES ACTUAL no gestionados
+    let vencQuery = db.collection('vencimientos')
       .where('fechaVencimiento', '>=', `${mesActual}-01`)
       .where('fechaVencimiento', '<=', `${mesActual}-31`)
-      .where('gestionado', '==', false)
-      .get();
+      .where('gestionado', '==', false);
+    // ✅ FIX LUCY-ELEVEN-001c: si la corrida es de un solo tenant, se filtra
+    // desde la consulta — imposible tocar vencimientos de otros suscriptores.
+    if (soloAdminId) vencQuery = vencQuery.where('adminId', '==', soloAdminId);
 
+    const vencSnap = await vencQuery.get();
     if (vencSnap.empty) {
-      console.log('[LLAMADAS-IA] Sin vencimientos para este mes');
-      return { tenantsProcesados: 0, llamadasLanzadas: 0 };
+      console.log('[LLAMADAS-IA] Sin vencimientos para procesar');
+      return { tenantsProcesados: 0, llamadasLanzadas: 0, omitidasPorTope: 0 };
     }
 
-    // 2) Agrupar por tenant (mismo patrón que el cron de WhatsApp)
+    // 2) Agrupar por tenant
     const porTenant = {};
     vencSnap.docs.forEach(doc => {
       const d = doc.data();
@@ -185,19 +222,24 @@ const ejecutarMotorLlamadas = async () => {
 
     let totalLanzadas = 0;
     let tenantsProcesados = 0;
+    let omitidasPorTope = 0;
 
     for (const [adminId, vencimientos] of Object.entries(porTenant)) {
-      // 3) Filtro de activación manual — si Sandra no la activó, se omite el tenant
+      // 3) Activación manual por Sandra — sin la clave, el tenant no suena
       const activa = await tenantTieneLucyActiva(adminId);
       if (!activa) continue;
 
       tenantsProcesados++;
 
-      // Datos del tenant para personalizar el guión. Horario / medios de
-      // pago / domicilio quedan con los valores por defecto razonables de
-      // construirVariablesLlamada por ahora (igual patrón que el resto del
-      // proyecto: simple primero, se personaliza por tenant más adelante
-      // si hace falta — no bloquea el lanzamiento del 2 de julio).
+      // 3b) ✅ FIX LUCY-ELEVEN-001d: tope de minutos del tenant este mes
+      const config = await obtenerConfigTenant(adminId);
+      let minutosDisponibles = config.topeMinutosMes - config.minutosConsumidosMes;
+      if (minutosDisponibles <= 0) {
+        console.warn(`[LLAMADAS-IA] Tenant ${adminId} alcanzó su tope de ${config.topeMinutosMes} min — omitido`);
+        omitidasPorTope += vencimientos.length;
+        continue;
+      }
+
       const userDoc = await db.collection('users').doc(adminId).get();
       const tenantInfo = {
         nombre:    userDoc.exists ? (userDoc.data().empresa || userDoc.data().nombre) : 'Control360',
@@ -207,7 +249,9 @@ const ejecutarMotorLlamadas = async () => {
 
       for (const venc of vencimientos) {
         try {
-          // 4) Anti-duplicado + control de máximo 2 intentos
+          if (minutosDisponibles <= 0) { omitidasPorTope++; continue; }
+
+          // 4) Anti-duplicado + máximo 2 intentos
           const existentesSnap = await db.collection('llamadas_ia')
             .where('adminId', '==', adminId)
             .where('clienteId', '==', venc.clienteId)
@@ -218,49 +262,45 @@ const ejecutarMotorLlamadas = async () => {
           const yaTieneResultadoFinal = intentos.some(i =>
             ['cerrada', 'reagendada', 'inactivo_cliente', 'escalado_asesor', 'no_interesado'].includes(i.resultado)
           );
-          if (yaTieneResultadoFinal) continue; // ya se resolvió, no se vuelve a llamar
+          if (yaTieneResultadoFinal) continue;
 
           const numeroIntento = intentos.length + 1;
-          if (numeroIntento > 2) continue; // ya agotó los 2 intentos → debe pasar a telemercadeo (paso aparte)
+          if (numeroIntento > 2) continue;
 
-          // 5) Resolver datos del cliente y teléfono
+          // 5) Cliente y teléfono
           const cliDoc = await db.collection('clients').doc(venc.clienteId).get();
           if (!cliDoc.exists) continue;
           const cliente = cliDoc.data();
           const telefonoRaw = venc.telefono || cliente.celular || cliente.telefono;
-          const telefono = normalizarParaVapi(telefonoRaw);
+          const telefono = normalizarParaLlamada(telefonoRaw);
           if (!telefono) {
             console.warn(`[LLAMADAS-IA] Cliente ${venc.clienteId} sin teléfono válido — omitido`);
             continue;
           }
 
-          // Respeta el horario permitido del proyecto (L-V 8-18, Sáb 9-12 Colombia)
-          const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
-          const diaSemana = ahoraCO.getUTCDay(); // 0 dom, 6 sáb
-          const horaActual = ahoraCO.getUTCHours();
-          const horarioValido =
-            (diaSemana >= 1 && diaSemana <= 5 && horaActual >= 8 && horaActual < 18) ||
-            (diaSemana === 6 && horaActual >= 9 && horaActual < 12);
-          if (!horarioValido) {
-            console.log('[LLAMADAS-IA] Fuera de horario permitido — el cron reintentará en la próxima ventana');
-            continue;
+          // Ventana horaria (solo la respeta el cron — ver FIX LUCY-ELEVEN-001c)
+          if (!ignorarHorario) {
+            const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
+            const diaSemana = ahoraCO.getUTCDay();
+            const horaActual = ahoraCO.getUTCHours();
+            const horarioValido =
+              (diaSemana >= 1 && diaSemana <= 5 && horaActual >= 8 && horaActual < 18) ||
+              (diaSemana === 6 && horaActual >= 9 && horaActual < 12);
+            if (!horarioValido) {
+              console.log('[LLAMADAS-IA] Fuera de horario permitido — el cron reintentará');
+              continue;
+            }
           }
 
-          // 6) Construir variables dinámicas y lanzar la llamada
-          const variables = construirVariablesLlamada({ adminId, registroId: registroRef.id, cliente, vencimiento: venc, tenantInfo });
-
+          // 6) ✅ FIX LUCY-ELEVEN-001b: registroRef se declara ANTES de usarse
+          // (antes se usaba registroRef.id dos líneas antes de su declaración
+          // — TDZ ReferenceError que tumbaba cada intento de llamada).
           const registroRef = db.collection('llamadas_ia').doc();
-          const resultadoVapi = await lanzarLlamadaVapi({
-            telefono,
-            variables,
-            metadata: {
-              adminId,
-              clienteId: venc.clienteId,
-              vencimientoId: venc.id,
-              registroId: registroRef.id,
-              intento: numeroIntento,
-            },
+          const variables = construirVariablesLlamada({
+            adminId, registroId: registroRef.id, cliente, vencimiento: venc, tenantInfo,
           });
+
+          const resultadoLanzamiento = await lanzarLlamadaElevenLabs({ telefono, variables });
 
           await registroRef.set({
             adminId,
@@ -269,19 +309,24 @@ const ejecutarMotorLlamadas = async () => {
             telefono: telefonoRaw,
             mesVencimiento: venc.fechaVencimiento,
             intento: numeroIntento,
-            estado: resultadoVapi.ok ? 'en_curso' : 'fallida',
+            estado: resultadoLanzamiento.ok ? 'en_curso' : 'fallida',
             resultado: null,
-            vapiCallId: resultadoVapi.ok ? resultadoVapi.vapiCallId : null,
-            errorLanzamiento: resultadoVapi.ok ? null : resultadoVapi.error,
+            proveedor: 'elevenlabs',
+            conversationId: resultadoLanzamiento.ok ? resultadoLanzamiento.conversationId : null,
+            errorLanzamiento: resultadoLanzamiento.ok ? null : resultadoLanzamiento.error,
             costoFacturadoCOP: COSTO_FACTURADO_COP,
+            esPrueba: false,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
           });
 
-          if (resultadoVapi.ok) totalLanzadas++;
-          else console.error(`[LLAMADAS-IA] Fallo al lanzar a ${telefono}:`, resultadoVapi.error);
+          if (resultadoLanzamiento.ok) {
+            totalLanzadas++;
+            minutosDisponibles -= 2; // estimación conservadora (2 min/llamada) hasta que el webhook traiga la duración real
+          } else {
+            console.error(`[LLAMADAS-IA] Fallo al lanzar a ${telefono}:`, resultadoLanzamiento.error);
+          }
 
-          // Pausa breve entre llamadas — evita saturar la API igual que WhatsApp
-          await new Promise(r => setTimeout(r, 800));
+          await new Promise(r => setTimeout(r, 800)); // pausa entre llamadas
 
         } catch (errCliente) {
           console.error('[LLAMADAS-IA] Error procesando vencimiento', venc.id, errCliente.message);
@@ -289,25 +334,90 @@ const ejecutarMotorLlamadas = async () => {
       }
     }
 
-    console.log(`[LLAMADAS-IA] Motor completado — ${tenantsProcesados} tenant(s), ${totalLanzadas} llamada(s) lanzada(s)`);
-    return { tenantsProcesados, llamadasLanzadas: totalLanzadas };
+    console.log(`[LLAMADAS-IA] Motor completado — ${tenantsProcesados} tenant(s), ${totalLanzadas} llamada(s), ${omitidasPorTope} omitida(s) por tope`);
+    return { tenantsProcesados, llamadasLanzadas: totalLanzadas, omitidasPorTope };
   } catch (e) {
     console.error('[LLAMADAS-IA] Error general del motor:', e.message);
-    return { tenantsProcesados: 0, llamadasLanzadas: 0, error: e.message };
+    return { tenantsProcesados: 0, llamadasLanzadas: 0, omitidasPorTope: 0, error: e.message };
   }
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Procesa el webhook que Vapi envía al terminar una llamada (end-of-call-report)
-// Actualiza el registro en llamadas_ia con resultado, duración, costo y
-// transcripción. Si Lucy cerró la venta, dispara la creación de la orden.
+// LLAMADA DE PRUEBA — ✅ FIX LUCY-ELEVEN-001f
+// Lanza UNA llamada al número indicado con datos de ejemplo del tenant.
+// No toca vencimientos ni clientes; el registro queda marcado esPrueba=true.
+// ═════════════════════════════════════════════════════════════════════════════
+const lanzarLlamadaPrueba = async ({ adminId, telefono }) => {
+  const telefonoE164 = normalizarParaLlamada(telefono);
+  if (!telefonoE164) return { ok: false, error: 'Teléfono inválido — usa un celular colombiano de 10 dígitos' };
+
+  const activa = await tenantTieneLucyActiva(adminId);
+  if (!activa) return { ok: false, error: 'El módulo Llamadas IA no está activo para esta empresa' };
+
+  const userDoc = await db.collection('users').doc(adminId).get();
+  const tenantInfo = {
+    nombre:    userDoc.exists ? (userDoc.data().empresa || userDoc.data().nombre) : 'Control360',
+    direccion: userDoc.exists ? userDoc.data().direccion : '',
+    ciudad:    userDoc.exists ? userDoc.data().ciudad : '',
+  };
+
+  const registroRef = db.collection('llamadas_ia').doc();
+  const variables = construirVariablesLlamada({
+    adminId,
+    registroId: registroRef.id,
+    cliente: {
+      nombre: 'CLIENTE DE PRUEBA',
+      contacto: 'Sandra',
+      direccion: 'Calle 10 número 5-23, barrio Centro',
+      celular: telefono,
+    },
+    vencimiento: {
+      descripcionEquipo: 'tres extintores ABC de 10 libras',
+      fechaVencimiento: `${mesActualColombia()}-01`,
+      telefono,
+    },
+    tenantInfo,
+  });
+
+  const resultadoLanzamiento = await lanzarLlamadaElevenLabs({ telefono: telefonoE164, variables });
+
+  await registroRef.set({
+    adminId,
+    vencimientoId: null,
+    clienteId: null,
+    telefono,
+    mesVencimiento: `${mesActualColombia()}-01`,
+    intento: 1,
+    estado: resultadoLanzamiento.ok ? 'en_curso' : 'fallida',
+    resultado: null,
+    proveedor: 'elevenlabs',
+    conversationId: resultadoLanzamiento.ok ? resultadoLanzamiento.conversationId : null,
+    errorLanzamiento: resultadoLanzamiento.ok ? null : resultadoLanzamiento.error,
+    costoFacturadoCOP: 0, // las pruebas no se facturan al tenant
+    esPrueba: true,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+
+  return resultadoLanzamiento.ok
+    ? { ok: true, mensaje: 'Llamada de prueba lanzada — tu teléfono sonará en unos segundos', registroId: registroRef.id }
+    : { ok: false, error: resultadoLanzamiento.error };
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// WEBHOOK POST-LLAMADA (ElevenLabs "post_call_transcription")
+// Estructura del payload:
+// { type, data: { conversation_id, transcript:[{role,message}],
+//   metadata:{ call_duration_secs, cost }, analysis:{ transcript_summary,
+//   data_collection_results }, conversation_initiation_client_data:
+//   { dynamic_variables: { adminId, registroId, ... } } } }
 // ═════════════════════════════════════════════════════════════════════════════
 const procesarResultadoLlamada = async (payload) => {
   try {
-    const metadata = payload?.call?.metadata || payload?.message?.call?.metadata || {};
-    const registroId = metadata.registroId;
+    const data = payload?.data || payload || {};
+    const dynVars = data?.conversation_initiation_client_data?.dynamic_variables || {};
+    const registroId = dynVars.registroId || data?.metadata?.registroId;
     if (!registroId) {
-      console.warn('[LLAMADAS-IA] Webhook sin registroId en metadata — ignorado');
+      console.warn('[LLAMADAS-IA] Webhook sin registroId — ignorado');
       return { ok: false, error: 'Sin registroId' };
     }
 
@@ -317,51 +427,66 @@ const procesarResultadoLlamada = async (payload) => {
       console.warn('[LLAMADAS-IA] Webhook referencia un registro inexistente:', registroId);
       return { ok: false, error: 'Registro no encontrado' };
     }
+    const registroActual = doc.data();
 
-    const analysis = payload?.message?.analysis || payload?.analysis || {};
-    const transcript = payload?.message?.transcript || payload?.transcript || '';
-    const durationSeconds = payload?.message?.call?.endedAt && payload?.message?.call?.startedAt
-      ? Math.round((new Date(payload.message.call.endedAt) - new Date(payload.message.call.startedAt)) / 1000)
-      : (payload?.message?.durationSeconds || null);
+    // Transcripción: ElevenLabs la entrega como array de turnos
+    let transcript = '';
+    if (Array.isArray(data.transcript)) {
+      transcript = data.transcript
+        .map(t => `${t.role === 'agent' ? 'Lucy' : 'Cliente'}: ${t.message || ''}`)
+        .join('\n');
+    } else if (typeof data.transcript === 'string') {
+      transcript = data.transcript;
+    }
 
-    // Vapi reporta el costo en USD dentro de message.cost (según su API)
-    const costoUSD = payload?.message?.cost ?? payload?.cost ?? null;
+    const durationSeconds = Number(data?.metadata?.call_duration_secs) || null;
+    const costoCreditos = Number(data?.metadata?.cost) || null;
 
-    // El resultado estructurado (cerrada/reagendada/etc.) lo determina Lucy
-    // mediante una function-call durante la llamada (Tool "registrar_resultado").
-    // Si no llegó por ahí, se infiere de forma conservadora del análisis de Vapi.
-    const resultado = metadata.resultadoReportado || analysis?.structuredData?.resultado || 'sin_respuesta';
+    // Resultado: prioridad 1) la Tool registrar-cierre ya marcó 'cerrada';
+    // 2) data_collection_results del agente; 3) conservador: sin_respuesta.
+    const dcr = data?.analysis?.data_collection_results || {};
+    const resultadoAnalisis = dcr?.resultado?.value || dcr?.resultado || null;
+    const RESULTADOS_VALIDOS = ['cerrada', 'reagendada', 'inactivo_cliente', 'escalado_asesor', 'no_interesado', 'sin_respuesta'];
+    let resultado;
+    if (registroActual.resultado === 'cerrada') {
+      resultado = 'cerrada'; // la Tool ya lo fijó durante la llamada — no se pisa
+    } else if (RESULTADOS_VALIDOS.includes(resultadoAnalisis)) {
+      resultado = resultadoAnalisis;
+    } else {
+      resultado = 'sin_respuesta';
+    }
 
     const update = {
       estado: 'completada',
       resultado,
       duracionSegundos: durationSeconds,
-      costoVapiUSD: costoUSD,
+      costoCreditosEleven: costoCreditos,
       transcripcion: transcript,
+      resumenIA: data?.analysis?.transcript_summary || null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
-
-    if (metadata.fechaAgendada) update.fechaAgendada = metadata.fechaAgendada;
-    if (metadata.datosCierre) update.datosCierre = metadata.datosCierre; // datos recolectados por Lucy, pendientes de revisión humana
-
     await ref.update(update);
 
-    // Si quedó sin respuesta y ya fue el intento 2, marcar el vencimiento
-    // para que la cola de Telemercadeo lo tome (no se toca su lógica interna,
-    // solo se deja la señal — el módulo Comercial ya sabe leer esto).
-    const data = doc.data();
-    if ((resultado === 'sin_respuesta' && data.intento >= 2) || resultado === 'escalado_asesor') { // ✅ TELEVENC-001
-      await db.collection('vencimientos').doc(data.vencimientoId).update({
+    // ✅ FIX LUCY-ELEVEN-001d: consumo real de minutos del tenant
+    await registrarConsumoMinutos(registroActual.adminId, durationSeconds);
+
+    // Las pruebas terminan aquí — no tocan vencimientos ni telemercadeo
+    if (registroActual.esPrueba) {
+      console.log(`[LLAMADAS-IA] Prueba procesada — registro ${registroId}: ${resultado}`);
+      return { ok: true };
+    }
+
+    // Sin respuesta en intento 2, o escalado → señal para Telemercadeo (TELEVENC-001)
+    if ((resultado === 'sin_respuesta' && registroActual.intento >= 2) || resultado === 'escalado_asesor') {
+      await db.collection('vencimientos').doc(registroActual.vencimientoId).update({
         escaladoTelemercadeo: true,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
     }
 
-    // Si Lucy marcó el vencimiento como resuelto (cerrada/reagendada/inactivo),
-    // se marca gestionado=true para que no vuelva a sonar el motor el próximo mes
-    // con el mismo ciclo. (No aplica si quedó escalado a asesor sin resolución.)
+    // Resuelto → gestionado=true para que el motor no vuelva a llamar este ciclo
     if (['cerrada', 'reagendada', 'inactivo_cliente'].includes(resultado)) {
-      await db.collection('vencimientos').doc(data.vencimientoId).update({
+      await db.collection('vencimientos').doc(registroActual.vencimientoId).update({
         gestionado: true,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
@@ -375,33 +500,61 @@ const procesarResultadoLlamada = async (payload) => {
   }
 };
 
+// ═════════════════════════════════════════════════════════════════════════════
+// CORRIDAS PROGRAMADAS — ✅ FIX LUCY-ELEVEN-001e (igual que Anny)
+// Colección llamadas_ia_programadas:
+// { adminId, fechaHora: 'YYYY-MM-DDTHH:mm' (hora Colombia),
+//   estado: 'pendiente' | 'ejecutada' | 'cancelada', creadaPor, createdAt }
+// El cron (cada 15 min) ejecuta las vencidas, SIEMPRE scoped al tenant.
+// ═════════════════════════════════════════════════════════════════════════════
+const ejecutarProgramadasVencidas = async () => {
+  try {
+    const ahora = ahoraColombiaISO();
+    const snap = await db.collection('llamadas_ia_programadas')
+      .where('estado', '==', 'pendiente')
+      .limit(50)
+      .get();
+    if (snap.empty) return;
+
+    for (const doc of snap.docs) {
+      const prog = doc.data();
+      if (!prog.fechaHora || prog.fechaHora > ahora) continue; // aún no es la hora
+      console.log(`[LLAMADAS-IA-CRON] Ejecutando corrida programada ${doc.id} — tenant ${prog.adminId}`);
+      await doc.ref.update({
+        estado: 'ejecutada',
+        ejecutadaAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      // Scoped al tenant + ignora ventana horaria (el humano eligió la hora)
+      await ejecutarMotorLlamadas({ soloAdminId: prog.adminId, ignorarHorario: true })
+        .catch(e => console.error('[LLAMADAS-IA-CRON] Error en programada:', e.message));
+    }
+  } catch (e) {
+    console.error('[LLAMADAS-IA-CRON] Error revisando programadas:', e.message);
+  }
+};
+
 module.exports = {
   ejecutarMotorLlamadas,
   procesarResultadoLlamada,
+  lanzarLlamadaPrueba,
   tenantTieneLucyActiva,
-  normalizarParaVapi,
+  obtenerConfigTenant,
+  normalizarParaLlamada,
 };
 
 // ════════════════════════════════════════════════════════════════════════════
-// CRON AUTOMÁTICO — mismo patrón que iniciarCronWhatsapp() en suscripcionCron.js
-// ------------------------------------------------------------------------------
-// Disparo: ventana de los primeros 3 días HÁBILES de cada mes (no solo el
-// día 2 exacto). Esto evita que el negocio se quede sin llamadas ese mes si
-// el día 2 cae en fin de semana, o si el servidor tuvo un problema puntual
-// ese día — el motor reintenta automáticamente al día siguiente hábil y la
-// deduplicación (clienteId + mesVencimiento) evita llamar dos veces al mismo
-// cliente aunque el cron corra varios días seguidos.
-// Corre todos los días a las 9:00 AM Colombia, pero solo ACTÚA dentro de la
-// ventana — fuera de ella no hace nada (mismo costo en credits que no correr).
+// CRON AUTOMÁTICO
+// - Corrida mensual: primeros 3 días hábiles, 9:00 AM Colombia (todos los
+//   tenants ACTIVOS — la activación explícita es el filtro de seguridad).
+// - Corridas programadas: se revisan cada 15 minutos, a cualquier hora.
 // ════════════════════════════════════════════════════════════════════════════
 
 const esDiaHabil = (fechaStr) => {
   const [y, m, d] = fechaStr.split('-').map(Number);
-  const diaSemana = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0 dom, 6 sáb
+  const diaSemana = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
   return diaSemana >= 1 && diaSemana <= 5;
 };
 
-// Cuenta cuántos días hábiles van transcurridos en el mes, incluyendo hoy
 const diasHabilesTranscurridosMes = (fechaStr) => {
   const [y, m, d] = fechaStr.split('-').map(Number);
   let count = 0;
@@ -416,34 +569,29 @@ let ultimaEjecucionLlamadasIA = null;
 
 const iniciarCronLlamadasIA = () => {
   const verificar = () => {
+    // 1) Corridas programadas — cada ciclo, sin restricción de ventana
+    ejecutarProgramadasVencidas();
+
+    // 2) Corrida mensual automática
     const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
     const fechaHoy = ahoraCO.toISOString().slice(0, 10);
     const hora = ahoraCO.getUTCHours();
 
-    // Correr a las 9:00 AM Colombia, una sola vez al día
     if (hora !== 9 || ahoraCO.getMinutes() >= 15) return;
     if (ultimaEjecucionLlamadasIA === fechaHoy) return;
+    if (!esDiaHabil(fechaHoy)) return;
 
-    if (!esDiaHabil(fechaHoy)) {
-      console.log('[LLAMADAS-IA-CRON] Día no hábil — sin ejecución');
-      return;
-    }
-
-    // Ventana: primeros 3 días hábiles del mes (cubre el "día 2" + margen
-    // de seguridad si el 2 cae en fin de semana o hubo un fallo puntual)
     const diasHabiles = diasHabilesTranscurridosMes(fechaHoy);
-    if (diasHabiles > 3) {
-      return; // fuera de ventana — silencioso, no llena logs todos los días
-    }
+    if (diasHabiles > 3) return;
 
     ultimaEjecucionLlamadasIA = fechaHoy;
-    console.log(`[LLAMADAS-IA-CRON] Ejecutando motor — día hábil ${diasHabiles} del mes`);
+    console.log(`[LLAMADAS-IA-CRON] Corrida mensual — día hábil ${diasHabiles} del mes`);
     ejecutarMotorLlamadas().catch(e => console.error('[LLAMADAS-IA-CRON]', e.message));
   };
 
-  setInterval(verificar, 15 * 60 * 1000); // revisa cada 15 min, igual que los otros crons
+  setInterval(verificar, 15 * 60 * 1000);
   verificar();
-  console.log('✅ Cron Llamadas IA (Lucy) activo — corre en los primeros 3 días hábiles del mes, 9:00 AM Colombia');
+  console.log('✅ Cron Llamadas IA (Lucy/ElevenLabs) activo — mensual (3 primeros días hábiles 9AM) + programadas cada 15 min');
 };
 
 module.exports.iniciarCronLlamadasIA = iniciarCronLlamadasIA;
