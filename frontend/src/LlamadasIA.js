@@ -101,7 +101,17 @@ export default function LlamadasIA({ user, onNavegar }) {
       const r = await fetch(`${API}/llamadas-ia/ejecutar-motor`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({}) });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Error al lanzar el motor');
-      mostrarAviso('ok', `Motor ejecutado: ${data.llamadasLanzadas || 0} llamada(s) lanzada(s)${data.omitidasPorTope ? ` · ${data.omitidasPorTope} omitida(s) por tope de minutos` : ''}`);
+      // ✅ FIX LUCY-DIAGNOSTICO-001: el motor atrapa sus propios errores y
+      // responde 200 con { error } — antes eso se veía como "0 llamadas" sin
+      // explicación. Ahora el motivo real llega a pantalla.
+      if (data.error) throw new Error(data.error);
+      if (!data.llamadasLanzadas) {
+        mostrarAviso('error', data.omitidasPorTope
+          ? `No se lanzó ninguna llamada: ${data.omitidasPorTope} vencimiento(s) omitido(s) por tope de minutos.`
+          : 'No se lanzó ninguna llamada. Revisa que haya vencimientos de ESTE mes sin gestionar, con cliente y teléfono válido.');
+      } else {
+        mostrarAviso('ok', `Motor ejecutado: ${data.llamadasLanzadas} llamada(s) lanzada(s)${data.omitidasPorTope ? ` · ${data.omitidasPorTope} omitida(s) por tope de minutos` : ''}`);
+      }
       cargar();
     } catch (e) { mostrarAviso('error', e.message); }
     setOcupado(false);

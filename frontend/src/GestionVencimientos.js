@@ -799,12 +799,16 @@ export default function GestionVencimientos({ user, onNavegar }) {
 
       {/* ===== VISTA: ANNY ===== */}
       {vista === 'anny' && (
-        <VencimientosAnny />
+        <VencimientosAnny user={user} onNavegar={onNavegar} />
       )}
 
       {/* ===== VISTA: LUCY ===== */}
+      {/* ✅ FIX LUCY-BOTONES-001: se montaba SIN el prop `user`, así que
+          esAdmin (user.role === 'admin') siempre era falso y los botones
+          "Lanzar ahora", "Programar" y "Llamada de prueba" NUNCA se dibujaban,
+          aunque el backend sí los tenía listos. */}
       {vista === 'llamadas_ia' && (
-        <LlamadasIA />
+        <LlamadasIA user={user} onNavegar={onNavegar} />
       )}
     </div>
   );
