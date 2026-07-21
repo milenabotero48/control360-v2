@@ -706,6 +706,10 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
         update.fechaPago = update.pagado ? timestampFoto : (orden.fechaPago || null);
         // Solo se "cobra por mensajero" (espera cuadre) si HAY mensajero.
         update.cobradoPorMensajero = hayMensajero;
+        // ✅ DINERO-UN-IDIOMA-001: el efectivo cobrado queda EN TRÁNSITO con
+        // el mensajero. Órdenes y CxC bloquean cualquier registro de este
+        // dinero hasta que el Cuadre del Mensajero lo reciba.
+        if (hayMensajero && !esVirtual) update.dineroEstado = 'con_mensajero';
         // Si el dinero anterior ya estaba en caja/cuadrado, este cobro nuevo
         // reabre el ciclo de cuadre SOLO por el monto nuevo.
         if (orden.dineroEnCaja === true) update.dineroEnCaja = false;
@@ -891,6 +895,9 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
         // Cobró el mensajero en ruta → tiene que cuadrarlo. La alerta a
         // tesorería se dispara más abajo (cobroParaCuadre).
         update.cobradoPorMensajero = !!orden.mensajeroId;
+        // ✅ DINERO-UN-IDIOMA-001: efectivo en manos del mensajero = en
+        // tránsito. Solo el Cuadre lo recibe.
+        if (orden.mensajeroId && !esVirtual) update.dineroEstado = 'con_mensajero';
         if (orden.dineroEnCaja === true) update.dineroEnCaja = false;
         if (orden.cuadrado === true) update.cuadrado = false;
       }
@@ -1514,11 +1521,14 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
             } : {})
           } : {})
         }),
-        ...(sumaCaja ? {
-          dineroEnCaja: true,
-          dineroEnCajaFecha: new Date().toISOString(),
-          dineroEnCajaPor: req.user.email
-        } : {}),
+        // ✅ CANDADO-MONTO-001: la bandera dineroEnCaja y el acumulador
+        // ingresadoCaja los maneja EXCLUSIVAMENTE registrarIngresoEnCaja
+        // (se llama abajo, orden por orden). Marcarla aquí a mano hacía que
+        // el candado viera "ya está en caja" y rechazara el ingreso real.
+        // ✅ DINERO-UN-IDIOMA-001: al cuadrar, el dinero deja de estar "en
+        // tránsito" con el mensajero (si no entra a caja aquí —crédito,
+        // virtual, sin cobro— vuelve a 'pendiente' y sigue su flujo normal).
+        ...(!sumaCaja && o.dineroEstado === 'con_mensajero' ? { dineroEstado: 'pendiente' } : {}),
         // FIX Ola 2.5: si fue virtual, marcar pendiente de validar (NO falsear).
         ...(tipo === 'virtual' && !esCredito ? {
           pagoVirtualPendienteValidar: true,
@@ -1548,7 +1558,7 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
 
       if (sumaCaja) {
         sumaEfectivo += monto;
-        ordenesParaCaja.push({ ordenId: doc.id, numeroOrden: o.numeroOrden, monto, tipo, cajaId: cajaOrdenId });
+        ordenesParaCaja.push({ ordenId: doc.id, numeroOrden: o.numeroOrden, clienteNombre: o.clienteNombre || '', monto, tipo, cajaId: cajaOrdenId });
       }
     });
 
@@ -1603,40 +1613,59 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
       }
     }
 
-    const gruposPorCaja = new Map(); // cajaId → { caja, monto, ordenes[] }
+    // ── Resolver la caja destino de cada orden (queda congelada en el arqueo) ─
     for (const o of ordenesParaCaja) {
       let destino = null;
       if (o.cajaId && o.cajaId !== (cajaDefault && cajaDefault.id)) {
         destino = await resolverCajaValida(o.cajaId);
       }
       if (!destino) destino = cajaDefault;
-      if (!destino) continue; // sin caja resoluble: no registrar a ciegas
+      if (!destino) { o.cajaId = null; continue; } // sin caja resoluble: no registrar a ciegas
       o.cajaId = destino.id;          // queda congelado en el arqueo
       o.cajaNombre = destino.nombre;  // para el histórico legible
-      const g = gruposPorCaja.get(destino.id) || { caja: destino, monto: 0, ordenes: [] };
-      g.monto += o.monto;
-      g.ordenes.push(o.numeroOrden);
-      gruposPorCaja.set(destino.id, g);
     }
 
+    // ── ✅ CANDADO-MONTO-001: ingreso ORDEN POR ORDEN con el candado único ────
+    // ANTES el cuadre sumaba el grupo DIRECTO a la caja, sin candado y sin
+    // ordenId en el movimiento: si una orden ya había entrado por otra vía
+    // (pago en Órdenes/CxC), el cuadre la volvía a sumar → ingreso doble
+    // (caso real OS-0475). AHORA cada orden pasa por registrarIngresoEnCaja:
+    // el candado por monto rechaza o recorta lo que ya estaba en caja, y cada
+    // movimiento queda trazado con su ordenId (visible para la reparación).
     const cajasDestinoArqueo = []; // resumen para el arqueo inmutable
-    for (const [, g] of gruposPorCaja) {
-      await g.caja.ref.update({
-        saldo: admin.firestore.FieldValue.increment(g.monto),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      await db.collection('movimientos').add({
-        userId: adminId,
-        cajaId: g.caja.id,
-        tipo: 'ingreso',
-        concepto: 'Cuadre mensajero (efectivo)',
-        monto: g.monto,
-        referencia: g.ordenes.join(', ') || 'Cuadre',
-        creadoPor: req.user.email,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      cajasDestinoArqueo.push({ cajaId: g.caja.id, cajaNombre: g.caja.nombre, monto: g.monto, ordenes: g.ordenes });
+    const arqueoPorCaja = new Map();
+    for (const o of ordenesParaCaja) {
+      if (!o.cajaId) continue;
+      let resIngreso = null;
+      if (typeof registrarIngresoEnCaja === 'function') {
+        try {
+          resIngreso = await registrarIngresoEnCaja({
+            userId: adminId,
+            ordenId: o.ordenId,
+            numeroOrden: o.numeroOrden,
+            clienteNombre: o.clienteNombre || '',
+            monto: o.monto,
+            formaPago: 'Efectivo — Cuadre mensajero',
+            usuarioEmail: req.user.email,
+            numeroFactura: '',
+            cajaIdSeleccionada: o.cajaId
+          });
+        } catch (eIng) {
+          console.error(`Cuadre: error ingresando ${o.numeroOrden} a caja:`, eIng.message);
+        }
+      }
+      const montoReal = (resIngreso && resIngreso.tipo === 'caja') ? (resIngreso.monto ?? o.monto) : 0;
+      o.montoIngresado = montoReal;    // constancia en el arqueo de lo que DE VERDAD entró
+      if (resIngreso && resIngreso.tipo === 'duplicado') {
+        o.notaIngreso = 'El dinero de esta orden ya estaba en caja — el candado evitó duplicarlo';
+        console.warn(`Cuadre: ${o.numeroOrden} ya estaba en caja — no se duplicó`);
+      }
+      const g = arqueoPorCaja.get(o.cajaId) || { cajaId: o.cajaId, cajaNombre: o.cajaNombre || '', monto: 0, ordenes: [] };
+      g.monto += montoReal;
+      g.ordenes.push(o.numeroOrden);
+      arqueoPorCaja.set(o.cajaId, g);
     }
+    for (const [, g] of arqueoPorCaja) cajasDestinoArqueo.push(g);
 
     await auditar({
       accion: 'CUADRE_CONFIRMADO',

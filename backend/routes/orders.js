@@ -534,30 +534,74 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
       return { tipo: 'sin_caja', pendiente: true, mensaje: 'Pago registrado SIN caja asignada — asígnalo a una caja desde el módulo Caja' };
     }
 
-    // ── CANDADO ANTI-DOBLE-SUMA (transacción atómica) ─────────────────────────
-    // ✅ FIX CAJA-002: el candado corre DESPUÉS de resolver la caja destino.
-    if (ordenId) {
-      const ordenRef = db.collection('orders').doc(ordenId);
-      const yaRegistrado = await db.runTransaction(async (tx) => {
-        const snap = await tx.get(ordenRef);
-        if (snap.exists && snap.data().dineroEnCaja === true) return true;
-        if (snap.exists) {
-          tx.update(ordenRef, {
-            dineroEnCaja: true,
-            dineroEnCajaFecha: new Date().toISOString(),
-            dineroEnCajaPor: usuarioEmail || userId
-          });
-        }
-        return false;
-      });
-      if (yaRegistrado) {
-        return { tipo: 'duplicado', mensaje: 'El dinero de esta orden ya estaba en caja (no se duplicó)' };
-      }
-    }
-
+    // ── ✅ CANDADO-MONTO-001: CANDADO POR MONTO (transacción atómica) ──────────
+    // ANTES el candado era un booleano (dineroEnCaja sí/no). Con abonos
+    // parciales el booleano no alcanza: hay que resetearlo para dejar entrar
+    // el siguiente abono, y cada reset reabría la puerta a duplicados (caso
+    // real OS-0475: $68.000 en caja contra un total de $34.000).
+    // AHORA la orden lleva un ACUMULADOR `ingresadoCaja`: la transacción
+    // reserva el cupo disponible (total − ya ingresado) y NUNCA deja entrar
+    // a caja más que el total de la orden, venga el ingreso por la ruta que
+    // venga (pago en Órdenes, CxC, cobranza, cuadre, avanzar estado).
+    // El booleano dineroEnCaja se mantiene por compatibilidad: se enciende
+    // solo cuando el total completo ya está en caja.
+    //
+    // La caja destino se valida ANTES del candado: si no existe, se aborta
+    // sin consumir cupo (si no, un cupo reservado sin dinero real bloquearía
+    // ingresos legítimos futuros de la orden).
     const cajaRef = db.collection('cajas').doc(cajaId);
     const cajaDoc = await cajaRef.get();
     if (!cajaDoc.exists) return { tipo: 'error', mensaje: 'Caja no encontrada' };
+
+    if (ordenId) {
+      const ordenRef = db.collection('orders').doc(ordenId);
+      const candado = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ordenRef);
+        if (!snap.exists) return { permitido: true, montoPermitido: monto };
+        const o = snap.data();
+        const totalOrden = Math.round(Number(o.total) || 0);
+
+        // Acumulado ya ingresado a caja por esta orden.
+        let ingresadoPrevio = Number(o.ingresadoCaja);
+        if (!Number.isFinite(ingresadoPrevio)) {
+          // Migración perezosa (órdenes anteriores a este fix): si la bandera
+          // vieja dice que el dinero ya está en caja, se asume el total
+          // (mismo comportamiento del candado anterior: bloquear).
+          ingresadoPrevio = (o.dineroEnCaja === true) ? totalOrden : 0;
+        }
+
+        const cupo = Math.max(0, totalOrden - ingresadoPrevio);
+        if (cupo <= 0) {
+          return { permitido: false, ingresadoPrevio, totalOrden };
+        }
+
+        // Nunca entra más que el cupo disponible (recorta excesos).
+        const montoPermitido = Math.min(monto, cupo);
+        const nuevoIngresado = ingresadoPrevio + montoPermitido;
+        const quedoCompleto = nuevoIngresado >= totalOrden - 1;
+        tx.update(ordenRef, {
+          ingresadoCaja: nuevoIngresado,
+          dineroEnCaja: quedoCompleto,
+          dineroEnCajaFecha: new Date().toISOString(),
+          dineroEnCajaPor: usuarioEmail || userId,
+          // El dinero ya no está "en tránsito" con el mensajero: entró a caja
+          // (completo) o queda saldo cobrable por las vías normales (parcial).
+          dineroEstado: quedoCompleto ? 'en_caja' : 'pendiente'
+        });
+        return { permitido: true, montoPermitido, ingresadoPrevio, totalOrden };
+      });
+
+      if (!candado.permitido) {
+        return {
+          tipo: 'duplicado',
+          mensaje: `El dinero de esta orden ya está completo en caja ($${(candado.ingresadoPrevio || 0).toLocaleString('es-CO')} de $${(candado.totalOrden || 0).toLocaleString('es-CO')}) — no se duplicó`
+        };
+      }
+      if (candado.montoPermitido < monto) {
+        console.warn(`CANDADO-MONTO-001: ingreso recortado en ${numeroOrden} — se pidió $${monto.toLocaleString('es-CO')} pero el cupo era $${candado.montoPermitido.toLocaleString('es-CO')}`);
+      }
+      monto = candado.montoPermitido;
+    }
 
     const saldoActual = Number(cajaDoc.data().saldo) || 0;
     await cajaRef.update({
@@ -573,7 +617,7 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
-    return { tipo: 'caja', cajaId, nuevoSaldo: saldoActual + monto };
+    return { tipo: 'caja', cajaId, monto, nuevoSaldo: saldoActual + monto };
   } catch (e) {
     console.error('Error registrando ingreso en caja:', e);
     return { tipo: 'error', mensaje: e.message };
@@ -1718,54 +1762,32 @@ router.put('/:id/estado', authenticate, async (req, res) => {
       cambios.historialEstados = historial;
       cambios.fechaCompletada = ahora();
 
-      // Si fue pagada en efectivo, registrar movimiento en caja "Efectivo"
+      // Si fue pagada en efectivo, registrar el ingreso en caja.
+      // ✅ FIX AVANZAR-NO-DUPLICA-001 (caso real OS-0475): ANTES este bloque
+      // sumaba actual.total DIRECTO a la caja Efectivo, sin pasar por el
+      // candado. Si el dinero YA había entrado (pago registrado, cobro del
+      // mensajero, CxC), avanzar la orden lo duplicaba en caja. AHORA todo
+      // pasa por registrarIngresoEnCaja: el candado por monto garantiza que
+      // jamás entra más que el total de la orden. Si el dinero ya estaba
+      // completo en caja, la función devuelve 'duplicado' y no suma nada.
       const esEfectivoPagado = actual.pagado === true
         && /efectivo/i.test(actual.formaPago || '');
 
       if (esEfectivoPagado) {
         try {
-          // Buscar caja "Efectivo" del admin (case insensitive)
-          const cajasSnap = await db.collection('cajas')
-            .where('userId', '==', usuarioId).get();
-          const cajaEfectivo = cajasSnap.docs.find(d => {
-            const c = d.data();
-            return /efectivo/i.test(c.nombre || '') && c.activa !== false;
+          const resCajaAvance = await registrarIngresoEnCaja({
+            userId: usuarioId,
+            ordenId: id,
+            numeroOrden: actual.numeroOrden,
+            clienteNombre: actual.clienteNombre || '',
+            monto: Number(actual.total) || 0,
+            formaPago: actual.formaPago || 'Efectivo',
+            usuarioEmail: usuarioNombre,
+            numeroFactura: actual.numeroFactura || ''
           });
-
-          if (cajaEfectivo) {
-            const cajaId = cajaEfectivo.id;
-            const cajaData = cajaEfectivo.data();
-            const monto = Number(actual.total) || 0;
-
-            // Registrar movimiento de ingreso
-            await db.collection('movimientos').add({
-              userId: usuarioId,
-              cajaId,
-              cajaNombre: cajaData.nombre,
-              tipo: 'ingreso',
-              monto,
-              concepto: `Pago ${actual.numeroOrden} — ${actual.clienteNombre || ''}`,
-              referencia: actual.numeroOrden,
-              ordenId: id,
-              fecha: ahora(),
-              registradoPor: usuarioNombre,
-              registradoPorId: usuarioId,
-              tipoMovimiento: 'pago_orden_sin_mensajero',
-              timestamp: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            // Actualizar saldo de la caja
-            await db.collection('cajas').doc(cajaId).update({
-              saldo: admin.firestore.FieldValue.increment(monto),
-              updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            console.log(`[orders] Cierre admin sin mensajero: $${monto} a caja "${cajaData.nombre}" para ${actual.numeroOrden}`);
-          } else {
-            console.warn(`[orders] No se encontró caja "Efectivo" activa para registrar pago de ${actual.numeroOrden}. El admin debe registrarlo manualmente.`);
-          }
+          console.log(`[orders] Cierre admin sin mensajero (${actual.numeroOrden}):`, resCajaAvance?.tipo, resCajaAvance?.mensaje || '');
         } catch (errCaja) {
-          console.error(`[orders] Error registrando movimiento en caja para ${actual.numeroOrden}:`, errCaja.message);
+          console.error(`[orders] Error registrando ingreso en caja para ${actual.numeroOrden}:`, errCaja.message);
           // No bloqueamos la finalización por esto. Solo logueamos.
         }
       }
@@ -1957,6 +1979,18 @@ router.post('/:id/pago', authenticate, async (req, res) => {
       return res.status(409).json({
         error: 'Esta orden se cobra en el cuadre del mensajero, no desde aquí.',
         cobroPorMensajero: true
+      });
+    }
+
+    // ── ✅ DINERO-UN-IDIOMA-001: dinero EN TRÁNSITO con el mensajero ──────────
+    // Si el mensajero YA registró el cobro, ese dinero está en sus manos y
+    // solo entra al sistema por el Cuadre del Mensajero. NADIE —tampoco
+    // admin— lo registra desde Órdenes o CxC: hacerlo duplicaba el ingreso
+    // (caso real OS-0475: se abonó por Órdenes y el cuadre volvió a sumarlo).
+    if (!esCxC && actual.dineroEstado === 'con_mensajero') {
+      return res.status(409).json({
+        error: `💰 El dinero de esta orden lo tiene el mensajero${actual.mensajeroNombre ? ' ' + actual.mensajeroNombre : ''}. Recíbelo en Logística → Cuadre del Mensajero — no se registra desde aquí.`,
+        dineroConMensajero: true
       });
     }
 

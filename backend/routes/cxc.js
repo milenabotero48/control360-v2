@@ -4,6 +4,13 @@ const { db, admin } = require('../config/firebase');
 const jwt = require('jsonwebtoken');
 const { authenticate, validarTenant } = require('../middleware/auth');
 
+// ✅ CANDADO-MONTO-001: TODO ingreso a caja pasa por la función única de
+// orders.js (candado por monto: jamás entra a caja más que el total de la
+// orden). Antes este módulo sumaba a caja directo y era una de las puertas
+// de los ingresos duplicados (caso real OS-0475).
+const ordersRouter = require('./orders');
+const registrarIngresoEnCaja = ordersRouter.registrarIngresoEnCaja;
+
 // ─── AUDITORÍA ────────────────────────────────────────────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioEmail, datos = {} }) => {
   try {
@@ -293,6 +300,15 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
       return res.status(409).json({ error: 'Esta orden no tiene saldo pendiente por cobrar.', yaPagada: true });
     }
 
+    // ✅ DINERO-UN-IDIOMA-001: si el mensajero ya registró el cobro, ese
+    // dinero está EN TRÁNSITO y solo entra por el Cuadre del Mensajero.
+    if (orden.dineroEstado === 'con_mensajero') {
+      return res.status(409).json({
+        error: `💰 El dinero de esta orden lo tiene el mensajero${orden.mensajeroNombre ? ' ' + orden.mensajeroNombre : ''}. Recíbelo en Logística → Cuadre del Mensajero — no se registra desde aquí.`,
+        dineroConMensajero: true
+      });
+    }
+
     const montoRetencion = Number(retencion) || 0;
     // ✅ FIX: usar montoAbono si se envía (abono parcial), si no usar el saldo
     const montoAbonoSolicitado = req.body.montoAbono ? Number(req.body.montoAbono) : null;
@@ -309,29 +325,54 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
     }
     const facturaLimpia = numeroFactura ? numeroFactura.trim().toUpperCase() : (orden.numeroFactura || '');
 
-    // 1. Actualizar saldo de caja
+    // 1. Ingresar el dinero a caja por la PUERTA ÚNICA (candado por monto).
+    // ✅ CANDADO-MONTO-001: antes este endpoint sumaba a caja directo, sin
+    // candado — si el mismo pago se registraba también por Órdenes (o dos
+    // veces), la caja recibía el dinero doble. Ahora registrarIngresoEnCaja
+    // reserva el cupo (total − ya ingresado) de forma atómica: el segundo
+    // intento devuelve 'duplicado' y NO suma nada.
     const cajaRef = db.collection('cajas').doc(cajaId);
     const cajaDoc = await cajaRef.get();
     if (!cajaDoc.exists) return res.status(404).json({ error: 'Caja no encontrada' });
 
-    const batch = db.batch();
-
-    batch.update(cajaRef, {
-      saldo: admin.firestore.FieldValue.increment(montoAPagar),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    const resCaja = await registrarIngresoEnCaja({
+      userId: adminId,
+      ordenId,
+      numeroOrden: orden.numeroOrden,
+      clienteNombre: orden.clienteNombre,
+      monto: montoAPagar,
+      formaPago,
+      usuarioEmail: req.user.email,
+      numeroFactura: facturaLimpia,
+      cajaIdSeleccionada: cajaId
     });
+
+    if (resCaja.tipo === 'duplicado') {
+      return res.status(409).json({
+        error: 'El dinero de esta orden ya está completo en caja — el candado evitó duplicar el ingreso. Si la deuda sigue apareciendo, usa "Reparar pagos" para reconciliar.',
+        duplicadoEvitado: true
+      });
+    }
+    if (resCaja.tipo === 'error') {
+      return res.status(500).json({ error: `No se pudo ingresar a caja: ${resCaja.mensaje}` });
+    }
+    // Si el candado recortó el monto (ya había entrado una parte por otra
+    // vía), la orden se actualiza con lo que DE VERDAD entró a caja.
+    const montoIngresado = resCaja.tipo === 'caja' ? (resCaja.monto ?? montoAPagar) : montoAPagar;
+
+    const batch = db.batch();
 
     // 2. Actualizar orden — si quedó saldo 0 marcar completada, si no dejar como abono parcial
     // ✅ SALDO-UNICO-001: la retención TAMBIÉN es pago del cliente (la practica
     // por impuesto). Antes solo se sumaba el efectivo a montoPagado y la orden
     // quedaba con "saldo" igual a la retención para siempre — por eso las
     // órdenes pagadas con retefuente no se quitaban de la lista de CxC.
-    const nuevoSaldo = Math.max(0, saldoActual - montoAPagar - montoRetencion);
+    const nuevoSaldo = Math.max(0, saldoActual - montoIngresado - montoRetencion);
     const quedoPagada = nuevoSaldo <= 1;
     const ordenUpdate = {
       cxcSaldo: nuevoSaldo,
       cxcEstado: quedoPagada ? 'pagada' : 'parcial',
-      montoPagado: admin.firestore.FieldValue.increment(montoAPagar + montoRetencion),
+      montoPagado: admin.firestore.FieldValue.increment(montoIngresado + montoRetencion),
       fechaPago: quedoPagada ? (fechaPago || new Date().toISOString()) : undefined,
       cajaId: quedoPagada ? cajaId : undefined,
       numeroFactura: facturaLimpia || undefined,
@@ -339,7 +380,7 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       cxcHistorial: admin.firestore.FieldValue.arrayUnion({
         tipo: quedoPagada ? 'pago_total' : 'abono_parcial',
-        monto: montoAPagar,
+        monto: montoIngresado,
         retencion: montoRetencion,
         metodoPago: formaPago,
         fecha: new Date().toISOString(),
@@ -353,17 +394,23 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
         usuarioId: req.adminId || req.user.uid || req.user.id,
         usuarioNombre: req.user.nombre || req.user.email,
         nota: quedoPagada
-          ? `Pago CxC completo — ${formaPago} — $${montoAPagar.toLocaleString('es-CO')}`
-          : `Abono parcial — ${formaPago} — $${montoAPagar.toLocaleString('es-CO')} — Saldo restante: $${nuevoSaldo.toLocaleString('es-CO')}`
+          ? `Pago CxC completo — ${formaPago} — $${montoIngresado.toLocaleString('es-CO')}`
+          : `Abono parcial — ${formaPago} — $${montoIngresado.toLocaleString('es-CO')} — Saldo restante: $${nuevoSaldo.toLocaleString('es-CO')}`
       })
     };
-    // Solo marcar pagada si quedó saldo 0
+    // Solo marcar pagada si quedó saldo 0.
+    // ✅ CANDADO-MONTO-001: la bandera dineroEnCaja y el acumulador
+    // ingresadoCaja los administra registrarIngresoEnCaja (ya corrió arriba).
+    // Aquí solo se enciende en el caso de retención: la retención es pago del
+    // cliente que NUNCA entra a caja, por eso el candado no la ve.
     if (quedoPagada) {
       ordenUpdate.estado = 'completada';
       ordenUpdate.pagado = true;
-      ordenUpdate.dineroEnCaja = true;
-      ordenUpdate.dineroEnCajaFecha = new Date().toISOString();
-      ordenUpdate.dineroEnCajaPor = req.user.email;
+      if (montoRetencion > 0) {
+        ordenUpdate.dineroEnCaja = true;
+        ordenUpdate.dineroEnCajaFecha = new Date().toISOString();
+        ordenUpdate.dineroEnCajaPor = req.user.email;
+      }
     }
     // Limpiar undefined
     Object.keys(ordenUpdate).forEach(k => ordenUpdate[k] === undefined && delete ordenUpdate[k]);
@@ -386,19 +433,8 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
       } catch (eCxcDoc) { console.warn('CxC doc no actualizado:', eCxcDoc.message); }
     }
 
-    // 3. Registrar movimiento en caja
-    await db.collection('movimientos').add({
-      userId: req.adminId || req.user.uid || req.user.id,
-      cajaId,
-      tipo: 'ingreso',
-      concepto: `Pago CXC ${orden.numeroOrden} — ${orden.clienteNombre}`,
-      monto: montoAPagar,
-      referencia: orden.numeroOrden,
-      ordenId,
-      formaPago,
-      creadoPor: req.user.email,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+    // 3. Movimiento en caja: YA lo registró registrarIngresoEnCaja (con
+    // ordenId y trazabilidad completa) — aquí no se duplica.
 
     // 4. Si hay retención → registrar en egresos como CXP categoría Impuestos
     if (montoRetencion > 0) {
@@ -420,15 +456,15 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
 
     await auditar({
       accion: 'PAGO_CXC',
-      descripcion: `Pago CXC registrado — ${orden.numeroOrden} — ${orden.clienteNombre} — $${montoAPagar.toLocaleString('es-CO')}`,
+      descripcion: `Pago CXC registrado — ${orden.numeroOrden} — ${orden.clienteNombre} — $${montoIngresado.toLocaleString('es-CO')}`,
       usuarioId: req.adminId || req.user.uid || req.user.id,
       usuarioEmail: req.user.email,
-      datos: { ordenId, formaPago, cajaId, montoAPagar, montoRetencion }
+      datos: { ordenId, formaPago, cajaId, montoIngresado, montoRetencion, resultadoCaja: resCaja.tipo }
     });
 
-    res.json({ 
-      ok: true, 
-      montoIngresado: montoAPagar, 
+    res.json({
+      ok: true,
+      montoIngresado,
       retencion: montoRetencion,
       saldoRestante: nuevoSaldo,
       quedoPagada
@@ -539,6 +575,15 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
         return res.status(400).json({ error: `Orden ${oc.numeroOrden} ya está pagada` });
       }
 
+      // ✅ DINERO-UN-IDIOMA-001: dinero en tránsito con el mensajero solo
+      // entra por el Cuadre del Mensajero.
+      if (orden.dineroEstado === 'con_mensajero') {
+        return res.status(409).json({
+          error: `💰 El dinero de ${oc.numeroOrden} lo tiene el mensajero${orden.mensajeroNombre ? ' ' + orden.mensajeroNombre : ''}. Recíbelo en Logística → Cuadre del Mensajero.`,
+          dineroConMensajero: true
+        });
+      }
+
       const montoEfectivo = Number(oc.monto) || 0;
       const retencionTotal = Number(oc.retencionTotal) || 0;
       const aplicadoTotal = montoEfectivo + retencionTotal;
@@ -585,7 +630,31 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
       const saldoAnterior = saldoRealDe(orden);
       const montoEfectivo = Number(oc.monto) || 0;
       const retencionTotal = Number(oc.retencionTotal) || 0;
-      const aplicado = montoEfectivo + retencionTotal;
+
+      // ✅ CANDADO-MONTO-001: el efectivo entra a caja ORDEN POR ORDEN por la
+      // puerta única (candado por monto + movimiento con ordenId). Antes se
+      // sumaba todo el grupo directo a la caja sin candado — otra de las
+      // puertas de los ingresos duplicados. Si el dinero de una orden ya
+      // había entrado por otra vía, se recorta o se rechaza: jamás se duplica.
+      let efectivoReal = 0;
+      if (montoEfectivo > 0) {
+        const resIng = await registrarIngresoEnCaja({
+          userId,
+          ordenId: oc.ordenId,
+          numeroOrden: orden.numeroOrden,
+          clienteNombre: orden.clienteNombre,
+          monto: montoEfectivo,
+          formaPago: metodoPago,
+          usuarioEmail: req.user.email,
+          numeroFactura: orden.numeroFactura || '',
+          cajaIdSeleccionada: cajaId
+        });
+        efectivoReal = (resIng && resIng.tipo === 'caja') ? (resIng.monto ?? montoEfectivo) : 0;
+        if (resIng && resIng.tipo === 'duplicado') {
+          console.warn(`Cobranza: ${orden.numeroOrden} ya estaba en caja — el candado evitó duplicar`);
+        }
+      }
+      const aplicado = efectivoReal + retencionTotal;
       const nuevoSaldo = Math.max(0, saldoAnterior - aplicado);
 
       // Determinar estado nuevo
@@ -596,7 +665,7 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
         montoPagado: admin.firestore.FieldValue.increment(aplicado),
         cxcHistorial: admin.firestore.FieldValue.arrayUnion({
           tipo: yaPagada ? 'pago_total' : 'abono_parcial',
-          monto: montoEfectivo,
+          monto: efectivoReal,
           retencionTotal,
           retenciones: oc.retenciones || [],
           metodoPago,
@@ -608,13 +677,18 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
       };
 
       // Si quedó completamente pagada, marcar completada
+      // ✅ CANDADO-MONTO-001: dineroEnCaja/ingresadoCaja los administra
+      // registrarIngresoEnCaja (ya corrió arriba). Solo se enciende a mano
+      // en el caso de retención (dinero que nunca pasa por caja).
       if (yaPagada) {
         ordenUpdate.estado = 'completada';
         ordenUpdate.pagado = true;
         ordenUpdate.fechaPago = new Date().toISOString();
-        ordenUpdate.dineroEnCaja = true;
-        ordenUpdate.dineroEnCajaFecha = new Date().toISOString();
-        ordenUpdate.dineroEnCajaPor = req.user.email;
+        if (retencionTotal > 0) {
+          ordenUpdate.dineroEnCaja = true;
+          ordenUpdate.dineroEnCajaFecha = new Date().toISOString();
+          ordenUpdate.dineroEnCajaPor = req.user.email;
+        }
         ordenUpdate.retencionPracticada = (orden.retencionPracticada || 0) + retencionTotal;
         ordenUpdate.historialEstados = admin.firestore.FieldValue.arrayUnion({
           estado: 'completada',
@@ -642,7 +716,7 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
       }
 
       saldoTotalPendiente += nuevoSaldo;
-      efectivoIngresadoCaja += montoEfectivo;
+      efectivoIngresadoCaja += efectivoReal;
 
       // Registrar las retenciones de esta orden como egresos (cuenta por pagar a DIAN)
       for (const r of (oc.retenciones || [])) {
@@ -669,10 +743,12 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
       }
     }
 
-    // ── Una sola operación de caja por todo el cobro ─────────────────────────
+    // ── ✅ CANDADO-MONTO-001: el efectivo YA entró a caja orden por orden ─────
+    // (registrarIngresoEnCaja, arriba en el bucle: candado por monto y un
+    // movimiento con ordenId por cada orden). Aquí solo queda la huella del
+    // cobro agrupado en la caja para trazabilidad del recibo.
     if (efectivoIngresadoCaja > 0) {
       await cajaRef.update({
-        saldo: admin.firestore.FieldValue.increment(efectivoIngresadoCaja),
         ultimoIngreso: new Date().toISOString(),
         historialMovimientos: admin.firestore.FieldValue.arrayUnion({
           tipo: 'ingreso_cobranza',
@@ -685,18 +761,6 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
           usuarioNombre: req.user.nombre || req.user.email
         }),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-
-      // Movimiento independiente para reportes
-      await db.collection('movimientos').add({
-        userId, cajaId,
-        tipo: 'ingreso',
-        concepto: `Cobranza CxC — Cliente ${clienteId} — ${ordenesCobradas.length} factura(s)`,
-        monto: efectivoIngresadoCaja,
-        referencia: cobroRef.id,
-        formaPago: metodoPago,
-        creadoPor: req.user.email,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
       });
     }
 

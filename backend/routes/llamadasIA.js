@@ -336,6 +336,71 @@ router.get('/config', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/llamadas-ia/superadmin/config/:adminId — ✅ LUCY-MINUTOS-001
+// Tope y consumo del mes de UN suscriptor (para el panel de suscriptores).
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/superadmin/config/:adminId', async (req, res) => {
+  try {
+    if (!req.user?.superAdmin) return res.status(403).json({ error: 'Solo SuperAdmin' });
+    const { adminId } = req.params;
+    const userDoc = await db.collection('users').doc(adminId).get();
+    if (!userDoc.exists) return res.status(404).json({ error: 'Suscriptor no encontrado' });
+
+    const config = await obtenerConfigTenant(adminId);
+    return res.json({
+      adminId,
+      activo: (userDoc.data().modulos || []).includes('llamadas_ia'),
+      topeMinutosMes: config.topeMinutosMes,
+      minutosConsumidosMes: config.minutosConsumidosMes,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUT /api/llamadas-ia/superadmin/config/:adminId — ✅ LUCY-MINUTOS-001
+// Fija el tope de minutos/mes de Lucy para un suscriptor (plan comercial).
+// ANTES el tope solo existía en la variable de entorno (120 min para todos) y
+// solo se podía cambiar tocando la base de datos a mano.
+// Body: { topeMinutosMes: number }
+// ─────────────────────────────────────────────────────────────────────────────
+router.put('/superadmin/config/:adminId', async (req, res) => {
+  try {
+    if (!req.user?.superAdmin) return res.status(403).json({ error: 'Solo SuperAdmin' });
+    const { adminId } = req.params;
+    const tope = Number(req.body?.topeMinutosMes);
+
+    if (!Number.isFinite(tope) || tope < 0 || tope > 100000) {
+      return res.status(400).json({ error: 'topeMinutosMes debe ser un número entre 0 y 100000' });
+    }
+
+    const userDoc = await db.collection('users').doc(adminId).get();
+    if (!userDoc.exists) return res.status(404).json({ error: 'Suscriptor no encontrado' });
+
+    // merge: NUNCA se toca el histórico de consumo del tenant.
+    await db.collection('llamadas_ia_config').doc(adminId).set({
+      topeMinutosMes: Math.round(tope),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      actualizadoPor: req.user?.nombre || req.user?.email || 'superadmin',
+    }, { merge: true });
+
+    await auditar({
+      accion: 'config_tope_minutos',
+      descripcion: `Tope de minutos de Lucy fijado en ${Math.round(tope)} min/mes para el suscriptor ${adminId}`,
+      usuarioId: getAdminId(req),
+      usuarioNombre: req.user?.nombre || '',
+      datos: { adminIdObjetivo: adminId, topeMinutosMes: Math.round(tope) },
+    });
+
+    const config = await obtenerConfigTenant(adminId);
+    return res.json({ ok: true, ...config });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/llamadas-ia/ejecutar-motor — Disparo MANUAL "Lanzar llamadas ahora"
 // ✅ FIX LUCY-ELEVEN-002c: SCOPED al tenant de la sesión. SuperAdmin puede
 // pasar { adminId } en el body para correr otro tenant puntual. NUNCA global.

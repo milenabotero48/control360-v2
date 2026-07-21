@@ -74,7 +74,11 @@ export default function GestionVencimientos({ user, onNavegar }) {
   const [mostrarForm,  setMostrarForm]  = useState(false);
   const [importando,   setImportando]   = useState(false);
   const [msgImport,    setMsgImport]    = useState(null);
-  const [form, setForm] = useState({ clienteId:'', sucursal:'', descripcionEquipo:'', cantidad:1, mesServicio:'' });
+  // ✅ VENC-MANUAL-001: el form ahora maneja fechas reales (el backend calcula
+  // el vencimiento a 12 meses si solo se envía la fecha de última recarga).
+  const [form, setForm] = useState({ clienteId:'', sucursal:'', descripcionEquipo:'', cantidad:1, fechaUltimaRecarga:'', fechaVencimiento:'' });
+  const [guardandoForm, setGuardandoForm] = useState(false);
+  const [msgForm, setMsgForm] = useState(null);
   
   // ============================================================
   // FIX MULTI-TENANT-001: vista puede ser 'vencimientos' | 'anny' | 'llamadas_ia'
@@ -174,12 +178,15 @@ export default function GestionVencimientos({ user, onNavegar }) {
 
   const agrupado = agruparPorMesYCliente();
 
+  // ✅ FIX GESTIONADO-001: el backend expone PUT /:id y espera
+  // { gestionado: true } — el frontend mandaba PATCH { estado } y la marca
+  // NUNCA se guardaba (la fila volvía a aparecer al recargar).
   const marcarGestionado = async (vencId) => {
     try {
       await fetch(`${API}/vencimientos/${vencId}`, {
-        method: 'PATCH',
+        method: 'PUT',
         headers: authHeaders(),
-        body: JSON.stringify({ estado: 'GESTIONADO' })
+        body: JSON.stringify({ gestionado: true })
       });
       cargar();
     } catch(e) { console.error(e); }
@@ -192,23 +199,145 @@ export default function GestionVencimientos({ user, onNavegar }) {
     for (const id of ids) await marcarGestionado(id);
   };
 
+  // ✅ FIX IMPORT-VENC-001: la importación estaba ROTA — el frontend enviaba el
+  // archivo como FormData a /vencimientos/import (endpoint inexistente: 404),
+  // mientras el backend expone /vencimientos/importar y espera las filas ya
+  // parseadas en JSON. Ahora el CSV se parsea aquí y se envía { filas }.
+  // Columnas aceptadas por el backend (alias tolerantes):
+  //   nombre | razon social | empresa   ← obligatoria
+  //   telefono | celular                ← obligatoria
+  //   nit, sucursal, equipo, cantidad, fechaUltimaRecarga
+  // Fila CON fecha → cliente + vencimiento · SIN fecha → prospecto (Telemercadeo)
+  const parsearCSV = (texto) => {
+    // Parser tolerante: separador ; o , — respeta comillas dobles.
+    const limpio = texto.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+    const lineas = limpio.split('\n').filter(l => l.trim() !== '');
+    if (lineas.length < 2) return [];
+    const sep = (lineas[0].match(/;/g) || []).length > (lineas[0].match(/,/g) || []).length ? ';' : ',';
+
+    const partir = (linea) => {
+      const out = []; let actual = ''; let enComillas = false;
+      for (let i = 0; i < linea.length; i++) {
+        const c = linea[i];
+        if (c === '"') {
+          if (enComillas && linea[i + 1] === '"') { actual += '"'; i++; }
+          else enComillas = !enComillas;
+        } else if (c === sep && !enComillas) { out.push(actual); actual = ''; }
+        else actual += c;
+      }
+      out.push(actual);
+      return out.map(s => s.trim());
+    };
+
+    // Normaliza encabezados: sin tildes, minúsculas, sin espacios extra.
+    const normHead = (h) => h.toLowerCase().trim()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/\s+/g, ' ');
+    const ALIAS = {
+      'nombre': 'nombre', 'razon social': 'nombre', 'razonsocial': 'nombre', 'cliente': 'nombre',
+      'empresa': 'empresa',
+      'telefono': 'telefono', 'celular': 'telefono', 'movil': 'telefono',
+      'nit': 'nit', 'sucursal': 'sucursal', 'sede': 'sucursal',
+      'equipo': 'equipo', 'descripcion equipo': 'equipo', 'descripcion': 'equipo',
+      'cantidad': 'cantidad', 'cant': 'cantidad',
+      'fecha ultima recarga': 'fechaUltimaRecarga', 'fechaultimarecarga': 'fechaUltimaRecarga',
+      'ultima recarga': 'fechaUltimaRecarga', 'fecha recarga': 'fechaUltimaRecarga',
+      'fecha': 'fechaUltimaRecarga', 'vencimiento': 'fechaUltimaRecarga',
+    };
+    const cabecera = partir(lineas[0]).map(h => ALIAS[normHead(h)] || normHead(h));
+
+    return lineas.slice(1).map(l => {
+      const celdas = partir(l);
+      const fila = {};
+      cabecera.forEach((col, i) => { if (col && celdas[i] !== undefined) fila[col] = celdas[i]; });
+      return fila;
+    }).filter(f => (f.nombre || f.empresa) && f.telefono);
+  };
+
+  const descargarPlantilla = () => {
+    // ✅ FIX IMPORT-VENC-001: plantilla oficial (volvió al modal).
+    const hoy = new Date().toISOString().slice(0, 10);
+    const filas = [
+      ['nombre', 'empresa', 'nit', 'telefono', 'sucursal', 'equipo', 'cantidad', 'fechaUltimaRecarga'],
+      ['INDUSTRIAS EJEMPLO SAS', 'INDUSTRIAS EJEMPLO SAS', '900123456', '3001234567', 'Sede Norte', 'Extintor ABC 10 lbs', '3', hoy],
+      ['CLIENTE SIN FECHA LTDA', 'CLIENTE SIN FECHA LTDA', '', '3109876543', '', 'Extintor CO2 15 lbs', '1', ''],
+    ];
+    const csv = filas.map(r => r.map(c => `"${c}"`).join(',')).join('\n');
+    const link = document.createElement('a');
+    link.href = `data:text/csv;charset=utf-8,${encodeURIComponent('﻿' + csv)}`;
+    link.download = 'plantilla_vencimientos_control360.csv';
+    link.click();
+  };
+
   const importarCSV = async (archivo, empresaId, empresaNombre) => {
     setImportando(true);
     setMsgImport(null);
-    const formData = new FormData();
-    formData.append('archivo', archivo);
-    formData.append('empresaId', empresaId);
     try {
-      const r = await fetch(`${API}/vencimientos/import`, {
+      const texto = await archivo.text();
+      const filas = parsearCSV(texto);
+      if (!filas.length) {
+        setMsgImport('❌ No se encontraron filas válidas. Cada fila necesita al menos nombre y teléfono — descarga la plantilla para ver el formato.');
+        setImportando(false);
+        return;
+      }
+      if (filas.length > 2000) {
+        setMsgImport('❌ Máximo 2000 filas por importación. Divide el archivo.');
+        setImportando(false);
+        return;
+      }
+
+      const r = await fetch(`${API}/vencimientos/importar`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
-        body: formData
+        headers: authHeaders(),
+        body: JSON.stringify({ filas, empresaId, empresaNombre })
       });
       const d = await r.json();
-      setMsgImport(r.ok ? `✓ Importados ${d.creados} vencimientos de ${empresaNombre}` : `❌ ${d.error}`);
-      if (r.ok) { setTimeout(() => { setMostrarImportVenc(false); cargar(); }, 1500); }
+      if (!r.ok) { setMsgImport(`❌ ${d.error || 'Error al importar'}`); setImportando(false); return; }
+
+      const partes = [`✓ ${d.vencimientosCreados || 0} vencimientos`];
+      if (d.clientesNuevos)          partes.push(`${d.clientesNuevos} clientes nuevos`);
+      if (d.prospectosCreados)       partes.push(`${d.prospectosCreados} prospectos (sin fecha → Telemercadeo)`);
+      if (d.prospectosActualizados)  partes.push(`${d.prospectosActualizados} prospectos actualizados`);
+      if (d.porVerificar)            partes.push(`☎️ ${d.porVerificar} teléfonos por verificar`);
+      if (d.errores?.length)         partes.push(`⚠️ ${d.errores.length} filas con error`);
+      setMsgImport(`${partes.join(' · ')} — ${empresaNombre}`);
+      setTimeout(() => { setMostrarImportVenc(false); setMsgImport(null); cargar(); }, 3500);
     } catch(e) { setMsgImport(`❌ ${e.message}`); }
     setImportando(false);
+  };
+
+  // ✅ FIX VENC-MANUAL-001: crear un vencimiento a mano.
+  // Regla del backend: exige clienteId + descripcionEquipo, y al menos una de
+  // las dos fechas. Con solo la fecha de recarga, el vencimiento se calcula
+  // solo (+12 meses) — el caso normal de una recarga de extintor.
+  const guardarVencimiento = async () => {
+    if (!form.clienteId)          { setMsgForm('❌ Selecciona el cliente'); return; }
+    if (!form.descripcionEquipo)  { setMsgForm('❌ Escribe el equipo (ej: Extintor ABC 10 lbs)'); return; }
+    if (!form.fechaUltimaRecarga && !form.fechaVencimiento) {
+      setMsgForm('❌ Indica la fecha de la última recarga o la fecha de vencimiento');
+      return;
+    }
+    setGuardandoForm(true); setMsgForm(null);
+    try {
+      const r = await fetch(`${API}/vencimientos`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          clienteId: form.clienteId,
+          sucursal: form.sucursal || null,
+          descripcionEquipo: form.descripcionEquipo,
+          cantidad: Number(form.cantidad) || 1,
+          fechaUltimaRecarga: form.fechaUltimaRecarga || null,
+          fechaVencimiento: form.fechaVencimiento || null,
+          origenDato: 'manual',
+        })
+      });
+      const d = await r.json();
+      if (!r.ok) { setMsgForm(`❌ ${d.error || 'No se pudo crear'}`); setGuardandoForm(false); return; }
+      setMsgForm(`✓ Vencimiento creado — vence ${d.fechaVencimiento}`);
+      setTimeout(() => { setMostrarForm(false); setMsgForm(null); cargar(); }, 1400);
+    } catch(e) { setMsgForm(`❌ ${e.message}`); }
+    setGuardandoForm(false);
   };
 
   const exportarCSV = () => {
@@ -320,6 +449,15 @@ export default function GestionVencimientos({ user, onNavegar }) {
               <option value="VIGENTE">Vigente</option>
               <option value="GESTIONADO">Gestionado</option>
             </select>
+
+            {/* ✅ FIX VENC-MANUAL-001: crear un vencimiento suelto sin importar
+                un archivo (el endpoint POST /api/vencimientos ya existía, pero
+                no había forma de llamarlo desde la pantalla). */}
+            <button
+              onClick={() => { setForm({ clienteId:'', sucursal:'', descripcionEquipo:'', cantidad:1, fechaUltimaRecarga:'', fechaVencimiento:'' }); setMsgForm(null); setMostrarForm(true); }}
+              style={{ padding:'8px 16px', border:'none', borderRadius:8, background:'#16a34a', color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer' }}>
+              ➕ Nuevo vencimiento
+            </button>
 
             <button
               onClick={() => setMostrarImportVenc(true)}
@@ -439,6 +577,97 @@ export default function GestionVencimientos({ user, onNavegar }) {
             </div>
           )}
 
+          {/* ✅ VENC-MANUAL-001: Modal crear vencimiento manual */}
+          {mostrarForm && (
+            <div onClick={() => { if(!guardandoForm){ setMostrarForm(false); setMsgForm(null); } }}
+              style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.55)', zIndex:500, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+              <div onClick={e => e.stopPropagation()} style={{ background:'#fff', borderRadius:16, width:'100%', maxWidth:480, maxHeight:'92vh', overflowY:'auto', padding:20 }}>
+
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+                  <div style={{ fontWeight:800, fontSize:15, color:'#1a1a2e' }}>➕ Nuevo vencimiento</div>
+                  <button onClick={() => { setMostrarForm(false); setMsgForm(null); }} disabled={guardandoForm}
+                    style={{ border:'none', background:'#f3f4f6', borderRadius:8, width:30, height:30, cursor:'pointer' }}>✕</button>
+                </div>
+
+                <div style={{ marginBottom:12 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Cliente *</div>
+                  <select value={form.clienteId} onChange={e => setForm(f => ({ ...f, clienteId: e.target.value }))} style={inp}>
+                    <option value="">— Selecciona el cliente —</option>
+                    {clientes.map(c => (
+                      <option key={c.id || c.uid} value={c.id || c.uid}>
+                        {c.nombre || c.empresa || 'Sin nombre'}{c.nit ? ` — NIT ${c.nit}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {clientes.length === 0 && (
+                    <div style={{ fontSize:11, color:'#b45309', marginTop:5 }}>
+                      No hay clientes cargados. Crea el cliente primero en el módulo Clientes.
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ marginBottom:12 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Equipo *</div>
+                  <input type="text" placeholder="Ej: Extintor ABC 10 lbs" style={inp}
+                    value={form.descripcionEquipo}
+                    onChange={e => setForm(f => ({ ...f, descripcionEquipo: e.target.value }))} />
+                </div>
+
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, marginBottom:12 }}>
+                  <div>
+                    <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Cantidad</div>
+                    <input type="number" min="1" style={inp}
+                      value={form.cantidad}
+                      onChange={e => setForm(f => ({ ...f, cantidad: e.target.value }))} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Sucursal</div>
+                    <input type="text" placeholder="Opcional" style={inp}
+                      value={form.sucursal}
+                      onChange={e => setForm(f => ({ ...f, sucursal: e.target.value }))} />
+                  </div>
+                </div>
+
+                <div style={{ background:'#f9fafb', border:'1px solid #e5e7eb', borderRadius:10, padding:'12px 14px', marginBottom:12 }}>
+                  <div style={{ fontSize:11, color:'#6b7280', marginBottom:10, lineHeight:1.5 }}>
+                    Con la <strong>fecha de última recarga</strong>, el vencimiento se calcula solo (12 meses después).
+                    Si ya conoces la fecha exacta de vencimiento, escríbela abajo y manda esa.
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
+                    <div>
+                      <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Última recarga</div>
+                      <input type="date" style={inp}
+                        value={form.fechaUltimaRecarga}
+                        onChange={e => setForm(f => ({ ...f, fechaUltimaRecarga: e.target.value }))} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Vencimiento</div>
+                      <input type="date" style={inp}
+                        value={form.fechaVencimiento}
+                        onChange={e => setForm(f => ({ ...f, fechaVencimiento: e.target.value }))} />
+                    </div>
+                  </div>
+                </div>
+
+                {msgForm && (
+                  <div style={{ marginBottom:12, background: msgForm.startsWith('✓') ? '#dcfce7' : '#fee2e2', color: msgForm.startsWith('✓') ? '#15803d' : '#b91c1c', borderRadius:8, padding:'9px 12px', fontSize:12, fontWeight:600 }}>
+                    {msgForm}
+                  </div>
+                )}
+
+                <button onClick={guardarVencimiento} disabled={guardandoForm}
+                  style={{
+                    width:'100%', border:'none', borderRadius:10, padding:'12px 0', fontWeight:700, fontSize:13,
+                    background: guardandoForm ? '#e5e7eb' : '#16a34a',
+                    color: guardandoForm ? '#9ca3af' : '#fff',
+                    cursor: guardandoForm ? 'not-allowed' : 'pointer',
+                  }}>
+                  {guardandoForm ? 'Guardando...' : 'Crear vencimiento'}
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Modal importar */}
           {mostrarImportVenc && (
             <div onClick={() => { if(!importando){ setMostrarImportVenc(false); setEmpresaImportSel(''); setArchivoImportSel(null); } }}
@@ -457,6 +686,19 @@ export default function GestionVencimientos({ user, onNavegar }) {
                     <option value="">— Selecciona la empresa —</option>
                     {empresasDisponibles.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
                   </select>
+                </div>
+
+                {/* ✅ FIX IMPORT-VENC-001: la plantilla volvió al modal */}
+                <div style={{ marginBottom:14, background:'#f5f3ff', border:'1px solid #ddd6fe', borderRadius:10, padding:'12px 14px' }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:'#5b21b6', marginBottom:4 }}>¿Primera vez? Descarga la plantilla</div>
+                  <div style={{ fontSize:11, color:'#6d28d9', lineHeight:1.5, marginBottom:8 }}>
+                    Columnas: <strong>nombre</strong> y <strong>telefono</strong> son obligatorias · empresa, nit, sucursal, equipo, cantidad, fechaUltimaRecarga son opcionales.<br/>
+                    Con fecha de recarga → entra a Vencimientos (vence 12 meses después). Sin fecha → entra a Telemercadeo como prospecto.
+                  </div>
+                  <button onClick={descargarPlantilla}
+                    style={{ padding:'7px 14px', border:'none', borderRadius:8, background:'#7c3aed', color:'#fff', fontWeight:700, fontSize:12, cursor:'pointer' }}>
+                    ⬇ Descargar plantilla CSV
+                  </button>
                 </div>
 
                 <div style={{ marginBottom:6 }}>

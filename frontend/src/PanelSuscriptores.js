@@ -70,6 +70,11 @@ const PanelSuscriptores = () => {
   const [editMods, setEditMods] = useState(null);
   const [modsSel, setModsSel] = useState([]);
 
+  // ✅ LUCY-MINUTOS-001: tope de minutos de Lucy por suscriptor
+  const [editMinutos, setEditMinutos] = useState(null);
+  const [minutosCfg, setMinutosCfg] = useState(null);
+  const [minutosVal, setMinutosVal] = useState('');
+
   const [guardando, setGuardando] = useState(false);
 
   // ─── Cargar lista ──────────────────────────────────────────────────────────
@@ -130,6 +135,40 @@ const PanelSuscriptores = () => {
       cargar();
     } catch (e) {
       setError(e.response?.data?.error || 'Error al guardar la suscripción');
+    } finally {
+      setGuardando(false);
+    }
+  };
+
+  // ─── ✅ LUCY-MINUTOS-001: tope de minutos de Lucy por suscriptor ───────────
+  // Antes el tope vivía solo en la variable de entorno (120 min iguales para
+  // todos) y solo se cambiaba tocando la base de datos a mano. Ahora se
+  // asigna por suscriptor desde aquí, según el plan que se le venda.
+  const abrirMinutos = async (s) => {
+    setEditMinutos(s);
+    setMinutosCfg(null);
+    setMinutosVal('');
+    try {
+      const r = await axios.get(`${API}/llamadas-ia/superadmin/config/${s.adminId}`, { headers });
+      setMinutosCfg(r.data);
+      setMinutosVal(String(r.data.topeMinutosMes ?? ''));
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo leer la configuración de Lucy');
+    }
+  };
+
+  const guardarMinutos = async () => {
+    const tope = Number(minutosVal);
+    if (!Number.isFinite(tope) || tope < 0) { setError('El tope debe ser un número mayor o igual a 0'); return; }
+    setGuardando(true);
+    setError('');
+    try {
+      await axios.put(`${API}/llamadas-ia/superadmin/config/${editMinutos.adminId}`,
+        { topeMinutosMes: tope }, { headers });
+      setEditMinutos(null);
+      flashExito(`Tope de Lucy actualizado a ${tope} min/mes`);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error al guardar el tope de minutos');
     } finally {
       setGuardando(false);
     }
@@ -266,6 +305,10 @@ const PanelSuscriptores = () => {
                 {s.plan ? 'Editar plan' : 'Asignar plan'}
               </button>
               <button style={st.btnGhost} onClick={() => abrirMods(s)}>Módulos</button>
+              {/* ✅ LUCY-MINUTOS-001: solo si el suscriptor tiene Lucy activa */}
+              {(s.modulos || []).includes('llamadas_ia') && (
+                <button style={st.btnGhost} onClick={() => abrirMinutos(s)}>📞 Minutos Lucy</button>
+              )}
             </div>
           </div>
         );
@@ -273,6 +316,53 @@ const PanelSuscriptores = () => {
 
       {!cargando && suscriptores.length === 0 && !error && (
         <div style={{ ...st.card, color: '#6b6b85', textAlign: 'center' }}>No hay suscriptores registrados todavía.</div>
+      )}
+
+      {/* ─── ✅ LUCY-MINUTOS-001 · MODAL: MINUTOS DE LUCY ─── */}
+      {editMinutos && (
+        <div style={st.overlay} onClick={() => !guardando && setEditMinutos(null)}>
+          <div style={st.modal} onClick={(ev) => ev.stopPropagation()}>
+            <h2 style={{ ...st.h1, fontSize: 17 }}>📞 Minutos de Lucy — {editMinutos.empresa || editMinutos.nombre || editMinutos.email}</h2>
+
+            {!minutosCfg ? (
+              <div style={{ color: '#6b6b85', fontSize: 13, marginTop: 14 }}>Cargando configuración...</div>
+            ) : (
+              <>
+                <div style={{ background: '#f7f7fb', borderRadius: 10, padding: '12px 14px', marginTop: 14, fontSize: 13, color: '#3d3d5c' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <span>Consumido este mes</span>
+                    <strong>{minutosCfg.minutosConsumidosMes || 0} min</strong>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span>Tope actual</span>
+                    <strong>{minutosCfg.topeMinutosMes} min/mes</strong>
+                  </div>
+                </div>
+
+                <label style={st.label}>Tope de minutos por mes</label>
+                <input type="number" min="0" style={st.input} value={minutosVal}
+                  onChange={e => setMinutosVal(e.target.value)} />
+                <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+                  {[60, 120, 300, 600].map(v => (
+                    <button key={v} style={{ ...st.btnGhost, padding: '5px 10px', fontSize: 11.5 }}
+                      onClick={() => setMinutosVal(String(v))}>{v} min</button>
+                  ))}
+                </div>
+                <div style={{ color: '#6b6b85', fontSize: 12, marginTop: 10, lineHeight: 1.5 }}>
+                  Cuando el suscriptor llega a su tope, Lucy deja de llamar por ese mes y queda registrado.
+                  El consumo se reinicia solo cada mes — cambiar el tope no borra el histórico.
+                </div>
+
+                <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
+                  <button style={st.btn} onClick={guardarMinutos} disabled={guardando}>
+                    {guardando ? 'Guardando...' : 'Guardar tope'}
+                  </button>
+                  <button style={st.btnGhost} onClick={() => setEditMinutos(null)} disabled={guardando}>Cancelar</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
 
       {/* ─── MODAL: PLAN ─── */}
