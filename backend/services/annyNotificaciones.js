@@ -1,14 +1,30 @@
 // ============================================================
-// Control360 — Notificaciones salientes vía Anny (Baileys)
+// Control360 — Notificaciones salientes vía Anny (Baileys)  v22
 // Ubicación: backend/services/annyNotificaciones.js
 // FIX ANNY-NOTIF-001 + ANNY-VENC-001 + ANNY-VENC-002 + ANNY-VENC-003
 // ============================================================
 // FIX ANNY-VENC-003: los 320 vencimientos daban 0 candidatos.
-// Causa probable: fechaVencimiento importada como Timestamp de
-// Firestore (no string) — la comparación de texto fallaba en el
-// 100%. Ahora: (1) lectura de fecha ROBUSTA (string 'YYYY-MM-DD',
-// 'YYYY-MM', Timestamp o Date), y (2) log de diagnóstico
-// desglosado por motivo de descarte.
+// Causa: fechaVencimiento importada como Timestamp (no string).
+// Ahora: lectura de fecha ROBUSTA + log de diagnóstico por motivo.
+//
+// ════════════════════════════════════════════════════════════
+// NUEVO EN v22:
+// - ANNY-MISION-014: toda salida deja marcada la MISIÓN activa del
+//   chat (`misionActiva` + `misionHasta` en el resumen del chat).
+//   Sin esto, un cliente que responde a una cobranza era atendido
+//   como si fuera una consulta comercial y Anny le ofrecía
+//   productos en medio de un cobro. Ahora la conversación
+//   mantiene el propósito con el que se abrió.
+// - ANNY-HUMANO-012: `enviarAvisoInterno` — manda el aviso de
+//   escalamiento al WhatsApp que la suscriptora ya configuró
+//   (perfil.notificarEscalamientoA, o notificarPedidosA).
+// - ANNY-TALLER-018: `notificarCambioTaller` — misión
+//   NOTIFICACION_TALLER para autorizar cambios de repuesto.
+// - ANNY-SAAS-019: `ejecutarRenovacionSaaS` — cuenta de cobro a
+//   suscriptores bajo la misión RENOVACION_SAAS. NO tiene cron
+//   propio a propósito: se dispara manualmente hasta validarla.
+// - ANNY-BREV-011: plantillas salientes acortadas y sin formato
+//   de folleto, coherentes con el tono nuevo de Anny.
 // ============================================================
 
 const { db, admin } = require('../config/firebase');
@@ -52,31 +68,72 @@ function formatearMes(mesStr) {
   } catch { return String(mesStr || ''); }
 }
 
+// ─── Normalización de celular a JID de WhatsApp ──────────────
+function aJid(celular) {
+  const num = String(celular || '').replace(/\D/g, '');
+  if (num.length < 10) return null;
+  const con57 = num.startsWith('57') ? num : '57' + num;
+  return { num: con57, jid: `${con57}@s.whatsapp.net` };
+}
+
+// ============================================================
+// FIX ANNY-MISION-014: marcar la misión activa del chat
+// ------------------------------------------------------------
+// Cuando Anny abre una conversación con un propósito (cobrar,
+// pedir autorización de taller, renovar suscripción), ese
+// propósito debe sobrevivir a la respuesta del cliente.
+// Se guarda en el resumen del chat con vencimiento, para que
+// pasado el plazo la conversación vuelva a ATENCION normal.
+// ============================================================
+async function marcarMisionActiva(adminId, telefonoNum, mision, horasVigencia = 48) {
+  try {
+    if (!adminId || !telefonoNum || !mision) return;
+    await db.collection('chatsAnny')
+      .doc(adminId)
+      .collection('chats')
+      .doc(String(telefonoNum))
+      .set({
+        adminId,
+        telefono: String(telefonoNum),
+        misionActiva: mision,
+        misionHasta: Date.now() + horasVigencia * 3600 * 1000,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+  } catch (err) {
+    console.error('[ANNY-NOTIF] Error marcando misión activa:', err.message);
+  }
+}
+
 // ============================================================
 // Enviar un WhatsApp a un cliente por la línea de Anny.
+// v22: recibe la misión con la que se abre la conversación.
 // ============================================================
-async function notificarClienteWhatsApp(adminId, celular, texto) {
+async function notificarClienteWhatsApp(adminId, celular, texto, mision = null) {
   try {
     if (!adminId || !celular || !texto) return false;
 
     const activo = await annyService.tenantTieneAnnyActiva(adminId);
     if (!activo) return false;
 
-    const num = String(celular).replace(/\D/g, '');
-    if (num.length < 10) return false;
-    const jid = `${num.startsWith('57') ? num : '57' + num}@s.whatsapp.net`;
+    const tel = aJid(celular);
+    if (!tel) return false;
 
-    const enviado = await baileysService.enviarMensaje(adminId, jid, texto);
+    const enviado = await baileysService.enviarMensaje(adminId, tel.jid, texto);
     if (enviado) {
       await annyService.registrarConversacion(adminId, {
-        telefono: num.startsWith('57') ? num : '57' + num,
+        telefono: tel.num,
         nombreCliente: null,
         mensajeCliente: null,
         respuestaAgente: texto,
         respondidoPor: 'NOTIFICACION_SISTEMA',
+        mision: mision || null,
         escalado: false,
         caseId: null
       });
+
+      // ANNY-MISION-014: la respuesta del cliente se atenderá con
+      // esta misión, no como una consulta comercial cualquiera.
+      if (mision) await marcarMisionActiva(adminId, tel.num, mision);
     }
     return !!enviado;
   } catch (err) {
@@ -86,7 +143,40 @@ async function notificarClienteWhatsApp(adminId, celular, texto) {
 }
 
 // ============================================================
+// FIX ANNY-HUMANO-012: aviso INTERNO al equipo
+// ------------------------------------------------------------
+// No va al cliente: va al WhatsApp de la empresa. Se usa cuando
+// el cliente pide un asesor o cuando se escala un caso.
+// Destino: perfil.notificarEscalamientoA → si está vacío, cae al
+// notificarPedidosA que la suscriptora ya tiene configurado.
+// ============================================================
+async function enviarAvisoInterno(adminId, texto, destinoExplicito = null) {
+  try {
+    if (!adminId || !texto) return false;
+
+    let destino = destinoExplicito;
+    if (!destino) {
+      const perfil = await annyService.obtenerPerfilTenant(adminId);
+      destino = perfil.notificarEscalamientoA;
+    }
+    if (!destino) {
+      console.warn(`[ANNY-NOTIF] Tenant ${adminId} sin WhatsApp de avisos configurado`);
+      return false;
+    }
+
+    const tel = aJid(destino);
+    if (!tel) return false;
+
+    return !!(await baileysService.enviarMensaje(adminId, tel.jid, texto));
+  } catch (err) {
+    console.error('[ANNY-NOTIF] Error enviando aviso interno:', err.message);
+    return false;
+  }
+}
+
+// ============================================================
 // COBRANZA CxC — órdenes en cartera con >10 días de completadas
+// Misión: COBRANZA (Anny NO vende dentro de un cobro)
 // ============================================================
 async function ejecutarCobranzaCxC() {
   console.log('[ANNY-NOTIF] Iniciando cobranza CxC semanal...');
@@ -132,14 +222,13 @@ async function ejecutarCobranzaCxC() {
 
           if (o.ultimaCobranzaAnny === hoyStr) continue;
 
-          const msg = `Hola ${o.clienteNombre || ''} 👋\n\n` +
-            `Te escribimos de parte de nuestra área de cartera. ` +
-            `La orden *${o.numeroOrden}* presenta un saldo pendiente de *$${saldo.toLocaleString('es-CO')}* ` +
-            `(${dias} días desde el servicio).\n\n` +
-            `Puedes responder por este medio para coordinar el pago o resolver cualquier duda. ` +
-            `¡Gracias por tu atención! 🙌`;
+          // ANNY-BREV-011: mensaje corto, sin bloques ni adornos.
+          const msg = `Hola ${o.clienteNombre || ''} 👋 Te escribo de cartera: ` +
+            `la orden ${o.numeroOrden} tiene un saldo pendiente de ` +
+            `$${saldo.toLocaleString('es-CO')} (${dias} días desde el servicio). ` +
+            `¿Me confirmas cuándo lo podemos coordinar?`;
 
-          const ok = await notificarClienteWhatsApp(adminId, celular, msg);
+          const ok = await notificarClienteWhatsApp(adminId, celular, msg, 'COBRANZA');
           if (ok) {
             enviados += 1;
             await doc.ref.update({ ultimaCobranzaAnny: hoyStr });
@@ -161,7 +250,134 @@ async function ejecutarCobranzaCxC() {
 }
 
 // ============================================================
-// RONDA DE VENCIMIENTOS
+// FIX ANNY-TALLER-018: notificación de cambio de repuesto
+// ------------------------------------------------------------
+// Misión NOTIFICACION_TALLER: informar la novedad y obtener un
+// SÍ/NO. Si el cliente negocia el precio, el motor escala.
+// Uso desde el módulo Taller:
+//   notificarCambioTaller(adminId, {
+//     celular, nombreCliente, numeroOrden, repuesto, valor
+//   })
+// ============================================================
+async function notificarCambioTaller(adminId, datos = {}) {
+  try {
+    const { celular, nombreCliente, numeroOrden, repuesto, valor } = datos;
+    if (!celular || !repuesto) {
+      return { ok: false, error: 'faltan_datos', mensaje: 'Se requiere celular y repuesto.' };
+    }
+
+    const activo = await annyService.tenantTieneAnnyActiva(adminId);
+    if (!activo) return { ok: false, error: 'anny_inactivo' };
+
+    const valorTxt = Number(valor) > 0 ? ` Tiene un costo de $${Number(valor).toLocaleString('es-CO')}.` : '';
+    const ordenTxt = numeroOrden ? ` de la orden ${numeroOrden}` : '';
+
+    const msg = `Hola${nombreCliente ? ' ' + nombreCliente : ''} 👋 ` +
+      `Revisando tu equipo${ordenTxt} encontramos que necesita cambio de ${repuesto}.${valorTxt} ` +
+      `¿Autorizas que lo hagamos?`;
+
+    const ok = await notificarClienteWhatsApp(adminId, celular, msg, 'NOTIFICACION_TALLER');
+    return { ok, enviado: ok };
+  } catch (err) {
+    console.error('[ANNY-TALLER] Error notificando cambio:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+// ============================================================
+// FIX ANNY-SAAS-019: cuenta de cobro de suscripción
+// ------------------------------------------------------------
+// Misión RENOVACION_SAAS. Anny habla del SOFTWARE, no de
+// productos físicos: por eso el tenant que la use debe tener su
+// perfil con fuentePrecios 'planes' o 'ninguna' (ANNY-CFG-010).
+//
+// SIN CRON A PROPÓSITO: se dispara manualmente hasta validar
+// varias corridas. Un cobro automático mal calibrado le escribe
+// a todos los suscriptores a la vez — el mismo error que ya
+// costó 170 llamadas con Lucy.
+//
+// Params: adminId = tenant dueño de la línea (Control360),
+//         opciones.diasAntes = ventana de aviso (default 5)
+//         opciones.simular = true → no envía, solo lista
+// ============================================================
+async function ejecutarRenovacionSaaS(adminId, opciones = {}) {
+  const diasAntes = Number(opciones.diasAntes) || 5;
+  const simular = opciones.simular === true;
+
+  try {
+    const activo = await annyService.tenantTieneAnnyActiva(adminId);
+    if (!activo) return { ok: false, error: 'anny_inactivo' };
+
+    const perfil = await annyService.obtenerPerfilTenant(adminId);
+    if (perfil.fuentePrecios === 'products') {
+      return {
+        ok: false,
+        error: 'perfil_incorrecto',
+        mensaje: 'Este tenant tiene perfil de venta de productos. Configura su perfil de Anny con fuentePrecios "planes" antes de usar la renovación de suscripciones.'
+      };
+    }
+
+    const cfgDoc = await db.collection('annyConfig').doc(adminId).get();
+    if (!cfgDoc.exists || cfgDoc.data().conexionEstado !== 'conectado') {
+      return { ok: false, error: 'whatsapp_desconectado' };
+    }
+
+    const hoy = new Date(Date.now() - 5 * 3600 * 1000);
+    const hoyStr = hoy.toISOString().slice(0, 10);
+    const limite = new Date(hoy.getTime() + diasAntes * 86400000).toISOString().slice(0, 10);
+
+    const snap = await db.collection('suscripciones').limit(500).get();
+
+    const candidatos = [];
+    for (const d of snap.docs) {
+      const s = d.data();
+      const venc = String(s.fechaVencimiento || '').slice(0, 10);
+      if (!venc || venc > limite) continue;
+      if (s.estado === 'suspendido') continue;
+      if (s.ultimoAvisoCobroAnny === hoyStr) continue;
+
+      const celular = String(s.celular || s.telefono || '').replace(/\D/g, '');
+      if (celular.length < 10) continue;
+
+      candidatos.push({ id: d.id, ref: d.ref, ...s, _celular: celular, _venc: venc });
+    }
+
+    if (simular) {
+      return {
+        ok: true, simulacion: true, candidatos: candidatos.length,
+        detalle: candidatos.map(c => ({ id: c.id, nombre: c.nombre || c.empresa || c.id, vence: c._venc }))
+      };
+    }
+
+    let enviados = 0;
+    for (const c of candidatos) {
+      try {
+        const valor = Number(c.valorMensual || c.precio || 0);
+        const valorTxt = valor > 0 ? ` por $${valor.toLocaleString('es-CO')}` : '';
+        const msg = `Hola${c.nombre ? ' ' + c.nombre : ''} 👋 Te recuerdo que tu suscripción a Control360` +
+          `${valorTxt} vence el ${c._venc}. ¿Te comparto los datos para el pago?`;
+
+        const ok = await notificarClienteWhatsApp(adminId, c._celular, msg, 'RENOVACION_SAAS');
+        if (ok) {
+          enviados += 1;
+          await c.ref.update({ ultimoAvisoCobroAnny: hoyStr });
+        }
+        await sleep(8000);
+      } catch (e) {
+        console.error('[ANNY-SAAS] Error con suscriptor', c.id, e.message);
+      }
+    }
+
+    console.log(`[ANNY-SAAS] Renovación terminada — ${enviados}/${candidatos.length} enviados`);
+    return { ok: true, candidatos: candidatos.length, enviados };
+  } catch (err) {
+    console.error('[ANNY-SAAS] Error en renovación:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+// ============================================================
+// RONDA DE VENCIMIENTOS — misión REACTIVACION
 // ============================================================
 
 const rondasEnCurso = new Set();
@@ -257,7 +473,8 @@ async function procesarLoteRonda(adminId, lote) {
       if (v.clienteId) {
         try {
           const cliDoc = await db.collection('clients').doc(v.clienteId).get();
-          if (cliDoc.exists) {
+          // AISLAMIENTO: nunca leer el nombre de un cliente de otro tenant
+          if (cliDoc.exists && cliDoc.data().adminId === adminId) {
             const c = cliDoc.data();
             nombre = c.nombre || c.nombreCompleto || c.razonSocial || '';
           }
@@ -268,13 +485,13 @@ async function procesarLoteRonda(adminId, lote) {
       const equipoTxt = v.descripcionEquipo || 'extintor';
       const plural = (v.cantidad || 1) > 1;
 
-      const msg = `Hola${nombre ? ' ' + nombre : ''} 👋\n\n` +
-        `Te recordamos que ${plural ? `tus ${v.cantidad} equipos` : 'tu equipo'} ` +
-        `*${equipoTxt}* ${plural ? 'vencieron' : 'venció'} su recarga en *${mesTxt}*. ` +
-        `Un extintor vencido no te protege en una emergencia 🧯\n\n` +
-        `¿Agendamos la recarga? Tenemos servicio a domicilio — responde este mensaje y te atendemos de una vez 😊`;
+      // ANNY-BREV-011: dos frases, sin bloques ni doble salto.
+      const msg = `Hola${nombre ? ' ' + nombre : ''} 👋 ` +
+        `${plural ? `Tus ${v.cantidad} equipos ${equipoTxt} vencieron` : `Tu ${equipoTxt} venció`} ` +
+        `su recarga en ${mesTxt} y ya no te protege en una emergencia. ` +
+        `¿Te lo agendamos? Vamos hasta donde estés.`;
 
-      const ok = await notificarClienteWhatsApp(adminId, v.telefono, msg);
+      const ok = await notificarClienteWhatsApp(adminId, v.telefono, msg, 'REACTIVACION');
       if (ok) {
         enviados += 1;
         await v.ref.update({
@@ -340,6 +557,7 @@ function iniciarCronRondasVencimientos() {
 
 // ============================================================
 // Cron cobranza: viernes 9:00 AM Colombia
+// Log tag para Railway: ANNY-NOTIF
 // ============================================================
 let ultimaCobranza = null;
 
@@ -368,6 +586,11 @@ module.exports = {
   ejecutarCobranzaCxC,
   iniciarCronCobranzaAnny,
   ejecutarRondaVencimientos,
-  iniciarCronRondasVencimientos
+  iniciarCronRondasVencimientos,
+  // ── v22 ──
+  enviarAvisoInterno,
+  marcarMisionActiva,
+  notificarCambioTaller,
+  ejecutarRenovacionSaaS
 };
-// FIN annyNotificaciones.js
+// FIN annyNotificaciones.js (v22)

@@ -7,7 +7,7 @@
 // ✅ FIX TEL-CO-001: enlaces de llamada con indicativo +57 (antes marcaban a Holanda)
 import React, { useState, useEffect, useCallback } from 'react';
 import LlamadasIA from './LlamadasIA';
-import VencimientosAnny from './VencimientosAnny';
+import ModuloAnny from './components/anny/ModuloAnny';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -799,7 +799,7 @@ export default function GestionVencimientos({ user, onNavegar }) {
 
       {/* ===== VISTA: ANNY ===== */}
       {vista === 'anny' && (
-        <VencimientosAnny user={user} onNavegar={onNavegar} />
+        <ModuloAnny user={user} onNavegar={onNavegar} />
       )}
 
       {/* ===== VISTA: LUCY ===== */}
