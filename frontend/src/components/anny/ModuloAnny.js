@@ -18,8 +18,17 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { API, authHeaders, C, fmtEspera, fmtMoneda, sumarPedidos } from './annyUI';
+// FIX ANNY-ESTADO-025: getEstado del backend devuelve
+//   { estado: 'conectado'|'desconectado'|'reconectando', numero }
+//   NO devuelve un booleano `conectado`. Leer estado.conectado daba
+//   undefined y el panel mostraba "Desconectado" con la sesión activa;
+//   además el QR nunca se ocultaba tras vincular. Se centraliza la
+//   lectura en un solo helper para no repetir el error.
 import AnnyConversaciones from './AnnyConversaciones';
 import AnnyEntrenamiento from './AnnyEntrenamiento';
+
+// FIX ANNY-ESTADO-025: única fuente de verdad de la conexión.
+const estaConectado = (e) => String(e?.estado || '').toLowerCase() === 'conectado';
 
 export default function ModuloAnny() {
   const [activo, setActivo] = useState(null);
@@ -82,7 +91,7 @@ export default function ModuloAnny() {
           if (d.qr) setQr(d.qr);
 
           const est = await fetch(`${API}/anny/estado`, { headers: authHeaders() }).then(x => x.ok ? x.json() : null);
-          if (est && est.conectado) {
+          if (estaConectado(est)) {
             setEstado(est);
             setQr(null);
             clearInterval(timer);
@@ -143,10 +152,10 @@ export default function ModuloAnny() {
           <div>
             <p style={S.nombre}>Anny</p>
             <p style={S.conexion}>
-              <span style={{ ...S.punto, background: estado?.conectado ? C.ok : C.textMuted }} />
-              {estado?.conectado
+              <span style={{ ...S.punto, background: estaConectado(estado) ? C.ok : (estado?.estado === 'reconectando' ? C.warn : C.textMuted) }} />
+              {estaConectado(estado)
                 ? `Conectado${estado.numero ? ` · ${estado.numero}` : ''}`
-                : 'Desconectado'}
+                : (estado?.estado === 'reconectando' ? 'Reconectando…' : 'Desconectado')}
             </p>
           </div>
         </div>
@@ -157,7 +166,7 @@ export default function ModuloAnny() {
               {casos.length} sin atender
             </span>
           )}
-          {estado?.conectado
+          {estaConectado(estado)
             ? <button onClick={desconectar} style={S.btnSec}>Desconectar</button>
             : <button onClick={conectar} disabled={conectando} style={S.btnPrim}>
                 {conectando ? 'Generando QR…' : 'Conectar WhatsApp'}
@@ -526,4 +535,4 @@ const S = {
 
   vacio: { padding: '28px 14px', textAlign: 'center', fontSize: 13, color: C.textMuted }
 };
-// FIN ModuloAnny.js
+// FIN ModuloAnny.js (rev. ANNY-ESTADO-025)
