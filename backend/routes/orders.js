@@ -3300,7 +3300,37 @@ router.post('/reparar-sin-taller', authenticate, async (req, res) => {
       return res.status(403).json({ error: 'Solo el administrador puede ejecutar esta reparación' });
     }
     const aplicar = req.body?.aplicar === true;
-    const adminIdRep = req.adminId || req.user.uid || req.user.id;
+    const propioId = req.adminId || req.user.uid || req.user.id;
+
+    // ✅ CAPACIDAD-TENANT-002: modo SuperAdmin.
+    // Las órdenes atascadas son del SUSCRIPTOR, no del operador del SaaS.
+    // Milena no puede (ni debe) entrar con el usuario del suscriptor, y
+    // pedirle a un cliente que abra la consola del navegador no es opción
+    // en un producto que se vende.
+    //
+    // Regla de seguridad: el campo `adminId` del body SOLO se respeta si
+    // quien llama tiene la marca superAdmin===true en Firestore (misma
+    // verificación de superadmin.js, leída en cada petición: quitar la
+    // marca revoca el acceso al instante). Para cualquier otro usuario el
+    // campo se IGNORA por completo y solo puede reparar su propio tenant
+    // — el aislamiento multiempresa no se debilita en ningún caso.
+    let adminIdRep = propioId;
+    let modoSuperAdmin = false;
+    const adminIdSolicitado = (req.body?.adminId || '').trim();
+    if (adminIdSolicitado && adminIdSolicitado !== propioId) {
+      const yo = await db.collection('users').doc(req.user.uid || req.user.id).get();
+      if (!yo.exists || yo.data().superAdmin !== true) {
+        return res.status(403).json({
+          error: 'Solo el SuperAdmin puede reparar órdenes de otro suscriptor.'
+        });
+      }
+      const destino = await db.collection('users').doc(adminIdSolicitado).get();
+      if (!destino.exists || destino.data().role !== 'admin') {
+        return res.status(404).json({ error: 'Suscriptor no encontrado' });
+      }
+      adminIdRep = adminIdSolicitado;
+      modoSuperAdmin = true;
+    }
 
     const capacidadesRep = await getCapacidades(adminIdRep);
     if (capacidadesRep.taller !== false) {
@@ -3308,6 +3338,7 @@ router.post('/reparar-sin-taller', authenticate, async (req, res) => {
         ok: true,
         modo: 'sin_cambios',
         mensaje: 'Este suscriptor SÍ tiene el módulo Taller: su flujo es el correcto y no hay nada que reparar.',
+        adminIdReparado: adminIdRep, modoSuperAdmin,
         total: 0, corregidas: 0, hallazgos: []
       });
     }
@@ -3368,16 +3399,19 @@ router.post('/reparar-sin-taller', authenticate, async (req, res) => {
     if (aplicar && corregidas > 0) {
       await auditar({
         accion: 'REPARAR_ORDENES_SIN_TALLER',
-        descripcion: `${req.user.nombre || req.user.email} desatascó ${corregidas} orden(es) que estaban en taller sin tener el módulo Taller`,
+        descripcion: `${req.user.nombre || req.user.email} desatascó ${corregidas} orden(es) que estaban en taller sin tener el módulo Taller`
+          + (modoSuperAdmin ? ` — tenant reparado: ${adminIdRep} (modo SuperAdmin)` : ''),
         usuarioId: req.user.uid || req.user.id,
         usuarioNombre: req.user.nombre || req.user.email,
-        datos: { total: hallazgos.length, corregidas }
+        datos: { total: hallazgos.length, corregidas, adminIdReparado: adminIdRep, modoSuperAdmin }
       });
     }
 
     res.json({
       ok: true,
       modo: aplicar ? 'aplicado' : 'vista_previa',
+      adminIdReparado: adminIdRep,
+      modoSuperAdmin,
       total: hallazgos.length,
       corregidas,
       hallazgos

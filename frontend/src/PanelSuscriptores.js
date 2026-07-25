@@ -75,6 +75,11 @@ const PanelSuscriptores = () => {
   const [minutosCfg, setMinutosCfg] = useState(null);
   const [minutosVal, setMinutosVal] = useState('');
 
+  // ✅ CAPACIDAD-TENANT-002: diagnóstico de órdenes atascadas por falta de módulo
+  const [editAtascos, setEditAtascos] = useState(null); // suscriptor en revisión
+  const [atascos, setAtascos] = useState(null);         // respuesta del backend
+  const [revisando, setRevisando] = useState(false);
+
   const [guardando, setGuardando] = useState(false);
 
   // ─── Cargar lista ──────────────────────────────────────────────────────────
@@ -199,6 +204,31 @@ const PanelSuscriptores = () => {
     }
   };
 
+  // ─── ✅ CAPACIDAD-TENANT-002: órdenes atascadas ────────────────────────────
+  // Un suscriptor sin módulo Taller que crea su categoría "Recarga y
+  // Mantenimiento" generaba órdenes que nacían en 'en_taller' — estado cuya
+  // única salida la ejecuta el módulo Taller, que no tiene. Quedaban muertas.
+  // El fix CAPACIDAD-TENANT-001 impide que vuelvan a nacer así; esto desatasca
+  // las que ya existían, desde aquí, sin entrar con el usuario del suscriptor.
+  const revisarAtascos = async (s2, aplicar = false) => {
+    setRevisando(true);
+    setError('');
+    try {
+      const { data } = await axios.post(
+        `${API}/orders/reparar-sin-taller`,
+        { adminId: s2.adminId, aplicar },
+        { headers }
+      );
+      setAtascos(data);
+      setEditAtascos(s2);
+      if (aplicar && data.corregidas > 0) flashExito(`${data.corregidas} orden(es) desatascada(s)`);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error al revisar órdenes atascadas');
+    } finally {
+      setRevisando(false);
+    }
+  };
+
   // ─── Estilos ───────────────────────────────────────────────────────────────
   const st = {
     page: { padding: '24px 16px', maxWidth: 1100, margin: '0 auto', fontFamily: 'inherit' },
@@ -305,6 +335,15 @@ const PanelSuscriptores = () => {
                 {s.plan ? 'Editar plan' : 'Asignar plan'}
               </button>
               <button style={st.btnGhost} onClick={() => abrirMods(s)}>Módulos</button>
+              {/* ✅ CAPACIDAD-TENANT-002: solo tiene sentido si NO tiene Taller.
+                  Con Taller activo su flujo es el correcto y no hay nada que reparar.
+                  Lista vacía = todos los módulos = sí tiene Taller. */}
+              {(s.modulos || []).length > 0 && !(s.modulos || []).includes('taller') && (
+                <button style={st.btnGhost} disabled={revisando}
+                  onClick={() => revisarAtascos(s, false)}>
+                  {revisando ? 'Revisando…' : '🔧 Órdenes atascadas'}
+                </button>
+              )}
               {/* ✅ LUCY-MINUTOS-001: solo si el suscriptor tiene Lucy activa */}
               {(s.modulos || []).includes('llamadas_ia') && (
                 <button style={st.btnGhost} onClick={() => abrirMinutos(s)}>📞 Minutos Lucy</button>
@@ -440,6 +479,62 @@ const PanelSuscriptores = () => {
             <div style={{ ...st.btns, justifyContent: 'flex-end' }}>
               <button style={st.btnGhost} disabled={guardando} onClick={() => setEditMods(null)}>Cancelar</button>
               <button style={st.btn} disabled={guardando} onClick={guardarMods}>{guardando ? 'Guardando…' : 'Guardar módulos'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── ✅ CAPACIDAD-TENANT-002: MODAL ÓRDENES ATASCADAS ─── */}
+      {editAtascos && atascos && (
+        <div style={st.overlay} onClick={() => !revisando && setEditAtascos(null)}>
+          <div style={st.modal} onClick={(ev) => ev.stopPropagation()}>
+            <h2 style={{ ...st.h1, fontSize: 17 }}>
+              Órdenes atascadas — {editAtascos.empresa || editAtascos.nombre || editAtascos.email}
+            </h2>
+
+            {atascos.modo === 'sin_cambios' ? (
+              <div style={{ ...st.aviso, marginTop: 12 }}>{atascos.mensaje}</div>
+            ) : atascos.total === 0 ? (
+              <div style={{ ...st.aviso, marginTop: 12 }}>
+                No hay órdenes atascadas. Este suscriptor está limpio.
+              </div>
+            ) : (
+              <>
+                <p style={{ ...st.sub, marginTop: 6 }}>
+                  {atascos.modo === 'aplicado'
+                    ? `Se corrigieron ${atascos.corregidas} de ${atascos.total} orden(es).`
+                    : `${atascos.total} orden(es) quedaron detenidas en taller sin que el suscriptor tenga el módulo. Vista previa — todavía no se ha modificado nada.`}
+                </p>
+
+                <div style={{ maxHeight: 300, overflowY: 'auto', margin: '12px 0' }}>
+                  {atascos.hallazgos.map(h => (
+                    <div key={h.id} style={{ padding: '9px 4px', borderBottom: '1px solid #f1f1f8', fontSize: 13 }}>
+                      <div style={{ fontWeight: 700, color: '#14142b' }}>
+                        {h.numeroOrden} — {h.clienteNombre || 'Sin cliente'}
+                      </div>
+                      <div style={{ color: '#6b6b85', marginTop: 3 }}>
+                        ${Number(h.total || 0).toLocaleString('es-CO')} · {h.estadoActual}
+                        {' → '}
+                        <b style={{ color: '#16a34a' }}>{h.estadoPropuesto}</b>
+                        {h.requiereFactura && !h.numeroFactura && (
+                          <span style={{ color: '#d97706' }}> · espera N° de factura DIAN</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <div style={{ ...st.btns, justifyContent: 'flex-end' }}>
+              <button style={st.btnGhost} disabled={revisando}
+                onClick={() => { setEditAtascos(null); setAtascos(null); }}>Cerrar</button>
+              {atascos.modo === 'vista_previa' && atascos.total > 0 && (
+                <button style={st.btn} disabled={revisando}
+                  onClick={() => revisarAtascos(editAtascos, true)}>
+                  {revisando ? 'Corrigiendo…' : `Corregir ${atascos.total} orden(es)`}
+                </button>
+              )}
             </div>
           </div>
         </div>
