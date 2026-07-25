@@ -12,6 +12,12 @@ const { crearVencimientosDeOrden } = require('../services/vencimientosService');
 // se omite en silencio — NUNCA afecta al módulo que llama.
 const { notificarClienteWhatsApp } = require('../services/annyNotificaciones');
 
+// ✅ FIX CAPACIDAD-TENANT-001: capacidades operativas del tenant (qué módulos
+// tiene realmente contratado). Entran como parámetro de la máquina de estados
+// para que un suscriptor SIN el módulo Taller no genere órdenes que nacen en
+// 'en_taller' y quedan muertas (no tiene quién las saque de ese estado).
+const { getCapacidades } = require('../services/capacidadesTenant');
+
 // ─── ESTADOS VÁLIDOS ──────────────────────────────────────────────────────────
 const ESTADOS = [
   'programada', 'en_ruta_recogida', 'en_taller', 'listo_entregar', 'facturado',
@@ -66,15 +72,47 @@ const normalizarLugar = (lugar) => {
   return l;
 };
 
+// ✅ FIX CAPACIDAD-TENANT-001 — segunda mitad del candado.
+// Gatear solo `tieneEquipoTaller` no basta: los lugares 'taller' y
+// 'produccion' nacen SIEMPRE en 'en_taller' sin mirar los ítems. Para un
+// tenant sin el módulo Taller esas órdenes también quedarían muertas.
+// Aquí se reinterpretan como atención en oficina (cliente presente, se
+// cobra y se cierra) — que es exactamente la operación real de un
+// suscriptor que hace el trabajo pero no gestiona el taller en el sistema.
+//
+// DELIBERADAMENTE NO se tocan 'domicilio', 'despacho' ni 'cobranza' aunque
+// dependan de Logística: una orden de cobranza reinterpretada como oficina
+// se autocompletaría y distorsionaría la cartera y los abonos. Esos tipos se
+// bloquean en la UI (NuevaOrden.js), que es el lugar correcto y no
+// destructivo. Ver nota en la entrega.
+//
+// Si `capacidades` no se pasa → no cambia nada (comportamiento actual).
+const normalizarLugarPorCapacidad = (lugar, capacidades = null) => {
+  if (!capacidades) return lugar;
+  const sinTaller = capacidades.taller === false;
+  // Solo el lugar 'taller'. 'produccion' NO se remapea: su flujo arranca en
+  // 'programada' y la oficina no define salida para ese estado, así que
+  // remapearlo cambiaría un atasco por otro. Producción es una función
+  // interna del propio módulo Taller y la UI ya la oculta sin el módulo.
+  if (sinTaller && lugar === 'taller') return 'oficina';
+  return lugar;
+};
+
 // tieneEquipoTaller: ¿la orden lleva extintores de recarga/mantenimiento/PH?
 //   true  → flujo de SERVICIO (recoge, va a taller, entrega)
 //   false → flujo de VENTA (botiquín, chaleco, extintor nuevo): NO recoge,
 //           NO va a taller. Solo se entrega y se cobra. Esto resuelve el
 //           "recoger un botiquín no tiene lógica".
-const construirFlujo = (lugarAtencion, requiereFactura, tieneEquipoTaller = true) => {
-  const lugar = normalizarLugar(lugarAtencion);
+// ✅ FIX CAPACIDAD-TENANT-001: `capacidades` es el 4º parámetro OPCIONAL.
+// Si no se pasa (o viene sin la clave), se asume true → la expresión queda
+// idéntica a la anterior. Para un tenant CON taller: true && X === X, o sea
+// comportamiento byte-idéntico. Solo cambia el resultado para el tenant que
+// NO tiene el módulo — que es justamente donde hoy la orden queda muerta.
+const construirFlujo = (lugarAtencion, requiereFactura, tieneEquipoTaller = true, capacidades = null) => {
+  const capTaller = !capacidades || capacidades.taller !== false;
+  const lugar = normalizarLugarPorCapacidad(normalizarLugar(lugarAtencion), capacidades);
   const F = !!requiereFactura;
-  const T = tieneEquipoTaller !== false; // por defecto true (compatibilidad)
+  const T = tieneEquipoTaller !== false && capTaller; // por defecto true (compatibilidad)
 
   const flujos = {
     // FLUJO 1 — OFICINA: cliente presente. Sin factura: nace 'completada'.
@@ -188,9 +226,12 @@ const construirFlujo = (lugarAtencion, requiereFactura, tieneEquipoTaller = true
   return flujos[lugar] || flujos.domicilio;
 };
 
-const pasoSiguiente = (orden) => {
+// ✅ FIX CAPACIDAD-TENANT-001: `capacidades` opcional. Esto es lo que alimenta
+// `orden.siguientePaso` que consume DetalleOrden.js para pintar el botón de
+// avance — al gatearlo aquí, el frontend hereda el fix sin tocar una línea.
+const pasoSiguiente = (orden, capacidades = null) => {
   const tieneTaller = (orden.items || []).some(esItemTaller);
-  const flujo = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller);
+  const flujo = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller, capacidades);
   return flujo[orden.estado] || null;
 };
 
@@ -201,9 +242,12 @@ const ordenTieneTaller = (orden) => {
   return (orden.items || []).some(esItemTaller);
 };
 
-const calcularEstadoInicial = (lugarAtencion, requiereFactura, tieneEquipoTaller = true, items = []) => {
-  const lugar = normalizarLugar(lugarAtencion);
-  const T = tieneEquipoTaller !== false;
+// ✅ FIX CAPACIDAD-TENANT-001: mismo candado que construirFlujo, para que el
+// estado con el que NACE la orden y el flujo que la mueve nunca discrepen.
+const calcularEstadoInicial = (lugarAtencion, requiereFactura, tieneEquipoTaller = true, items = [], capacidades = null) => {
+  const capTaller = !capacidades || capacidades.taller !== false;
+  const lugar = normalizarLugarPorCapacidad(normalizarLugar(lugarAtencion), capacidades);
+  const T = tieneEquipoTaller !== false && capTaller;
 
   if (lugar === 'oficina') {
     // Ola 2.5 Bloque 1: Oficina con equipo de taller (recarga/mant sin Cambio)
@@ -761,9 +805,15 @@ router.get('/:id', authenticate, validarTenant('orders'), async (req, res) => {
     const dataOrden = doc.data();
     // siguientePaso: el frontend pinta el botón de avance con esto.
     // Una sola fuente de verdad del flujo (la máquina de estados de este archivo).
+    // ✅ FIX CAPACIDAD-TENANT-001: el paso se calcula con las capacidades del
+    // tenant. Así DetalleOrden.js nunca muestra un botón que el backend va a
+    // rechazar (el frontend ya NO calcula el flujo: consume esto).
+    const capacidadesDet = await getCapacidades(
+      dataOrden.adminId || req.adminId || req.user?.uid || req.user?.id
+    );
     res.json({
       id: doc.id, ...dataOrden,
-      siguientePaso: pasoSiguiente(dataOrden) || null
+      siguientePaso: pasoSiguiente(dataOrden, capacidadesDet) || null
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -946,7 +996,17 @@ router.post('/', authenticate, async (req, res) => {
     // mant/PH que NO estén marcados como "cambio". Un equipo de cambio se
     // entrega listo (no se recoge ni se procesa). Si todos los de recarga
     // son cambio → es venta/entrega, no servicio de taller.
-    const tieneEquipoTaller = (items || []).some(it => esItemTaller(it) && !it.esCambio);
+    // ✅ FIX CAPACIDAD-TENANT-001: capacidades del tenant. `adminId` ya está
+    // declarado arriba en este handler (ojo con el orden de declaración).
+    const capacidadesTenant = await getCapacidades(adminId);
+
+    // Un ítem de recarga/mantenimiento/PH solo cuenta como "equipo de taller"
+    // si el tenant TIENE el módulo Taller. Sin el módulo no existe quién
+    // procese ni quién saque la orden de 'en_taller' → la orden se cierra en
+    // el mismo acto (que es la operación real del suscriptor).
+    // Con módulo Taller activo: true && X === X → comportamiento idéntico.
+    const tieneEquipoTaller = capacidadesTenant.taller
+      && (items || []).some(it => esItemTaller(it) && !it.esCambio);
 
     // ── ESTADO INICIAL — Ola 2.5 Bloque 1: bug raíz corregido ───────────────
     // ANTES: si era CxC saltaba directo a 'cxc' (línea 611 anterior). Esto rompía
@@ -954,7 +1014,7 @@ router.post('/', authenticate, async (req, res) => {
     // AHORA: el estado inicial se calcula SOLO por tipo de servicio. El "cxc"
     // se asigna SOLO al completar el flujo si la orden quedó sin cobrar.
     const estadoInicial = esProduccion ? 'programada'
-      : calcularEstadoInicial(lugarAtencion, requiereFacturaFinal, tieneEquipoTaller, items);
+      : calcularEstadoInicial(lugarAtencion, requiereFacturaFinal, tieneEquipoTaller, items, capacidadesTenant); // CAPACIDAD-TENANT-001
 
     // ── PAGO AL CREAR — entra a caja cuando el cliente paga en el momento ─────
     // El cliente está presente y entrega el dinero (oficina o taller con pago
@@ -1418,6 +1478,11 @@ router.put('/:id/estado', authenticate, async (req, res) => {
       return res.status(403).json({ error: 'No tienes acceso a esta orden' });
     }
 
+    // ✅ FIX CAPACIDAD-TENANT-001: capacidades del tenant DUEÑO de la orden,
+    // resueltas UNA sola vez por request (cacheadas 60s en memoria) y
+    // reutilizadas en todos los cálculos de flujo de este handler.
+    const capacidades = await getCapacidades(actual.adminId || usuarioId);
+
     // ── ANULACIÓN ─────────────────────────────────────────────────────────────
     // R-02-03: solo Admin/Tesorería con PIN válido pueden anular.
     if (nuevoEstado === 'anulada') {
@@ -1571,7 +1636,7 @@ router.put('/:id/estado', authenticate, async (req, res) => {
     const tallerVal = ordenTieneTaller(actual);
     // reparacion_proceso es una pausa dentro de taller: valida como en_taller.
     const estadoBaseVal = actual.estado === 'reparacion_proceso' ? 'en_taller' : actual.estado;
-    const flujoVal = construirFlujo(actual.lugarAtencion, actual.requiereFactura, tallerVal);
+    const flujoVal = construirFlujo(actual.lugarAtencion, actual.requiereFactura, tallerVal, capacidades); // CAPACIDAD-TENANT-001
 
     // Cadena de estados alcanzables hacia adelante desde el estado actual.
     const alcanzables = new Set();
@@ -1697,7 +1762,7 @@ router.put('/:id/estado', authenticate, async (req, res) => {
     // que la cierre o la mande a cartera. Esto incluye CxC con empresa con IVA
     // (una CxC con IVA igual necesita su factura DIAN — Error 4 corregido).
     const tallerActual = ordenTieneTaller(actual);
-    const flujoOrden = construirFlujo(actual.lugarAtencion, actual.requiereFactura, tallerActual);
+    const flujoOrden = construirFlujo(actual.lugarAtencion, actual.requiereFactura, tallerActual, capacidades); // CAPACIDAD-TENANT-001
     const pasoDesdeActual = flujoOrden[actual.estado];
 
     // Estados donde la orden ya no debería seguir sin factura si la requiere.
@@ -1727,7 +1792,7 @@ router.put('/:id/estado', authenticate, async (req, res) => {
 
     let guardia = 0;
     while (guardia++ < 12) {
-      const flujo = construirFlujo(actual.lugarAtencion, actual.requiereFactura, tallerActual);
+      const flujo = construirFlujo(actual.lugarAtencion, actual.requiereFactura, tallerActual, capacidades); // CAPACIDAD-TENANT-001
       const paso = flujo[estadoCursor];
       if (!paso) break;
       if (!paso.auto) break;
@@ -1927,7 +1992,7 @@ router.put('/:id/estado', authenticate, async (req, res) => {
       id, estado: estadoCursor, historialEstados: historial,
       // El frontend usa esto para pintar el botón del siguiente paso — ya no
       // calcula el flujo por su cuenta (una sola fuente de verdad).
-      siguientePaso: pasoSiguiente({ ...actual, estado: estadoCursor }) || null
+      siguientePaso: pasoSiguiente({ ...actual, estado: estadoCursor }, capacidades) || null // CAPACIDAD-TENANT-001
     });
   } catch (error) {
     console.error('Error cambiando estado:', error);
@@ -3212,11 +3277,124 @@ router.post('/reparar-pagos', authenticate, async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ CAPACIDAD-TENANT-001: REPARACIÓN DE ÓRDENES ATASCADAS SIN MÓDULO TALLER
+// POST /api/orders/reparar-sin-taller   Body: { aplicar: false }
+// ──────────────────────────────────────────────────────────────────────────────
+// El fix impide que NAZCAN órdenes muertas de aquí en adelante, pero no
+// desatasca las que ya existen: `tieneEquipoTaller: true` quedó GRABADO en el
+// documento y `ordenTieneTaller()` lee ese booleano antes de recalcular.
+//
+// Este endpoint recalcula el estado de las órdenes del tenant que están en
+// 'en_taller' cuando el tenant NO tiene el módulo Taller.
+//   - aplicar: false (por defecto) → VISTA PREVIA, no escribe nada.
+//   - aplicar: true  → corrige, deja rastro en historialEstados y auditoría.
+//
+// Solo admin, y SOLO sobre las órdenes de su propio tenant (aislamiento).
+// Si el tenant SÍ tiene el módulo Taller, devuelve 0 hallazgos: no hay nada
+// que reparar porque su flujo es el correcto.
+// ══════════════════════════════════════════════════════════════════════════════
+router.post('/reparar-sin-taller', authenticate, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el administrador puede ejecutar esta reparación' });
+    }
+    const aplicar = req.body?.aplicar === true;
+    const adminIdRep = req.adminId || req.user.uid || req.user.id;
+
+    const capacidadesRep = await getCapacidades(adminIdRep);
+    if (capacidadesRep.taller !== false) {
+      return res.json({
+        ok: true,
+        modo: 'sin_cambios',
+        mensaje: 'Este suscriptor SÍ tiene el módulo Taller: su flujo es el correcto y no hay nada que reparar.',
+        total: 0, corregidas: 0, hallazgos: []
+      });
+    }
+
+    const snap = await db.collection('orders')
+      .where('adminId', '==', adminIdRep)
+      .where('estado', '==', 'en_taller')
+      .get();
+
+    const hallazgos = [];
+    let corregidas = 0;
+
+    for (const docOrden of snap.docs) {
+      const o = docOrden.data();
+      if (o.estado === 'anulada') continue;
+
+      // Estado que la orden HABRÍA tenido con el fix ya activo.
+      const estadoCorrecto = calcularEstadoInicial(
+        o.lugarAtencion, o.requiereFactura, false, o.items || [], capacidadesRep
+      );
+
+      // Si requiere factura DIAN y aún no la tiene, se deja en 'facturado':
+      // la obligación de facturar NO se salta. Se completará sola al digitar
+      // el número (paso automático del flujo de oficina).
+      const estadoFinal = (o.requiereFactura && !o.numeroFactura) ? 'facturado' : estadoCorrecto;
+
+      hallazgos.push({
+        id: docOrden.id,
+        numeroOrden: o.numeroOrden,
+        clienteNombre: o.clienteNombre || '',
+        total: o.total || 0,
+        lugarAtencion: o.lugarAtencion,
+        requiereFactura: !!o.requiereFactura,
+        numeroFactura: o.numeroFactura || '',
+        estadoActual: o.estado,
+        estadoPropuesto: estadoFinal
+      });
+
+      if (aplicar && estadoFinal && estadoFinal !== o.estado) {
+        const historialRep = o.historialEstados || [];
+        historialRep.push({
+          estado: estadoFinal,
+          fecha: new Date().toISOString(),
+          usuarioId: req.user.uid || req.user.id,
+          usuarioNombre: req.user.nombre || req.user.email,
+          notas: 'CAPACIDAD-TENANT-001: orden desatascada — el suscriptor no tiene módulo Taller'
+        });
+        await docOrden.ref.update({
+          estado: estadoFinal,
+          tieneEquipoTaller: false,
+          historialEstados: historialRep,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        corregidas++;
+      }
+    }
+
+    if (aplicar && corregidas > 0) {
+      await auditar({
+        accion: 'REPARAR_ORDENES_SIN_TALLER',
+        descripcion: `${req.user.nombre || req.user.email} desatascó ${corregidas} orden(es) que estaban en taller sin tener el módulo Taller`,
+        usuarioId: req.user.uid || req.user.id,
+        usuarioNombre: req.user.nombre || req.user.email,
+        datos: { total: hallazgos.length, corregidas }
+      });
+    }
+
+    res.json({
+      ok: true,
+      modo: aplicar ? 'aplicado' : 'vista_previa',
+      total: hallazgos.length,
+      corregidas,
+      hallazgos
+    });
+  } catch (e) {
+    console.error('POST reparar-sin-taller:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Exportar la máquina de estados para que logistics.js use LA MISMA lógica.
 router.construirFlujo = construirFlujo;
 router.pasoSiguiente = pasoSiguiente;
 router.calcularEstadoInicial = calcularEstadoInicial;
 router.normalizarLugar = normalizarLugar;
+// ✅ CAPACIDAD-TENANT-001
+router.normalizarLugarPorCapacidad = normalizarLugarPorCapacidad;
 router.esItemTaller = esItemTaller;
 router.contarEquiposTaller = contarEquiposTaller;
 router.registrarIngresoEnCaja = registrarIngresoEnCaja;

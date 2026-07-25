@@ -10,6 +10,10 @@ const registrarIngresoEnCaja = ordersRouter.registrarIngresoEnCaja;
 // Verificador de PIN por usuario (Ola 1 — sustituye al PIN de empresa).
 const verificarPinUsuario = ordersRouter.verificarPinUsuario;
 const { authenticate, validarTenant } = require('../middleware/auth');
+// ✅ FIX CAPACIDAD-TENANT-001: capacidades operativas del tenant (módulos
+// realmente contratados). Alimentan la máquina de estados para que un
+// suscriptor sin módulo Taller nunca reciba un flujo que pase por taller.
+const { getCapacidades } = require('../services/capacidadesTenant');
 // ✅ FIX FECHA-CO-001: "hoy" siempre en fecha Colombia (America/Bogota).
 // new Date().toISOString() es UTC: después de las 7 pm en Colombia ya es
 // "mañana" y las órdenes/asignaciones quedaban con fecha corrida un día.
@@ -176,8 +180,10 @@ router.post('/asignar', async (req, res) => {
       // solo registra el mensajero y el estado queda intacto.
       let cambiaEstado = false;
       let estadoAsignado = ordData.estado;
+      // ✅ FIX CAPACIDAD-TENANT-001
+      const capAsig = await getCapacidades(ordData.adminId || req.adminId || req.user?.uid || req.user?.id);
       if (ordData.estado === 'programada' && typeof construirFlujo === 'function') {
-        const flujoAsig = construirFlujo(ordData.lugarAtencion, ordData.requiereFactura, tieneRecogerReal);
+        const flujoAsig = construirFlujo(ordData.lugarAtencion, ordData.requiereFactura, tieneRecogerReal, capAsig);
         const pasoProg = flujoAsig['programada'];
         if (pasoProg && pasoProg.accion === 'asignar' && pasoProg.siguiente) {
           cambiaEstado = true;
@@ -394,6 +400,11 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
     const orden = ordenDoc.data();
     const timestampFoto = new Date().toISOString();
 
+    // ✅ FIX CAPACIDAD-TENANT-001: capacidades del tenant dueño de la orden,
+    // resueltas UNA vez por request y reutilizadas en los dos cálculos de
+    // flujo de este handler (validación de transición y avance automático).
+    const capOrden = await getCapacidades(orden.adminId || req.adminId || req.user?.uid || req.user?.id);
+
     // ══════════════════════════════════════════════════════════════════════════
     // VALIDACIÓN DE TRANSICIÓN LEGAL — la máquina de estados manda (Ola 3)
     // ──────────────────────────────────────────────────────────────────────────
@@ -408,7 +419,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
             return ['recarga', 'mantenimiento', 'hidrostatica', 'hidrostática'].some(k => c.includes(k));
           });
       const estadoBaseVal = orden.estado === 'reparacion_proceso' ? 'en_taller' : orden.estado;
-      const flujoVal = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTallerVal);
+      const flujoVal = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTallerVal, capOrden); // CAPACIDAD-TENANT-001
 
       // Cadena hacia adelante desde el estado actual
       const alcanzables = new Set();
@@ -916,7 +927,7 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
             return ['recarga','mantenimiento','hidrostatica','hidrostática'].some(k => c.includes(k));
           });
       while (guardia++ < 12) {
-        const flujo = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller);
+        const flujo = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller, capOrden); // CAPACIDAD-TENANT-001
         const paso = flujo[cursor];
         if (!paso || !paso.auto) break;
         if (paso.requiereFacturaAntes && !orden.numeroFactura) break;

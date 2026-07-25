@@ -10,6 +10,12 @@ const construirFlujo = ordersRouter.construirFlujo;
 // Servicio central de vencimientos (trigger por categoría)
 const { crearVencimientosDeOrden } = require('../services/vencimientosService');
 
+// ✅ FIX CAPACIDAD-TENANT-001: capacidades operativas del tenant. Aquí es
+// cinturón y tirantes: sin el módulo Taller nadie llega a este archivo, pero
+// la máquina de estados debe recibir SIEMPRE la misma entrada en todo el
+// sistema para que jamás existan dos verdades del flujo.
+const { getCapacidades } = require('../services/capacidadesTenant');
+
 // ✅ FIX ANNY-NOTIF-001: notificaciones al cliente vía la línea de Anny.
 // Fire-and-forget: si el tenant no tiene anny_ia o no está conectado,
 // se omite en silencio — NUNCA afecta al módulo que llama.
@@ -750,6 +756,8 @@ router.post('/ordenes/:ordenId/completar', async (req, res) => {
     let nuevoEstado = 'facturado';
     let estadoCursor = orden.estado;
     const historialExtra = [];
+    // ✅ FIX CAPACIDAD-TENANT-001: una sola resolución por request (cacheada).
+    const capTallerTenant = await getCapacidades(orden.adminId || getAdminId(req));
     if (typeof construirFlujo === 'function') {
       const tieneTaller = typeof orden.tieneEquipoTaller === 'boolean'
         ? orden.tieneEquipoTaller
@@ -760,7 +768,7 @@ router.post('/ordenes/:ordenId/completar', async (req, res) => {
             const esTaller = ['recarga','mantenimiento','hidrostatica','hidrostática'].some(k => c.includes(k));
             return esTaller && !it.esCambio;
           });
-      const flujo = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller);
+      const flujo = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller, capTallerTenant); // CAPACIDAD-TENANT-001
       const paso = flujo[orden.estado];
       if (paso && paso.siguiente) {
         estadoCursor = paso.siguiente;
@@ -773,7 +781,7 @@ router.post('/ordenes/:ordenId/completar', async (req, res) => {
         // Encadenar pasos automáticos (ej: facturado→listo_entregar si ya hay factura)
         let guardia = 0;
         while (guardia++ < 10) {
-          const f2 = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller);
+          const f2 = construirFlujo(orden.lugarAtencion, orden.requiereFactura, tieneTaller, capTallerTenant); // CAPACIDAD-TENANT-001
           const p2 = f2[estadoCursor];
           if (!p2 || !p2.auto) break;
           if (p2.requiereFacturaAntes && !orden.numeroFactura) break;

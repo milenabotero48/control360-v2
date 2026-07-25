@@ -748,7 +748,14 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
                     if (t.value === 'taller')     return mods.includes('taller');
                     if (t.value === 'despacho')   return mods.includes('logistica');
                     if (t.value === 'domicilio')  return mods.includes('logistica');
-                    if (t.value === 'cobranza')   return mods.includes('cxc');
+                    // ✅ FIX CAPACIDAD-TENANT-001: Cobranza es una VISITA de cobro en
+                    // calle: su flujo exige mensajero (programada → en_ruta_recogida →
+                    // entrega_cobranza → cuadre). Antes se mostraba con solo tener 'cxc'
+                    // — el plan Independiente lo tiene y NO tiene logística, así que esas
+                    // órdenes nacían muertas igual que las de taller. Ahora exige AMBOS.
+                    // Esto NO le quita capacidad de cobrar: sin logística, los pagos y
+                    // abonos se registran directo desde el módulo CxC.
+                    if (t.value === 'cobranza')   return mods.includes('cxc') && mods.includes('logistica');
                     if (t.value === 'produccion') return mods.includes('taller');
                     if (t.value === 'interna')    return mods.includes('logistica') || mods.includes('taller');
                     return true; // oficina siempre visible

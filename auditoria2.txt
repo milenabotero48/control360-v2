@@ -1,0 +1,57 @@
+================================================================
+  AUDITORIA GLOBAL DE INTEGRIDAD (v2) — READ ONLY
+  Fecha: 2026-07-18T16:54:39.678Z | TODOS los suscriptores
+================================================================
+
+Ordenes: 1329 | Movimientos: 1758 | Cajas: 19 | Arqueos: 34
+
+----------------------------------------------------------------
+SUSCRIPTOR: Extintores del Valle SAS  (6h2gpIJ1vAZaUwBA5SLXTRONShp1)
+  [OK] 11 orden(es) verificadas: su dinero SI entro por cuadre agrupado
+
+  2. FANTASMA EN CAJA (marcada "en caja" sin ingreso real) — 2 orden(es), $923.680:
+     - OS-0224 — CENTRALQUIPOS S.A.S. | completada | total $918.680 | pagado $918.680 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     - OS-0232 — DOBLE VÍA COMUNICACIONES EU | completada | total $5.000 | pagado $5.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+
+----------------------------------------------------------------
+SUSCRIPTOR: EXTINTORES ALMAR SAS  (iLc4V2z0UeyjhI653tMC)
+  [OK] 20 orden(es) verificadas: su dinero SI entro por cuadre agrupado
+
+  3. INGRESO DUPLICADO (saldo de caja inflado) — 7 orden(es), $189.030:
+     - OS-0075 — ALBA MARIA | completada | total $30.000 | pagado $30.000 | en caja $60.000 | EXCESO $30.000 (directos $60.000 + cuadre $0) | mensajero: SERGIO MENDOZA
+     - OS-0290 — JORGE GARCIA | completada | total $47.000 | pagado $47.000 | en caja $94.000 | EXCESO $47.000 (directos $94.000 + cuadre $0)
+     - OS-0295 — COMERCIALIZADORA LA BODEGA REPUESTOS S.A.S | completada | total $21.420 | pagado $21.420 | en caja $42.840 | EXCESO $21.420 (directos $42.840 + cuadre $0)
+     - OS-0293 — SANDRA MILENA OSORIO | completada | total $19.000 | pagado $19.000 | en caja $38.000 | EXCESO $19.000 (directos $38.000 + cuadre $0)
+     - OS-0311 — MOSELUIS CLEMENTE SONEIRA | completada | total $19.000 | pagado $19.000 | en caja $38.000 | EXCESO $19.000 (directos $38.000 + cuadre $0)
+     - OS-0291 — CESAR LONDOÑO | completada | total $30.000 | pagado $30.000 | en caja $60.000 | EXCESO $30.000 (directos $60.000 + cuadre $0)
+     - OS-0358 — FÁCILCREDITOS SAS  JUAN CAMILO | completada | total $22.610 | pagado $22.610 | en caja $45.220 | EXCESO $22.610 (directos $45.220 + cuadre $0)
+
+----------------------------------------------------------------
+SUSCRIPTOR: Zuly Salarzar  (rY1gbCr2SJclTCjpeqKdZ3JAYPp2)
+  [OK] 24 orden(es) verificadas: su dinero SI entro por cuadre agrupado
+
+  1. LIMBO SIN CUADRE (dinero que NUNCA entrara a caja — caso OS-0185) — 4 orden(es), $220.000:
+     - OS-0185 — GALATI BARBER | completada | total $35.000 | pagado $35.000 | en caja $0
+     - OS-0152 — PAPELERIA EL GRAN MAYORISTA | completada | total $80.000 | pagado $80.000 | en caja $0
+     - OS-0188 — RIKO RIKO | completada | total $35.000 | pagado $35.000 | en caja $0
+     - OS-0155 — TRANSPORTE GUAIMARAL | completada | total $70.000 | pagado $70.000 | en caja $0
+
+================================================================
+  RESUMEN GLOBAL
+================================================================
+  [OK] Ordenes verificadas por cuadre agrupado (dinero SI entro): 55
+  1. LIMBO SIN CUADRE: 4 orden(es) — $220.000
+  2. FANTASMA EN CAJA: 2 orden(es) — $923.680
+  3. INGRESO DUPLICADO: 7 orden(es) — $189.030
+  4. COBRO SIN CUADRAR hace mas de 3 dias: 0 orden(es) — $0
+  5. PAGO VIRTUAL SIN VALIDAR hace mas de 3 dias: 0 orden(es) — $0
+  6. "PAGADA" CON SALDO PENDIENTE: 0 orden(es) — $0
+
+  Acciones sugeridas:
+  - Caso 1 -> node backend/scripts/reparar-datos.js --tenant=UID (seccion B)
+  - Caso 2 -> revisar una por una (dinero marcado que no consta en ningun lado)
+  - Caso 3 -> Revision de pagos en CxC del suscriptor
+  - Casos 4 y 5 -> gestion operativa: cuadrar mensajero / validar en tesoreria
+  - Caso 6 -> Revision de pagos en CxC (recalcula saldos)
+
+[OK] Auditoria terminada (no se modifico ningun dato).

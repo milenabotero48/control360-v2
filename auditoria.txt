@@ -1,0 +1,111 @@
+══════════════════════════════════════════════════════════════
+  AUDITORÍA GLOBAL DE INTEGRIDAD — READ ONLY
+  Fecha: 2026-07-18T16:49:41.908Z | TODOS los suscriptores
+══════════════════════════════════════════════════════════════
+
+Órdenes: 1328 · Movimientos: 1756 · Cajas: 19
+
+──────────────────────────────────────────────────────────────
+SUSCRIPTOR: Extintores del Valle SAS  (6h2gpIJ1vAZaUwBA5SLXTRONShp1)
+
+  👻 2. FANTASMA EN CAJA (marcada "en caja" sin movimiento — saldo incompleto) — 13 orden(es), $2.272.680:
+     · OS-0254 — ALVARO LORA | estado: completada | total $46.000 | pagado $46.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0158 — JAIRO DISTRIBUIDOR | estado: completada | total $48.000 | pagado $48.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0183 — PROYECTOS Y INVERSIONES ZULY AREPAS | estado: completada | total $58.000 | pagado $58.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0190 — YENY PATRICIA HURTADO | estado: completada | total $27.000 | pagado $27.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0224 — CENTRALQUIPOS S.A.S. | estado: completada | total $918.680 | pagado $918.680 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0220 — FABIÁN ORTEGA | estado: completada | total $667.000 | pagado $667.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0232 — DOBLE VÍA COMUNICACIONES EU | estado: completada | total $5.000 | pagado $5.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0038 — DESECHABLES RC | estado: completada | total $108.000 | pagado $108.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0091 — V3 COFFEE ROASTERS SAS | estado: completada | total $63.000 | pagado $63.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0186 — CASA TODO | estado: completada | total $52.000 | pagado $52.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0246 — GUSTAVO CADAVID | estado: completada | total $53.000 | pagado $53.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0247 — PAOLA ANDREA ORTIZ | estado: completada | total $27.000 | pagado $27.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+     · OS-0019 — QUESOS LA CALIDAD | estado: completada | total $200.000 | pagado $200.000 | en caja $0 | mensajero: HENRY ANDRES ZUÑIGA
+
+──────────────────────────────────────────────────────────────
+SUSCRIPTOR: EXTINTORES ALMAR SAS  (iLc4V2z0UeyjhI653tMC)
+
+  👻 2. FANTASMA EN CAJA (marcada "en caja" sin movimiento — saldo incompleto) — 20 orden(es), $1.387.450:
+     · OS-0171 — LILIANA GORDON LLANOS- CABELLOS MAGICOS | estado: completada | total $25.000 | pagado $25.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0379 — PLICA S.A | estado: completada | total $51.170 | pagado $51.170 | en caja $0 | mensajero: CARLOS GONZALEZ
+     · OS-0316 — EDIFICIO LAURA | estado: completada | total $66.000 | pagado $66.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0419 — ESTATAL DE SEGURIDAD | estado: completada | total $224.910 | pagado $224.910 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0041 — AVANZU EDUCATION COLOMBIA SAS | estado: completada | total $72.590 | pagado $72.590 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0069 — ARTURO ARBELAEZ RAMIREZ | estado: completada | total $19.000 | pagado $19.000 | en caja $0 | mensajero: JHONIER MENDEZ
+     · OS-0024 — JHONATAN VALLEJO | estado: completada | total $15.000 | pagado $15.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0260 — ACARREOS FAMI | estado: completada | total $86.000 | pagado $86.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0149 — BEATRIZ | estado: completada | total $19.000 | pagado $19.000 | en caja $0 | mensajero: CARLOS GONZALEZ
+     · OS-0466 — METROMEDICS | estado: completada | total $33.320 | pagado $33.320 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0381 — DISTRIBUCIONES EL DESCUENTO S.A.S | estado: completada | total $272.510 | pagado $272.510 | en caja $0 | mensajero: CARLOS GONZALEZ
+     · OS-0186 — TATIANA MARIN VILLA | estado: completada | total $23.000 | pagado $23.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0336 — VELOENDURO PEREIRA | estado: completada | total $42.000 | pagado $42.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0142 — ALIMENTOS SALUDABLES PARA MASCOTAS SAS | estado: completada | total $193.970 | pagado $105.910 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0467 — HELADOS IGLU | estado: completada | total $106.000 | pagado $106.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0380 — PLICA S.A | estado: completada | total $55.930 | pagado $55.930 | en caja $0 | mensajero: CARLOS GONZALEZ
+     · OS-0265 — ANDRES ECHEVERRY | estado: completada | total $69.000 | pagado $69.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0052 — CASA DE LA VALVULA | estado: completada | total $33.320 | pagado $33.320 | en caja $0 | mensajero: JHONIER MENDEZ
+     · OS-0116 — CESAR AUGUSTO AGUDELO PARRA | estado: completada | total $19.000 | pagado $19.000 | en caja $0 | mensajero: SERGIO MENDOZA
+     · OS-0020 — CLINICA QUIRURGICA | estado: completada | total $48.790 | pagado $48.790 | en caja $0 | mensajero: CARLOS GONZALEZ
+
+  💥 3. INGRESO DUPLICADO (saldo de caja inflado) — 7 orden(es), $189.030:
+     · OS-0075 — ALBA MARIA | estado: completada | total $30.000 | pagado $30.000 | en caja $60.000 | EXCESO $30.000 | mensajero: SERGIO MENDOZA
+     · OS-0290 — JORGE GARCIA | estado: completada | total $47.000 | pagado $47.000 | en caja $94.000 | EXCESO $47.000
+     · OS-0295 — COMERCIALIZADORA LA BODEGA REPUESTOS S.A.S | estado: completada | total $21.420 | pagado $21.420 | en caja $42.840 | EXCESO $21.420
+     · OS-0293 — SANDRA MILENA OSORIO | estado: completada | total $19.000 | pagado $19.000 | en caja $38.000 | EXCESO $19.000
+     · OS-0311 — MOSELUIS CLEMENTE SONEIRA | estado: completada | total $19.000 | pagado $19.000 | en caja $38.000 | EXCESO $19.000
+     · OS-0291 — CESAR LONDOÑO | estado: completada | total $30.000 | pagado $30.000 | en caja $60.000 | EXCESO $30.000
+     · OS-0358 — FÁCILCREDITOS SAS  JUAN CAMILO | estado: completada | total $22.610 | pagado $22.610 | en caja $45.220 | EXCESO $22.610
+
+──────────────────────────────────────────────────────────────
+SUSCRIPTOR: Zuly Salarzar  (rY1gbCr2SJclTCjpeqKdZ3JAYPp2)
+
+  🕳️  1. LIMBO SIN CUADRE (dinero que NUNCA entrará a caja — caso OS-0185) — 4 orden(es), $220.000:
+     · OS-0185 — GALATI BARBER | estado: completada | total $35.000 | pagado $35.000 | en caja $0
+     · OS-0152 — PAPELERIA EL GRAN MAYORISTA | estado: completada | total $80.000 | pagado $80.000 | en caja $0
+     · OS-0188 — RIKO RIKO | estado: completada | total $35.000 | pagado $35.000 | en caja $0
+     · OS-0155 — TRANSPORTE GUAIMARAL | estado: completada | total $70.000 | pagado $70.000 | en caja $0
+
+  👻 2. FANTASMA EN CAJA (marcada "en caja" sin movimiento — saldo incompleto) — 24 orden(es), $930.000:
+     · OS-0144 — LINDA REMOLINA | estado: completada | total $25.000 | pagado $25.000 | en caja $0 | mensajero: Mensajero
+     · OS-0164 — DROGUERIA ZABDIEL | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0011 — DROGUERIA YOKA | estado: completada | total $75.000 | pagado $75.000 | en caja $0 | mensajero: Mensajero
+     · OS-0123 — D'TRIGO PASTELES | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0160 — NORT BASCULAS | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0130 — SALA DE BELLEZA PISCIS | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0100 — ZULEBAC DROGUERIA PURA | estado: completada | total $80.000 | pagado $80.000 | en caja $0 | mensajero: Mensajero
+     · OS-0163 — JOSE PICARON | estado: completada | total $25.000 | pagado $25.000 | en caja $0 | mensajero: Mensajero
+     · OS-0143 — PUNTO DIESEL | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0079 — MAHDI SPA | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0124 — ALVARO GARCIA | estado: completada | total $20.000 | pagado $20.000 | en caja $0 | mensajero: Mensajero
+     · OS-0043 — GPS Y ALARMAS | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0117 — BIHOMEDAS | estado: completada | total $40.000 | pagado $40.000 | en caja $0 | mensajero: Mensajero
+     · OS-0159 — JAVIER SARMIENTO | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0156 — UNAYRE IPS | estado: completada | total $50.000 | pagado $50.000 | en caja $0 | mensajero: Mensajero
+     · OS-0089 — FERRETERIA IPM ELECTRICOS | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0161 — NORT BASCULAS | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0131 — ROOTTCO | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0126 — PINTU SCREM | estado: completada | total $60.000 | pagado $60.000 | en caja $0 | mensajero: Mensajero
+     · OS-0080 — ALVARO CASTELLANOS | estado: completada | total $25.000 | pagado $25.000 | en caja $0 | mensajero: Mensajero
+     · OS-0112 — ODONTOLOGIA ESPECIALIZADA | estado: completada | total $40.000 | pagado $40.000 | en caja $0 | mensajero: Mensajero
+     · OS-0122 — PAOLA | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0118 — MAO MOTOOS | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+     · OS-0120 — ANBALMIRO ZAMALEJA | estado: completada | total $35.000 | pagado $35.000 | en caja $0 | mensajero: Mensajero
+
+══════════════════════════════════════════════════════════════
+  RESUMEN GLOBAL
+══════════════════════════════════════════════════════════════
+  🕳️  1. LIMBO SIN CUADRE: 4 orden(es) — $220.000
+  👻 2. FANTASMA EN CAJA: 57 orden(es) — $4.590.130
+  💥 3. INGRESO DUPLICADO: 7 orden(es) — $189.030
+  ⏳ 4. COBRO SIN CUADRAR hace más de 3 días: 0 orden(es) — $0
+  🏦 5. PAGO VIRTUAL SIN VALIDAR hace más de 3 días: 0 orden(es) — $0
+  ⚠️  6. "PAGADA" CON SALDO PENDIENTE: 0 orden(es) — $0
+
+  Acciones sugeridas:
+  · Casos 1 y 2 → node backend/scripts/reparar-datos.js (sección B; los "fantasma" requieren revisión manual del histórico de la caja)
+  · Caso 3 → Revisión de pagos en CxC de cada suscriptor (o /api/orders/reparar-pagos)
+  · Casos 4 y 5 → gestión operativa: cuadrar mensajero / validar pagos en tesorería
+  · Caso 6 → Revisión de pagos en CxC (recalcula saldos)
+
+✅ Auditoría terminada (no se modificó ningún dato).

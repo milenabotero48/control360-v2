@@ -52,6 +52,11 @@ const MODULOS_POR_PLAN = {
   super_pro: [] // [] = todos los módulos incluido qr, whatsapp, ia_whatsapp
 };
 
+// ✅ FIX CAPACIDAD-TENANT-001: al cambiar los módulos de un suscriptor hay que
+// invalidar su caché de capacidades para que el nuevo flujo aplique de
+// inmediato y no haya que esperar el TTL de 60s.
+const { invalidarCapacidades } = require('../services/capacidadesTenant');
+
 const ESTADOS = ['trial', 'activo', 'suspendido'];
 
 // ─── MIDDLEWARE: verificar token (mismo patrón del resto del sistema) ────────
@@ -227,6 +232,8 @@ router.put('/suscriptores/:adminId/plan', authenticate, soloSuperAdmin, async (r
     if (!anterior && modulosActuales.length === 0) {
       modulosAutoAsignados = MODULOS_POR_PLAN[plan] || [];
       await userDoc.ref.update({ modulos: modulosAutoAsignados });
+      // ✅ FIX CAPACIDAD-TENANT-001
+      invalidarCapacidades(adminId);
     }
 
     const datos = {
@@ -294,6 +301,9 @@ router.put('/suscriptores/:adminId/modulos', authenticate, soloSuperAdmin, async
 
     const anteriores = userDoc.data().modulos || [];
     await userRef.update({ modulos: limpios });
+
+    // ✅ FIX CAPACIDAD-TENANT-001: efecto inmediato en la máquina de estados.
+    invalidarCapacidades(adminId);
 
     await registrarAuditoria({
       accion: 'editar_modulos_suscriptor',
