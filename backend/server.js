@@ -77,6 +77,14 @@ app.use('/api/alertas',   authenticate, require('./routes/alertas'));
 app.use('/api/auditoria', authenticate, require('./routes/auditoria'));
 app.use('/api/compras',   authenticate, require('./routes/compras'));
 
+// ═════════════════════════════════════════════════════════════════════════════
+// FIX INV-KARDEX-001: módulo Inventario (Kardex, rotación, conteo físico).
+// El gating premium NO va aquí: vive dentro del router, en el middleware
+// requireModuloPremium('inventario_pro'). Un solo lugar donde se decide el
+// acceso, no dos que puedan contradecirse.
+// ═════════════════════════════════════════════════════════════════════════════
+app.use('/api/inventario', authenticate, require('./routes/inventario'));
+
 // WhatsApp: el webhook de Meta es público — el authenticate va POR RUTA
 app.use('/api/whatsapp', require('./routes/whatsapp'));
 // Motor de Vencimientos (Fase 2)

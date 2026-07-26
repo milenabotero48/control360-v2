@@ -89,8 +89,15 @@ const genNumero = async (userId) => {
   return `EGR-${String(siguiente).padStart(4, '0')}`;
 };
 
+// ══════════════════════════════════════════════════════════════════════════════
+// FIX INV-KARDEX-001: motor del Kardex. La compra rápida por egreso es el sexto
+// y último punto donde el stock se movía sin dejar rastro. Lógica de control y
+// alertas de margen intactas; solo cambia la escritura del stock.
+// ══════════════════════════════════════════════════════════════════════════════
+const ledger = require('../services/inventoryLedger');
+
 // ─── HELPER: actualizar stock e inventario al comprar mercancía ───────────────
-const actualizarInventarioCompra = async (productosCompra) => {
+const actualizarInventarioCompra = async (productosCompra, egreso = {}, usuario = {}) => {
   const alertas = [];
   for (const item of productosCompra) {
     if (!item.productoId || !item.cantidad || item.cantidad <= 0) continue;
@@ -104,8 +111,8 @@ const actualizarInventarioCompra = async (productosCompra) => {
       const costoNuevo = Number(item.precioUnitario) || 0;
       const cantidadComprada = Number(item.cantidad);
 
+      // ✅ INV-KARDEX-001: el stock sale de este update y pasa al ledger.
       const update = {
-        stock: admin.firestore.FieldValue.increment(cantidadComprada),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
       if (costoNuevo > 0 && costoNuevo !== costoPrevio) {
@@ -126,6 +133,20 @@ const actualizarInventarioCompra = async (productosCompra) => {
         }
       }
       await prodRef.update(update);
+
+      // ✅ INV-KARDEX-001
+      await ledger.registrarMovimiento({
+        productoId: item.productoId,
+        tipo: ledger.TIPOS.ENTRADA_COMPRA,
+        cantidad: cantidadComprada,
+        origenTipo: 'egreso', origenId: egreso.id || null,
+        origenNumero: egreso.numero || null,
+        proveedorNombre: egreso.beneficiario || null,
+        usuarioId: usuario.id || null,
+        usuarioNombre: usuario.nombre || null,
+        costoUnitario: costoNuevo > 0 ? costoNuevo : null,
+        motivo: egreso.concepto ? `Compra por egreso: ${egreso.concepto}` : 'Compra registrada por egreso'
+      });
     } catch (e) { console.warn('Error actualizando inventario compra:', item.productoId, e.message); }
   }
   return alertas;
@@ -232,7 +253,12 @@ router.post('/', async (req, res) => {
 
     let alertasMargen = [];
     if (categoria === 'Compra de Mercancia' && productosCompra?.length > 0) {
-      alertasMargen = await actualizarInventarioCompra(productosCompra);
+      // ✅ INV-KARDEX-001: contexto del egreso para el kardex.
+      alertasMargen = await actualizarInventarioCompra(
+        productosCompra,
+        { numero, concepto, beneficiario: proveedor },
+        { id: req.adminId || req.user.uid, nombre: req.user.nombre || req.user.email }
+      );
     }
 
     await registrarAuditoria({

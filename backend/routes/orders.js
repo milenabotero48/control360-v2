@@ -415,8 +415,19 @@ const requiereCertificado = (items = []) => {
   });
 };
 
+// ══════════════════════════════════════════════════════════════════════════════
+// FIX INV-KARDEX-001: motor del Kardex.
+// Los helpers de inventario conservan su lógica de control INTACTA (mismos if,
+// mismos try/catch, mismos guardas de tieneStock, mismo orden). Lo único que
+// cambia es la línea que escribe el stock: donde antes había un increment()
+// ciego, ahora hay un movimiento registrado en transacción atómica.
+// Se recibe `orden` (opcional) para que el movimiento sepa a qué número de
+// orden y a qué cliente pertenece — sin eso el kardex no responde "¿a quién?".
+// ══════════════════════════════════════════════════════════════════════════════
+const ledger = require('../services/inventoryLedger');
+
 // ─── HELPER: descontar inventario ────────────────────────────────────────────
-const descontarInventario = async (items, ordenId) => {
+const descontarInventario = async (items, ordenId, orden = {}, usuario = {}) => {
   for (const item of items) {
     if (!item.productoId) continue;
     try {
@@ -431,16 +442,33 @@ const descontarInventario = async (items, ordenId) => {
             const compRef = db.collection('products').doc(comp.productoId);
             const compDoc = await compRef.get();
             if (!compDoc.exists) continue;
-            await compRef.update({
-              stock: admin.firestore.FieldValue.increment(-(comp.cantidad * item.cantidad)),
-              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            // ✅ INV-KARDEX-001
+            await ledger.registrarMovimiento({
+              productoId: comp.productoId,
+              tipo: ledger.TIPOS.CONSUMO_COMPUESTO,
+              cantidad: comp.cantidad * item.cantidad,
+              origenTipo: 'orden', origenId: ordenId,
+              origenNumero: orden.numeroOrden || null,
+              clienteId: orden.clienteId || null,
+              clienteNombre: orden.clienteNombre || null,
+              usuarioId: usuario.id || null,
+              usuarioNombre: usuario.nombre || null,
+              motivo: `Componente de ${item.nombre || 'producto compuesto'}`
             });
           } catch (e) { console.warn('Componente no encontrado:', comp.productoId); }
         }
       } else if (prod.tieneStock) {
-        await prodRef.update({
-          stock: admin.firestore.FieldValue.increment(-item.cantidad),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        // ✅ INV-KARDEX-001
+        await ledger.registrarMovimiento({
+          productoId: item.productoId,
+          tipo: ledger.TIPOS.SALIDA_VENTA,
+          cantidad: item.cantidad,
+          origenTipo: 'orden', origenId: ordenId,
+          origenNumero: orden.numeroOrden || null,
+          clienteId: orden.clienteId || null,
+          clienteNombre: orden.clienteNombre || null,
+          usuarioId: usuario.id || null,
+          usuarioNombre: usuario.nombre || null
         });
       }
     } catch (e) { console.warn('Producto no encontrado:', item.productoId); }
@@ -448,7 +476,7 @@ const descontarInventario = async (items, ordenId) => {
 };
 
 // ─── HELPER: devolver inventario al anular ────────────────────────────────────
-const devolverInventario = async (items) => {
+const devolverInventario = async (items, orden = {}, usuario = {}) => {
   for (const item of items) {
     if (!item.productoId) continue;
     try {
@@ -463,16 +491,34 @@ const devolverInventario = async (items) => {
             const compRef = db.collection('products').doc(comp.productoId);
             const compDoc = await compRef.get();
             if (!compDoc.exists) continue;
-            await compRef.update({
-              stock: admin.firestore.FieldValue.increment(comp.cantidad * item.cantidad),
-              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            // ✅ INV-KARDEX-001
+            await ledger.registrarMovimiento({
+              productoId: comp.productoId,
+              tipo: ledger.TIPOS.DEVOLUCION_ANULACION,
+              cantidad: comp.cantidad * item.cantidad,
+              origenTipo: 'orden', origenId: orden.id || null,
+              origenNumero: orden.numeroOrden || null,
+              clienteId: orden.clienteId || null,
+              clienteNombre: orden.clienteNombre || null,
+              usuarioId: usuario.id || null,
+              usuarioNombre: usuario.nombre || null,
+              motivo: `Anulación de orden — componente de ${item.nombre || 'producto compuesto'}`
             });
           } catch (e) { console.warn('Componente no encontrado al devolver:', comp.productoId); }
         }
       } else if (prod.tieneStock) {
-        await prodRef.update({
-          stock: admin.firestore.FieldValue.increment(item.cantidad),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        // ✅ INV-KARDEX-001
+        await ledger.registrarMovimiento({
+          productoId: item.productoId,
+          tipo: ledger.TIPOS.DEVOLUCION_ANULACION,
+          cantidad: item.cantidad,
+          origenTipo: 'orden', origenId: orden.id || null,
+          origenNumero: orden.numeroOrden || null,
+          clienteId: orden.clienteId || null,
+          clienteNombre: orden.clienteNombre || null,
+          usuarioId: usuario.id || null,
+          usuarioNombre: usuario.nombre || null,
+          motivo: 'Anulación de orden'
         });
       }
     } catch (e) { console.warn('Producto no encontrado al devolver:', item.productoId); }
@@ -1161,7 +1207,15 @@ router.post('/', authenticate, async (req, res) => {
     const ref = await db.collection('orders').add(nuevaOrden);
 
     if (tipoFinal !== 'interna' && tipoFinal !== 'produccion') {
-      await descontarInventario(items, ref.id);
+      // ✅ INV-KARDEX-001: se pasa el contexto de la orden para que el kardex
+      // pueda responder "¿a quién se le vendió?" — sin esto el movimiento
+      // quedaría huérfano de cliente y de número de orden.
+      await descontarInventario(
+        items,
+        ref.id,
+        { id: ref.id, numeroOrden: nuevaOrden.numeroOrden, clienteId: nuevaOrden.clienteId, clienteNombre: nuevaOrden.clienteNombre },
+        { id: req.user.uid || req.user.id, nombre: req.user.nombre || req.user.email }
+      );
     }
 
     if (pagadoAlCrear && !marcarPagoAdelantado) {
@@ -1511,7 +1565,12 @@ router.put('/:id/estado', authenticate, async (req, res) => {
         return res.status(400).json({ error: 'Debes indicar el motivo de la anulación' });
       }
 
-      await devolverInventario(actual.items || []);
+      // ✅ INV-KARDEX-001
+      await devolverInventario(
+        actual.items || [],
+        { id, numeroOrden: actual.numeroOrden, clienteId: actual.clienteId, clienteNombre: actual.clienteNombre },
+        { id: usuarioId, nombre: usuarioNombre }
+      );
 
       // ✅ FIX CAJA-001: revertir caja si el dinero ya había entrado
       let cajaRevertida = null;
@@ -1890,9 +1949,15 @@ router.put('/:id/estado', authenticate, async (req, res) => {
             for (const comp of prod.componentes) {
               if (!comp.productoId) continue;
               try {
-                await db.collection('products').doc(comp.productoId).update({
-                  stock: admin.firestore.FieldValue.increment(-(comp.cantidad * cant)),
-                  updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                // ✅ INV-KARDEX-001: consumo de componentes en orden de producción.
+                await ledger.registrarMovimiento({
+                  productoId: comp.productoId,
+                  tipo: ledger.TIPOS.CONSUMO_PRODUCCION,
+                  cantidad: comp.cantidad * cant,
+                  origenTipo: 'orden', origenId: id,
+                  origenNumero: actual.numeroOrden || null,
+                  usuarioId, usuarioNombre,
+                  motivo: `Producción de ${item.nombre || 'producto terminado'}`
                 });
               } catch (e) {
                 console.warn(`Error descontando componente ${comp.productoId} en OP:`, e.message);
@@ -1910,8 +1975,15 @@ router.put('/:id/estado', authenticate, async (req, res) => {
         const cant = Number(item.cantidad) || 0;
         if (cant <= 0) continue;
         try {
-          await db.collection('products').doc(item.productoId).update({
-            stock: admin.firestore.FieldValue.increment(cant)
+          // ✅ INV-KARDEX-001: alta del producto terminado.
+          await ledger.registrarMovimiento({
+            productoId: item.productoId,
+            tipo: ledger.TIPOS.ENTRADA_PRODUCCION,
+            cantidad: cant,
+            origenTipo: 'orden', origenId: id,
+            origenNumero: actual.numeroOrden || null,
+            usuarioId, usuarioNombre,
+            motivo: 'Producto terminado en orden de producción'
           });
         } catch (e) {
           console.error(`Error sumando stock de ${item.productoId}:`, e.message);
@@ -2912,7 +2984,13 @@ const agregarItemsAOrden = async ({
   const total    = subtotal + ivaValor;
 
   // ── Descontar inventario solo de los nuevos ──────────────────────────────
-  await descontarInventario(itemsSanitizados, ordenId);
+  // ✅ INV-KARDEX-001
+  await descontarInventario(
+    itemsSanitizados,
+    ordenId,
+    { id: ordenId, numeroOrden: orden.numeroOrden, clienteId: orden.clienteId, clienteNombre: orden.clienteNombre },
+    { id: usuarioId, nombre: usuarioNombre }
+  );
 
   // ✅ SALDO-UNICO-001: al crecer el total, el pago se RE-EVALÚA (caso OS-192:
   // el taller agregaba repuestos aprobados, el total subía, pero la orden

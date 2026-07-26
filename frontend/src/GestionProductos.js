@@ -1,4 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
+// ✅ INV-KARDEX-003: el módulo Inventario vive en componente propio. Este archivo
+// ya tiene 1.347 líneas; absorber la UI de kardex, conteo y rotación lo llevaría
+// a más de 2.200 y volvería inmanejable el catálogo de productos.
+import ModuloInventario from './ModuloInventario';
 import axios from 'axios';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
@@ -106,7 +110,7 @@ const BuscadorComponente = ({ productos, onAgregar }) => {
 };
 
 const GestionProductos = ({ user }) => {
-  const [vista, setVista]               = useState('productos'); // productos | categorias | ajuste
+  const [vista, setVista]               = useState('productos'); // productos | categorias | ajuste | inventario
   const [categorias, setCategorias]     = useState([]);
   const [productos, setProductos]       = useState([]);
   const [loading, setLoading]           = useState(true);
@@ -481,6 +485,9 @@ const GestionProductos = ({ user }) => {
               <button onClick={() => setVista('productos')} style={vista === 'productos' ? s.btnActivo : s.btnSecundario}>📦 Productos</button>
               <button onClick={() => setVista('categorias')} style={vista === 'categorias' ? s.btnActivo : s.btnSecundario}>🗂️ Categorías</button>
               <button onClick={() => setVista('ajuste')} style={vista === 'ajuste' ? s.btnActivo : s.btnSecundario}>📊 Ajuste Precios</button>
+              {/* ✅ INV-KARDEX-003: Kardex, conteo físico y rotación. Si el tenant
+                  no tiene el módulo, el componente muestra su propia pantalla. */}
+              <button onClick={() => setVista('inventario')} style={vista === 'inventario' ? s.btnActivo : s.btnSecundario}>📋 Inventario</button>
               <button onClick={() => setVista('importar')} style={vista === 'importar' ? s.btnActivo : s.btnSecundario}>📥 Importar</button>
               <button onClick={() => setVista('exportar')} style={s.btnSecundario}>📤 Exportar CSV</button>
             </>
@@ -547,6 +554,21 @@ const GestionProductos = ({ user }) => {
             )}
           </div>
         </div>
+      )}
+
+      {/* ════════════════════════════════════════════
+          ✅ INV-KARDEX-003 · VISTA: INVENTARIO
+          Kardex, conteo físico y rotación. Se le pasan los productos y
+          categorías ya cargados para no repetir las peticiones, y un callback
+          para refrescar el catálogo cuando un ajuste cambie el stock.
+      ════════════════════════════════════════════ */}
+      {vista === 'inventario' && (
+        <ModuloInventario
+          user={user}
+          productos={productos}
+          categorias={categorias}
+          onStockCambiado={cargarProductos}
+        />
       )}
 
       {/* ════════════════════════════════════════════
@@ -901,9 +923,28 @@ const GestionProductos = ({ user }) => {
                 <div style={s.fila2}>
                   <div style={s.campo}>
                     <label style={s.label}>Stock actual</label>
-                    <input style={s.input} type="number" placeholder="0"
+                    {/* ✅ INV-KARDEX-003: al EDITAR, el stock es de solo lectura.
+                        Se movía desde aquí sin dejar rastro del valor anterior, y
+                        esa era la causa de los descuadres imposibles de investigar.
+                        Al CREAR sí se escribe: es la carga inicial, y el backend la
+                        registra como movimiento ENTRADA_IMPORTACION en el Kardex. */}
+                    <input style={editandoId ? { ...s.input, background: '#f3f4f6', color: '#9ca3af', cursor: 'not-allowed' } : s.input}
+                      type="number" placeholder="0"
                       value={form.stock}
+                      disabled={!!editandoId}
                       onChange={e => setForm(p => ({ ...p, stock: e.target.value }))} />
+                    {editandoId ? (
+                      <small style={s.hint2}>
+                        El stock se mueve solo con compras, ventas o un ajuste registrado.{' '}
+                        <button type="button"
+                          style={{ background: 'none', border: 'none', color: '#7c3aed', fontWeight: 700, cursor: 'pointer', padding: 0, fontSize: 'inherit', textDecoration: 'underline' }}
+                          onClick={() => { setMostrarForm(false); setVista('inventario'); }}>
+                          Ajustar stock →
+                        </button>
+                      </small>
+                    ) : (
+                      <small style={s.hint2}>Stock inicial. Queda registrado en el Kardex como carga inicial.</small>
+                    )}
                   </div>
                   <div style={s.campo}>
                     <label style={s.label}>Stock mínimo <span style={s.hint}>(alerta)</span></label>

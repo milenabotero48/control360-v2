@@ -4,6 +4,10 @@ const { db, admin } = require('../config/firebase');
 const jwt = require('jsonwebtoken');
 const { authenticate, validarTenant } = require('../middleware/auth');
 
+// ✅ INV-KARDEX-001: motor del Kardex. products.stock deja de ser un número
+// que cualquiera escribe y pasa a ser un SALDO respaldado por movimientos.
+const ledger = require('../services/inventoryLedger');
+
 // ─── HELPER: auditoría ────────────────────────────────────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = {} }) => {
   try {
@@ -299,7 +303,11 @@ router.post('/', authenticate, async (req, res) => {
       precioVenta: precioVenta || 0,
       margen: parseFloat(margen),
       tieneStock: tipo !== 'servicio',
-      stock: tipo !== 'servicio' ? (stock || 0) : 0,
+      // ✅ INV-KARDEX-001: el producto NACE en 0. El stock inicial entra
+      // inmediatamente después como movimiento ENTRADA_IMPORTACION, para que
+      // hasta la primera unidad tenga un asiento que la explique. Si se dejara
+      // el número aquí, el kardex arrancaría con un saldo huérfano.
+      stock: 0,
       stockMinimo: stockMinimo || 0,
       componentes: tipo === 'compuesto' ? (componentes || []) : [],
       descripcion: descripcion || '',
@@ -314,6 +322,25 @@ router.post('/', authenticate, async (req, res) => {
     };
 
     const ref = await db.collection('products').add(nuevoProducto);
+
+    // ✅ INV-KARDEX-001: carga inicial trazada. registrarMovimiento actualiza
+    // el stock dentro de su propia transacción, por eso el documento nació en 0.
+    const stockInicial = tipo !== 'servicio' ? (Number(stock) || 0) : 0;
+    if (stockInicial > 0) {
+      await ledger.registrarMovimiento({
+        productoId: ref.id,
+        tipo: ledger.TIPOS.ENTRADA_IMPORTACION,
+        cantidad: stockInicial,
+        origenTipo: 'producto',
+        origenId: ref.id,
+        origenNumero: codigoFinal,
+        usuarioId: req.user.uid || req.user.id,
+        usuarioNombre: req.user.nombre || req.user.email,
+        motivo: 'Stock inicial al crear el producto',
+        costoUnitario: costoFinal
+      });
+      nuevoProducto.stock = stockInicial;
+    }
 
     await auditar({
       accion: 'CREAR_PRODUCTO',
@@ -357,7 +384,23 @@ router.put('/:id', authenticate, validarTenant('products'), async (req, res) => 
     if (categoriaId) { cambios.categoriaId = categoriaId; cambios.categoria = categoriaNombre || ''; }
     if (tipo) cambios.tipo = tipo;
     if (precioVenta !== undefined) cambios.precioVenta = precioVenta;
-    if (stock !== undefined) cambios.stock = stock;
+
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ INV-KARDEX-001: EL STOCK YA NO SE EDITA DESDE AQUÍ.
+    // Este era el punto ciego del sistema: cualquier admin o comercial
+    // sobrescribía el stock sin dejar rastro del valor anterior. La auditoría
+    // registraba "editó producto X" pero no de qué número a qué número — origen
+    // de descuadres imposibles de investigar.
+    // El stock solo se mueve por: compra, venta, taller, anulación o AJUSTE
+    // con motivo obligatorio (POST /api/inventario/ajuste).
+    // El campo se IGNORA en silencio salvo aviso: no se devuelve error para no
+    // romper clientes antiguos que sigan enviándolo.
+    // ══════════════════════════════════════════════════════════════════════
+    let avisoStock = null;
+    if (stock !== undefined && Number(stock) !== (Number(actual.stock) || 0)) {
+      avisoStock = 'El stock no se modifica desde el formulario del producto. Usa Inventario → Ajustar stock para dejar el movimiento registrado en el Kardex.';
+    }
+
     if (stockMinimo !== undefined) cambios.stockMinimo = stockMinimo;
     if (descripcion !== undefined) cambios.descripcion = descripcion;
     if (activo !== undefined) cambios.activo = activo;
@@ -407,7 +450,10 @@ router.put('/:id', authenticate, validarTenant('products'), async (req, res) => 
     res.json({
       id,
       ...cambios,
-      compuestosAfectados: compuestosAfectados.length > 0 ? compuestosAfectados : undefined
+      compuestosAfectados: compuestosAfectados.length > 0 ? compuestosAfectados : undefined,
+      // ✅ INV-KARDEX-001: la UI muestra este aviso si el usuario intentó
+      // cambiar el stock desde el formulario.
+      avisoStock: avisoStock || undefined
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -529,7 +575,21 @@ router.post('/importar', authenticate, async (req, res) => {
     const adminId = req.adminId || req.user.uid || req.user.id;
 
     let creados = 0, errores = [];
-    const batch = db.batch();
+
+    // ✅ INV-KARDEX-001: la importación ahora escribe 2 documentos por producto
+    // (el producto + su movimiento de carga inicial). Un batch de Firestore
+    // admite 500 operaciones, así que el batch único anterior se rompería a
+    // partir de 250 productos. Se commitea por lotes de 400 operaciones.
+    let batch = db.batch();
+    let opsEnBatch = 0;
+    const LIMITE_OPS = 400;
+    const commitSiLleno = async () => {
+      if (opsEnBatch >= LIMITE_OPS) {
+        await batch.commit();
+        batch = db.batch();
+        opsEnBatch = 0;
+      }
+    };
 
     // ✅ FIX CONSECUTIVO: antes se llamaba a generarCodigo() (consulta a
     // Firestore) DENTRO del for, por cada fila. Como el batch.commit() solo
@@ -594,6 +654,11 @@ router.post('/importar', authenticate, async (req, res) => {
         continue;
       }
 
+      const costoImp = parseFloat(p.PrecioCosto || p['PrecioCosto '] || 0) || 0;
+      const stockImp = tipoCSV !== 'servicio'
+        ? (parseInt(p.Stock || p['Stock '] || 0) || 0)
+        : 0;
+
       const ref = db.collection('products').doc();
       batch.set(ref, {
         nombre: nombreProducto.toUpperCase(),
@@ -601,9 +666,9 @@ router.post('/importar', authenticate, async (req, res) => {
         categoriaId,
         categoria: categoriaNombre,
         tipo: tipoCSV,
-        precioCosto: parseFloat(p.PrecioCosto || p['PrecioCosto '] || 0) || 0,
+        precioCosto: costoImp,
         precioVenta: parseFloat(p.PrecioVenta || p['PrecioVenta '] || 0) || 0,
-        stock: parseInt(p.Stock || p['Stock '] || 0) || 0,
+        stock: stockImp,
         stockMinimo: parseInt(p.StockMinimo || p['StockMinimo '] || 0) || 0,
         tieneStock: tipoCSV !== 'servicio',
         componentes: [],
@@ -615,10 +680,45 @@ router.post('/importar', authenticate, async (req, res) => {
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
+      opsEnBatch++;
+
+      // ✅ INV-KARDEX-001: cada unidad importada nace con su asiento. Aquí NO
+      // se usa registrarMovimiento() porque el producto todavía no existe en
+      // Firestore (está en el batch sin commitear) y la transacción no podría
+      // leerlo. Como es una creación, no hay concurrencia posible:
+      // stockAntes = 0 es un hecho, no una suposición.
+      if (stockImp > 0) {
+        batch.set(db.collection(ledger.COL).doc(), {
+          adminId,
+          productoId: ref.id,
+          productoNombre: nombreProducto.toUpperCase(),
+          productoCodigo: codigoFinal,
+          categoria: categoriaNombre,
+          tipo: ledger.TIPOS.ENTRADA_IMPORTACION,
+          tipoLabel: ledger.ETIQUETAS[ledger.TIPOS.ENTRADA_IMPORTACION],
+          cantidad: stockImp,
+          stockAntes: 0,
+          stockDespues: stockImp,
+          stockNegativo: false,
+          origenTipo: 'importacion', origenId: ref.id, origenNumero: codigoFinal,
+          clienteId: null, clienteNombre: null, proveedorNombre: null,
+          usuarioId: req.user.uid || req.user.id,
+          usuarioNombre: req.user.nombre || req.user.email,
+          motivo: 'Carga inicial por importación masiva',
+          costoUnitario: costoImp,
+          valorMovimiento: Math.round(stockImp * costoImp),
+          fecha: new Date().toISOString(),
+          reconstruido: false,
+          timestamp: admin.firestore.FieldValue.serverTimestamp()
+        });
+        opsEnBatch++;
+      }
+
       creados++;
+      await commitSiLleno();
     }
 
-    await batch.commit();
+    if (opsEnBatch > 0) await batch.commit();
 
     await auditar({
       accion: 'IMPORTAR_PRODUCTOS',

@@ -20,18 +20,10 @@ const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 // Catálogo de módulos conocidos (claves reales del sistema, en minúscula).
 // Si un suscriptor tiene claves fuera de este catálogo, se muestran y se
 // CONSERVAN — el editor nunca elimina claves desconocidas en silencio.
-// FIX MODULOS-003: faltaban claves reales del sistema en el catálogo.
-// Por eso un suscriptor nuevo (p. ej. Gabriel) no veía 'vencimientos'
-// para activarlo, y módulos como dashboard/proveedores/mi_empresa
-// aparecían marcados como "(clave personalizada)". El editor ya
-// conservaba las claves desconocidas; lo que faltaba era poder
-// ACTIVARLAS desde aquí.
 const CATALOGO_MODULOS = [
-  { key: 'dashboard',    label: 'Dashboard' },
   { key: 'ordenes',      label: 'Órdenes de servicio' },
   { key: 'cotizaciones', label: 'Cotizaciones' },
   { key: 'clientes',     label: 'Clientes' },
-  { key: 'proveedores',  label: 'Proveedores' },
   { key: 'productos',    label: 'Productos' },
   { key: 'inventarios',  label: 'Inventarios' },
   { key: 'logistica',    label: 'Logística' },
@@ -43,14 +35,18 @@ const CATALOGO_MODULOS = [
   { key: 'cxp',          label: 'Cuentas por Pagar' },
   { key: 'eri',          label: 'ERI' },
   { key: 'reportes',     label: 'Reportes' },
-  { key: 'vencimientos', label: 'Vencimientos' },
-  { key: 'comercial',    label: 'Comercial / Telemercadeo' },
-  { key: 'usuarios',     label: 'Usuarios' },
-  { key: 'mi_empresa',   label: 'Mi Empresa' },
   { key: 'qr',           label: 'QR Activos ⭐ (solo invitados)' },
   { key: 'llamadas_ia',  label: 'Llamadas IA — Lucy ⭐ (solo invitados)' },
  { key: 'anny_ia',      label: 'WhatsApp IA Anny ⭐ (solo invitados)' },
+  { key: 'inventario_pro', label: 'Inventario Inteligente ⭐ (solo invitados)' },
 ];
+
+// ✅ INV-KARDEX-003: claves PREMIUM. Semántica opuesta al resto del catálogo:
+// la convención "lista vacía = todos los módulos" NO aplica a estas. Solo se
+// conceden si están marcadas explícitamente, y el backend las valida igual
+// (services/capacidadesTenant.js → PREMIUM). Si aquí se agrega una clave, debe
+// agregarse también allá, o el panel prometerá algo que el backend niega.
+const CLAVES_PREMIUM = ['llamadas_ia', 'anny_ia', 'inventario_pro'];
 
 const ESTADO_UI = {
   trial:      { txt: 'Prueba',     bg: '#eef2ff', col: '#5b5bd6' },
@@ -89,12 +85,6 @@ const PanelSuscriptores = () => {
 
   // ✅ CAPACIDAD-TENANT-002: diagnóstico de órdenes atascadas por falta de módulo
   const [editAtascos, setEditAtascos] = useState(null); // suscriptor en revisión
-
-  // ── FIX ANNY-CFG-010: perfil de negocio de Anny por tenant ──
-  // Es lo que hace a Anny polifacética. Sin esto, la Anny de un
-  // suscriptor de software le ofrecería recarga de extintores.
-  const [editPerfil, setEditPerfil] = useState(null);
-  const [perfilCfg, setPerfilCfg] = useState(null);
   const [atascos, setAtascos] = useState(null);         // respuesta del backend
   const [revisando, setRevisando] = useState(false);
 
@@ -198,49 +188,6 @@ const PanelSuscriptores = () => {
   };
 
   // ─── Abrir modal de módulos ────────────────────────────────────────────────
-  // ── FIX ANNY-CFG-010 ──
-  const abrirPerfil = async (s) => {
-    setEditPerfil(s);
-    setPerfilCfg(null);
-    try {
-      const { data } = await axios.get(`${API}/anny/perfil/${s.id}`, { headers });
-      setPerfilCfg({
-        nombreAgente: data.perfil?.nombreAgente || 'Anny',
-        empresa: data.perfil?.empresa || (s.empresa || s.nombre || ''),
-        vertical: data.perfil?.vertical || '',
-        queVende: data.perfil?.queVende || '',
-        fuentePrecios: data.perfil?.fuentePrecios || 'products',
-        reglasNegocio: data.perfil?.reglasNegocio || '',
-        notificarEscalamientoA: data.perfil?.notificarEscalamientoA || '',
-        configurado: !!data.perfil?.configurado
-      });
-    } catch (e) {
-      setPerfilCfg({ error: e.response?.data?.error || 'No se pudo cargar el perfil.' });
-    }
-  };
-
-  const guardarPerfil = async () => {
-    if (!editPerfil || !perfilCfg) return;
-    setGuardando(true);
-    try {
-      await axios.put(`${API}/anny/perfil/${editPerfil.id}`, {
-        nombreAgente: perfilCfg.nombreAgente,
-        empresa: perfilCfg.empresa,
-        vertical: perfilCfg.vertical,
-        queVende: perfilCfg.queVende,
-        fuentePrecios: perfilCfg.fuentePrecios,
-        reglasNegocio: perfilCfg.reglasNegocio,
-        notificarEscalamientoA: perfilCfg.notificarEscalamientoA
-      }, { headers });
-      flashExito('Perfil de Anny actualizado');
-      setEditPerfil(null);
-    } catch (e) {
-      setError(e.response?.data?.error || 'No se pudo guardar el perfil de Anny.');
-    } finally {
-      setGuardando(false);
-    }
-  };
-
   const abrirMods = (s) => {
     setModsSel(s.modulos || []);
     setEditMods(s);
@@ -385,7 +332,7 @@ const PanelSuscriptores = () => {
               {(s.modulos || []).length === 0
                 ? <span style={st.chip}>Todos los módulos</span>
                 : s.modulos.map(m => (
-                    <span key={m} style={m === 'qr' ? st.chipQR : st.chip}>
+                    <span key={m} style={(m === 'qr' || CLAVES_PREMIUM.includes(m)) ? st.chipQR : st.chip}>
                       {CATALOGO_MODULOS.find(c => c.key === m)?.label.replace(' ⭐ (solo invitados)', ' ⭐') || m}
                     </span>
                   ))}
@@ -409,11 +356,6 @@ const PanelSuscriptores = () => {
               {(s.modulos || []).includes('llamadas_ia') && (
                 <button style={st.btnGhost} onClick={() => abrirMinutos(s)}>📞 Minutos Lucy</button>
               )}
-              {/* ✅ ANNY-CFG-010: solo si el suscriptor tiene Anny activa.
-                  Lista vacía = todos los módulos = sí tiene Anny. */}
-              {((s.modulos || []).length === 0 || (s.modulos || []).includes('anny_ia')) && (
-                <button style={st.btnGhost} onClick={() => abrirPerfil(s)}>🤖 Perfil de Anny</button>
-              )}
             </div>
           </div>
         );
@@ -421,79 +363,6 @@ const PanelSuscriptores = () => {
 
       {!cargando && suscriptores.length === 0 && !error && (
         <div style={{ ...st.card, color: '#6b6b85', textAlign: 'center' }}>No hay suscriptores registrados todavía.</div>
-      )}
-
-      {/* ─── ✅ ANNY-CFG-010 · MODAL: PERFIL DE ANNY ─── */}
-      {editPerfil && (
-        <div style={st.overlay} onClick={() => !guardando && setEditPerfil(null)}>
-          <div style={st.modal} onClick={(ev) => ev.stopPropagation()}>
-            <h2 style={{ ...st.h1, fontSize: 17 }}>🤖 Perfil de Anny — {editPerfil.empresa || editPerfil.nombre || editPerfil.email}</h2>
-
-            {!perfilCfg ? (
-              <div style={{ color: '#6b6b85', fontSize: 13, marginTop: 14 }}>Cargando perfil...</div>
-            ) : perfilCfg.error ? (
-              <div style={{ color: '#dc2626', fontSize: 13, marginTop: 14 }}>{perfilCfg.error}</div>
-            ) : (
-              <>
-                <div style={{ background: '#f7f7fb', borderRadius: 10, padding: '12px 14px', marginTop: 14, fontSize: 12.5, color: '#3d3d5c', lineHeight: 1.55 }}>
-                  Esto define QUIÉN es Anny para este suscriptor. Si queda vacío, se comporta
-                  con el perfil por defecto (extintores y seguridad industrial).
-                  {perfilCfg.configurado ? '' : ' Este suscriptor todavía usa el perfil por defecto.'}
-                </div>
-
-                <label style={st.label}>Nombre de la agente</label>
-                <input style={st.input} value={perfilCfg.nombreAgente}
-                  onChange={e => setPerfilCfg(c => ({ ...c, nombreAgente: e.target.value }))} />
-
-                <label style={st.label}>Nombre de la empresa</label>
-                <input style={st.input} value={perfilCfg.empresa}
-                  onChange={e => setPerfilCfg(c => ({ ...c, empresa: e.target.value }))} />
-
-                <label style={st.label}>Sector / actividad</label>
-                <input style={st.input} value={perfilCfg.vertical}
-                  placeholder="software de gestión empresarial en Colombia"
-                  onChange={e => setPerfilCfg(c => ({ ...c, vertical: e.target.value }))} />
-
-                <label style={st.label}>Qué ofrece</label>
-                <textarea style={{ ...st.input, minHeight: 66, fontFamily: 'inherit', resize: 'vertical' }}
-                  value={perfilCfg.queVende}
-                  placeholder="suscripciones mensuales a la plataforma por planes"
-                  onChange={e => setPerfilCfg(c => ({ ...c, queVende: e.target.value }))} />
-
-                <label style={st.label}>De dónde salen los precios</label>
-                <select style={st.input} value={perfilCfg.fuentePrecios}
-                  onChange={e => setPerfilCfg(c => ({ ...c, fuentePrecios: e.target.value }))}>
-                  <option value="products">Catálogo de productos</option>
-                  <option value="planes">Planes de suscripción</option>
-                  <option value="ninguna">No maneja precios</option>
-                </select>
-                <div style={{ color: '#6b6b85', fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
-                  Si eliges algo distinto a "catálogo de productos", Anny no cargará productos
-                  físicos y no podrá ofrecerlos. Es lo que evita que le venda extintores a un
-                  suscriptor de software.
-                </div>
-
-                <label style={st.label}>Reglas propias de esta empresa (opcional)</label>
-                <textarea style={{ ...st.input, minHeight: 60, fontFamily: 'inherit', resize: 'vertical' }}
-                  value={perfilCfg.reglasNegocio}
-                  placeholder="No damos descuentos por WhatsApp. El domicilio se cobra aparte."
-                  onChange={e => setPerfilCfg(c => ({ ...c, reglasNegocio: e.target.value }))} />
-
-                <label style={st.label}>WhatsApp para escalamientos (opcional)</label>
-                <input style={st.input} value={perfilCfg.notificarEscalamientoA}
-                  placeholder="Si se deja vacío, usa el WhatsApp de avisos del suscriptor"
-                  onChange={e => setPerfilCfg(c => ({ ...c, notificarEscalamientoA: e.target.value }))} />
-
-                <div style={{ display: 'flex', gap: 10, marginTop: 18 }}>
-                  <button style={st.btn} onClick={guardarPerfil} disabled={guardando}>
-                    {guardando ? 'Guardando...' : 'Guardar perfil'}
-                  </button>
-                  <button style={st.btnGhost} onClick={() => setEditPerfil(null)} disabled={guardando}>Cancelar</button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
       )}
 
       {/* ─── ✅ LUCY-MINUTOS-001 · MODAL: MINUTOS DE LUCY ─── */}
@@ -599,7 +468,8 @@ const PanelSuscriptores = () => {
             {CATALOGO_MODULOS.map(m => (
               <label key={m.key} style={st.modRow}>
                 <input type="checkbox" checked={modsSel.includes(m.key)} onChange={() => toggleMod(m.key)} />
-                <span style={m.key === 'qr' ? { color: '#8b5cf6', fontWeight: 700 } : {}}>{m.label}</span>
+                {/* ✅ INV-KARDEX-003 */}
+                <span style={(m.key === 'qr' || CLAVES_PREMIUM.includes(m.key)) ? { color: '#8b5cf6', fontWeight: 700 } : {}}>{m.label}</span>
               </label>
             ))}
 
@@ -612,7 +482,7 @@ const PanelSuscriptores = () => {
             ))}
 
             {modsSel.length === 0 && (
-              <div style={st.aviso}>Lista vacía = el suscriptor ve <b>TODOS</b> los módulos (convención del sistema). Si quieres restringir, marca solo los que aplican.</div>
+              <div style={st.aviso}>Lista vacía = el suscriptor ve <b>todos los módulos operativos</b> (convención del sistema). Los módulos ⭐ premium son la excepción: <b>nunca</b> se activan solos, hay que marcarlos aquí uno por uno.</div>
             )}
 
             <div style={{ ...st.btns, justifyContent: 'flex-end' }}>

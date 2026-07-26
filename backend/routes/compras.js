@@ -52,9 +52,18 @@ const genNumeroCompra = async (adminId) => {
   return `CMP-${String(siguiente).padStart(4, '0')}`;
 };
 
+// ══════════════════════════════════════════════════════════════════════════════
+// FIX INV-KARDEX-001: motor del Kardex.
+// La lógica de control (destinos, alertas de margen, try/catch) queda intacta.
+// Solo cambia la escritura del stock de `products`. NOTA: taller_insumos NO se
+// instrumenta — es otra colección, con su propio ciclo, y meterla aquí mezclaría
+// dos inventarios distintos en un mismo kardex.
+// ══════════════════════════════════════════════════════════════════════════════
+const ledger = require('../services/inventoryLedger');
+
 // ─── HELPER: actualizar stock al confirmar compra ────────────────────────────
 // destino 'taller' → taller_insumos | destino 'catalogo' → products
-const aplicarCompraAInventario = async (lineas) => {
+const aplicarCompraAInventario = async (lineas, compra = {}, usuario = {}) => {
   const alertasMargen = [];
   for (const linea of lineas) {
     if (!linea.productoId || !linea.cantidad || linea.cantidad <= 0) continue;
@@ -75,8 +84,9 @@ const aplicarCompraAInventario = async (lineas) => {
         const prod = prodDoc.data();
         const costoPrevio = prod.precioCosto || 0;
         const costoNuevo = Number(linea.precioUnitario) || 0;
+        // ✅ INV-KARDEX-001: el stock sale de este update y pasa al ledger.
+        // Aquí solo quedan los campos que NO son stock (precioCosto).
         const update = {
-          stock: admin.firestore.FieldValue.increment(Number(linea.cantidad)),
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         };
         if (costoNuevo > 0 && costoNuevo !== costoPrevio) {
@@ -99,6 +109,22 @@ const aplicarCompraAInventario = async (lineas) => {
           }
         }
         await prodRef.update(update);
+
+        // ✅ INV-KARDEX-001: la entrada queda registrada con proveedor y número
+        // de compra. El costo del movimiento es el de ESTA factura, no el del
+        // producto: así el kardex valoriza cada entrada a lo que realmente costó.
+        await ledger.registrarMovimiento({
+          productoId: linea.productoId,
+          tipo: ledger.TIPOS.ENTRADA_COMPRA,
+          cantidad: Number(linea.cantidad),
+          origenTipo: 'compra', origenId: compra.id || null,
+          origenNumero: compra.numero || null,
+          proveedorNombre: compra.proveedorNombre || null,
+          usuarioId: usuario.id || null,
+          usuarioNombre: usuario.nombre || null,
+          costoUnitario: costoNuevo > 0 ? costoNuevo : null,
+          motivo: compra.numeroFactura ? `Factura ${compra.numeroFactura}` : ''
+        });
       }
     } catch (e) {
       console.warn('Error actualizando inventario compra:', linea.productoId, e.message);
@@ -388,7 +414,12 @@ router.post('/:id/confirmar', async (req, res) => {
     }
 
     // 1. Aplicar inventario
-    const alertasMargen = await aplicarCompraAInventario(compra.lineas || []);
+    // ✅ INV-KARDEX-001: contexto de la compra para el kardex.
+    const alertasMargen = await aplicarCompraAInventario(
+      compra.lineas || [],
+      { id: req.params.id, numero: compra.numero, proveedorNombre: compra.proveedorNombre, numeroFactura: compra.numeroFactura },
+      { id: req.user.uid || req.user.id, nombre: req.user.nombre || req.user.email }
+    );
 
     // 2. Crear egreso
     const { db: dbRef } = require('../config/firebase');
@@ -519,13 +550,34 @@ router.post('/:id/anular', async (req, res) => {
       if (!linea.productoId || !linea.cantidad || linea.cantidad <= 0) continue;
       try {
         const esTaller = linea.destino === 'taller';
-        const coleccion = esTaller ? 'taller_insumos' : 'products';
-        const docRef = db.collection(coleccion).doc(linea.productoId);
-        const docSnap = await docRef.get();
-        if (docSnap.exists) {
-          await docRef.update({
-            stock: admin.firestore.FieldValue.increment(-Number(linea.cantidad)),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        if (esTaller) {
+          // taller_insumos conserva el comportamiento anterior: no entra al kardex.
+          const insRef = db.collection('taller_insumos').doc(linea.productoId);
+          const insSnap = await insRef.get();
+          if (insSnap.exists) {
+            await insRef.update({
+              stock: admin.firestore.FieldValue.increment(-Number(linea.cantidad)),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+          }
+        } else {
+          // ✅ INV-KARDEX-001: la reversión NO se bloquea aunque deje el stock
+          // en negativo. Anular una compra es un hecho contable y no puede
+          // quedar atrapado por una razón de inventario — mismo criterio que
+          // el dinero que entra a caja aunque falten fotos.
+          // El negativo queda marcado y con nota explicativa en el movimiento,
+          // para que quien lo vea sepa que hay ventas sin respaldo por corregir.
+          await ledger.registrarMovimiento({
+            productoId: linea.productoId,
+            tipo: ledger.TIPOS.SALIDA_DEVOLUCION_PROVEEDOR,
+            cantidad: Number(linea.cantidad),
+            origenTipo: 'compra', origenId: req.params.id,
+            origenNumero: compra.numero || null,
+            proveedorNombre: compra.proveedorNombre || null,
+            usuarioId: req.user.uid || req.user.id,
+            usuarioNombre: req.user.nombre || req.user.email,
+            costoUnitario: Number(linea.precioUnitario) || null,
+            motivo: `Anulación de compra: ${motivo}`
           });
         }
       } catch (e) {

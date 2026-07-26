@@ -40,6 +40,42 @@
 // Firestore (crear orden, cambiar estado, completar taller).
 // NUNCA dentro de un bucle por documento ni en endpoints de listado.
 // ============================================================
+//
+// ============================================================
+// FIX INV-KARDEX-001 — CLAVES PREMIUM OPT-IN
+// ------------------------------------------------------------
+// PROBLEMA
+// La convención "modulos vacío = TODOS activos" es correcta para
+// las capacidades OPERATIVAS (taller, logistica, cxc, qr): un
+// suscriptor sin restricción configurada debe poder operar. Pero
+// aplicada a los módulos COMERCIALES premium produce lo contrario
+// de lo que el negocio necesita: cualquier tenant con `modulos`
+// vacío quedaría con Kardex, Lucy y Anny encendidos gratis.
+//
+// SOLUCIÓN
+// Se separan dos universos con semánticas opuestas:
+//
+//   CLAVES (operativas)  → vacío = TODAS activas   (fail-open)
+//   PREMIUM (comerciales)→ vacío = NINGUNA activa  (opt-in)
+//
+// Un módulo premium solo se concede si su clave está listada
+// EXPLÍCITAMENTE en users/{adminId}.modulos. Sandra las activa una
+// por una desde el Panel de Suscriptores.
+//
+// POR QUÉ 'qr' NO SE MUEVE A PREMIUM
+// 'qr' es a la vez capacidad operativa (la máquina de estados de
+// orders.js decide flujos con ella) y módulo comercial. Moverla a
+// opt-in cambiaría el flujo de órdenes de todo tenant con `modulos`
+// vacío — un cambio de comportamiento que NO pertenece a este fix.
+// Se deja en CLAVES. Su restricción comercial se sigue haciendo en
+// la UI, como hasta hoy.
+//
+// FAIL-CLOSED (inverso al de las operativas)
+// Si la lectura de Firestore falla, un módulo premium se niega. Un
+// error de red nunca puede regalar un módulo de pago. Es la decisión
+// segura: el peor caso es que Sandra vea un "no disponible" pasajero,
+// no que un competidor acceda al Kardex.
+// ============================================================
 
 const { db } = require('../config/firebase');
 
@@ -49,9 +85,19 @@ const TTL_MS = 60 * 1000;
 // adminId → { capacidades, expira }
 const CACHE = new Map();
 
+// ✅ INV-KARDEX-001: caché de módulos premium. Se declara AQUÍ, junto a CACHE,
+// y no más abajo: invalidarCapacidades() la referencia, y dejar la declaración
+// después de esa función crearía una Temporal Dead Zone.
+const CACHE_PREMIUM = new Map();
+
 // Capacidades conocidas por el sistema. Cada una corresponde 1:1 con una
 // clave real del array `modulos` en la colección `users`.
 const CLAVES = ['taller', 'logistica', 'cxc', 'qr'];
+
+// ✅ INV-KARDEX-001: módulos comerciales premium. Semántica OPT-IN: solo se
+// conceden si la clave está listada explícitamente en users/{adminId}.modulos.
+// La convención "vacío = todo activo" NO aplica aquí.
+const PREMIUM = ['llamadas_ia', 'anny_ia', 'inventario_pro'];
 
 // Todas activas = comportamiento histórico del sistema.
 const TODAS = Object.freeze(
@@ -105,6 +151,76 @@ async function getCapacidades(adminId) {
 function invalidarCapacidades(adminId) {
   if (adminId) CACHE.delete(adminId);
   else CACHE.clear();
+  CACHE_PREMIUM.delete(adminId || '');
+  if (!adminId) CACHE_PREMIUM.clear();
 }
 
-module.exports = { getCapacidades, invalidarCapacidades, todasActivas };
+// ════════════════════════════════════════════════════════════════════════════
+// ✅ INV-KARDEX-001: MÓDULOS PREMIUM (OPT-IN)
+// ════════════════════════════════════════════════════════════════════════════
+
+// (CACHE_PREMIUM se declara arriba, junto a CACHE)
+
+/**
+ * ¿El tenant tiene contratado un módulo premium?
+ * Semántica OPT-IN: `modulos` vacío o ausente = NO lo tiene.
+ * FAIL-CLOSED: si la lectura falla, devuelve false.
+ *
+ * @param {string} adminId  UID del admin dueño del tenant.
+ * @param {string} clave    p.ej. 'inventario_pro'
+ * @returns {Promise<boolean>}
+ */
+async function tieneModuloPremium(adminId, clave) {
+  if (!adminId || !clave) return false;
+
+  const k = String(clave).toLowerCase().trim();
+  // Una clave que no está declarada como premium no se gestiona aquí.
+  if (!PREMIUM.includes(k)) return false;
+
+  const enCache = CACHE_PREMIUM.get(adminId);
+  if (enCache && enCache.expira > Date.now()) return enCache.modulos.has(k);
+
+  try {
+    const doc = await db.collection('users').doc(adminId).get();
+    const mods = doc.exists && Array.isArray(doc.data().modulos)
+      ? doc.data().modulos
+      : [];
+    const set = new Set(
+      mods.map(m => String(m || '').toLowerCase().trim()).filter(Boolean)
+    );
+    CACHE_PREMIUM.set(adminId, { modulos: set, expira: Date.now() + TTL_MS });
+    return set.has(k);
+  } catch (e) {
+    // FAIL-CLOSED: un error de red no regala un módulo de pago.
+    console.error('INV-KARDEX-001 lectura premium falló, fail-closed:', e.message);
+    return false;
+  }
+}
+
+/**
+ * Middleware Express que exige un módulo premium.
+ * Uso: router.use(requireModuloPremium('inventario_pro'))
+ */
+function requireModuloPremium(clave) {
+  return async (req, res, next) => {
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const tiene = await tieneModuloPremium(adminId, clave);
+    if (!tiene) {
+      return res.status(403).json({
+        error: 'MODULO_NO_ACTIVO',
+        modulo: clave,
+        mensaje: 'Este módulo no está activo en tu plan. Contacta a Control360 para activarlo.'
+      });
+    }
+    next();
+  };
+}
+
+module.exports = {
+  getCapacidades,
+  invalidarCapacidades,
+  todasActivas,
+  PREMIUM,
+  tieneModuloPremium,
+  requireModuloPremium
+};
