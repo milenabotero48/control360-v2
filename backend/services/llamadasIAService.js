@@ -205,20 +205,35 @@ const obtenerSede = async (adminId, empresaId, cacheSedes) => {
     if (doc.exists && doc.data().user_id === adminId) sede = { id: doc.id, ...doc.data() };
   }
 
-  // Sin empresaId asignado → sede principal del suscriptor (la primera activa).
+  // ✅ SEDE-PRINCIPAL-001: sin empresaId asignado → la sede marcada como
+  // PRINCIPAL por el suscriptor. Antes se tomaba "la primera que devuelva la
+  // base de datos", un orden arbitrario que podía hacer que Lucy dictara la
+  // dirección de otra ciudad a un cliente importado sin empresa.
+  // Si no hay ninguna marcada, `sede` queda null y el motor NO llama.
   if (!sede) {
-    const snap = await db.collection('companies').where('user_id', '==', adminId).limit(5).get();
+    const snap = await db.collection('companies')
+      .where('user_id', '==', adminId)
+      .where('esPrincipal', '==', true)
+      .limit(1)
+      .get();
     if (!snap.empty) sede = { id: snap.docs[0].id, ...snap.docs[0].data() };
   }
 
+  // Qué número le decimos al cliente — lo elige el suscriptor por sede.
+  const telefonoDeSede = (s) => {
+    const preferido = s[s.telefonoPrincipal] || null;
+    return preferido || s.phone || s.cellphone || s.whatsapp || '';
+  };
+
   const resuelta = sede
     ? {
+        // "completa" = Lucy puede dictar la dirección con confianza.
         completa:  !!(sede.address && String(sede.address).trim()),
         nombre:    sede.name || '',
         direccion: sede.address || '',
         ciudad:    sede.ciudad || '',
-        telefono:  sede.phone || sede.cellphone || sede.whatsapp || '',
-        horario:   sede.horarioAtencion || HORARIO_FALLBACK,
+        telefono:  telefonoDeSede(sede),
+        horario:   (sede.horarioAtencion && sede.horarioAtencion.trim()) || HORARIO_FALLBACK,
       }
     : { completa: false, nombre: '', direccion: '', ciudad: '', telefono: '', horario: HORARIO_FALLBACK };
 
@@ -411,6 +426,7 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
       cliente_inexistente: 0,
       fuera_de_horario: 0,
       fallo_proveedor: 0,
+      sin_sede: 0, // ✅ SEDE-PRINCIPAL-001
     };
 
     for (const [adminId, vencimientos] of Object.entries(porTenant)) {
@@ -493,6 +509,17 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
           // Lucy no haga ninguna consulta durante la llamada (menos latencia).
           const perfil = clasificarActivo(venc.descripcionEquipo, config.reglasClasificacion);
           const sede = await obtenerSede(adminId, venc.empresaId || cliente.empresaId, cacheSedes);
+
+          // ✅ SEDE-PRINCIPAL-001 — REGLA: sin dirección de sede, NO se llama.
+          // Decisión de negocio de Sandra: una llamada con dirección equivocada
+          // cuesta el cliente y obliga a rellamar (minutos ya pagados); una
+          // llamada no hecha solo cuesta esperar. El vencimiento queda listado
+          // con el motivo para que se corrija la ficha del cliente.
+          if (!sede.completa) {
+            motivos.sin_sede++;
+            console.warn(`[LLAMADAS-IA] Vencimiento ${venc.id} sin sede con dirección — omitido`);
+            continue;
+          }
 
           // 6) ✅ FIX LUCY-ELEVEN-001b: registroRef se declara ANTES de usarse
           // (antes se usaba registroRef.id dos líneas antes de su declaración

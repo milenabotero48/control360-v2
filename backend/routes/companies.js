@@ -37,6 +37,43 @@ const limpiarEmpresa = (data) => {
   return resto;
 };
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ SEDE-PRINCIPAL-001 (2026-07-26)
+// ─────────────────────────────────────────────────────────────────────────────
+// Lucy dicta por teléfono la dirección de la sede que atiende a cada cliente.
+// Normalmente la resuelve por `empresaId` del cliente, pero los clientes
+// importados antes de que ese campo fuera obligatorio pueden no tenerlo. Antes
+// el respaldo era "la primera sede que devuelva la base de datos" — un orden
+// arbitrario que podía hacer que Lucy dictara la dirección de OTRA ciudad.
+//
+// Ahora el suscriptor marca explícitamente:
+//   · esPrincipal      → sede de respaldo cuando el cliente no tiene una
+//   · horarioAtencion  → horario propio de esa sede (Lucy lo dice en la llamada)
+//   · telefonoPrincipal→ cuál de los números se le da al cliente
+//
+// Y si NO hay sede principal marcada, Lucy no llama a esos clientes: quedan
+// omitidos con motivo visible. Una llamada con dirección equivocada cuesta el
+// cliente; una llamada no hecha solo cuesta esperar.
+// ═════════════════════════════════════════════════════════════════════════════
+const TELEFONOS_VALIDOS = ['phone', 'cellphone', 'whatsapp'];
+
+// Solo puede haber UNA sede principal por suscriptor. Al marcar una, se
+// desmarcan las demás en la misma operación.
+const desmarcarOtrasPrincipales = async (userId, exceptoId) => {
+  const snap = await db.collection('companies')
+    .where('user_id', '==', userId)
+    .where('esPrincipal', '==', true)
+    .get();
+  const batch = db.batch();
+  let cambios = 0;
+  snap.docs.forEach(d => {
+    if (d.id === exceptoId) return;
+    batch.update(d.ref, { esPrincipal: false, updated_at: new Date().toISOString() });
+    cambios++;
+  });
+  if (cambios) await batch.commit();
+};
+
 router.get('/', async (req, res) => {
   try {
     // AISLAMIENTO SAAS: usar adminId del token (ya resuelto en auth.js)
@@ -68,7 +105,8 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, web, whatsapp, anchoImpresoraPos } = req.body;
+    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, web, whatsapp, anchoImpresoraPos,
+            esPrincipal, horarioAtencion, telefonoPrincipal } = req.body;
 
     if (!name)                      return res.status(400).json({ error: 'Nombre requerido' });
     if (!validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido: mínimo 8 dígitos' });
@@ -99,11 +137,18 @@ router.post('/', async (req, res) => {
       logo:       logoUrl || '',
       // Ola 3: ancho impresora POS (mm) — default 58, configurable a 80.
       anchoImpresoraPos: (() => { const a = parseInt(anchoImpresoraPos); return (!isNaN(a) && a >= 48 && a <= 112) ? a : 58; })(),
+      // ✅ SEDE-PRINCIPAL-001 — datos que Lucy usa en la llamada
+      esPrincipal:       esPrincipal === true,
+      horarioAtencion:   (horarioAtencion || '').trim(),
+      telefonoPrincipal: TELEFONOS_VALIDOS.includes(telefonoPrincipal) ? telefonoPrincipal : 'phone',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
 
     const docRef = await db.collection('companies').add(newCompany);
+    if (newCompany.esPrincipal) {
+      await desmarcarOtrasPrincipales(req.user.uid, docRef.id);
+    }
     res.status(201).json({ id: docRef.id, ...newCompany });
   } catch (error) {
     console.error('POST /companies error:', error);
@@ -114,7 +159,20 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     // Aceptamos configCertificado pero IGNORAMOS pinAutorizacion (deprecado).
-    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, configCertificado, web, whatsapp, anchoImpresoraPos } = req.body;
+    const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, configCertificado, web, whatsapp, anchoImpresoraPos,
+            esPrincipal, horarioAtencion, telefonoPrincipal } = req.body;
+
+    // ✅ SEDE-PRINCIPAL-001 — VALIDACIÓN DE PROPIEDAD (no existía)
+    // Esta ruta actualizaba la empresa por id SIN comprobar que perteneciera al
+    // suscriptor de la sesión: cualquier usuario autenticado podía modificar la
+    // empresa de otro tenant conociendo su id. Se cierra aquí porque además
+    // necesitamos el user_id para gestionar la sede principal.
+    const userId = req.adminId || req.user.uid || req.user.id;
+    const empresaDoc = await db.collection('companies').doc(req.params.id).get();
+    if (!empresaDoc.exists) return res.status(404).json({ error: 'Empresa no encontrada' });
+    if (empresaDoc.data().user_id !== userId) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
 
     if (nit       && !validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido' });
     if (phone     && !validarTelefono(phone))     return res.status(400).json({ error: 'Teléfono inválido' });
@@ -153,7 +211,23 @@ router.put('/:id', async (req, res) => {
       updateData.logo = logo;
     }
 
+    // ✅ SEDE-PRINCIPAL-001
+    if (horarioAtencion !== undefined)   updateData.horarioAtencion = String(horarioAtencion).trim();
+    if (telefonoPrincipal !== undefined) {
+      if (!TELEFONOS_VALIDOS.includes(telefonoPrincipal)) {
+        return res.status(400).json({ error: 'Teléfono principal inválido' });
+      }
+      updateData.telefonoPrincipal = telefonoPrincipal;
+    }
+    if (esPrincipal !== undefined) updateData.esPrincipal = esPrincipal === true;
+
     await db.collection('companies').doc(req.params.id).update(updateData);
+
+    // Una sola sede principal por suscriptor.
+    if (updateData.esPrincipal === true) {
+      await desmarcarOtrasPrincipales(userId, req.params.id);
+    }
+
     const updated = await db.collection('companies').doc(req.params.id).get();
     res.json({ id: updated.id, ...limpiarEmpresa(updated.data()) });
   } catch (error) {

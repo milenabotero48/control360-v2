@@ -35,7 +35,8 @@ const TabEmpresas = ({ token }) => {
   const [logoFile, setLogoFile] = useState(null);
   const [mensaje, setMensaje] = useState(null);
   const fileInputRef = useRef();
-  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58 });
+  // ✅ SEDE-PRINCIPAL-001: horarioAtencion, telefonoPrincipal y esPrincipal
+  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false });
   const [errores, setErrores] = useState({});
 
   useEffect(() => { cargarEmpresas(); }, []);
@@ -138,7 +139,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
 
   const handleEditar = (emp) => {
     setEditando(emp.id);
-    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '', anchoImpresoraPos: emp.anchoImpresoraPos || 58 });
+    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '', anchoImpresoraPos: emp.anchoImpresoraPos || 58, horarioAtencion: emp.horarioAtencion || '', telefonoPrincipal: emp.telefonoPrincipal || 'phone', esPrincipal: emp.esPrincipal === true });
     setLogoPreview(emp.logo || null); setLogoFile(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -151,7 +152,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
     } catch { mostrarMensaje('Error al eliminar', 'error'); }
   };
 
-  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58 }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
+  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
 
   const campo = (label, key, tipo = 'text', placeholder = '') => (
     <div style={S.campo}>
@@ -185,6 +186,80 @@ const comprimirImagen = (file, maxWidth, quality) => {
                 {campo('WhatsApp', 'whatsapp', 'text', '3148361622')}
                 {campo('Página Web', 'web', 'text', 'www.miempresa.com')}
             </div>
+            {/* ═══════════════════════════════════════════════════════════════ */}
+            {/* ✅ SEDE-PRINCIPAL-001 — Datos que Lucy dice por teléfono        */}
+            {/* Esta sede es la que el cliente escucha en la llamada: a dónde   */}
+            {/* debe ir, en qué horario y a qué número llamar. Si estos datos    */}
+            {/* están mal, se manda gente a la dirección equivocada.            */}
+            {/* ═══════════════════════════════════════════════════════════════ */}
+            <div style={{ marginTop: 22, padding: '16px 18px', background: '#f5f3ff', border: '1.5px solid #ddd6fe', borderRadius: 12 }}>
+              <label style={{ display: 'block', fontSize: 13, fontWeight: 800, color: '#5b21b6', marginBottom: 4 }}>
+                ☎️ Datos que Lucy dice en la llamada
+              </label>
+              <div style={{ fontSize: 11.5, color: '#6d28d9', marginBottom: 14 }}>
+                Lucy le dicta al cliente la dirección, el horario y el teléfono de la sede que lo atiende.
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 5 }}>
+                  Horario de atención
+                </label>
+                <input
+                  type="text"
+                  value={formData.horarioAtencion || ''}
+                  placeholder="lunes a viernes de 8 a 5 y sábados de 8 a 12"
+                  onChange={(e) => setFormData({ ...formData, horarioAtencion: e.target.value })}
+                  style={{ ...S.input, width: '100%', boxSizing: 'border-box' }}
+                />
+                <span style={{ fontSize: 11, color: '#9ca3af', marginTop: 4, display: 'block' }}>
+                  Escríbelo como se dice en voz alta. Si lo dejas vacío, Lucy usa el horario genérico.
+                </span>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>
+                  ¿Qué teléfono le damos al cliente?
+                </label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {[
+                    { v: 'phone',     label: 'Fijo',     dato: formData.phone },
+                    { v: 'cellphone', label: 'Celular',  dato: formData.cellphone },
+                    { v: 'whatsapp',  label: 'WhatsApp', dato: formData.whatsapp },
+                  ].map(o => {
+                    const sel = (formData.telefonoPrincipal || 'phone') === o.v;
+                    return (
+                      <button key={o.v} type="button"
+                        onClick={() => setFormData(f => ({ ...f, telefonoPrincipal: o.v }))}
+                        style={{
+                          cursor: 'pointer', borderRadius: 8, padding: '8px 12px', textAlign: 'left',
+                          border: `2px solid ${sel ? '#7c3aed' : '#e5e7eb'}`,
+                          background: sel ? '#ede9fe' : '#fff',
+                        }}>
+                        <div style={{ fontSize: 12, fontWeight: 800, color: sel ? '#5b21b6' : '#374151' }}>{o.label}</div>
+                        <div style={{ fontSize: 10.5, color: '#9ca3af' }}>{o.dato || 'sin dato'}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={!!formData.esPrincipal}
+                  onChange={(e) => setFormData({ ...formData, esPrincipal: e.target.checked })}
+                  style={{ width: 18, height: 18, marginTop: 1, cursor: 'pointer' }}
+                />
+                <span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: '#374151' }}>Marcar como sede principal</span>
+                  <span style={{ display: 'block', fontSize: 11, color: '#6b7280', marginTop: 2 }}>
+                    Se usa cuando un cliente no tiene empresa asignada. Solo puede haber una: al marcar esta, se desmarca la otra.
+                    Si ninguna sede está marcada, Lucy no llamará a esos clientes en vez de arriesgarse a dar una dirección equivocada.
+                  </span>
+                </span>
+              </label>
+            </div>
+
             {/* Ola 3: ancho de la impresora POS — la tirilla escala a este ancho */}
             <div style={{ marginTop: 18 }}>
               <label style={{ display: 'block', fontSize: 13, fontWeight: 700, color: '#374151', marginBottom: 8 }}>
@@ -227,7 +302,18 @@ const comprimirImagen = (file, maxWidth, quality) => {
               <div key={emp.id} style={{ background: '#f8f9ff', border: '1px solid #e8ecff', borderRadius: 10, padding: 20 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
                   {emp.logo ? <img src={emp.logo} alt="Logo" style={{ width: 56, height: 56, objectFit: 'contain', borderRadius: 8, border: '1px solid #eee' }} /> : <div style={{ width: 56, height: 56, background: '#e8ecff', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24 }}>🏢</div>}
-                  <div><h4 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: '#1a1a2e' }}>{emp.name}</h4><span style={{ fontSize: 12, color: '#667eea', fontWeight: 600 }}>NIT: {emp.nit}</span></div>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: '#1a1a2e' }}>
+                      {emp.name}
+                      {/* ✅ SEDE-PRINCIPAL-001 */}
+                      {emp.esPrincipal && (
+                        <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 999, background: '#ede9fe', color: '#5b21b6', verticalAlign: 'middle' }}>
+                          ★ SEDE PRINCIPAL
+                        </span>
+                      )}
+                    </h4>
+                    <span style={{ fontSize: 12, color: '#667eea', fontWeight: 600 }}>NIT: {emp.nit}</span>
+                  </div>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, color: '#555', marginBottom: 16 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>📍 Dirección</span><span>{emp.address}</span></div>
@@ -237,6 +323,13 @@ const comprimirImagen = (file, maxWidth, quality) => {
                   {emp.whatsapp && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>💬 WhatsApp</span><span>{emp.whatsapp}</span></div>}
                   {emp.web && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>🌐 Web</span><span style={{ color: '#7c3aed' }}>{emp.web}</span></div>}
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600, color: '#888' }}>💰 IVA</span><span>{emp.iva}%</span></div>
+                  {/* ✅ SEDE-PRINCIPAL-001 — lo que Lucy dice en la llamada */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                    <span style={{ fontWeight: 600, color: '#888', whiteSpace: 'nowrap' }}>🕐 Horario</span>
+                    <span style={{ textAlign: 'right' }}>
+                      {emp.horarioAtencion || <span style={{ color: '#b45309', fontStyle: 'italic' }}>genérico</span>}
+                    </span>
+                  </div>
                 </div>
                 <div style={{ display: 'flex', gap: 10 }}>
                   <button onClick={() => handleEditar(emp)} style={{ flex: 1, padding: 8, background: '#0066cc', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>✏️ Editar</button>

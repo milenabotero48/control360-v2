@@ -120,6 +120,7 @@ export default function LlamadasIA({ user, onNavegar }) {
         m.cliente_inexistente  ? `${m.cliente_inexistente} sin ficha de cliente` : null,
         m.fuera_de_horario     ? `${m.fuera_de_horario} fuera de horario`      : null,
         m.fallo_proveedor      ? `${m.fallo_proveedor} rechazada(s) por el proveedor` : null,
+        m.sin_sede             ? `${m.sin_sede} sin sede con dirección (asigna empresa al cliente o marca una sede principal en Mi Empresa)` : null,
       ].filter(Boolean).join(' · ');
 
       if (!data.llamadasLanzadas) {
