@@ -31,6 +31,8 @@ const {
   procesarResultadoLlamada,
   lanzarLlamadaPrueba,
   obtenerConfigTenant,
+  guardarCorrida,
+  obtenerUltimaCorrida,
 } = require('../services/llamadasIAService');
 
 const LUCY_WEBHOOK_SECRET = process.env.LUCY_WEBHOOK_SECRET || process.env.VAPI_WEBHOOK_SECRET;
@@ -472,8 +474,47 @@ router.post('/ejecutar-motor', async (req, res) => {
       datos: { adminIdObjetivo },
     });
 
-    const resultado = await ejecutarMotorLlamadas({ soloAdminId: adminIdObjetivo, ignorarHorario: true });
-    return res.json(resultado);
+    // ✅ LUCY-ASINCRONO-001: NO se espera al motor. Con el ritmo de llamadas
+    // que impone el límite de concurrencia del plan, una base de 120 clientes
+    // tarda ~40 minutos — ninguna petición HTTP sobrevive eso. Se responde de
+    // inmediato y el avance se sigue por GET /corrida.
+    const yaCorriendo = await obtenerUltimaCorrida(adminIdObjetivo);
+    if (yaCorriendo?.estado === 'en_curso') {
+      return res.status(409).json({ error: 'Ya hay una corrida en curso. Espera a que termine.' });
+    }
+
+    await guardarCorrida(adminIdObjetivo, {
+      estado: 'en_curso', lanzadas: 0, totalObjetivo: null,
+      llamandoAhora: null, clienteAhora: null,
+      iniciadaPor: req.user?.nombre || adminIdSesion,
+      iniciadaAt: new Date().toISOString(),
+    });
+
+    ejecutarMotorLlamadas({ soloAdminId: adminIdObjetivo, ignorarHorario: true })
+      .catch(async (e) => {
+        console.error('[LLAMADAS-IA] Corrida en segundo plano falló:', e.message);
+        await guardarCorrida(adminIdObjetivo, { estado: 'error', error: e.message });
+      });
+
+    return res.status(202).json({
+      iniciado: true,
+      mensaje: 'Lucy empezó a llamar. El avance se actualiza solo en esta pantalla.',
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/llamadas-ia/corrida — ✅ LUCY-ASINCRONO-001
+// Estado de la última corrida del tenant: si está en curso, a quién llama Lucy
+// en este momento; si terminó, el resumen con el desglose de omisiones.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/corrida', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const corrida = await obtenerUltimaCorrida(adminId);
+    return res.json(corrida || { estado: 'ninguna' });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

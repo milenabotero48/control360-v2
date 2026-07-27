@@ -69,11 +69,26 @@ const MAX_INTENTOS_DEFAULT = Number(process.env.LLAMADA_IA_MAX_INTENTOS) || 3;
 // Conservador: si de cada 10 llamadas contestan 4, solo esas consumen minutos.
 const FACTOR_CONTESTACION = Number(process.env.LLAMADA_IA_FACTOR_CONTESTACION) || 0.45;
 
-// Control de concurrencia: ElevenLabs/Twilio limitan llamadas simultáneas.
-// Antes se lanzaban en serie con 800 ms de separación — con 900 vencimientos
-// eso deja cientos de llamadas vivas al mismo tiempo y el proveedor rechaza.
-const LOTE_CONCURRENTE  = Number(process.env.LLAMADA_IA_CONCURRENCIA) || 5;
-const PAUSA_ENTRE_LOTES = Number(process.env.LLAMADA_IA_PAUSA_LOTE_MS) || 20000;
+// ═════════════════════════════════════════════════════════════════════════════
+// CONTROL DE CONCURRENCIA — el plan de ElevenLabs limita llamadas SIMULTÁNEAS
+// (Free 4 · Starter 6 · Creator 10 · Pro 20 · Scale 30). Superar el límite
+// dispara tarifa de ráfaga (~2× el minuto) o rechazo de llamadas.
+//
+// ⚠️ EL CÁLCULO IMPORTA: no basta con lanzar lotes pequeños. Las llamadas del
+// lote anterior SIGUEN VIVAS cuando entra el siguiente. Con lote=5 cada 20 s y
+// llamadas de ~75 s, a los 40 segundos hay 15 activas — se supera el límite de
+// Creator sin que nadie se dé cuenta.
+//
+// Concurrencia en régimen ≈ LOTE × (DURACIÓN_LLAMADA / PAUSA)
+//   4 × (75 / 45) ≈ 6,7 activas → cabe con holgura en Creator (10)
+//
+// Si subes de plan, ajusta ambas variables en Railway; no toques este archivo.
+// ═════════════════════════════════════════════════════════════════════════════
+// Ajuste conservador pedido por Sandra: 3 llamadas por minuto.
+//   3 × (75 / 60) ≈ 3,75 activas → margen enorme frente a las 10 de Creator.
+//   Una base de 120 clientes se lanza en ~40 minutos.
+const LOTE_CONCURRENTE  = Number(process.env.LLAMADA_IA_CONCURRENCIA) || 3;
+const PAUSA_ENTRE_LOTES = Number(process.env.LLAMADA_IA_PAUSA_LOTE_MS) || 60000;
 
 // ─── Helpers de fecha (mismo criterio que vencimientosService.js) ────────────
 const mesActualColombia = () => {
@@ -376,6 +391,36 @@ const lanzarLlamadaElevenLabs = async ({ telefono, variables }) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ LUCY-ASINCRONO-001 (2026-07-26) — ESTADO DE LA CORRIDA
+// ─────────────────────────────────────────────────────────────────────────────
+// PROBLEMA: el motor lanza las llamadas con pausas para respetar el límite de
+// llamadas simultáneas del plan. Una base de 120 clientes tarda ~40 minutos.
+// La ruta /ejecutar-motor esperaba a que TERMINARA para responder — ninguna
+// petición HTTP sobrevive eso: el panel mostraba error aunque Lucy estuviera
+// llamando perfectamente, y el resumen de diagnóstico se perdía.
+//
+// SOLUCIÓN: la corrida se ejecuta en segundo plano y su estado vive en
+// `llamadas_ia_corridas/{adminId}`. El panel lo consulta y muestra el avance
+// en vivo. Un solo documento por tenant: siempre la última corrida.
+// ═════════════════════════════════════════════════════════════════════════════
+const guardarCorrida = async (adminId, datos) => {
+  try {
+    await db.collection('llamadas_ia_corridas').doc(adminId).set({
+      ...datos,
+      adminId,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+  } catch (e) {
+    console.error('[LLAMADAS-IA] No se pudo guardar el estado de la corrida:', e.message);
+  }
+};
+
+const obtenerUltimaCorrida = async (adminId) => {
+  const doc = await db.collection('llamadas_ia_corridas').doc(adminId).get();
+  return doc.exists ? doc.data() : null;
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 // MOTOR PRINCIPAL
 // opciones:
 //   soloAdminId    → limita la corrida a UN tenant (manual/programada). El cron
@@ -559,6 +604,18 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
           if (resultadoLanzamiento.ok) {
             totalLanzadas++;
             lanzadasEnLote++;
+            // ✅ LUCY-ASINCRONO-001: avance en vivo para el panel — a quién
+            // está llamando Lucy en este momento y cuánto lleva.
+            if (soloAdminId) {
+              await guardarCorrida(adminId, {
+                estado: 'en_curso',
+                lanzadas: totalLanzadas,
+                totalObjetivo: vencimientos.length,
+                llamandoAhora: telefonoRaw,
+                clienteAhora: cliente.nombre || '',
+                tipoAhora: perfil.tipoUso,
+              });
+            }
             // ✅ FIX LUCY-CAPACIDAD-001: la reserva ya NO es 2 min fijos. Se
             // estima por tipo de activo y se pondera por tasa de contestación
             // —una llamada no contestada casi no consume minutos—. El consumo
@@ -586,13 +643,17 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
     }
 
     console.log(`[LLAMADAS-IA] Motor completado — ${tenantsProcesados} tenant(s), ${totalLanzadas} llamada(s), ${omitidasPorTope} omitida(s) por tope`, motivos);
-    return {
+    const resumen = {
       tenantsProcesados,
       llamadasLanzadas: totalLanzadas,
       omitidasPorTope,
       vencimientosEvaluados: vencSnap.size,
       motivos, // ✅ LUCY-DIAGNOSTICO-002 — desglose visible en el panel
     };
+    // ✅ LUCY-ASINCRONO-001: el resumen se persiste porque el motor ya NO
+    // responde dentro de la petición HTTP (ver más abajo).
+    if (soloAdminId) await guardarCorrida(soloAdminId, { estado: 'terminada', ...resumen });
+    return resumen;
   } catch (e) {
     console.error('[LLAMADAS-IA] Error general del motor:', e.message);
     return { tenantsProcesados: 0, llamadasLanzadas: 0, omitidasPorTope: 0, error: e.message };
@@ -817,6 +878,8 @@ module.exports = {
   normalizarParaLlamada,
   clasificarActivo,   // expuesto para el panel y para pruebas del ruleset
   obtenerSede,
+  guardarCorrida,
+  obtenerUltimaCorrida,
 };
 
 // ════════════════════════════════════════════════════════════════════════════

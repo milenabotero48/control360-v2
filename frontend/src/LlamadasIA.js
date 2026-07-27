@@ -64,6 +64,7 @@ export default function LlamadasIA({ user, onNavegar }) {
   const [telPrueba, setTelPrueba] = useState('');
   const [tipoPrueba, setTipoPrueba] = useState('empresa'); // 'vehicular' | 'empresa'
   const [preorden, setPreorden] = useState(null); // LUCY-PREORDEN-001
+  const [corrida, setCorrida] = useState(null);   // LUCY-ASINCRONO-001
   const [ocupado, setOcupado] = useState(false);
   const [aviso, setAviso] = useState(null); // { tipo: 'ok'|'error', texto }
 
@@ -77,23 +78,35 @@ export default function LlamadasIA({ user, onNavegar }) {
   const cargar = useCallback(async () => {
     setCargando(true);
     try {
-      const [r1, r2, r3, r4] = await Promise.all([
+      const [r1, r2, r3, r4, r5] = await Promise.all([
         fetch(`${API}/llamadas-ia/resumen`, { headers: authHeaders() }),
         fetch(`${API}/llamadas-ia`, { headers: authHeaders() }),
         fetch(`${API}/llamadas-ia/config`, { headers: authHeaders() }),
         fetch(`${API}/llamadas-ia/programadas`, { headers: authHeaders() }),
+        fetch(`${API}/llamadas-ia/corrida`, { headers: authHeaders() }),
       ]);
-      const [res, lst, cfg, prog] = await Promise.all([r1.json(), r2.json(), r3.json(), r4.json()]);
+      const [res, lst, cfg, prog, cor] = await Promise.all([r1.json(), r2.json(), r3.json(), r4.json(), r5.json()]);
       setResumen(res);
       setLista(Array.isArray(lst) ? lst : []);
       setActiva(!!cfg?.activo);
       setConfig(cfg);
       setProgramadas(Array.isArray(prog) ? prog.filter(p => p.estado === 'pendiente') : []);
+      setCorrida(cor && cor.estado !== 'ninguna' ? cor : null);
     } catch (e) { console.error(e); }
     setCargando(false);
   }, []);
 
   useEffect(() => { cargar(); }, [cargar]);
+
+  // ✅ LUCY-ASINCRONO-001: mientras Lucy esté llamando, la pantalla se refresca
+  // sola cada 10 s. Así se ve a quién está llamando en este momento sin que
+  // nadie tenga que recargar. Cuando la corrida termina, el intervalo se corta
+  // solo — no queda consultando la API para siempre.
+  useEffect(() => {
+    if (corrida?.estado !== 'en_curso') return;
+    const t = setInterval(() => { cargar(); }, 10000);
+    return () => clearInterval(t);
+  }, [corrida?.estado, cargar]);
 
   // ─── Acciones de operación (FIX LUCY-ELEVEN-004) ───────────────────────────
   const lanzarAhora = async () => {
@@ -103,6 +116,15 @@ export default function LlamadasIA({ user, onNavegar }) {
       const r = await fetch(`${API}/llamadas-ia/ejecutar-motor`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({}) });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Error al lanzar el motor');
+
+      // ✅ LUCY-ASINCRONO-001: el backend responde 202 apenas arranca; el motor
+      // sigue llamando en segundo plano. El avance llega por el panel en vivo.
+      if (data.iniciado) {
+        mostrarAviso('ok', data.mensaje || 'Lucy empezó a llamar.');
+        cargar();
+        setOcupado(false);
+        return;
+      }
       // ✅ FIX LUCY-DIAGNOSTICO-001: el motor atrapa sus propios errores y
       // responde 200 con { error } — antes eso se veía como "0 llamadas" sin
       // explicación. Ahora el motivo real llega a pantalla.
@@ -327,6 +349,85 @@ export default function LlamadasIA({ user, onNavegar }) {
           borderRadius: 10, padding: '10px 14px', fontSize: 12.5, fontWeight: 700, marginBottom: 12,
         }}>
           {aviso.texto}
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {/* ✅ LUCY-ASINCRONO-001 — Corrida en vivo                             */}
+      {/* A quién está llamando Lucy en este momento. Se refresca solo.       */}
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {corrida?.estado === 'en_curso' && (
+        <div style={{ background: '#1a1a2e', color: '#fff', borderRadius: 12, padding: '14px 16px', marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
+            <span style={{
+              width: 9, height: 9, borderRadius: '50%', background: '#4ade80',
+              display: 'inline-block', animation: 'c360pulse 1.2s infinite',
+            }} />
+            <span style={{ fontWeight: 800, fontSize: 12.5, letterSpacing: 0.5 }}>LUCY ESTÁ LLAMANDO</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#a5b4fc' }}>
+              {corrida.lanzadas || 0}{corrida.totalObjetivo ? ` de ${corrida.totalObjetivo}` : ''} llamada(s) lanzada(s)
+            </span>
+          </div>
+
+          {corrida.llamandoAhora && (
+            <div style={{ background: 'rgba(255,255,255,0.08)', borderRadius: 8, padding: '9px 12px', fontSize: 13 }}>
+              <span style={{ color: '#9ca3af', fontSize: 11 }}>Marcando ahora</span>
+              <div style={{ fontWeight: 800, marginTop: 2 }}>
+                {telBonito(corrida.llamandoAhora)}
+                {corrida.clienteAhora ? <span style={{ fontWeight: 500, color: '#d1d5db' }}> · {corrida.clienteAhora}</span> : null}
+                {corrida.tipoAhora && (
+                  <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: corrida.tipoAhora === 'vehicular' ? '#065f46' : '#3730a3' }}>
+                    {corrida.tipoAhora === 'vehicular' ? 'guion corto' : 'guion largo'}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {corrida.totalObjetivo ? (
+            <div style={{ background: 'rgba(255,255,255,0.15)', borderRadius: 99, height: 6, overflow: 'hidden', marginTop: 10 }}>
+              <div style={{ width: `${Math.min(100, Math.round(((corrida.lanzadas || 0) / corrida.totalObjetivo) * 100))}%`, height: '100%', background: '#4ade80', borderRadius: 99, transition: 'width .4s' }} />
+            </div>
+          ) : null}
+
+          <div style={{ fontSize: 10.5, color: '#9ca3af', marginTop: 8 }}>
+            Lucy llama de a 3 por minuto para respetar el límite de llamadas simultáneas de tu plan. Puedes cerrar esta pantalla, la corrida sigue.
+          </div>
+          <style>{`@keyframes c360pulse{0%,100%{opacity:1}50%{opacity:.25}}`}</style>
+        </div>
+      )}
+
+      {/* Resumen de la última corrida terminada — con motivos de omisión */}
+      {corrida?.estado === 'terminada' && (
+        <div style={{ background: '#f9fafb', border: '1.5px solid #e5e7eb', borderRadius: 12, padding: '12px 14px', marginBottom: 12 }}>
+          <div style={{ fontWeight: 800, fontSize: 11, color: '#374151', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
+            Última corrida
+          </div>
+          <div style={{ fontSize: 13, color: '#1a1a2e', fontWeight: 700 }}>
+            {corrida.llamadasLanzadas || 0} llamada(s) lanzada(s) de {corrida.vencimientosEvaluados ?? '—'} vencimiento(s) evaluado(s)
+          </div>
+          {(() => {
+            const m = corrida.motivos || {};
+            const filas = [
+              ['Sin teléfono válido', m.sin_telefono],
+              ['Sin sede con dirección', m.sin_sede],
+              ['Ya gestionados', m.ya_gestionado],
+              ['Intentos agotados', m.intentos_agotados],
+              ['Sin ficha de cliente', m.cliente_inexistente],
+              ['Rechazadas por el proveedor', m.fallo_proveedor],
+              ['Omitidas por tope de minutos', corrida.omitidasPorTope],
+            ].filter(([, v]) => v);
+            if (!filas.length) return null;
+            return (
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                {filas.map(([label, v]) => (
+                  <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#6b7280' }}>
+                    <span>{label}</span><span style={{ fontWeight: 700, color: '#b45309' }}>{v}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
         </div>
       )}
 
