@@ -273,17 +273,61 @@ const tenantTieneLucyActiva = async (adminId) => {
 // { topeMinutosMes: number, consumo: { 'YYYY-MM': minutos } }
 // El consumo lo alimenta procesarResultadoLlamada() con la duración real.
 // ═════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ FIX LUCY-CONSUMO-002 (2026-07-27) — CONSUMO CALCULADO, NO ACUMULADO
+// ─────────────────────────────────────────────────────────────────────────────
+// El contador `consumo` venía inflado por el bug de redondeo (cada llamada,
+// aunque durara 3 segundos, sumaba 1 minuto). Corregir la fórmula no arregla
+// los datos ya escritos: el panel seguía mostrando 213 minutos cuando el
+// proveedor había cobrado ~31.
+//
+// En vez de acumular un contador que puede desviarse —y que después hay que
+// migrar a mano—, el consumo se CALCULA sobre la fuente de la verdad: la
+// duración real que el webhook guardó en cada registro de `llamadas_ia`.
+//
+// Ventajas: se autocorrige solo, no necesita migración, y si mañana hay que
+// recalcular un mes cerrado los datos siguen ahí. Las llamadas de prueba no
+// cuentan, porque no se le facturan al suscriptor.
+// ═════════════════════════════════════════════════════════════════════════════
+const calcularSegundosDelMes = async (adminId, mes) => {
+  try {
+    const snap = await db.collection('llamadas_ia')
+      .where('adminId', '==', adminId)
+      .limit(5000)
+      .get();
+
+    let segundos = 0;
+    snap.docs.forEach(d => {
+      const l = d.data();
+      if (l.esPrueba) return;                 // las pruebas no se facturan
+      if (!l.duracionSegundos) return;        // sin duración = nunca conectó
+      const fecha = l.createdAt?.toDate?.();
+      if (!fecha) return;
+      // Mes en hora Colombia, mismo criterio que el resto del servicio
+      const mesLlamada = new Date(fecha.getTime() - 5 * 3600 * 1000).toISOString().slice(0, 7);
+      if (mesLlamada === mes) segundos += Number(l.duracionSegundos) || 0;
+    });
+    return segundos;
+  } catch (e) {
+    console.error('[LLAMADAS-IA] Error calculando consumo del mes:', e.message);
+    return null; // null = no se pudo calcular; se usa el contador como respaldo
+  }
+};
+
 const obtenerConfigTenant = async (adminId) => {
   const doc = await db.collection('llamadas_ia_config').doc(adminId).get();
   const data = doc.exists ? doc.data() : {};
   const mes = mesActualColombia();
-  // ✅ FIX LUCY-CONSUMO-001: el redondeo se hace UNA vez sobre el total del mes,
-  // no llamada por llamada. `consumo` (legado, en minutos inflados) solo se usa
-  // si el tenant aún no tiene segundos registrados este mes.
-  const segundosMes = Number(data.consumoSegundos?.[mes]) || 0;
-  const minutosMes = segundosMes > 0
-    ? Math.ceil(segundosMes / 60)
-    : (Number(data.consumo?.[mes]) || 0);
+
+  // Fuente de la verdad: la duración real de cada llamada. Si el cálculo falla
+  // (p. ej. problema de red con Firestore) se cae al contador acumulado para no
+  // dejar el módulo sin tope, que sería peor.
+  const segundosCalculados = await calcularSegundosDelMes(adminId, mes);
+  const segundosMes = segundosCalculados !== null
+    ? segundosCalculados
+    : (Number(data.consumoSegundos?.[mes]) || 0);
+
+  const minutosMes = Math.ceil(segundosMes / 60);
 
   return {
     topeMinutosMes: Number(data.topeMinutosMes) || TOPE_MINUTOS_DEFAULT,
