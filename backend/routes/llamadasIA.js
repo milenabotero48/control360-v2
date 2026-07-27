@@ -38,6 +38,41 @@ const LUCY_WEBHOOK_SECRET = process.env.LUCY_WEBHOOK_SECRET || process.env.VAPI_
 // ─── HELPER: resolver tenant (patrón estándar del proyecto) ──────────────────
 const getAdminId = (req) => req.adminId || req.user?.uid || req.user?.id;
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ FIX LUCY-SUPERADMIN-001 (2026-07-26) — BUG BLOQUEANTE
+// ─────────────────────────────────────────────────────────────────────────────
+// SÍNTOMA: la SuperAdmin abría "Minutos Lucy" en el Panel de Suscriptores y
+// recibía 403 "Solo SuperAdmin", con el modal colgado en "Cargando
+// configuración…".
+//
+// CAUSA: estas rutas leían `req.user.superAdmin`, es decir, la marca DENTRO DEL
+// JWT. Pero en Control360 la marca `superAdmin` NO viaja en el token: vive
+// únicamente en el documento Firestore `users/{uid}`. auth.js la incluye en la
+// RESPUESTA del login (para que el frontend pinte el menú Plataforma), no en el
+// token firmado. Por eso `req.user.superAdmin` era siempre undefined y TODA
+// ruta superadmin de Lucy respondía 403 — para cualquier usuario, incluida ella.
+//
+// SOLUCIÓN: mismo patrón que superadmin.js, anny.js y orders.js — leer la marca
+// desde Firestore. Se cachea en el request para no repetir la lectura.
+//
+// NOTA DE SEGURIDAD: este cambio es MÁS estricto, no menos. Antes la condición
+// era imposible de cumplir; ahora se verifica contra la fuente de verdad. Un
+// usuario normal sigue sin poder entrar.
+// ═════════════════════════════════════════════════════════════════════════════
+const esSuperAdmin = async (req) => {
+  if (req._esSuperAdmin !== undefined) return req._esSuperAdmin;
+  try {
+    const uid = req.user?.uid || req.user?.id;
+    if (!uid) { req._esSuperAdmin = false; return false; }
+    const doc = await db.collection('users').doc(uid).get();
+    req._esSuperAdmin = doc.exists && doc.data().superAdmin === true;
+  } catch (e) {
+    console.error('[LLAMADAS-IA] Error verificando superAdmin:', e.message);
+    req._esSuperAdmin = false; // fail-closed
+  }
+  return req._esSuperAdmin;
+};
+
 // ─── HELPER: auditoría ───────────────────────────────────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = {} }) => {
   try {
@@ -276,7 +311,7 @@ router.get('/resumen', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/superadmin/resumen', async (req, res) => {
   try {
-    if (!req.user?.superAdmin) {
+    if (!(await esSuperAdmin(req))) {
       return res.status(403).json({ error: 'Solo SuperAdmin' });
     }
     const { mes } = req.query; // 'YYYY-MM'
@@ -342,7 +377,7 @@ router.get('/config', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/superadmin/config/:adminId', async (req, res) => {
   try {
-    if (!req.user?.superAdmin) return res.status(403).json({ error: 'Solo SuperAdmin' });
+    if (!(await esSuperAdmin(req))) return res.status(403).json({ error: 'Solo SuperAdmin' });
     const { adminId } = req.params;
     const userDoc = await db.collection('users').doc(adminId).get();
     if (!userDoc.exists) return res.status(404).json({ error: 'Suscriptor no encontrado' });
@@ -369,7 +404,7 @@ router.get('/superadmin/config/:adminId', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.put('/superadmin/config/:adminId', async (req, res) => {
   try {
-    if (!req.user?.superAdmin) return res.status(403).json({ error: 'Solo SuperAdmin' });
+    if (!(await esSuperAdmin(req))) return res.status(403).json({ error: 'Solo SuperAdmin' });
     const { adminId } = req.params;
     const tope = Number(req.body?.topeMinutosMes);
 
@@ -421,12 +456,13 @@ router.put('/superadmin/config/:adminId', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/ejecutar-motor', async (req, res) => {
   try {
-    if (req.user?.role !== 'admin' && !req.user?.superAdmin) {
+    const superAdmin = await esSuperAdmin(req);
+    if (req.user?.role !== 'admin' && !superAdmin) {
       return res.status(403).json({ error: 'Solo el administrador puede lanzar llamadas manualmente' });
     }
 
     const adminIdSesion = getAdminId(req);
-    const adminIdObjetivo = (req.user?.superAdmin && req.body?.adminId) ? req.body.adminId : adminIdSesion;
+    const adminIdObjetivo = (superAdmin && req.body?.adminId) ? req.body.adminId : adminIdSesion;
 
     await auditar({
       accion: 'lanzar_motor_manual',
@@ -450,7 +486,7 @@ router.post('/ejecutar-motor', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/llamada-prueba', async (req, res) => {
   try {
-    if (req.user?.role !== 'admin' && !req.user?.superAdmin) {
+    if (req.user?.role !== 'admin' && !(await esSuperAdmin(req))) {
       return res.status(403).json({ error: 'Solo el administrador puede lanzar llamadas de prueba' });
     }
     const adminId = getAdminId(req);
@@ -483,7 +519,7 @@ router.post('/llamada-prueba', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/programar', async (req, res) => {
   try {
-    if (req.user?.role !== 'admin' && !req.user?.superAdmin) {
+    if (req.user?.role !== 'admin' && !(await esSuperAdmin(req))) {
       return res.status(403).json({ error: 'Solo el administrador puede programar llamadas' });
     }
     const adminId = getAdminId(req);

@@ -20,11 +20,21 @@ const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 // Catálogo de módulos conocidos (claves reales del sistema, en minúscula).
 // Si un suscriptor tiene claves fuera de este catálogo, se muestran y se
 // CONSERVAN — el editor nunca elimina claves desconocidas en silencio.
+// ✅ FIX PANEL-MODULOS-001 (2026-07-26)
+// Faltaban en el catálogo claves que SÍ existen en la navegación (App.js →
+// NAV_GRUPOS/TODOS_LOS_MODULOS): vencimientos, comercial, proveedores,
+// mi_empresa y usuarios. Al no estar aquí, el editor de módulos no permitía
+// activarlas ni desactivarlas: aparecían como texto suelto en las etiquetas del
+// suscriptor pero no tenían casilla. 'vencimientos' es justo el módulo del que
+// dependen Lucy y Anny, así que era el más molesto de los cinco.
 const CATALOGO_MODULOS = [
   { key: 'ordenes',      label: 'Órdenes de servicio' },
   { key: 'cotizaciones', label: 'Cotizaciones' },
   { key: 'clientes',     label: 'Clientes' },
+  { key: 'comercial',    label: 'Comercial / Telemercadeo' },
+  { key: 'vencimientos', label: 'Vencimientos' },
   { key: 'productos',    label: 'Productos' },
+  { key: 'proveedores',  label: 'Proveedores' },
   { key: 'inventarios',  label: 'Inventarios' },
   { key: 'logistica',    label: 'Logística' },
   { key: 'taller',       label: 'Taller' },
@@ -35,6 +45,8 @@ const CATALOGO_MODULOS = [
   { key: 'cxp',          label: 'Cuentas por Pagar' },
   { key: 'eri',          label: 'ERI' },
   { key: 'reportes',     label: 'Reportes' },
+  { key: 'mi_empresa',   label: 'Mi Empresa' },
+  { key: 'usuarios',     label: 'Usuarios' },
   { key: 'qr',           label: 'QR Activos ⭐ (solo invitados)' },
   { key: 'llamadas_ia',  label: 'Llamadas IA — Lucy ⭐ (solo invitados)' },
  { key: 'anny_ia',      label: 'WhatsApp IA Anny ⭐ (solo invitados)' },
