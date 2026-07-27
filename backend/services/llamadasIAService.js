@@ -277,9 +277,18 @@ const obtenerConfigTenant = async (adminId) => {
   const doc = await db.collection('llamadas_ia_config').doc(adminId).get();
   const data = doc.exists ? doc.data() : {};
   const mes = mesActualColombia();
+  // ✅ FIX LUCY-CONSUMO-001: el redondeo se hace UNA vez sobre el total del mes,
+  // no llamada por llamada. `consumo` (legado, en minutos inflados) solo se usa
+  // si el tenant aún no tiene segundos registrados este mes.
+  const segundosMes = Number(data.consumoSegundos?.[mes]) || 0;
+  const minutosMes = segundosMes > 0
+    ? Math.ceil(segundosMes / 60)
+    : (Number(data.consumo?.[mes]) || 0);
+
   return {
     topeMinutosMes: Number(data.topeMinutosMes) || TOPE_MINUTOS_DEFAULT,
-    minutosConsumidosMes: Number(data.consumo?.[mes]) || 0,
+    minutosConsumidosMes: minutosMes,
+    segundosConsumidosMes: segundosMes,
     // ✅ LUCY-CAPACIDAD-001: intentos por cliente/mes configurables por tenant.
     // Antes estaba quemado en 2 dentro del motor.
     maxIntentos: Number(data.maxIntentos) || MAX_INTENTOS_DEFAULT,
@@ -289,12 +298,28 @@ const obtenerConfigTenant = async (adminId) => {
   };
 };
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ FIX LUCY-CONSUMO-001 (2026-07-27) — CONTABILIDAD REAL DE MINUTOS
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG: se acumulaba Math.ceil(segundos/60) POR LLAMADA. Una llamada de 3
+// segundos que nadie contestó se registraba como 1 minuto completo. Con 247
+// llamadas sin respuesta en un mes, eso inflaba el consumo en 247 minutos
+// inexistentes: el panel mostraba 213 min cuando el proveedor había cobrado 31.
+//
+// POR QUÉ IMPORTA: este número es la base para cobrarle el módulo al
+// suscriptor. Redondear hacia arriba en cada llamada multiplicaba la factura
+// por ~7. Un error de facturación contra un cliente es mucho más grave que un
+// error de reporte.
+//
+// AHORA: se acumulan SEGUNDOS reales y el redondeo se hace UNA sola vez, al
+// mostrar el total del mes. Se conserva `consumo` (minutos) para no romper el
+// histórico existente, pero manda `consumoSegundos` cuando está presente.
+// ═════════════════════════════════════════════════════════════════════════════
 const registrarConsumoMinutos = async (adminId, segundos) => {
   if (!adminId || !segundos) return;
-  const minutos = Math.ceil(segundos / 60); // se factura por minuto, igual criterio del proveedor
   const mes = mesActualColombia();
   await db.collection('llamadas_ia_config').doc(adminId).set({
-    consumo: { [mes]: admin.firestore.FieldValue.increment(minutos) },
+    consumoSegundos: { [mes]: admin.firestore.FieldValue.increment(Math.round(segundos)) },
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
 };
