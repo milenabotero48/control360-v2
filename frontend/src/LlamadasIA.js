@@ -159,6 +159,44 @@ export default function LlamadasIA({ user, onNavegar }) {
     setOcupado(false);
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ LUCY-PARADA-001 — Freno de la corrida
+  // El backend no mata el proceso: deja una señal que el motor lee antes de
+  // cada llamada. Por eso el texto dice "se detendrá en segundos" — puede haber
+  // una llamada ya marcada en vuelo y esa no se puede deshacer.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const detenerCorrida = async (modo) => {
+    const confirmacion = modo === 'cancelar'
+      ? '¿CANCELAR la corrida? Las llamadas pendientes se descartan y tendrás que lanzarla de nuevo desde cero.'
+      : '¿Pausar la corrida? Los pendientes quedan guardados y puedes continuar después justo donde quedó.';
+    if (!window.confirm(confirmacion)) return;
+    setOcupado(true);
+    try {
+      const r = await fetch(`${API}/llamadas-ia/corrida/detener`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ modo }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'No se pudo detener la corrida');
+      mostrarAviso('ok', data.mensaje || 'Corrida detenida.');
+      cargar();
+    } catch (e) { mostrarAviso('error', e.message); }
+    setOcupado(false);
+  };
+
+  const reanudarCorrida = async () => {
+    setOcupado(true);
+    try {
+      const r = await fetch(`${API}/llamadas-ia/corrida/reanudar`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({}),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'No se pudo continuar la corrida');
+      mostrarAviso('ok', data.mensaje || 'Lucy retomó la corrida.');
+      cargar();
+    } catch (e) { mostrarAviso('error', e.message); }
+    setOcupado(false);
+  };
+
   const programarCorrida = async () => {
     if (!progFecha || !progHora) { mostrarAviso('error', 'Elige fecha y hora'); return; }
     setOcupado(true);
@@ -393,7 +431,64 @@ export default function LlamadasIA({ user, onNavegar }) {
           <div style={{ fontSize: 10.5, color: '#9ca3af', marginTop: 8 }}>
             Lucy llama de a 3 por minuto para respetar el límite de llamadas simultáneas de tu plan. Puedes cerrar esta pantalla, la corrida sigue.
           </div>
+
+          {/* ✅ LUCY-PARADA-001 — Freno de emergencia */}
+          {esAdmin && (
+            corrida.senalControl ? (
+              <div style={{ marginTop: 10, background: 'rgba(251,191,36,0.15)', border: '1px solid rgba(251,191,36,0.4)', borderRadius: 8, padding: '8px 12px', fontSize: 11.5, color: '#fde68a', fontWeight: 700 }}>
+                ⏳ Deteniendo… Lucy no marcará más números. Las llamadas ya en curso terminan solas.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                <button onClick={() => detenerCorrida('pausar')} disabled={ocupado}
+                  style={{ ...btnAccion, background: '#f59e0b', color: '#1a1a2e', opacity: ocupado ? 0.6 : 1 }}>
+                  ⏸ Pausar
+                </button>
+                <button onClick={() => detenerCorrida('cancelar')} disabled={ocupado}
+                  style={{ ...btnAccion, background: '#dc2626', color: '#fff', opacity: ocupado ? 0.6 : 1 }}>
+                  ⏹ Detener todo
+                </button>
+                <span style={{ fontSize: 10.5, color: '#9ca3af', alignSelf: 'center' }}>
+                  Pausar guarda los pendientes · Detener todo descarta la cola
+                </span>
+              </div>
+            )
+          )}
           <style>{`@keyframes c360pulse{0%,100%{opacity:1}50%{opacity:.25}}`}</style>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {/* ✅ LUCY-PARADA-001 — Corrida pausada, lista para continuar          */}
+      {/* "Continuar" retoma la cola guardada. NO es lo mismo que "Lanzar     */}
+      {/* ahora": lanzar re-evalúa toda la base y volvería a llamar a quien   */}
+      {/* ya recibió llamada, gastando un intento y minutos ya pagados.       */}
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {corrida?.estado === 'pausada' && (
+        <div style={{ background: '#fffbeb', border: '1.5px solid #fcd34d', borderRadius: 12, padding: '14px 16px', marginBottom: 12 }}>
+          <div style={{ fontWeight: 800, fontSize: 12.5, color: '#92400e' }}>⏸ CORRIDA PAUSADA</div>
+          <div style={{ fontSize: 12.5, color: '#78350f', marginTop: 4 }}>
+            {corrida.llamadasLanzadas || 0} llamada(s) alcanzaron a salir ·{' '}
+            <strong>{corrida.pendientesCount || 0} pendiente(s)</strong> guardado(s)
+          </div>
+          {esAdmin && (
+            <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+              <button onClick={reanudarCorrida} disabled={ocupado || !corrida.pendientesCount}
+                style={{ ...btnAccion, background: '#16a34a', color: '#fff', opacity: (ocupado || !corrida.pendientesCount) ? 0.6 : 1 }}>
+                ▶️ Continuar donde quedó
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ✅ LUCY-PARADA-001 — Corrida cancelada por el usuario */}
+      {corrida?.estado === 'cancelada' && (
+        <div style={{ background: '#fef2f2', border: '1.5px solid #fecaca', borderRadius: 12, padding: '14px 16px', marginBottom: 12 }}>
+          <div style={{ fontWeight: 800, fontSize: 12.5, color: '#b91c1c' }}>⏹ CORRIDA DETENIDA</div>
+          <div style={{ fontSize: 12.5, color: '#7f1d1d', marginTop: 4 }}>
+            {corrida.llamadasLanzadas || 0} llamada(s) alcanzaron a salir. Los vencimientos que no se llamaron quedan sin gestionar y entran en la próxima corrida.
+          </div>
         </div>
       )}
 

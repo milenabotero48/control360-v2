@@ -33,6 +33,7 @@ const {
   obtenerConfigTenant,
   guardarCorrida,
   obtenerUltimaCorrida,
+  solicitarControlCorrida,
 } = require('../services/llamadasIAService');
 
 const LUCY_WEBHOOK_SECRET = process.env.LUCY_WEBHOOK_SECRET || process.env.VAPI_WEBHOOK_SECRET;
@@ -488,6 +489,11 @@ router.post('/ejecutar-motor', async (req, res) => {
       llamandoAhora: null, clienteAhora: null,
       iniciadaPor: req.user?.nombre || adminIdSesion,
       iniciadaAt: new Date().toISOString(),
+      // ✅ LUCY-PARADA-001: se limpia la señal y la cola de una corrida frenada
+      // antes. Si no, una pausa vieja detendría esta corrida en la 1ª llamada.
+      senalControl: null,
+      pendientes: [],
+      pendientesCount: 0,
     });
 
     ejecutarMotorLlamadas({ soloAdminId: adminIdObjetivo, ignorarHorario: true })
@@ -515,6 +521,113 @@ router.get('/corrida', async (req, res) => {
     const adminId = getAdminId(req);
     const corrida = await obtenerUltimaCorrida(adminId);
     return res.json(corrida || { estado: 'ninguna' });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/llamadas-ia/corrida/detener — ✅ LUCY-PARADA-001
+// Freno de emergencia. Body: { modo: 'pausar' | 'cancelar' } (default 'pausar').
+//
+// No mata el proceso: deja una señal que el motor lee ANTES de cada llamada.
+// Por eso la respuesta es "se detendrá en segundos", no "detenida": puede haber
+// una llamada ya marcada en vuelo, y esa no se puede deshacer.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/corrida/detener', async (req, res) => {
+  try {
+    const superAdmin = await esSuperAdmin(req);
+    if (req.user?.role !== 'admin' && !superAdmin) {
+      return res.status(403).json({ error: 'Solo el administrador puede detener las llamadas' });
+    }
+
+    const adminIdSesion = getAdminId(req);
+    // Ownership multi-tenant: solo SuperAdmin puede frenar la corrida de otro.
+    const adminIdObjetivo = (superAdmin && req.body?.adminId) ? req.body.adminId : adminIdSesion;
+
+    const modo = req.body?.modo === 'cancelar' ? 'cancelar' : 'pausar';
+    const resultado = await solicitarControlCorrida(adminIdObjetivo, modo);
+    if (!resultado.ok) return res.status(400).json({ error: resultado.error });
+
+    await auditar({
+      accion: modo === 'cancelar' ? 'cancelar_corrida' : 'pausar_corrida',
+      descripcion: `Corrida de llamadas IA ${modo === 'cancelar' ? 'cancelada' : 'pausada'} manualmente (tenant ${adminIdObjetivo})`,
+      usuarioId: adminIdSesion,
+      usuarioNombre: req.user?.nombre || '',
+      datos: { adminIdObjetivo, modo },
+    });
+
+    return res.json({
+      ok: true,
+      modo,
+      mensaje: modo === 'cancelar'
+        ? 'Corrida cancelada. Las llamadas ya marcadas terminan solas; no se marcan más.'
+        : 'Corrida pausada. Los pendientes quedan guardados para continuar cuando quieras.',
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/llamadas-ia/corrida/reanudar — ✅ LUCY-PARADA-001
+// Retoma una corrida PAUSADA exactamente donde quedó, usando la cola guardada.
+// No es lo mismo que "Lanzar ahora": lanzar re-evalúa toda la base del mes y
+// volvería a llamar a quien ya recibió llamada (gastando un intento y minutos).
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/corrida/reanudar', async (req, res) => {
+  try {
+    const superAdmin = await esSuperAdmin(req);
+    if (req.user?.role !== 'admin' && !superAdmin) {
+      return res.status(403).json({ error: 'Solo el administrador puede reanudar las llamadas' });
+    }
+
+    const adminIdSesion = getAdminId(req);
+    const adminIdObjetivo = (superAdmin && req.body?.adminId) ? req.body.adminId : adminIdSesion;
+
+    const corrida = await obtenerUltimaCorrida(adminIdObjetivo);
+    if (!corrida || corrida.estado !== 'pausada') {
+      return res.status(400).json({ error: 'No hay ninguna corrida pausada para continuar' });
+    }
+    const pendientes = Array.isArray(corrida.pendientes) ? corrida.pendientes : [];
+    if (!pendientes.length) {
+      return res.status(400).json({ error: 'La corrida pausada no tiene llamadas pendientes' });
+    }
+
+    await auditar({
+      accion: 'reanudar_corrida',
+      descripcion: `Corrida de llamadas IA reanudada — ${pendientes.length} pendiente(s) (tenant ${adminIdObjetivo})`,
+      usuarioId: adminIdSesion,
+      usuarioNombre: req.user?.nombre || '',
+      datos: { adminIdObjetivo, pendientes: pendientes.length },
+    });
+
+    await guardarCorrida(adminIdObjetivo, {
+      estado: 'en_curso',
+      lanzadas: 0,
+      totalObjetivo: pendientes.length,
+      llamandoAhora: null,
+      clienteAhora: null,
+      senalControl: null,
+      reanudadaAt: new Date().toISOString(),
+      reanudadaPor: req.user?.nombre || adminIdSesion,
+    });
+
+    // Mismo patrón asíncrono que /ejecutar-motor: 202 y el avance por GET /corrida.
+    ejecutarMotorLlamadas({
+      soloAdminId: adminIdObjetivo,
+      ignorarHorario: true,
+      soloVencimientoIds: pendientes,
+    }).catch(async (e) => {
+      console.error('[LLAMADAS-IA] Corrida reanudada falló:', e.message);
+      await guardarCorrida(adminIdObjetivo, { estado: 'error', error: e.message });
+    });
+
+    return res.status(202).json({
+      iniciado: true,
+      pendientes: pendientes.length,
+      mensaje: `Lucy retomó la corrida — ${pendientes.length} llamada(s) pendiente(s).`,
+    });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

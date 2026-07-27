@@ -490,6 +490,62 @@ const obtenerUltimaCorrida = async (adminId) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ LUCY-PARADA-001 (2026-07-27) — FRENO DE LA CORRIDA
+// ─────────────────────────────────────────────────────────────────────────────
+// PROBLEMA REAL (Sandra, 27-jul): una corrida de 478 llamadas arrancó y NO HABÍA
+// FORMA DE DETENERLA. El panel decía "puedes cerrar esta pantalla, la corrida
+// sigue" — literalmente cierto: el motor vive en el proceso del backend, cerrar
+// el navegador no lo toca. La única salida era apagar el agente de ElevenLabs o
+// quedarse sin saldo Twilio. Operar un marcador automático sin apagado es un
+// riesgo operativo y legal (Ley 2300: no se puede llamar fuera de horario).
+//
+// POR QUÉ UNA SEÑAL EN FIRESTORE Y NO UNA VARIABLE EN MEMORIA:
+// el backend puede correr con más de una instancia (Railway reinicia, escala).
+// Una bandera en memoria solo la vería el proceso que la escribió, y el botón
+// fallaría justo cuando más se necesita. La señal vive en el mismo documento
+// que ya usa el panel: una lectura por llamada, ~1 KB, ritmo de 3 por minuto.
+//
+// DOS MODOS, PORQUE NO SON LO MISMO:
+//   · pausar   → guarda los vencimientos que faltan. "Continuar" retoma EXACTO
+//                donde quedó, sin volver a llamar a quien ya recibió llamada.
+//   · cancelar → descarta la cola. Los vencimientos quedan sin gestionar y
+//                entran normalmente en la siguiente corrida.
+//
+// REGLA CRÍTICA: la señal se lee ANTES DE CADA LLAMADA, no al inicio del lote.
+// Si se leyera por lote, el botón tardaría hasta un minuto en surtir efecto y
+// dejaría salir 3 llamadas más — que es justo lo que se quiere evitar.
+// ═════════════════════════════════════════════════════════════════════════════
+const SENALES_VALIDAS = ['pausar', 'cancelar'];
+
+const solicitarControlCorrida = async (adminId, senal) => {
+  if (!SENALES_VALIDAS.includes(senal)) {
+    return { ok: false, error: 'Señal inválida' };
+  }
+  const corrida = await obtenerUltimaCorrida(adminId);
+  if (!corrida || corrida.estado !== 'en_curso') {
+    return { ok: false, error: 'No hay ninguna corrida en curso' };
+  }
+  await guardarCorrida(adminId, {
+    senalControl: senal,
+    senalSolicitadaAt: new Date().toISOString(),
+  });
+  return { ok: true, senal };
+};
+
+// Lectura de la señal. Si Firestore falla NO se detiene la corrida: un error de
+// red no puede cancelar llamadas que el suscriptor sí quiere hacer.
+const leerSenalControl = async (adminId) => {
+  try {
+    const doc = await db.collection('llamadas_ia_corridas').doc(adminId).get();
+    const senal = doc.exists ? doc.data().senalControl : null;
+    return SENALES_VALIDAS.includes(senal) ? senal : null;
+  } catch (e) {
+    console.error('[LLAMADAS-IA] No se pudo leer la señal de control:', e.message);
+    return null;
+  }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 // MOTOR PRINCIPAL
 // opciones:
 //   soloAdminId    → limita la corrida a UN tenant (manual/programada). El cron
@@ -498,7 +554,9 @@ const obtenerUltimaCorrida = async (adminId) => {
 //                    el momento); el cron respeta la ventana L-V 8-18 / S 9-12.
 // ═════════════════════════════════════════════════════════════════════════════
 const ejecutarMotorLlamadas = async (opciones = {}) => {
-  const { soloAdminId = null, ignorarHorario = false } = opciones;
+  // ✅ LUCY-PARADA-001: soloVencimientoIds llega solo al REANUDAR una corrida
+  // pausada — limita el motor a los vencimientos que quedaron en cola.
+  const { soloAdminId = null, ignorarHorario = false, soloVencimientoIds = null } = opciones;
   const mesActual = mesActualColombia();
   console.log(`[LLAMADAS-IA] Motor — mes ${mesActual}${soloAdminId ? ` — SOLO tenant ${soloAdminId}` : ' — todos los tenants activos'}`);
 
@@ -519,10 +577,18 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
     }
 
     // 2) Agrupar por tenant
+    // ✅ LUCY-PARADA-001: al reanudar, solo entran los vencimientos que
+    // quedaron pendientes cuando se pausó. El filtro se aplica aquí y no en la
+    // consulta porque Firestore limita los `in` a 30 elementos.
+    const setPendientes = Array.isArray(soloVencimientoIds) && soloVencimientoIds.length
+      ? new Set(soloVencimientoIds)
+      : null;
+
     const porTenant = {};
     vencSnap.docs.forEach(doc => {
       const d = doc.data();
       if (!d.adminId || !d.clienteId) return;
+      if (setPendientes && !setPendientes.has(doc.id)) return;
       if (!porTenant[d.adminId]) porTenant[d.adminId] = [];
       porTenant[d.adminId].push({ id: doc.id, ...d });
     });
@@ -530,6 +596,8 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
     let totalLanzadas = 0;
     let tenantsProcesados = 0;
     let omitidasPorTope = 0;
+    // ✅ LUCY-PARADA-001: queda { senal, pendientes } si el usuario frenó.
+    let detencion = null;
     // ✅ LUCY-DIAGNOSTICO-002: antes, cuando no salía ninguna llamada, el panel
     // solo podía decir "0 llamadas" o "omitidas por tope". Ahora se cuenta el
     // MOTIVO real de cada omisión y llega a pantalla.
@@ -570,7 +638,24 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
       const cacheSedes = new Map();
       let lanzadasEnLote = 0;
 
-      for (const venc of vencimientos) {
+      for (let idx = 0; idx < vencimientos.length; idx++) {
+        const venc = vencimientos[idx];
+
+        // ✅ LUCY-PARADA-001 — PUNTO DE CONTROL
+        // Se consulta ANTES de marcar cada número. Solo aplica a corridas de un
+        // tenant (manual o programada): el cron mensual global no se detiene
+        // desde el panel de un suscriptor.
+        if (soloAdminId) {
+          const senal = await leerSenalControl(adminId);
+          if (senal) {
+            // Lo que aún no se ha marcado. Es lo que "Continuar" retoma.
+            const pendientes = vencimientos.slice(idx).map(v => v.id);
+            detencion = { senal, pendientes };
+            console.log(`[LLAMADAS-IA] Corrida ${senal === 'pausar' ? 'PAUSADA' : 'CANCELADA'} por el usuario — ${pendientes.length} pendiente(s)`);
+            break;
+          }
+        }
+
         try {
           if (minutosDisponibles <= 0) { omitidasPorTope++; continue; }
 
@@ -709,6 +794,12 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
           console.error('[LLAMADAS-IA] Error procesando vencimiento', venc.id, errCliente.message);
         }
       }
+
+      // ✅ LUCY-PARADA-001: el freno corta la corrida completa, no solo el
+      // tenant actual. En corridas de un solo tenant es lo mismo; se deja
+      // explícito para que no cambie el comportamiento si algún día el botón
+      // se expone en una corrida multi-tenant.
+      if (detencion) break;
     }
 
     console.log(`[LLAMADAS-IA] Motor completado — ${tenantsProcesados} tenant(s), ${totalLanzadas} llamada(s), ${omitidasPorTope} omitida(s) por tope`, motivos);
@@ -721,8 +812,33 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
     };
     // ✅ LUCY-ASINCRONO-001: el resumen se persiste porque el motor ya NO
     // responde dentro de la petición HTTP (ver más abajo).
-    if (soloAdminId) await guardarCorrida(soloAdminId, { estado: 'terminada', ...resumen });
-    return resumen;
+    // ✅ LUCY-PARADA-001: si el usuario frenó, el estado final NO es 'terminada'.
+    // 'pausada' conserva la cola para poder continuar; 'cancelada' la descarta.
+    if (soloAdminId) {
+      if (detencion) {
+        await guardarCorrida(soloAdminId, {
+          ...resumen,
+          estado: detencion.senal === 'pausar' ? 'pausada' : 'cancelada',
+          pendientes: detencion.senal === 'pausar' ? detencion.pendientes : [],
+          pendientesCount: detencion.senal === 'pausar' ? detencion.pendientes.length : 0,
+          senalControl: null,               // consumida: no frena la próxima corrida
+          detenidaAt: new Date().toISOString(),
+          llamandoAhora: null,
+          clienteAhora: null,
+        });
+      } else {
+        await guardarCorrida(soloAdminId, {
+          estado: 'terminada',
+          ...resumen,
+          pendientes: [],
+          pendientesCount: 0,
+          senalControl: null,
+          llamandoAhora: null,
+          clienteAhora: null,
+        });
+      }
+    }
+    return { ...resumen, detenida: detencion?.senal || null };
   } catch (e) {
     console.error('[LLAMADAS-IA] Error general del motor:', e.message);
     return { tenantsProcesados: 0, llamadasLanzadas: 0, omitidasPorTope: 0, error: e.message };
@@ -963,6 +1079,8 @@ module.exports = {
   obtenerSede,
   guardarCorrida,
   obtenerUltimaCorrida,
+  solicitarControlCorrida, // ✅ LUCY-PARADA-001
+  leerSenalControl,
 };
 
 // ════════════════════════════════════════════════════════════════════════════
