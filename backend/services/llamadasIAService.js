@@ -47,6 +47,34 @@ const ELEVEN_PHONE_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID;   // id del núm
 const COSTO_FACTURADO_COP = Number(process.env.LLAMADA_IA_COSTO_COP) || 300;
 const TOPE_MINUTOS_DEFAULT = Number(process.env.LLAMADA_IA_TOPE_MINUTOS) || 120; // por tenant/mes si no hay config
 
+// ─── ✅ FIX LUCY-CAPACIDAD-001 (2026-07-26) ──────────────────────────────────
+// PROBLEMA DETECTADO: el motor descontaba 2 minutos FIJOS del presupuesto por
+// cada llamada lanzada. Con el tope por defecto de 120 min eso significaba
+// exactamente 60 llamadas y corte silencioso — un tenant con 120 vencimientos
+// solo recibía llamadas para la mitad de su base, sin explicación en pantalla.
+// Además una llamada NO CONTESTADA consume ~0 minutos reales pero igual
+// descontaba 2 del presupuesto, desperdiciando capacidad ya pagada.
+//
+// SOLUCIÓN (3 partes):
+//   1. La reserva se estima POR TIPO DE ACTIVO (ver clasificarActivo), no un
+//      valor fijo: el guion de mostrador es mucho más corto que el de técnico.
+//   2. La reserva se ajusta por la TASA DE CONTESTACIÓN: solo una fracción de
+//      las llamadas lanzadas llega a conversación real y consume minutos.
+//   3. El consumo REAL sigue siendo el que manda: lo registra el webhook con
+//      la duración efectiva (registrarConsumoMinutos). La reserva es solo un
+//      freno de emergencia dentro de la corrida.
+const MAX_INTENTOS_DEFAULT = Number(process.env.LLAMADA_IA_MAX_INTENTOS) || 3;
+
+// Fracción de llamadas lanzadas que termina en conversación facturable.
+// Conservador: si de cada 10 llamadas contestan 4, solo esas consumen minutos.
+const FACTOR_CONTESTACION = Number(process.env.LLAMADA_IA_FACTOR_CONTESTACION) || 0.45;
+
+// Control de concurrencia: ElevenLabs/Twilio limitan llamadas simultáneas.
+// Antes se lanzaban en serie con 800 ms de separación — con 900 vencimientos
+// eso deja cientos de llamadas vivas al mismo tiempo y el proveedor rechaza.
+const LOTE_CONCURRENTE  = Number(process.env.LLAMADA_IA_CONCURRENCIA) || 5;
+const PAUSA_ENTRE_LOTES = Number(process.env.LLAMADA_IA_PAUSA_LOTE_MS) || 20000;
+
 // ─── Helpers de fecha (mismo criterio que vencimientosService.js) ────────────
 const mesActualColombia = () => {
   const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
@@ -76,6 +104,129 @@ const primerNombre = (nombreCompleto) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ CLASIFICACIÓN DE ACTIVO — LUCY-CAPACIDAD-001
+// ─────────────────────────────────────────────────────────────────────────────
+// Regla de negocio (validada con Sandra, mercado colombiano):
+//   · ABC de 5 lb o menos  → ~90% son de VEHÍCULO. El cliente PASA por la sede,
+//     no requiere agendar técnico. Guion corto (~1 min) y desenlace mostrador.
+//   · ABC 10 lb+, CO2, Solkaflam, agua a presión, rodantes → EMPRESA. Servicio
+//     en sitio, requiere agendar técnico. Guion largo (~2.5 min).
+//
+// IMPORTANTE PARA EL SaaS: esto es un RULESET POR DEFECTO, no una verdad
+// universal. Un suscriptor de otro nicho (pólizas, mantenimientos, calibración)
+// debe poder sobrescribirlo desde llamadas_ia_config.reglasClasificacion sin
+// que nadie toque este archivo. El motor lee reglas; no las contiene.
+//
+// NOTA: Lucy NUNCA afirma "su extintor de carro" — el 10% restante puede ser de
+// casa u oficina. El guion de mostrador funciona igual en los tres casos, y si
+// el cliente pide visita, Lucy escala a preorden con técnico.
+// ═════════════════════════════════════════════════════════════════════════════
+const REGLAS_CLASIFICACION_DEFAULT = [
+  // Se evalúan en orden; la primera que hace match gana.
+  {
+    id: 'empresa_por_agente',
+    patron: 'CO2|SOLKAFLAM|LIMPIO|AGUA|ESPUMA|K |CLASE K|RODANTE|SATELITAL|CARRETA',
+    tipoUso: 'empresa',
+  },
+  {
+    id: 'empresa_por_peso',
+    // 10, 15, 20, 30, 50, 100, 150 lb — todo lo que no es portátil de carro
+    patron: '\\b(10|15|20|25|30|50|75|100|125|150)\\s*(LB|LBS|LIBRAS?|KG|KILOS?)\\b',
+    tipoUso: 'empresa',
+  },
+  {
+    id: 'vehicular_por_peso',
+    patron: '\\b(2|2\\.5|3|4|5)\\s*(LB|LBS|LIBRAS?|KG|KILOS?)\\b',
+    tipoUso: 'vehicular',
+  },
+];
+
+const PERFILES_DESENLACE = {
+  vehicular: {
+    tipoUso: 'vehicular',
+    requiereAgendamiento: false,
+    desenlace: 'mostrador',
+    guionTipo: 'corto_mostrador',
+    minutosEstimados: 1.2,
+  },
+  empresa: {
+    tipoUso: 'empresa',
+    requiereAgendamiento: true,
+    desenlace: 'preorden_tecnico',
+    guionTipo: 'largo_agendamiento',
+    minutosEstimados: 2.5,
+  },
+};
+
+const clasificarActivo = (descripcionEquipo, reglasTenant = null) => {
+  const texto = String(descripcionEquipo || '').toUpperCase();
+  const reglas = Array.isArray(reglasTenant) && reglasTenant.length
+    ? reglasTenant
+    : REGLAS_CLASIFICACION_DEFAULT;
+
+  for (const regla of reglas) {
+    try {
+      if (new RegExp(regla.patron, 'i').test(texto)) {
+        return { ...PERFILES_DESENLACE[regla.tipoUso], reglaAplicada: regla.id };
+      }
+    } catch {
+      // Una regla mal escrita por un suscriptor no puede tumbar el motor.
+      console.warn('[LLAMADAS-IA] Regla de clasificación inválida — omitida:', regla.id);
+    }
+  }
+  // Sin match: se asume EMPRESA (el caso caro). Es el fallback seguro: mejor
+  // agendar de más que mandar a alguien al mostrador cuando necesita técnico.
+  return { ...PERFILES_DESENLACE.empresa, reglaAplicada: 'fallback_empresa' };
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ SEDE DEL SUSCRIPTOR — LUCY-SEDE-001
+// ─────────────────────────────────────────────────────────────────────────────
+// La sede YA EXISTE en el sistema: es la colección `companies` (Sur / Valle /
+// Cúcuta), y clientes y vencimientos ya guardan `empresaId`. No se crea una
+// entidad nueva — se conecta la que ya está.
+//
+// REGLA CRÍTICA: si no hay dirección de sede, Lucy NO da una dirección
+// inventada. Una dirección equivocada dicha por teléfono cuesta el cliente y
+// obliga a rellamar (minutos ya pagados). En ese caso el guion cambia a
+// "un asesor le confirma la dirección".
+// ═════════════════════════════════════════════════════════════════════════════
+const HORARIO_FALLBACK = 'lunes a viernes de 8:00 a.m. a 5:30 p.m. y sábados de 8:00 a.m. a 12:00 m.';
+
+const obtenerSede = async (adminId, empresaId, cacheSedes) => {
+  const clave = empresaId || '__principal__';
+  if (cacheSedes.has(clave)) return cacheSedes.get(clave);
+
+  let sede = null;
+
+  if (empresaId) {
+    const doc = await db.collection('companies').doc(empresaId).get();
+    // Ownership multi-tenant: una sede de otro suscriptor jamás se usa.
+    if (doc.exists && doc.data().user_id === adminId) sede = { id: doc.id, ...doc.data() };
+  }
+
+  // Sin empresaId asignado → sede principal del suscriptor (la primera activa).
+  if (!sede) {
+    const snap = await db.collection('companies').where('user_id', '==', adminId).limit(5).get();
+    if (!snap.empty) sede = { id: snap.docs[0].id, ...snap.docs[0].data() };
+  }
+
+  const resuelta = sede
+    ? {
+        completa:  !!(sede.address && String(sede.address).trim()),
+        nombre:    sede.name || '',
+        direccion: sede.address || '',
+        ciudad:    sede.ciudad || '',
+        telefono:  sede.phone || sede.cellphone || sede.whatsapp || '',
+        horario:   sede.horarioAtencion || HORARIO_FALLBACK,
+      }
+    : { completa: false, nombre: '', direccion: '', ciudad: '', telefono: '', horario: HORARIO_FALLBACK };
+
+  cacheSedes.set(clave, resuelta);
+  return resuelta;
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Activación por tenant — clave EXPLÍCITA en users.modulos (igual que 'qr':
 // modulos === [] significa "todos" para el resto del sistema, pero NO aplica
 // a módulos premium de activación uno-a-uno como este).
@@ -99,6 +250,12 @@ const obtenerConfigTenant = async (adminId) => {
   return {
     topeMinutosMes: Number(data.topeMinutosMes) || TOPE_MINUTOS_DEFAULT,
     minutosConsumidosMes: Number(data.consumo?.[mes]) || 0,
+    // ✅ LUCY-CAPACIDAD-001: intentos por cliente/mes configurables por tenant.
+    // Antes estaba quemado en 2 dentro del motor.
+    maxIntentos: Number(data.maxIntentos) || MAX_INTENTOS_DEFAULT,
+    // Ruleset de clasificación propio del suscriptor (opcional). Si no lo tiene,
+    // se usa el de extintores por defecto.
+    reglasClasificacion: Array.isArray(data.reglasClasificacion) ? data.reglasClasificacion : null,
   };
 };
 
@@ -126,7 +283,12 @@ const registrarConsumoMinutos = async (adminId, segundos) => {
 // y "Extintor ABC 5lbs" son productos distintos).
 // Lucy NUNCA crea la orden: registra el cierre y un humano la crea.
 // ═════════════════════════════════════════════════════════════════════════════
-const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, tenantInfo }) => {
+const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, tenantInfo, sede, perfil }) => {
+  // ✅ LUCY-SEDE-001: la dirección/horario/teléfono que dice Lucy salen de la
+  // SEDE del cliente (companies), no de un texto fijo del tenant.
+  const sedeSegura = sede || { completa: false, direccion: '', ciudad: '', telefono: '', horario: HORARIO_FALLBACK };
+  const perfilSeguro = perfil || PERFILES_DESENLACE.empresa;
+
   return {
     adminId:            String(adminId),
     registroId:         String(registroId),
@@ -141,9 +303,25 @@ const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, 
     valor_domicilio:    tenantInfo.valorDomicilio || 'según su sector',
     mes_vencimiento:    vencimiento.fechaVencimiento || '',
     medios_pago:        tenantInfo.mediosPago || 'efectivo, transferencia y Nequi',
-    direccion_empresa:  tenantInfo.direccion || '',
-    horario_empresa:    tenantInfo.horario || 'lunes a viernes 8:00 a.m. – 5:30 p.m., sábados 8:00 a.m. – 12:00 p.m.',
-    ciudad_empresa:     tenantInfo.ciudad || '',
+
+    // ── Datos de la SEDE que atiende a este cliente ──────────────────────────
+    direccion_empresa:  sedeSegura.direccion || tenantInfo.direccion || '',
+    ciudad_empresa:     sedeSegura.ciudad    || tenantInfo.ciudad    || '',
+    horario_empresa:    sedeSegura.horario   || HORARIO_FALLBACK,
+    telefono_empresa:   sedeSegura.telefono  || '',
+    nombre_sede:        sedeSegura.nombre    || '',
+    // Bandera para el guion: si es "no", Lucy NO dicta dirección y remite a un
+    // asesor. Nunca inventa una sede.
+    sede_confirmada:    sedeSegura.completa ? 'si' : 'no',
+
+    // ── Ruta del guion según el tipo de activo (LUCY-CAPACIDAD-001) ──────────
+    // El agente de ElevenLabs ramifica con estas variables: guion corto de
+    // mostrador (~1 min) vs. guion largo con agendamiento de técnico (~2.5 min).
+    // Menos turnos de conversación = menos latencia percibida.
+    tipo_uso:               perfilSeguro.tipoUso,               // 'vehicular' | 'empresa'
+    requiere_agendamiento:  perfilSeguro.requiereAgendamiento ? 'si' : 'no',
+    guion_tipo:             perfilSeguro.guionTipo,             // 'corto_mostrador' | 'largo_agendamiento'
+    desenlace_esperado:     perfilSeguro.desenlace,             // 'mostrador' | 'preorden_tecnico'
   };
 };
 
@@ -223,6 +401,17 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
     let totalLanzadas = 0;
     let tenantsProcesados = 0;
     let omitidasPorTope = 0;
+    // ✅ LUCY-DIAGNOSTICO-002: antes, cuando no salía ninguna llamada, el panel
+    // solo podía decir "0 llamadas" o "omitidas por tope". Ahora se cuenta el
+    // MOTIVO real de cada omisión y llega a pantalla.
+    const motivos = {
+      sin_telefono: 0,
+      ya_gestionado: 0,
+      intentos_agotados: 0,
+      cliente_inexistente: 0,
+      fuera_de_horario: 0,
+      fallo_proveedor: 0,
+    };
 
     for (const [adminId, vencimientos] of Object.entries(porTenant)) {
       // 3) Activación manual por Sandra — sin la clave, el tenant no suena
@@ -247,6 +436,10 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
         ciudad:    userDoc.exists ? userDoc.data().ciudad : '',
       };
 
+      // Cache de sedes por corrida — evita releer `companies` en cada llamada.
+      const cacheSedes = new Map();
+      let lanzadasEnLote = 0;
+
       for (const venc of vencimientos) {
         try {
           if (minutosDisponibles <= 0) { omitidasPorTope++; continue; }
@@ -262,18 +455,20 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
           const yaTieneResultadoFinal = intentos.some(i =>
             ['cerrada', 'reagendada', 'inactivo_cliente', 'escalado_asesor', 'no_interesado'].includes(i.resultado)
           );
-          if (yaTieneResultadoFinal) continue;
+          if (yaTieneResultadoFinal) { motivos.ya_gestionado++; continue; }
 
+          // ✅ LUCY-CAPACIDAD-001: intentos configurables (antes quemado en 2).
           const numeroIntento = intentos.length + 1;
-          if (numeroIntento > 2) continue;
+          if (numeroIntento > config.maxIntentos) { motivos.intentos_agotados++; continue; }
 
           // 5) Cliente y teléfono
           const cliDoc = await db.collection('clients').doc(venc.clienteId).get();
-          if (!cliDoc.exists) continue;
+          if (!cliDoc.exists) { motivos.cliente_inexistente++; continue; }
           const cliente = cliDoc.data();
           const telefonoRaw = venc.telefono || cliente.celular || cliente.telefono;
           const telefono = normalizarParaLlamada(telefonoRaw);
           if (!telefono) {
+            motivos.sin_telefono++;
             console.warn(`[LLAMADAS-IA] Cliente ${venc.clienteId} sin teléfono válido — omitido`);
             continue;
           }
@@ -287,17 +482,24 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
               (diaSemana >= 1 && diaSemana <= 5 && horaActual >= 8 && horaActual < 18) ||
               (diaSemana === 6 && horaActual >= 9 && horaActual < 12);
             if (!horarioValido) {
+              motivos.fuera_de_horario++;
               console.log('[LLAMADAS-IA] Fuera de horario permitido — el cron reintentará');
               continue;
             }
           }
+
+          // ✅ LUCY-CAPACIDAD-001 / LUCY-SEDE-001: perfil del activo + sede que
+          // atiende a este cliente. Ambos se resuelven ANTES de marcar, para que
+          // Lucy no haga ninguna consulta durante la llamada (menos latencia).
+          const perfil = clasificarActivo(venc.descripcionEquipo, config.reglasClasificacion);
+          const sede = await obtenerSede(adminId, venc.empresaId || cliente.empresaId, cacheSedes);
 
           // 6) ✅ FIX LUCY-ELEVEN-001b: registroRef se declara ANTES de usarse
           // (antes se usaba registroRef.id dos líneas antes de su declaración
           // — TDZ ReferenceError que tumbaba cada intento de llamada).
           const registroRef = db.collection('llamadas_ia').doc();
           const variables = construirVariablesLlamada({
-            adminId, registroId: registroRef.id, cliente, vencimiento: venc, tenantInfo,
+            adminId, registroId: registroRef.id, cliente, vencimiento: venc, tenantInfo, sede, perfil,
           });
 
           const resultadoLanzamiento = await lanzarLlamadaElevenLabs({ telefono, variables });
@@ -316,17 +518,39 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
             errorLanzamiento: resultadoLanzamiento.ok ? null : resultadoLanzamiento.error,
             costoFacturadoCOP: COSTO_FACTURADO_COP,
             esPrueba: false,
+            // ✅ Trazabilidad del enrutamiento — permite auditar por qué Lucy
+            // usó el guion corto o el largo, y medir cierre por tipo de activo.
+            tipoUso: perfil.tipoUso,
+            desenlaceEsperado: perfil.desenlace,
+            guionTipo: perfil.guionTipo,
+            reglaClasificacion: perfil.reglaAplicada,
+            empresaId: venc.empresaId || cliente.empresaId || null,
+            sedeConfirmada: sede.completa,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
           });
 
           if (resultadoLanzamiento.ok) {
             totalLanzadas++;
-            minutosDisponibles -= 2; // estimación conservadora (2 min/llamada) hasta que el webhook traiga la duración real
+            lanzadasEnLote++;
+            // ✅ FIX LUCY-CAPACIDAD-001: la reserva ya NO es 2 min fijos. Se
+            // estima por tipo de activo y se pondera por tasa de contestación
+            // —una llamada no contestada casi no consume minutos—. El consumo
+            // real lo fija el webhook con la duración efectiva.
+            minutosDisponibles -= perfil.minutosEstimados * FACTOR_CONTESTACION;
           } else {
+            motivos.fallo_proveedor++;
             console.error(`[LLAMADAS-IA] Fallo al lanzar a ${telefono}:`, resultadoLanzamiento.error);
           }
 
-          await new Promise(r => setTimeout(r, 800)); // pausa entre llamadas
+          // ✅ Control de concurrencia: se lanzan en lotes pequeños con pausa,
+          // en vez de cientos de llamadas vivas al mismo tiempo (el proveedor
+          // las rechaza y se pierden vencimientos sin aviso).
+          if (lanzadasEnLote >= LOTE_CONCURRENTE) {
+            lanzadasEnLote = 0;
+            await new Promise(r => setTimeout(r, PAUSA_ENTRE_LOTES));
+          } else {
+            await new Promise(r => setTimeout(r, 800));
+          }
 
         } catch (errCliente) {
           console.error('[LLAMADAS-IA] Error procesando vencimiento', venc.id, errCliente.message);
@@ -334,8 +558,14 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
       }
     }
 
-    console.log(`[LLAMADAS-IA] Motor completado — ${tenantsProcesados} tenant(s), ${totalLanzadas} llamada(s), ${omitidasPorTope} omitida(s) por tope`);
-    return { tenantsProcesados, llamadasLanzadas: totalLanzadas, omitidasPorTope };
+    console.log(`[LLAMADAS-IA] Motor completado — ${tenantsProcesados} tenant(s), ${totalLanzadas} llamada(s), ${omitidasPorTope} omitida(s) por tope`, motivos);
+    return {
+      tenantsProcesados,
+      llamadasLanzadas: totalLanzadas,
+      omitidasPorTope,
+      vencimientosEvaluados: vencSnap.size,
+      motivos, // ✅ LUCY-DIAGNOSTICO-002 — desglose visible en el panel
+    };
   } catch (e) {
     console.error('[LLAMADAS-IA] Error general del motor:', e.message);
     return { tenantsProcesados: 0, llamadasLanzadas: 0, omitidasPorTope: 0, error: e.message };
@@ -347,7 +577,7 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
 // Lanza UNA llamada al número indicado con datos de ejemplo del tenant.
 // No toca vencimientos ni clientes; el registro queda marcado esPrueba=true.
 // ═════════════════════════════════════════════════════════════════════════════
-const lanzarLlamadaPrueba = async ({ adminId, telefono }) => {
+const lanzarLlamadaPrueba = async ({ adminId, telefono, tipoUso = 'empresa' }) => {
   const telefonoE164 = normalizarParaLlamada(telefono);
   if (!telefonoE164) return { ok: false, error: 'Teléfono inválido — usa un celular colombiano de 10 dígitos' };
 
@@ -361,6 +591,18 @@ const lanzarLlamadaPrueba = async ({ adminId, telefono }) => {
     ciudad:    userDoc.exists ? userDoc.data().ciudad : '',
   };
 
+  // ✅ LUCY-SEDE-001: la prueba usa la MISMA resolución de sede que la
+  // operación real — así se valida en la prueba que la dirección que dicta
+  // Lucy es la correcta, antes de llamar a un cliente.
+  const cacheSedes = new Map();
+  const sede = await obtenerSede(adminId, null, cacheSedes);
+
+  // Permite probar cualquiera de los dos guiones sin tocar clientes reales.
+  const equipoPrueba = tipoUso === 'vehicular'
+    ? 'un extintor ABC de 5 libras'
+    : 'tres extintores ABC de 10 libras';
+  const perfil = clasificarActivo(equipoPrueba);
+
   const registroRef = db.collection('llamadas_ia').doc();
   const variables = construirVariablesLlamada({
     adminId,
@@ -372,11 +614,13 @@ const lanzarLlamadaPrueba = async ({ adminId, telefono }) => {
       celular: telefono,
     },
     vencimiento: {
-      descripcionEquipo: 'tres extintores ABC de 10 libras',
+      descripcionEquipo: equipoPrueba,
       fechaVencimiento: `${mesActualColombia()}-01`,
       telefono,
     },
     tenantInfo,
+    sede,
+    perfil,
   });
 
   const resultadoLanzamiento = await lanzarLlamadaElevenLabs({ telefono: telefonoE164, variables });
@@ -395,6 +639,10 @@ const lanzarLlamadaPrueba = async ({ adminId, telefono }) => {
     errorLanzamiento: resultadoLanzamiento.ok ? null : resultadoLanzamiento.error,
     costoFacturadoCOP: 0, // las pruebas no se facturan al tenant
     esPrueba: true,
+    tipoUso: perfil.tipoUso,
+    desenlaceEsperado: perfil.desenlace,
+    guionTipo: perfil.guionTipo,
+    sedeConfirmada: sede.completa,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
@@ -540,6 +788,8 @@ module.exports = {
   tenantTieneLucyActiva,
   obtenerConfigTenant,
   normalizarParaLlamada,
+  clasificarActivo,   // expuesto para el panel y para pruebas del ruleset
+  obtenerSede,
 };
 
 // ════════════════════════════════════════════════════════════════════════════

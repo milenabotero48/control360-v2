@@ -329,6 +329,7 @@ router.get('/config', async (req, res) => {
       activo,
       topeMinutosMes: config?.topeMinutosMes ?? null,
       minutosConsumidosMes: config?.minutosConsumidosMes ?? null,
+      maxIntentos: config?.maxIntentos ?? null,
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -352,6 +353,7 @@ router.get('/superadmin/config/:adminId', async (req, res) => {
       activo: (userDoc.data().modulos || []).includes('llamadas_ia'),
       topeMinutosMes: config.topeMinutosMes,
       minutosConsumidosMes: config.minutosConsumidosMes,
+      maxIntentos: config.maxIntentos,
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -378,19 +380,31 @@ router.put('/superadmin/config/:adminId', async (req, res) => {
     const userDoc = await db.collection('users').doc(adminId).get();
     if (!userDoc.exists) return res.status(404).json({ error: 'Suscriptor no encontrado' });
 
-    // merge: NUNCA se toca el histórico de consumo del tenant.
-    await db.collection('llamadas_ia_config').doc(adminId).set({
+    const cambios = {
       topeMinutosMes: Math.round(tope),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       actualizadoPor: req.user?.nombre || req.user?.email || 'superadmin',
-    }, { merge: true });
+    };
+
+    // ✅ LUCY-CAPACIDAD-001: intentos por cliente/mes configurables por plan.
+    // Opcional — si no viene en el body, no se toca el valor actual.
+    if (req.body?.maxIntentos !== undefined) {
+      const intentos = Number(req.body.maxIntentos);
+      if (!Number.isInteger(intentos) || intentos < 1 || intentos > 5) {
+        return res.status(400).json({ error: 'maxIntentos debe ser un entero entre 1 y 5' });
+      }
+      cambios.maxIntentos = intentos;
+    }
+
+    // merge: NUNCA se toca el histórico de consumo del tenant.
+    await db.collection('llamadas_ia_config').doc(adminId).set(cambios, { merge: true });
 
     await auditar({
       accion: 'config_tope_minutos',
       descripcion: `Tope de minutos de Lucy fijado en ${Math.round(tope)} min/mes para el suscriptor ${adminId}`,
       usuarioId: getAdminId(req),
       usuarioNombre: req.user?.nombre || '',
-      datos: { adminIdObjetivo: adminId, topeMinutosMes: Math.round(tope) },
+      datos: { adminIdObjetivo: adminId, topeMinutosMes: Math.round(tope), maxIntentos: cambios.maxIntentos },
     });
 
     const config = await obtenerConfigTenant(adminId);
@@ -440,10 +454,13 @@ router.post('/llamada-prueba', async (req, res) => {
       return res.status(403).json({ error: 'Solo el administrador puede lanzar llamadas de prueba' });
     }
     const adminId = getAdminId(req);
-    const { telefono } = req.body || {};
+    const { telefono, tipoUso } = req.body || {};
     if (!telefono) return res.status(400).json({ error: 'Falta el teléfono' });
 
-    const resultado = await lanzarLlamadaPrueba({ adminId, telefono });
+    // ✅ LUCY-CAPACIDAD-001: permite probar el guion corto (mostrador) o el
+    // largo (agendamiento de técnico) por separado, sin tocar clientes reales.
+    const tipoValido = ['vehicular', 'empresa'].includes(tipoUso) ? tipoUso : 'empresa';
+    const resultado = await lanzarLlamadaPrueba({ adminId, telefono, tipoUso: tipoValido });
     if (!resultado.ok) return res.status(400).json({ error: resultado.error });
 
     await auditar({

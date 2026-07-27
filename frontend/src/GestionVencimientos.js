@@ -352,6 +352,92 @@ export default function GestionVencimientos({ user, onNavegar }) {
     link.click();
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ EXPORT GOOGLE CONTACTS — VENC-CONTACTOS-001 (2026-07-26)
+  // ───────────────────────────────────────────────────────────────────────────
+  // Automatiza el paso manual del cierre de mes: hoy los contactos de la
+  // campaña de WhatsApp se arman a mano en Google Contacts antes de usar la
+  // lista de difusión paga. Esto genera el CSV listo para importar.
+  //
+  // DECISIONES DE DISEÑO:
+  //  · UN CONTACTO POR CLIENTE, no por equipo. Un cliente con 12 extintores
+  //    recibe UN mensaje, no 12 — es la regla de "un solo toque por cliente/mes".
+  //  · Etiqueta VENC-AAAA-MM: permite seleccionar el grupo completo en el
+  //    celular y borrarlo después sin ensuciar la agenda.
+  //  · Teléfono en formato +57XXXXXXXXXX para que el celular lo reconozca.
+  //  · Solo se exportan vencidos y por vencer — no tiene sentido escribirle
+  //    a quien está vigente.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const exportarGoogleContacts = () => {
+    const mesTag = new Date().toISOString().slice(0, 7); // AAAA-MM
+    const etiqueta = `VENC-${mesTag}`;
+
+    // 1) Agrupar por cliente (clave: id de cliente, o teléfono si no hay id)
+    const porCliente = new Map();
+    lista
+      .filter(v => v.estado === 'vencido' || v.estado === 'por_vencer')
+      .forEach(v => {
+        const tel = String(v.telefono || '').replace(/\D/g, '');
+        if (!tel) return; // sin teléfono no sirve para la campaña
+        const clave = v.clienteId || tel;
+        if (!porCliente.has(clave)) {
+          porCliente.set(clave, {
+            nombre: v.clienteNombre || '',
+            empresa: v.empresa || '',
+            telefono: tel,
+            equipos: [],
+            unidades: 0,
+            proximo: v.fechaVencimiento || '',
+          });
+        }
+        const c = porCliente.get(clave);
+        c.equipos.push(`${v.cantidad || 1}× ${v.descripcionEquipo || 'equipo'}`);
+        c.unidades += Number(v.cantidad) || 1;
+        if (v.fechaVencimiento && (!c.proximo || v.fechaVencimiento < c.proximo)) {
+          c.proximo = v.fechaVencimiento;
+        }
+      });
+
+    if (porCliente.size === 0) {
+      alert('No hay clientes con vencimientos y teléfono válido para exportar este mes.');
+      return;
+    }
+
+    // 2) Formato CSV de Google Contacts
+    const telE164 = (t) => (t.length === 10 && t.startsWith('3')) ? `+57${t}`
+                        : (t.length === 12 && t.startsWith('57')) ? `+${t}`
+                        : t;
+
+    const cab = ['Name','Given Name','Family Name','Organization 1 - Name',
+                 'Phone 1 - Type','Phone 1 - Value','Notes','Group Membership'];
+
+    const filas = [...porCliente.values()].map(c => {
+      const nombreLimpio = (c.nombre || c.empresa || 'Cliente').trim();
+      return [
+        `${etiqueta} · ${nombreLimpio}`,   // prefijo → quedan juntos en la agenda
+        nombreLimpio,
+        '',
+        c.empresa || '',
+        'Mobile',
+        telE164(c.telefono),
+        `${c.unidades} unidad(es) — ${c.equipos.join('; ')}. Vence: ${c.proximo}`,
+        `* myContacts ::: ${etiqueta}`,
+      ];
+    });
+
+    const escapar = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    const csv = [cab, ...filas].map(r => r.map(escapar).join(',')).join('\r\n');
+
+    // BOM para que Google/Excel respeten las tildes
+    const link = document.createElement('a');
+    link.href = `data:text/csv;charset=utf-8,${encodeURIComponent('﻿' + csv)}`;
+    link.download = `google_contacts_${etiqueta}.csv`;
+    link.click();
+
+    setMsgImport(`✓ ${filas.length} contacto(s) exportado(s) con la etiqueta ${etiqueta}. Impórtalo en Google Contacts y usa esa etiqueta para armar la difusión.`);
+    setTimeout(() => setMsgImport(null), 12000);
+  };
+
   const inp = { width:'100%', padding:'8px 12px', border:'1px solid #d1d5db', borderRadius:8, fontSize:13 };
 
   return (
@@ -469,6 +555,14 @@ export default function GestionVencimientos({ user, onNavegar }) {
               onClick={exportarCSV}
               style={{ padding:'8px 16px', border:'none', borderRadius:8, background:'#1a1a2e', color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer' }}>
               ⬇ Exportar
+            </button>
+
+            {/* ✅ VENC-CONTACTOS-001 — CSV listo para Google Contacts */}
+            <button
+              onClick={exportarGoogleContacts}
+              title="Genera el CSV de contactos agrupado por cliente y etiquetado por mes, listo para importar en Google Contacts y armar la difusión de WhatsApp"
+              style={{ padding:'8px 16px', border:'none', borderRadius:8, background:'#16a34a', color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer' }}>
+              📇 Contactos WhatsApp
             </button>
           </div>
 

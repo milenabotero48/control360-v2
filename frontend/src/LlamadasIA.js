@@ -62,6 +62,8 @@ export default function LlamadasIA({ user, onNavegar }) {
   const [progFecha, setProgFecha] = useState('');
   const [progHora, setProgHora] = useState('09:00');
   const [telPrueba, setTelPrueba] = useState('');
+  const [tipoPrueba, setTipoPrueba] = useState('empresa'); // 'vehicular' | 'empresa'
+  const [preorden, setPreorden] = useState(null); // LUCY-PREORDEN-001
   const [ocupado, setOcupado] = useState(false);
   const [aviso, setAviso] = useState(null); // { tipo: 'ok'|'error', texto }
 
@@ -105,12 +107,29 @@ export default function LlamadasIA({ user, onNavegar }) {
       // responde 200 con { error } — antes eso se veía como "0 llamadas" sin
       // explicación. Ahora el motivo real llega a pantalla.
       if (data.error) throw new Error(data.error);
+
+      // ✅ FIX LUCY-DIAGNOSTICO-002: el backend ahora devuelve el desglose de
+      // motivos de omisión. Antes, si el motor se saltaba media base, en
+      // pantalla solo aparecía "0 llamadas" sin explicación.
+      const m = data.motivos || {};
+      const detalles = [
+        data.omitidasPorTope   ? `${data.omitidasPorTope} por tope de minutos` : null,
+        m.sin_telefono         ? `${m.sin_telefono} sin teléfono válido`       : null,
+        m.ya_gestionado        ? `${m.ya_gestionado} ya gestionado(s)`         : null,
+        m.intentos_agotados    ? `${m.intentos_agotados} con intentos agotados`: null,
+        m.cliente_inexistente  ? `${m.cliente_inexistente} sin ficha de cliente` : null,
+        m.fuera_de_horario     ? `${m.fuera_de_horario} fuera de horario`      : null,
+        m.fallo_proveedor      ? `${m.fallo_proveedor} rechazada(s) por el proveedor` : null,
+      ].filter(Boolean).join(' · ');
+
       if (!data.llamadasLanzadas) {
-        mostrarAviso('error', data.omitidasPorTope
-          ? `No se lanzó ninguna llamada: ${data.omitidasPorTope} vencimiento(s) omitido(s) por tope de minutos.`
+        mostrarAviso('error', detalles
+          ? `No se lanzó ninguna llamada. Motivos: ${detalles}.`
           : 'No se lanzó ninguna llamada. Revisa que haya vencimientos de ESTE mes sin gestionar, con cliente y teléfono válido.');
       } else {
-        mostrarAviso('ok', `Motor ejecutado: ${data.llamadasLanzadas} llamada(s) lanzada(s)${data.omitidasPorTope ? ` · ${data.omitidasPorTope} omitida(s) por tope de minutos` : ''}`);
+        mostrarAviso('ok',
+          `Motor ejecutado: ${data.llamadasLanzadas} llamada(s) lanzada(s) de ${data.vencimientosEvaluados ?? '—'} vencimiento(s) evaluado(s)` +
+          (detalles ? ` · Omitidas: ${detalles}` : ''));
       }
       cargar();
     } catch (e) { mostrarAviso('error', e.message); }
@@ -152,7 +171,7 @@ export default function LlamadasIA({ user, onNavegar }) {
     try {
       const r = await fetch(`${API}/llamadas-ia/llamada-prueba`, {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ telefono: tel }),
+        body: JSON.stringify({ telefono: tel, tipoUso: tipoPrueba }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Error al lanzar la prueba');
@@ -168,22 +187,85 @@ export default function LlamadasIA({ user, onNavegar }) {
     ? lista.filter(l => l.resultado === filtroResultado)
     : lista;
 
-  // ─── Llevar el cierre de Lucy a NuevaOrden — MISMO mecanismo que
-  // ModuloComercial.js (sessionStorage 'c360_orden_prefill' + onNavegar).
-  const crearOrdenDesdeCierre = (registro) => {
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ PREORDEN — LUCY-PREORDEN-001 (2026-07-26)
+  // ───────────────────────────────────────────────────────────────────────────
+  // ANTES: "Crear orden" saltaba directo a NuevaOrden con los datos crudos que
+  // Lucy había recogido por teléfono. Si la transcripción entendía mal una
+  // dirección o un NIT, el error entraba silencioso a la orden.
+  //
+  // AHORA: se abre una PREORDEN de revisión — los datos son editables, los
+  // campos que Lucy no logró confirmar salen resaltados, y solo al confirmar
+  // se pasa a NuevaOrden. Un dato dictado por voz siempre pasa por ojo humano.
+  //
+  // Los datos corregidos aquí NO se pierden: viajan en el prefill.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const CAMPOS_PREORDEN = [
+    { k: 'nombreCompleto', label: 'Nombre / Razón social', requerido: true },
+    { k: 'nit',            label: 'Cédula o NIT',          requerido: true },
+    { k: 'celular',        label: 'Celular',               requerido: true },
+    { k: 'direccion',      label: 'Dirección',             requerido: true },
+    { k: 'barrio',         label: 'Barrio',                requerido: false },
+    { k: 'email',          label: 'Correo',                requerido: false },
+    { k: 'empresa',        label: 'Empresa',               requerido: false },
+    { k: 'tipoServicio',   label: 'Tipo de servicio',      requerido: false },
+    { k: 'diaAcordado',    label: 'Día acordado',          requerido: false },
+    { k: 'franjaHoraria',  label: 'Franja horaria',        requerido: false },
+  ];
+
+  const abrirPreorden = (registro) => {
     if (!registro.clienteId) {
-      alert('Este cliente todavía no existe en Control360. Créalo primero en el módulo Clientes con los datos de abajo, y luego genera la orden desde allí.');
+      mostrarAviso('error', 'Este cliente todavía no existe en Control360. Créalo primero en el módulo Clientes y luego genera la orden desde allí.');
       return;
     }
     const dc = registro.datosCierre || {};
+    setPreorden({
+      registro,
+      datos: {
+        nombreCompleto: dc.nombreCompleto || '',
+        nit:            dc.nit || '',
+        celular:        dc.celular || registro.telefono || '',
+        direccion:      dc.direccion || '',
+        barrio:         dc.barrio || '',
+        email:          dc.email || '',
+        empresa:        dc.empresa || '',
+        tipoServicio:   dc.tipoServicio || '',
+        diaAcordado:    dc.diaAcordado || '',
+        franjaHoraria:  dc.franjaHoraria || '',
+      },
+      // Se recuerda qué campos llegaron vacíos de la llamada para resaltarlos
+      // aunque el usuario ya los haya diligenciado.
+      faltantesOriginales: CAMPOS_PREORDEN
+        .filter(c => c.requerido && !(dc[c.k] || (c.k === 'celular' ? registro.telefono : '')))
+        .map(c => c.k),
+    });
+    setDetalle(null);
+  };
+
+  const confirmarPreorden = () => {
+    if (!preorden) return;
+    const d = preorden.datos;
+    const faltantes = CAMPOS_PREORDEN.filter(c => c.requerido && !String(d[c.k] || '').trim());
+    if (faltantes.length) {
+      mostrarAviso('error', `Completa antes de continuar: ${faltantes.map(f => f.label).join(', ')}`);
+      return;
+    }
     const prefill = {
-      id: registro.clienteId,
-      nombre: (dc.nombreCompleto || '').toUpperCase(),
-      nit: dc.nit || '',
-      celular: dc.celular || registro.telefono || '',
-      empresaId: '',
+      id: preorden.registro.clienteId,
+      nombre: (d.nombreCompleto || '').toUpperCase(),
+      nit: d.nit || '',
+      celular: d.celular || '',
+      // Se conserva la sede que atendió la llamada — así la orden se factura
+      // por la empresa correcta (Sur / Valle) sin que el asesor la elija a mano.
+      empresaId: preorden.registro.empresaId || '',
+      direccion: d.direccion || '',
+      barrio: d.barrio || '',
+      email: d.email || '',
+      origen: 'lucy',
+      origenRef: preorden.registro.id,
     };
     sessionStorage.setItem('c360_orden_prefill', JSON.stringify(prefill));
+    setPreorden(null);
     if (onNavegar) onNavegar('ordenes');
   };
 
@@ -361,7 +443,7 @@ export default function LlamadasIA({ user, onNavegar }) {
                   </div>
                 </div>
                 {esCierre && (
-                  <button onClick={(e) => { e.stopPropagation(); crearOrdenDesdeCierre(reg); }}
+                  <button onClick={(e) => { e.stopPropagation(); abrirPreorden(reg); }}
                     style={{ background: '#15803d', color: '#fff', border: 'none', borderRadius: 8, padding: '9px 16px', fontWeight: 700, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' }}>
                     + Crear orden
                   </button>
@@ -409,9 +491,9 @@ export default function LlamadasIA({ user, onNavegar }) {
                   </div>
                 ))}
                 {!detalle.esPrueba && (
-                  <button onClick={() => crearOrdenDesdeCierre(detalle)}
+                  <button onClick={() => abrirPreorden(detalle)}
                     style={{ width: '100%', marginTop: 10, background: '#15803d', color: '#fff', border: 'none', borderRadius: 8, padding: '11px 0', fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
-                    + Crear orden con estos datos
+                    📋 Revisar preorden
                   </button>
                 )}
               </div>
@@ -438,6 +520,72 @@ export default function LlamadasIA({ user, onNavegar }) {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {/* Modal PREORDEN — LUCY-PREORDEN-001                                  */}
+      {/* Revisión humana obligatoria de los datos que Lucy tomó por voz.     */}
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {preorden && (
+        <div onClick={() => setPreorden(null)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ background: '#fff', borderRadius: 16, width: '100%', maxWidth: 520, maxHeight: '88vh', overflowY: 'auto', padding: '20px 18px 24px' }}>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+              <div style={{ fontWeight: 800, fontSize: 16, color: '#1a1a2e' }}>📋 Preorden</div>
+              <button onClick={() => setPreorden(null)}
+                style={{ border: 'none', background: '#f3f4f6', borderRadius: 8, width: 30, height: 30, cursor: 'pointer' }}>✕</button>
+            </div>
+            <div style={{ fontSize: 11.5, color: '#6b7280', marginBottom: 14 }}>
+              Lucy tomó estos datos por teléfono. Revísalos y corrige lo que haga falta antes de generar la orden.
+            </div>
+
+            {preorden.faltantesOriginales.length > 0 && (
+              <div style={{ background: '#fff8e6', border: '1.5px solid #fcd34d', borderRadius: 10, padding: '10px 12px', marginBottom: 14, fontSize: 11.5, color: '#92400e', fontWeight: 600 }}>
+                ⚠️ Lucy no logró confirmar {preorden.faltantesOriginales.length} dato(s) obligatorio(s) en la llamada. Están resaltados abajo.
+              </div>
+            )}
+
+            {CAMPOS_PREORDEN.map(campo => {
+              const vacioEnLlamada = preorden.faltantesOriginales.includes(campo.k);
+              const vacioAhora = !String(preorden.datos[campo.k] || '').trim();
+              const alertar = campo.requerido && (vacioAhora || vacioEnLlamada);
+              return (
+                <div key={campo.k} style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 11, fontWeight: 700, color: alertar ? '#b45309' : '#374151', display: 'block', marginBottom: 4 }}>
+                    {campo.label}{campo.requerido ? ' *' : ''}{vacioEnLlamada ? ' · no confirmado en la llamada' : ''}
+                  </label>
+                  <input
+                    value={preorden.datos[campo.k] || ''}
+                    onChange={e => setPreorden(p => ({ ...p, datos: { ...p.datos, [campo.k]: e.target.value } }))}
+                    style={{ ...inp, borderColor: alertar ? '#fcd34d' : '#e5e7eb', background: alertar ? '#fffbeb' : '#fff' }}
+                  />
+                </div>
+              );
+            })}
+
+            {preorden.registro.transcripcion && (
+              <details style={{ marginTop: 12, marginBottom: 4 }}>
+                <summary style={{ fontSize: 11.5, fontWeight: 700, color: '#6b7280', cursor: 'pointer' }}>
+                  📝 Ver transcripción para verificar un dato
+                </summary>
+                <div style={{ background: '#f9fafb', borderRadius: 10, padding: '10px 12px', fontSize: 12, color: '#374151', lineHeight: 1.6, whiteSpace: 'pre-wrap', marginTop: 8, maxHeight: 200, overflowY: 'auto' }}>
+                  {preorden.registro.transcripcion}
+                </div>
+              </details>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+              <button onClick={() => setPreorden(null)} style={{ ...btnAccion, flex: 1, background: '#f3f4f6', color: '#374151' }}>
+                Cancelar
+              </button>
+              <button onClick={confirmarPreorden} style={{ ...btnAccion, flex: 2, background: '#15803d', color: '#fff' }}>
+                ✓ Confirmar y crear orden
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -474,9 +622,32 @@ export default function LlamadasIA({ user, onNavegar }) {
             <div style={{ fontSize: 11.5, color: '#6b7280', marginBottom: 14 }}>
               Lucy llamará al número que indiques con datos de ejemplo. Ideal para validar la voz y el guion antes de llamar clientes reales. No afecta vencimientos ni métricas.
             </div>
-            <div style={{ marginBottom: 16 }}>
+            <div style={{ marginBottom: 12 }}>
               <label style={{ fontSize: 11, fontWeight: 700, color: '#374151', display: 'block', marginBottom: 4 }}>Celular (10 dígitos)</label>
               <input type="tel" value={telPrueba} onChange={e => setTelPrueba(e.target.value)} placeholder="3001234567" style={inp} />
+            </div>
+
+            {/* ✅ LUCY-CAPACIDAD-001: probar cada guion por separado.
+                El corto (mostrador) es el de extintores pequeños que el cliente
+                recoge en la sede; el largo agenda visita de técnico. */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#374151', display: 'block', marginBottom: 6 }}>¿Qué guion quieres probar?</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {[
+                  { v: 'vehicular', t: 'Corto · mostrador', s: 'ABC 5 lb · sin cita' },
+                  { v: 'empresa',   t: 'Largo · con técnico', s: 'ABC 10 lb · agenda visita' },
+                ].map(op => (
+                  <button key={op.v} onClick={() => setTipoPrueba(op.v)}
+                    style={{
+                      flex: 1, textAlign: 'left', cursor: 'pointer', borderRadius: 10, padding: '9px 11px',
+                      border: `2px solid ${tipoPrueba === op.v ? '#b45309' : '#e5e7eb'}`,
+                      background: tipoPrueba === op.v ? '#fff8e6' : '#fff',
+                    }}>
+                    <div style={{ fontWeight: 800, fontSize: 11.5, color: tipoPrueba === op.v ? '#b45309' : '#374151' }}>{op.t}</div>
+                    <div style={{ fontSize: 10, color: '#9ca3af', marginTop: 2 }}>{op.s}</div>
+                  </button>
+                ))}
+              </div>
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={() => setModalPrueba(false)} style={{ ...btnAccion, flex: 1, background: '#f3f4f6', color: '#374151' }}>Cancelar</button>
