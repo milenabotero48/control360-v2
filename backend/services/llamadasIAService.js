@@ -517,6 +517,33 @@ const obtenerUltimaCorrida = async (adminId) => {
 // ═════════════════════════════════════════════════════════════════════════════
 const SENALES_VALIDAS = ['pausar', 'cancelar'];
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ LUCY-PARADA-002 (2026-07-27) — CORRIDAS HUÉRFANAS
+// ─────────────────────────────────────────────────────────────────────────────
+// PROBLEMA DETECTADO EN LA PRIMERA PRUEBA: el motor vive en la memoria del
+// proceso de Node. Cuando Railway redespliega o reinicia, el bucle MUERE, pero
+// el documento de la corrida queda escrito como 'en_curso' para siempre. Se
+// pulsó Pausar y el panel quedó en "Deteniendo…" eternamente: nadie iba a leer
+// la señal. Peor, ese registro fantasma bloquea "Lanzar ahora" con 409.
+//
+// SOLUCIÓN: LATIDO. El motor sella `latidoAt` mientras avanza. Si el latido
+// está frío, la corrida se da por muerta y el estado se corrige AL INSTANTE en
+// vez de dejar una señal que nadie consumirá.
+//
+// Por qué 3 minutos: entre llamada y llamada el motor pausa hasta 60 s por el
+// límite de concurrencia del plan. 3 min = 3 ciclos perdidos, margen suficiente
+// para no declarar muerta una corrida que solo está esperando su turno.
+// ═════════════════════════════════════════════════════════════════════════════
+const LATIDO_FRIO_MS = 3 * 60 * 1000;
+
+const corridaEstaViva = (corrida) => {
+  if (!corrida || corrida.estado !== 'en_curso') return false;
+  const ref = corrida.latidoAt || corrida.reanudadaAt || corrida.iniciadaAt;
+  if (!ref) return false; // 'en_curso' sin marca de tiempo = registro viejo, muerto
+  const edad = Date.now() - new Date(ref).getTime();
+  return Number.isFinite(edad) && edad < LATIDO_FRIO_MS;
+};
+
 const solicitarControlCorrida = async (adminId, senal) => {
   if (!SENALES_VALIDAS.includes(senal)) {
     return { ok: false, error: 'Señal inválida' };
@@ -525,6 +552,23 @@ const solicitarControlCorrida = async (adminId, senal) => {
   if (!corrida || corrida.estado !== 'en_curso') {
     return { ok: false, error: 'No hay ninguna corrida en curso' };
   }
+
+  // ✅ LUCY-PARADA-002: corrida muerta (reinicio del backend) — se cierra ya.
+  // No se deja señal: no hay proceso que pueda leerla.
+  if (!corridaEstaViva(corrida)) {
+    await guardarCorrida(adminId, {
+      estado: 'cancelada',
+      senalControl: null,
+      pendientes: [],
+      pendientesCount: 0,
+      llamandoAhora: null,
+      clienteAhora: null,
+      detenidaAt: new Date().toISOString(),
+      motivoCierre: 'huerfana_backend_reiniciado',
+    });
+    return { ok: true, senal, huerfana: true };
+  }
+
   await guardarCorrida(adminId, {
     senalControl: senal,
     senalSolicitadaAt: new Date().toISOString(),
@@ -598,6 +642,8 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
     let omitidasPorTope = 0;
     // ✅ LUCY-PARADA-001: queda { senal, pendientes } si el usuario frenó.
     let detencion = null;
+    // ✅ LUCY-PARADA-002: sello de vida del motor (ver corridaEstaViva).
+    let ultimoLatidoAt = 0;
     // ✅ LUCY-DIAGNOSTICO-002: antes, cuando no salía ninguna llamada, el panel
     // solo podía decir "0 llamadas" o "omitidas por tope". Ahora se cuenta el
     // MOTIVO real de cada omisión y llega a pantalla.
@@ -646,6 +692,13 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
         // tenant (manual o programada): el cron mensual global no se detiene
         // desde el panel de un suscriptor.
         if (soloAdminId) {
+          // ✅ LUCY-PARADA-002: latido cada ~45 s (no en cada vuelta: serían
+          // cientos de escrituras por corrida sin ganar nada).
+          if (Date.now() - ultimoLatidoAt > 45000) {
+            ultimoLatidoAt = Date.now();
+            await guardarCorrida(adminId, { latidoAt: new Date().toISOString() });
+          }
+
           const senal = await leerSenalControl(adminId);
           if (senal) {
             // Lo que aún no se ha marcado. Es lo que "Continuar" retoma.
@@ -1081,6 +1134,7 @@ module.exports = {
   obtenerUltimaCorrida,
   solicitarControlCorrida, // ✅ LUCY-PARADA-001
   leerSenalControl,
+  corridaEstaViva,         // ✅ LUCY-PARADA-002
 };
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -437,6 +437,16 @@ export default function LlamadasIA({ user, onNavegar }) {
             corrida.senalControl ? (
               <div style={{ marginTop: 10, background: 'rgba(251,191,36,0.15)', border: '1px solid rgba(251,191,36,0.4)', borderRadius: 8, padding: '8px 12px', fontSize: 11.5, color: '#fde68a', fontWeight: 700 }}>
                 ⏳ Deteniendo… Lucy no marcará más números. Las llamadas ya en curso terminan solas.
+                {/* ✅ LUCY-PARADA-002: si el backend se reinició, el motor murió
+                    y nadie va a leer la señal — el aviso se quedaría aquí para
+                    siempre. Este botón cierra el registro huérfano. */}
+                <div style={{ fontWeight: 500, marginTop: 6, color: '#fcd34d' }}>
+                  ¿Lleva más de 2 minutos así?{' '}
+                  <button onClick={() => detenerCorrida('cancelar')} disabled={ocupado}
+                    style={{ background: 'transparent', border: '1px solid #fcd34d', color: '#fde68a', borderRadius: 6, padding: '2px 8px', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>
+                    Cerrar de todos modos
+                  </button>
+                </div>
               </div>
             ) : (
               <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>

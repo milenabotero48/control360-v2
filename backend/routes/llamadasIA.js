@@ -34,6 +34,7 @@ const {
   guardarCorrida,
   obtenerUltimaCorrida,
   solicitarControlCorrida,
+  corridaEstaViva,
 } = require('../services/llamadasIAService');
 
 const LUCY_WEBHOOK_SECRET = process.env.LUCY_WEBHOOK_SECRET || process.env.VAPI_WEBHOOK_SECRET;
@@ -479,9 +480,13 @@ router.post('/ejecutar-motor', async (req, res) => {
     // que impone el límite de concurrencia del plan, una base de 120 clientes
     // tarda ~40 minutos — ninguna petición HTTP sobrevive eso. Se responde de
     // inmediato y el avance se sigue por GET /corrida.
+    // ✅ LUCY-PARADA-002: solo bloquea si la corrida está VIVA. Antes, un
+    // reinicio del backend dejaba el documento en 'en_curso' para siempre y
+    // nadie podía volver a lanzar llamadas nunca — sin forma de destrabarlo
+    // desde la interfaz.
     const yaCorriendo = await obtenerUltimaCorrida(adminIdObjetivo);
-    if (yaCorriendo?.estado === 'en_curso') {
-      return res.status(409).json({ error: 'Ya hay una corrida en curso. Espera a que termine.' });
+    if (corridaEstaViva(yaCorriendo)) {
+      return res.status(409).json({ error: 'Ya hay una corrida en curso. Espera a que termine o púlsala en Pausar.' });
     }
 
     await guardarCorrida(adminIdObjetivo, {
@@ -556,6 +561,18 @@ router.post('/corrida/detener', async (req, res) => {
       usuarioNombre: req.user?.nombre || '',
       datos: { adminIdObjetivo, modo },
     });
+
+    // ✅ LUCY-PARADA-002: si el motor ya estaba muerto (reinicio del backend),
+    // se cerró el registro al instante — hay que decirlo con claridad, porque
+    // "pausada" haría creer que quedan pendientes recuperables y no es así.
+    if (resultado.huerfana) {
+      return res.json({
+        ok: true,
+        modo,
+        huerfana: true,
+        mensaje: 'La corrida ya no estaba activa (el servidor se reinició). Se cerró el registro: Lucy no está llamando y ya puedes lanzar una corrida nueva.',
+      });
+    }
 
     return res.json({
       ok: true,
