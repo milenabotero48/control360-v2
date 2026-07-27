@@ -114,6 +114,9 @@ app.listen(PORT, () => {
   iniciarCronWhatsapp();
   const { iniciarCronLlamadasIA } = require('./services/llamadasIAService');
   iniciarCronLlamadasIA();
+  // ✅ VENC-CICLO-004: archiva vencimientos con más de 6 meses sin servicio
+  const { iniciarCronArchivado } = require('./services/vencimientosService');
+  iniciarCronArchivado();
 
   // ═══════════════════════════════════════════════════════════════════════════
   // FIX ANNY-QR-001: restaurar sesiones Baileys después de cada deploy.

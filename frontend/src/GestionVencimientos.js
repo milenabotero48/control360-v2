@@ -87,6 +87,7 @@ export default function GestionVencimientos({ user, onNavegar }) {
 
   // ✅ NUEVO: el backend exige una empresa facturadora para cada importación
   const [empresasDisponibles, setEmpresasDisponibles] = useState([]);
+  const [cicloEstado, setCicloEstado] = useState(null); // VENC-CICLO-002
   const [mostrarImportVenc, setMostrarImportVenc] = useState(false);
   const [empresaImportSel, setEmpresaImportSel] = useState('');
   const [archivoImportSel, setArchivoImportSel] = useState(null);
@@ -340,6 +341,44 @@ export default function GestionVencimientos({ user, onNavegar }) {
     setGuardandoForm(false);
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ VENC-CICLO-002 — Cerrar ciclos de clientes que ya fueron atendidos
+  // ───────────────────────────────────────────────────────────────────────────
+  // SIEMPRE simula primero. El usuario ve exactamente qué se va a cerrar y
+  // recién ahí confirma. Cerrar vencimientos a ciegas sería destruir la base
+  // de campañas sin posibilidad de revisar.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const revisarCiclos = async () => {
+    setCicloEstado({ cargando: true });
+    try {
+      const r = await fetch(`${API}/vencimientos/cerrar-ciclos-servidos`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ aplicar: false, mesesAtras: 6 }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'No se pudo revisar');
+      setCicloEstado({ cargando: false, resultado: d });
+    } catch (e) {
+      setCicloEstado({ cargando: false, error: e.message });
+    }
+  };
+
+  const aplicarCiclos = async () => {
+    setCicloEstado(s => ({ ...s, cargando: true }));
+    try {
+      const r = await fetch(`${API}/vencimientos/cerrar-ciclos-servidos`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ aplicar: true, mesesAtras: 6 }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'No se pudo aplicar');
+      setCicloEstado({ cargando: false, aplicado: d.aCerrar });
+      cargar();
+    } catch (e) {
+      setCicloEstado(s => ({ ...s, cargando: false, error: e.message }));
+    }
+  };
+
   const exportarCSV = () => {
     const rows = [['Cliente','Empresa','Teléfono','Equipo','Cantidad','Sucursal','Vencimiento','Estado']];
     lista.forEach(v => {
@@ -564,7 +603,76 @@ export default function GestionVencimientos({ user, onNavegar }) {
               style={{ padding:'8px 16px', border:'none', borderRadius:8, background:'#16a34a', color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer' }}>
               📇 Contactos WhatsApp
             </button>
+
+            {/* ✅ VENC-CICLO-002 — cerrar ciclos de clientes ya atendidos */}
+            <button
+              onClick={() => { setCicloEstado({}); revisarCiclos(); }}
+              title="Detecta clientes que ya recargaron y cuyo vencimiento viejo sigue abierto, para que Lucy no los llame"
+              style={{ padding:'8px 16px', border:'none', borderRadius:8, background:'#0369a1', color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer' }}>
+              🔄 Cerrar ciclos atendidos
+            </button>
           </div>
+
+          {/* Panel de revisión — simulación antes de aplicar */}
+          {cicloEstado && (
+            <div style={{ background:'#f0f9ff', border:'1.5px solid #bae6fd', borderRadius:12, padding:16, marginBottom:16 }}>
+              {cicloEstado.cargando && <div style={{ color:'#0369a1', fontWeight:600, fontSize:13 }}>Revisando órdenes de los últimos 6 meses…</div>}
+
+              {cicloEstado.error && (
+                <div style={{ color:'#b91c1c', fontWeight:600, fontSize:13 }}>❌ {cicloEstado.error}</div>
+              )}
+
+              {cicloEstado.aplicado !== undefined && (
+                <div style={{ color:'#15803d', fontWeight:700, fontSize:14 }}>
+                  ✓ Listo: {cicloEstado.aplicado} vencimiento(s) cerrados. Lucy ya no los va a llamar.
+                </div>
+              )}
+
+              {cicloEstado.resultado && cicloEstado.aplicado === undefined && !cicloEstado.cargando && (
+                <>
+                  <div style={{ fontWeight:800, fontSize:14, color:'#0c4a6e', marginBottom:4 }}>
+                    {cicloEstado.resultado.aCerrar} vencimiento(s) se pueden cerrar
+                  </div>
+                  <div style={{ fontSize:12, color:'#0369a1', marginBottom:12 }}>
+                    Son clientes que ya recargaron pero cuyo vencimiento viejo sigue abierto.
+                    Esto es una simulación: todavía no se ha modificado nada.
+                  </div>
+
+                  {cicloEstado.resultado.aCerrar > 0 && (
+                    <>
+                      <div style={{ maxHeight:220, overflowY:'auto', background:'#fff', borderRadius:8, padding:10, marginBottom:12 }}>
+                        {cicloEstado.resultado.detalle.map(x => (
+                          <div key={x.id} style={{ fontSize:12, padding:'5px 0', borderBottom:'1px solid #f1f5f9' }}>
+                            <strong>{x.cliente || x.telefono}</strong> · {x.equipo}
+                            <div style={{ color:'#64748b', fontSize:11 }}>
+                              Vencía {x.vencia} · atendido el {x.atendidoEn} {x.orden ? `(orden ${x.orden})` : ''}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ display:'flex', gap:8 }}>
+                        <button onClick={() => setCicloEstado(null)}
+                          style={{ padding:'9px 16px', border:'1px solid #cbd5e1', borderRadius:8, background:'#fff', color:'#475569', fontWeight:700, fontSize:13, cursor:'pointer' }}>
+                          Cancelar
+                        </button>
+                        <button onClick={aplicarCiclos}
+                          style={{ padding:'9px 18px', border:'none', borderRadius:8, background:'#0369a1', color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer' }}>
+                          ✓ Cerrar estos {cicloEstado.resultado.aCerrar}
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                  {cicloEstado.resultado.aCerrar === 0 && (
+                    <button onClick={() => setCicloEstado(null)}
+                      style={{ padding:'8px 14px', border:'1px solid #cbd5e1', borderRadius:8, background:'#fff', color:'#475569', fontWeight:700, fontSize:12, cursor:'pointer' }}>
+                      Cerrar
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           {/* Lista de vencimientos */}
           {cargando ? (

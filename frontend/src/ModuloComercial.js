@@ -240,7 +240,7 @@ function MiDia({ user, onNavegar }) {
 
       {/* ✅ TELEVENC-005: VENCIDOS del mes — PRIORIDAD sobre reintentos y nuevos.
           Son clientes con recarga vencida: retención, plata casi segura. */}
-      <SeccionVencidos lista={filtrarPeriodo(cola.vencidos)} onLlamar={setVencidoActivo} />
+      <SeccionVencidos lista={filtrarPeriodo(cola.vencidos)} onLlamar={setVencidoActivo} onRefrescar={cargar} />
 
       <Seccion titulo="🔁 Reintentos" sub="No contestaron antes — nuevo intento hoy" lista={filtrarPeriodo(cola.reintentos)}
         onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
@@ -400,7 +400,70 @@ function Seccion({ titulo, sub, lista = [], conHora, onLlamar, clientesRecargado
 // Una tarjeta por CLIENTE con sus equipos vencidos. La fuente de verdad es la
 // colección `vencimientos` — aquí NO se duplican datos en prospectos.
 // ════════════════════════════════════════════════════════════════════════════
-function SeccionVencidos({ lista = [], onLlamar }) {
+// ✅ VENC-CICLO-003 — Acciones rápidas sobre la tarjeta.
+// El modal de llamada sigue siendo el camino completo (notas, equipos, fecha),
+// pero para los tres casos más frecuentes obligar a abrirlo es fricción pura:
+// el asesor ya SABE que el cliente vino, o que no vuelve. Un clic y listo.
+function AccionesRapidasVencido({ vencido, onHecho }) {
+  const [ocupado, setOcupado] = useState(null);
+  const [error, setError] = useState(null);
+
+  const ejecutar = async (accion) => {
+    const cfg = {
+      ya_vino:   { resultado: 'ya_recargo', confirm: `¿Marcar que ${vencido.nombre} ya recargó? Sale de la lista y no lo llamarán más este ciclo.` },
+      no_vuelve: { resultado: 'no_interesa', confirm: `¿Marcar que ${vencido.nombre} ya no es cliente? Deja de aparecer en campañas.`, motivo: 'Marcado desde telemercadeo' },
+      despues:   { resultado: 'reprogramar', confirm: null },
+    }[accion];
+
+    if (cfg.confirm && !window.confirm(cfg.confirm)) return;
+
+    // "Después" aplaza una semana, que es el uso real del botón.
+    let proximaLlamada;
+    if (accion === 'despues') {
+      const d = new Date(Date.now() + 7 * 86400000);
+      proximaLlamada = { fecha: d.toISOString().slice(0, 10), hora: null };
+    }
+
+    setOcupado(accion); setError(null);
+    try {
+      const body = {
+        resultado: cfg.resultado,
+        notas: accion === 'ya_vino' ? 'Ya recargó (marcado desde la tarjeta)' : null,
+        motivoDescarte: cfg.motivo,
+        proximaLlamada,
+        vencimientoIds: (accion === 'despues') ? undefined : vencido.equipos.map(e => e.id),
+      };
+      const res = await fetch(`${API}/comercial/vencidos/${vencido.clienteId}/llamada`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'No se pudo registrar');
+      onHecho?.();
+    } catch (e) {
+      setError(e.message);
+    }
+    setOcupado(null);
+  };
+
+  const btn = (bg, color) => ({
+    flex: 1, border: 'none', borderRadius: 8, padding: '7px 0', fontWeight: 800,
+    fontSize: 11.5, cursor: ocupado ? 'wait' : 'pointer', background: bg, color,
+    opacity: ocupado ? 0.6 : 1,
+  });
+
+  return (
+    <>
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        <button disabled={!!ocupado} onClick={() => ejecutar('ya_vino')}   style={btn('#dcfce7', '#15803d')}>✓ Ya vino</button>
+        <button disabled={!!ocupado} onClick={() => ejecutar('despues')}   style={btn('#fef3c7', '#b45309')}>↻ Después</button>
+        <button disabled={!!ocupado} onClick={() => ejecutar('no_vuelve')} style={btn('#fee2e2', '#b91c1c')}>✕ No vuelve</button>
+      </div>
+      {error && <div style={{ fontSize: 11, color: '#b91c1c', marginTop: 4 }}>{error}</div>}
+    </>
+  );
+}
+
+function SeccionVencidos({ lista = [], onLlamar, onRefrescar }) {
   if (!lista.length) return null;
   const hoyMes = periodoActualCO();
   return (
@@ -477,6 +540,8 @@ function SeccionVencidos({ lista = [], onLlamar }) {
             }}>
               ☎ Registrar llamada de retención
             </button>
+            {/* ✅ VENC-CICLO-003 — atajos sin abrir el modal */}
+            <AccionesRapidasVencido vencido={v} onHecho={onRefrescar} />
           </div>
           );
         })}

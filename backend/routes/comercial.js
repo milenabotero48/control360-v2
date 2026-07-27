@@ -592,8 +592,12 @@ router.post('/vencidos/:clienteId/llamada', async (req, res) => {
       };
       const update = { telemercadeo: seguimiento, updatedAt: ts };
 
+      // ✅ VENC-CICLO-003: además de `gestionado` (sí/no), cada resultado deja
+      // el ESTADO DEL CICLO. Sin esto, a fin de año no hay forma de distinguir
+      // un cliente que renovó de uno que se perdió: todos aparecen igual.
       if (resultado === 'acepta') {
         update.gestionado = true;
+        update.estadoCiclo = 'RENOVADO';
         update.canalGestion = 'telemercadeo';
         update.gestionadoPor = uid;
         update.gestionadoPorNombre = req.user?.nombre || req.user?.email || null;
@@ -604,15 +608,25 @@ router.post('/vencidos/:clienteId/llamada', async (req, res) => {
           hora: esHora(proximaLlamada.hora) ? proximaLlamada.hora : null,
         };
         seguimiento.intentosFallidos = 0;
+        update.estadoCiclo = 'EN_TELEMERCADEO';
       } else if (resultado === 'no_contesto') {
         seguimiento.intentosFallidos = (prev.intentosFallidos || 0) + 1;
         if (seguimiento.intentosFallidos >= 3) {
-          seguimiento.sinContacto = true; // agotado: sale de la cola, sigue VENCIDO
+          // Agotados los 3 intentos del asesor humano → se da por perdido.
+          // Regla definida con Sandra: Lucy escala a telemercadeo, y si el
+          // asesor tampoco logra contacto, ahí sí sale de la base activa.
+          seguimiento.sinContacto = true;
+          update.gestionado = true;
+          update.estadoCiclo = 'PERDIDO';
+          update.motivoPerdido = 'sin_contacto_telemercadeo';
+          update.fechaGestion = hoy;
         } else {
           seguimiento.proximaLlamada = { fecha: siguienteDiaHabil(hoy), hora: null };
+          update.estadoCiclo = 'EN_TELEMERCADEO';
         }
       } else if (resultado === 'no_interesa') {
         update.gestionado = true;
+        update.estadoCiclo = 'INACTIVO';
         update.canalGestion = 'telemercadeo';
         update.motivoNoInteresa = motivoDescarte;
         update.gestionadoPor = uid;
@@ -621,6 +635,7 @@ router.post('/vencidos/:clienteId/llamada', async (req, res) => {
       } else if (resultado === 'ya_recargo') {
         // ✅ FIX TELEVENC-YAREC-001: al día — sale de la cola sin ser venta
         update.gestionado = true;
+        update.estadoCiclo = 'RENOVADO';
         update.canalGestion = 'telemercadeo';
         update.yaRecargo = true;
         update.gestionadoPor = uid;

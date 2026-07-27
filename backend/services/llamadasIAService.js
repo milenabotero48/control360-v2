@@ -881,18 +881,32 @@ const procesarResultadoLlamada = async (payload) => {
       return { ok: true };
     }
 
-    // Sin respuesta en intento 2, o escalado → señal para Telemercadeo (TELEVENC-001)
-    if ((resultado === 'sin_respuesta' && registroActual.intento >= 2) || resultado === 'escalado_asesor') {
+    // ✅ VENC-CICLO-003: agotados los intentos de Lucy, el ciclo NO se cierra —
+    // pasa a un asesor humano. Regla de Sandra: solo se da por perdido cuando
+    // telemercadeo también lo intentó. Lucy filtra, no descarta.
+    const config = await obtenerConfigTenant(registroActual.adminId).catch(() => ({ maxIntentos: MAX_INTENTOS_DEFAULT }));
+    const intentosAgotados = resultado === 'sin_respuesta' && registroActual.intento >= (config.maxIntentos || MAX_INTENTOS_DEFAULT);
+
+    if (intentosAgotados || resultado === 'escalado_asesor') {
       await db.collection('vencimientos').doc(registroActual.vencimientoId).update({
         escaladoTelemercadeo: true,
+        estadoCiclo: 'EN_TELEMERCADEO',
+        motivoEscalamiento: resultado === 'escalado_asesor' ? 'lucy_escalo' : 'lucy_sin_contacto',
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
     }
 
     // Resuelto → gestionado=true para que el motor no vuelva a llamar este ciclo
-    if (['cerrada', 'reagendada', 'inactivo_cliente'].includes(resultado)) {
+    const ESTADO_POR_RESULTADO = {
+      cerrada:          'RENOVADO',
+      reagendada:       'EN_TELEMERCADEO',
+      inactivo_cliente: 'INACTIVO',
+      no_interesado:    'INACTIVO',
+    };
+    if (ESTADO_POR_RESULTADO[resultado]) {
       await db.collection('vencimientos').doc(registroActual.vencimientoId).update({
-        gestionado: true,
+        gestionado: ['cerrada', 'inactivo_cliente', 'no_interesado'].includes(resultado),
+        estadoCiclo: ESTADO_POR_RESULTADO[resultado],
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
     }

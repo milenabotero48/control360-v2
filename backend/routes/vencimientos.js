@@ -34,6 +34,7 @@
 const express = require('express');
 const router = express.Router();
 const { db, admin } = require('../config/firebase');
+const { normalizarTelefono: normTelCiclo } = require('../services/vencimientosService');
 
 // ─── HELPER: auditoría (mismo patrón de clients.js) ─────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = {} }) => {
@@ -121,9 +122,20 @@ const parsearFechaFlexible = (raw) => {
 
 // Estado calculado dinámicamente (no se "pudre" en la base):
 // GESTIONADO se respeta si está marcado; el resto se deriva de la fecha.
+// ✅ VENC-CICLO-003: si el ciclo tiene un desenlace explícito, ese manda.
+// Antes todo lo cerrado se veía igual ("GESTIONADO"), sin poder distinguir un
+// cliente que renovó de uno que se perdió o que ya no es cliente.
+const CICLOS_CERRADOS = {
+  RENOVADO: 'RENOVADO',
+  PERDIDO:  'PERDIDO',
+  INACTIVO: 'INACTIVO',
+};
+
 const calcularEstado = (venc, hoy) => {
+  if (CICLOS_CERRADOS[venc.estadoCiclo]) return CICLOS_CERRADOS[venc.estadoCiclo];
   if (venc.gestionado) return 'GESTIONADO';
   if (!venc.fechaVencimiento) return 'SIN_FECHA';
+  if (venc.estadoCiclo === 'EN_TELEMERCADEO') return 'EN_TELEMERCADEO';
   if (venc.fechaVencimiento < hoy) return 'VENCIDO';
   const limite30 = sumarMeses(hoy, 1); // ~30 días
   if (venc.fechaVencimiento <= limite30) return 'POR_VENCER';
@@ -568,6 +580,136 @@ router.post('/importar', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ VENC-CICLO-002 — LIMPIEZA RETROACTIVA
+// ─────────────────────────────────────────────────────────────────────────────
+// El cierre automático solo aplica a órdenes NUEVAS. Los vencimientos que hoy
+// están abiertos aunque el cliente ya vino quedaron así por el bug anterior.
+// Esta ruta los detecta cruzando contra las órdenes ya facturadas.
+//
+// SEGURIDAD: por defecto es SIMULACIÓN — devuelve qué cerraría sin tocar nada.
+// Solo con { aplicar: true } escribe. Nunca se cierra una base a ciegas.
+//
+// Body: { aplicar?: boolean, mesesAtras?: number }
+// ═════════════════════════════════════════════════════════════════════════════
+router.post('/cerrar-ciclos-servidos', async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    if (req.user?.role !== 'admin' && !req.user?.superAdmin) {
+      return res.status(403).json({ error: 'Solo el administrador puede cerrar ciclos' });
+    }
+
+    const aplicar    = req.body?.aplicar === true;
+    const mesesAtras = Math.min(Math.max(Number(req.body?.mesesAtras) || 6, 1), 24);
+
+    // Fecha límite hacia atrás para revisar órdenes
+    const hoyCO = new Date(Date.now() - 5 * 3600 * 1000);
+    const desde = new Date(hoyCO.getFullYear(), hoyCO.getMonth() - mesesAtras, 1)
+      .toISOString().slice(0, 10);
+
+    // 1) Órdenes del tenant con items que generan vencimiento
+    const { esItemConVencimiento } = require('../services/vencimientosService');
+    const ordSnap = await db.collection('orders')
+      .where('adminId', '==', adminId)
+      .limit(5000).get();
+
+    // Teléfono → dato del servicio más reciente
+    const servidos = new Map();
+    ordSnap.docs.forEach(d => {
+      const o = d.data();
+      const fecha = (o.fecha || o.createdAt?.toDate?.()?.toISOString() || '').slice(0, 10);
+      if (!fecha || fecha < desde) return;
+      if (o.estado === 'anulada' || o.anulada === true) return;
+      if (!(o.items || []).some(esItemConVencimiento)) return;
+
+      const tel = normTelCiclo(o.clienteCelular || o.clienteTelefono || o.telefono);
+      if (!tel) return;
+      const previo = servidos.get(tel);
+      if (!previo || fecha > previo.fecha) {
+        servidos.set(tel, {
+          fecha,
+          mes: fecha.slice(0, 7),
+          ordenId: d.id,
+          numeroOrden: o.numeroOrden || '',
+          cliente: o.clienteNombre || '',
+          sucursal: o.sucursal || o.sucursalDireccion || null,
+        });
+      }
+    });
+
+    if (!servidos.size) {
+      return res.json({ simulacion: !aplicar, revisados: 0, aCerrar: 0, detalle: [] });
+    }
+
+    // 2) Vencimientos abiertos que ya deberían estar cerrados
+    const vencSnap = await db.collection('vencimientos')
+      .where('adminId', '==', adminId)
+      .where('gestionado', '==', false)
+      .limit(5000).get();
+
+    const aCerrar = [];
+    vencSnap.docs.forEach(d => {
+      const v = d.data();
+      if (!v.fechaVencimiento) return;
+      const tel = normTelCiclo(v.telefono);
+      if (!tel) return;
+      const serv = servidos.get(tel);
+      if (!serv) return;
+      // Solo VENCIDOS respecto al mes en que se prestó el servicio.
+      // Un vencimiento posterior al servicio sigue vivo (equipos con otras fechas).
+      if (v.fechaVencimiento > `${serv.mes}-31`) return;
+
+      aCerrar.push({
+        id: d.id,
+        cliente: v.clienteNombre || serv.cliente || '',
+        telefono: v.telefono,
+        equipo: v.descripcionEquipo || '',
+        vencia: v.fechaVencimiento,
+        atendidoEn: serv.fecha,
+        orden: serv.numeroOrden,
+        ordenId: serv.ordenId,
+      });
+    });
+
+    // 3) Aplicar solo si se pidió explícitamente
+    if (aplicar && aCerrar.length) {
+      // Firestore limita a 500 escrituras por lote
+      for (let i = 0; i < aCerrar.length; i += 450) {
+        const lote = db.batch();
+        aCerrar.slice(i, i + 450).forEach(x => {
+          lote.update(db.collection('vencimientos').doc(x.id), {
+            gestionado: true,
+            estadoCiclo: 'RENOVADO',
+            cerradoPorOrdenId: x.ordenId,
+            cerradoMotivo: 'limpieza_retroactiva',
+            cerradoAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        });
+        await lote.commit();
+      }
+
+      await auditar({
+        accion: 'cerrar_ciclos_servidos',
+        descripcion: `Cierre retroactivo: ${aCerrar.length} vencimiento(s) marcados como renovados por servicio ya facturado`,
+        usuarioId: adminId,
+        usuarioNombre: req.user?.nombre || '',
+        datos: { cantidad: aCerrar.length, mesesAtras },
+      });
+    }
+
+    return res.json({
+      simulacion: !aplicar,
+      clientesConServicio: servidos.size,
+      aCerrar: aCerrar.length,
+      detalle: aCerrar.slice(0, 100), // muestra para revisión
+    });
+  } catch (err) {
+    console.error('POST /vencimientos/cerrar-ciclos-servidos:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // PUT /api/vencimientos/:id — Actualizar (fecha, sucursal) o marcar gestionado
 // ═════════════════════════════════════════════════════════════════════════════
 router.put('/:id', async (req, res) => {
