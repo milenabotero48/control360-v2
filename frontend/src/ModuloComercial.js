@@ -464,6 +464,8 @@ function AccionesRapidasVencido({ vencido, onHecho }) {
 }
 
 function SeccionVencidos({ lista = [], onLlamar, onRefrescar }) {
+  // ✅ TELEVENC-WA-001: cliente al que se le está redactando el WhatsApp
+  const [waVencido, setWaVencido] = useState(null);
   if (!lista.length) return null;
   const hoyMes = periodoActualCO();
   return (
@@ -505,6 +507,14 @@ function SeccionVencidos({ lista = [], onLlamar, onRefrescar }) {
                     🤖 Lucy no logró contacto
                   </span>
                 )}
+                {/* ✅ TELEVENC-VISITA-001: prometió pasar por la oficina y se
+                    venció el plazo sin orden suya. Es el cliente más caliente
+                    de la cola: ya dijo que sí, solo no vino. */}
+                {v.compromisoIncumplido && (
+                  <span style={{ background: '#fff7ed', color: '#c2410c', fontWeight: 800, fontSize: 10, padding: '3px 8px', borderRadius: 8 }}>
+                    🏢 Prometió venir y no vino
+                  </span>
+                )}
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
@@ -540,11 +550,175 @@ function SeccionVencidos({ lista = [], onLlamar, onRefrescar }) {
             }}>
               ☎ Registrar llamada de retención
             </button>
+            {/* ✅ TELEVENC-WA-001 — no contestó el teléfono pero sí lee WhatsApp */}
+            <button onClick={() => setWaVencido(v)} style={{
+              marginTop: 6, width: '100%', border: '1px solid #86efac', borderRadius: 9, padding: '8px 0',
+              background: '#f0fdf4', color: '#15803d', fontWeight: 800, fontSize: 12.5, cursor: 'pointer',
+            }}>
+              💬 Enviar WhatsApp
+            </button>
             {/* ✅ VENC-CICLO-003 — atajos sin abrir el modal */}
             <AccionesRapidasVencido vencido={v} onHecho={onRefrescar} />
           </div>
           );
         })}
+      </div>
+      {/* ✅ TELEVENC-WA-001 */}
+      {waVencido && (
+        <ModalWhatsAppVencido
+          vencido={waVencido}
+          onCerrar={(huboEnvio) => { setWaVencido(null); if (huboEnvio) onRefrescar?.(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ✅ TELEVENC-WA-001 — MODAL WHATSAPP 1-A-1
+// ─────────────────────────────────────────────────────────────────────────────
+// El backend sugiere el texto con los datos reales del cliente; el asesor lo
+// LEE, lo edita si quiere y lo envía. Nunca se manda nada sin que un humano
+// lo haya visto — eso es lo que lo mantiene personalizado y fuera del radar
+// de spam de WhatsApp.
+// ════════════════════════════════════════════════════════════════════════════
+function ModalWhatsAppVencido({ vencido, onCerrar }) {
+  const [cargando, setCargando] = useState(true);
+  const [texto, setTexto] = useState('');
+  const [info, setInfo] = useState(null);
+  const [error, setError] = useState(null);
+  const [enviando, setEnviando] = useState(false);
+  const [exito, setExito] = useState(null);
+
+  useEffect(() => {
+    let vivo = true;
+    (async () => {
+      try {
+        const res = await fetch(`${API}/comercial/vencidos/${vencido.clienteId}/mensaje-wa`, { headers: authHeaders() });
+        const json = await res.json();
+        if (!vivo) return;
+        if (!res.ok) throw new Error(json.error || 'No se pudo preparar el mensaje');
+        setInfo(json);
+        setTexto(json.mensaje || '');
+      } catch (e) {
+        if (vivo) setError(e.message);
+      } finally {
+        if (vivo) setCargando(false);
+      }
+    })();
+    return () => { vivo = false; };
+  }, [vencido.clienteId]);
+
+  const enviar = async () => {
+    setError(null);
+    setEnviando(true);
+    try {
+      const res = await fetch(`${API}/comercial/vencidos/${vencido.clienteId}/whatsapp`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ mensaje: texto }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'No se pudo enviar');
+      setExito(`✅ Enviado (${json.enviadosHoy} de ${json.topeDiario} hoy)`);
+      setTimeout(() => onCerrar(true), 1300);
+    } catch (e) {
+      setError(e.message);
+      setEnviando(false);
+    }
+  };
+
+  const marcarOptOut = async () => {
+    if (!window.confirm(`¿Marcar que ${vencido.nombre} NO quiere recibir WhatsApp? No se le volverá a escribir.`)) return;
+    setEnviando(true);
+    try {
+      const res = await fetch(`${API}/comercial/vencidos/${vencido.clienteId}/whatsapp`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ optOut: true }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || 'No se pudo guardar');
+      onCerrar(true);
+    } catch (e) {
+      setError(e.message);
+      setEnviando(false);
+    }
+  };
+
+  const bloqueado = !!info?.bloqueo;
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(15,23,42,.55)', zIndex: 90,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
+    }} onClick={() => !enviando && onCerrar(false)}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: '#fff', borderRadius: 16, padding: 20, width: '100%', maxWidth: 520,
+        maxHeight: '90vh', overflowY: 'auto',
+      }}>
+        <div style={{ fontSize: 16, fontWeight: 800, color: '#0f172a' }}>💬 WhatsApp a {vencido.nombre}</div>
+        <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+          {telBonito(vencido.telefono)} · sale por la línea de Anny
+        </div>
+
+        {cargando && <div style={{ padding: '24px 0', textAlign: 'center', color: '#94a3b8' }}>Preparando mensaje…</div>}
+
+        {!cargando && info && (
+          <>
+            {bloqueado && (
+              <div style={{ marginTop: 12, background: '#fef3c7', color: '#92400e', borderRadius: 8, padding: '9px 11px', fontSize: 12, fontWeight: 700 }}>
+                ⚠️ {info.bloqueo}
+              </div>
+            )}
+
+            <textarea
+              value={texto}
+              onChange={e => setTexto(e.target.value)}
+              disabled={bloqueado || enviando}
+              rows={6}
+              style={{
+                width: '100%', marginTop: 12, padding: '10px 12px', borderRadius: 10,
+                border: '1px solid #cbd5e1', fontSize: 13.5, lineHeight: 1.5,
+                fontFamily: 'inherit', resize: 'vertical', boxSizing: 'border-box',
+                background: bloqueado ? '#f8fafc' : '#fff',
+              }}
+            />
+            <div style={{ fontSize: 11, color: texto.length > 700 ? '#b91c1c' : '#94a3b8', marginTop: 4 }}>
+              {texto.length}/700 caracteres · revisa el texto antes de enviar
+            </div>
+
+            {error && (
+              <div style={{ marginTop: 10, background: '#fee2e2', color: '#b91c1c', borderRadius: 8, padding: '8px 10px', fontSize: 12, fontWeight: 700 }}>
+                {error}
+              </div>
+            )}
+            {exito && (
+              <div style={{ marginTop: 10, background: '#dcfce7', color: '#15803d', borderRadius: 8, padding: '8px 10px', fontSize: 12, fontWeight: 700 }}>
+                {exito}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+              <button onClick={() => onCerrar(false)} disabled={enviando} style={{
+                flex: 1, padding: '10px 0', borderRadius: 9, border: '1px solid #e2e8f0',
+                background: '#f8fafc', color: '#475569', fontWeight: 700, fontSize: 13, cursor: 'pointer',
+              }}>Cancelar</button>
+              <button onClick={enviar} disabled={bloqueado || enviando || texto.trim().length < 20 || texto.length > 700} style={{
+                flex: 2, padding: '10px 0', borderRadius: 9, border: 'none',
+                background: (bloqueado || enviando) ? '#94a3b8' : '#16a34a',
+                color: '#fff', fontWeight: 800, fontSize: 13,
+                cursor: (bloqueado || enviando) ? 'not-allowed' : 'pointer',
+              }}>{enviando ? 'Enviando…' : '💬 Enviar WhatsApp'}</button>
+            </div>
+
+            <button onClick={marcarOptOut} disabled={enviando} style={{
+              width: '100%', marginTop: 10, padding: '7px 0', borderRadius: 8,
+              border: '1px solid #fecaca', background: '#fff', color: '#b91c1c',
+              fontWeight: 700, fontSize: 11.5, cursor: 'pointer',
+            }}>🚫 No volver a escribirle por WhatsApp</button>
+
+            <div style={{ fontSize: 10.5, color: '#94a3b8', marginTop: 8, lineHeight: 1.5 }}>
+              Un mensaje por cliente al mes · {info.enviadosHoy} de {info.topeDiario} enviados hoy.
+              Si responde, Anny continúa la conversación con el contexto de sus equipos vencidos.
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -574,6 +748,9 @@ function ModalLlamadaVencido({ vencido, onCerrar, onCrearOrden }) {
     { value: 'no_contesto', label: '📵 No contestó',        bg: '#f3f4f6', color: '#6b7280' },
     { value: 'no_interesa', label: '❌ No le interesa',     bg: '#fee2e2', color: '#b91c1c' },
     { value: 'ya_recargo',  label: '♻️ Ya recargó',         bg: '#e0f2fe', color: '#0369a1' }, // ✅ FIX TELEVENC-YAREC-001
+    // ✅ TELEVENC-VISITA-001: compromiso con fecha. Sale de la cola hasta fin
+    // de mes; si no hay orden suya para entonces, vuelve marcado.
+    { value: 'visita_oficina', label: '🏢 Pasa por la oficina', bg: '#ede9fe', color: '#6d28d9' },
   ];
 
   const toggleEquipo = (id) => {
@@ -616,7 +793,11 @@ function ModalLlamadaVencido({ vencido, onCerrar, onCrearOrden }) {
         setGuardando(false);
         return; // muestra botones — no se cierra solo
       }
-      setExito(resultado === 'ya_recargo' ? '♻️ Listo — equipos marcados como ya recargados (al día)' : '✓ Llamada registrada');
+      setExito(
+        resultado === 'ya_recargo' ? '♻️ Listo — equipos marcados como ya recargados (al día)'
+        // ✅ TELEVENC-VISITA-001
+        : resultado === 'visita_oficina' ? '🏢 Compromiso registrado — sale de la cola. Si no viene antes de fin de mes, vuelve a aparecer.'
+        : '✓ Llamada registrada');
       setTimeout(() => onCerrar(true), 1400);
     } catch (e) {
       setError(e.message);

@@ -1327,10 +1327,19 @@ router.post('/', authenticate, async (req, res) => {
     if (tipoFinal !== 'interna' && tipoFinal !== 'produccion' &&
         lugarNorm !== 'oficina' && nuevaOrden.clienteCelular) {
       const dirNotif = sucursalDireccion || nuevaOrden.clienteDireccionPrincipal || '';
+      // ✅ FIX ANNY-NOTIF-DIR-002: si la orden se creó SIN dirección, antes el
+      // mensaje simplemente la omitía y el cliente no tenía forma de detectar
+      // el faltante. Ahora se le pide explícitamente: la corrección entra antes
+      // de que el mensajero salga, no cuando ya llegó a la dirección errada.
+      // NO se hace fallback silencioso a otra dirección del cliente: informar
+      // una dirección que no es la de esta orden sería peor que no informarla.
       const msgOrden = `✅ ¡Hola ${clienteNombre}! Tu pedido quedó registrado:\n\n` +
         `📋 Orden: ${numeroOrden}\n` +
-        (dirNotif ? `📍 Dirección: ${dirNotif}\n` : '') +
+        (dirNotif
+          ? `📍 Dirección: ${dirNotif}\n`
+          : `📍 Dirección: no la tenemos registrada — por favor respóndenos con la dirección de entrega.\n`) +
         `💰 Valor: $${Math.round(total).toLocaleString('es-CO')}\n\n` +
+        (dirNotif ? `Si la dirección no es correcta, respóndenos a este chat y la corregimos.\n\n` : '') +
         `Te mantendremos informado del avance. ¡Gracias por confiar en nosotros! 🙌`;
       notificarClienteWhatsApp(nuevaOrden.adminId, nuevaOrden.clienteCelular, msgOrden)
         .catch(() => {});

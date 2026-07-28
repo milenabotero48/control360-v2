@@ -65,6 +65,12 @@ const TOPE_MINUTOS_DEFAULT = Number(process.env.LLAMADA_IA_TOPE_MINUTOS) || 120;
 //      freno de emergencia dentro de la corrida.
 const MAX_INTENTOS_DEFAULT = Number(process.env.LLAMADA_IA_MAX_INTENTOS) || 3;
 
+// ✅ LUCY-PRIORIDAD-001: umbral de equipos para considerar prioritario a un
+// cliente. Un cliente con 1 extintor de carro y uno de oficina con 6 no valen
+// lo mismo: al segundo no se le puede dejar enfriar 3 intentos de Lucy.
+// Configurable por tenant en llamadasIAConfig.umbralPrioridadEquipos.
+const UMBRAL_PRIORIDAD_DEFAULT = Number(process.env.LLAMADA_IA_UMBRAL_PRIORIDAD) || 2;
+
 // Fracción de llamadas lanzadas que termina en conversación facturable.
 // Conservador: si de cada 10 llamadas contestan 4, solo esas consumen minutos.
 const FACTOR_CONTESTACION = Number(process.env.LLAMADA_IA_FACTOR_CONTESTACION) || 0.45;
@@ -336,10 +342,54 @@ const obtenerConfigTenant = async (adminId) => {
     // ✅ LUCY-CAPACIDAD-001: intentos por cliente/mes configurables por tenant.
     // Antes estaba quemado en 2 dentro del motor.
     maxIntentos: Number(data.maxIntentos) || MAX_INTENTOS_DEFAULT,
+    // ✅ LUCY-PRIORIDAD-001: a partir de cuántos equipos por vencer un cliente
+    // se considera prioritario y NO espera a que Lucy agote sus intentos.
+    // 0 desactiva la regla (todos siguen el flujo normal de Lucy).
+    umbralPrioridadEquipos: Number.isFinite(Number(data.umbralPrioridadEquipos))
+      ? Number(data.umbralPrioridadEquipos)
+      : UMBRAL_PRIORIDAD_DEFAULT,
     // Ruleset de clasificación propio del suscriptor (opcional). Si no lo tiene,
     // se usa el de extintores por defecto.
     reglasClasificacion: Array.isArray(data.reglasClasificacion) ? data.reglasClasificacion : null,
   };
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ LUCY-PRIORIDAD-001 — ¿este cliente merece pasar ya a un humano?
+// ─────────────────────────────────────────────────────────────────────────────
+// Criterio: total de equipos pendientes de recarga. Es la señal más limpia que
+// tenemos del valor del cliente y no exige clasificarlos a mano.
+// Solo lectura, siempre filtrado por adminId. Si falla, devuelve false: ante la
+// duda el cliente sigue el flujo normal de Lucy (nunca se pierde, solo espera).
+//
+// Se declara AQUÍ, antes de procesarWebhook, y no más abajo: la regla del
+// proyecto tras el bug de Temporal Dead Zone de LUCY-ELEVEN-001b es que nada
+// se use antes de su declaración, aunque la llamada sea diferida.
+// ═════════════════════════════════════════════════════════════════════════════
+const esClientePrioritario = async (adminId, clienteId, umbral) => {
+  try {
+    const min = Number.isFinite(Number(umbral)) ? Number(umbral) : UMBRAL_PRIORIDAD_DEFAULT;
+    if (min <= 0) return false; // regla desactivada para este tenant
+    if (!adminId || !clienteId) return false;
+
+    const snap = await db.collection('vencimientos')
+      .where('adminId', '==', adminId)
+      .where('clienteId', '==', clienteId)
+      .limit(200)
+      .get();
+
+    let equipos = 0;
+    snap.forEach(d => {
+      const v = d.data();
+      if (v.gestionado) return;
+      equipos += Number(v.cantidad) || 1;
+    });
+
+    return equipos >= min;
+  } catch (e) {
+    console.error('[LLAMADAS-IA] LUCY-PRIORIDAD-001 falló:', e.message);
+    return false;
+  }
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -725,6 +775,17 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
           );
           if (yaTieneResultadoFinal) { motivos.ya_gestionado++; continue; }
 
+          // ✅ LUCY-PRIORIDAD-001: si este vencimiento ya pasó a telemercadeo
+          // POR PRIORIDAD, Lucy deja de llamarlo — lo tiene un asesor humano y
+          // dos llamadas por el mismo tema molestan al cliente.
+          // OJO: solo aplica al escalamiento por prioridad. Los escalados por
+          // 'lucy_sin_contacto' ya quedaron fuera por intentos agotados, y los
+          // de 'lucy_escalo' por tener resultado final.
+          if (venc.escaladoTelemercadeo === true && venc.motivoEscalamiento === 'prioridad_alta') {
+            motivos.ya_gestionado++;
+            continue;
+          }
+
           // ✅ LUCY-CAPACIDAD-001: intentos configurables (antes quemado en 2).
           const numeroIntento = intentos.length + 1;
           if (numeroIntento > config.maxIntentos) { motivos.intentos_agotados++; continue; }
@@ -1056,13 +1117,29 @@ const procesarResultadoLlamada = async (payload) => {
     const config = await obtenerConfigTenant(registroActual.adminId).catch(() => ({ maxIntentos: MAX_INTENTOS_DEFAULT }));
     const intentosAgotados = resultado === 'sin_respuesta' && registroActual.intento >= (config.maxIntentos || MAX_INTENTOS_DEFAULT);
 
-    if (intentosAgotados || resultado === 'escalado_asesor') {
+    // ✅ LUCY-PRIORIDAD-001: clientes de alto valor no esperan los 3 intentos.
+    // Un cliente con varios equipos que no contesta la PRIMERA llamada pasa ya
+    // a telemercadeo humano. Con 1 equipo, sigue el flujo normal de Lucy.
+    // Aplica solo a 'sin_respuesta': si contestó, el resultado manda.
+    let prioritario = false;
+    if (resultado === 'sin_respuesta' && !intentosAgotados && registroActual.clienteId) {
+      prioritario = await esClientePrioritario(
+        registroActual.adminId, registroActual.clienteId, config.umbralPrioridadEquipos
+      );
+    }
+
+    if (intentosAgotados || prioritario || resultado === 'escalado_asesor') {
       await db.collection('vencimientos').doc(registroActual.vencimientoId).update({
         escaladoTelemercadeo: true,
         estadoCiclo: 'EN_TELEMERCADEO',
-        motivoEscalamiento: resultado === 'escalado_asesor' ? 'lucy_escalo' : 'lucy_sin_contacto',
+        motivoEscalamiento: resultado === 'escalado_asesor' ? 'lucy_escalo'
+          : prioritario ? 'prioridad_alta'   // ✅ LUCY-PRIORIDAD-001
+          : 'lucy_sin_contacto',
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }).catch(() => {});
+      if (prioritario) {
+        console.log(`[LLAMADAS-IA] LUCY-PRIORIDAD-001: cliente ${registroActual.clienteId} escalado a telemercadeo tras el intento ${registroActual.intento} (cliente de varios equipos)`);
+      }
     }
 
     // Resuelto → gestionado=true para que el motor no vuelva a llamar este ciclo

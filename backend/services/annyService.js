@@ -68,6 +68,9 @@
 
 const { db, admin } = require('../config/firebase');
 const Anthropic = require('@anthropic-ai/sdk');
+// ✅ TALLER-RESPUESTA-001: constancia de la respuesta del cliente sobre un
+// defecto. Solo escribe un campo informativo — nunca autoriza ni mueve stock.
+const tallerRespuestas = require('./tallerRespuestas');
 
 // ============================================================
 // FIX ANNY-BOOT-001: cliente Anthropic perezoso
@@ -189,7 +192,10 @@ const MISIONES = {
     objetivo: 'Atender al cliente que escribe: resolver su duda y, si aplica, cerrar la venta.',
     permiteVenta: true,
     permitePedido: true,
-    maxChars: 350,
+    // ✅ FIX ANNY-BREV-018: 350 → 220. 350 caracteres unidos en un solo
+    // párrafo (recortarRespuesta une todo en prosa) se leen como un
+    // muro de texto en WhatsApp. 220 obliga a la frase corta de asesora.
+    maxChars: 220,
     reglas: 'Responde primero lo que pregunta. Cierra cuando tengas los mínimos.'
   },
   COBRANZA: {
@@ -204,7 +210,10 @@ const MISIONES = {
     permiteVenta: false,
     permitePedido: false,
     maxChars: 260,
-    reglas: 'Ultrabreve. Informa la novedad y su valor, y pide autorización. NO negocies precio: si pide descuento o cambio, ESCALA.'
+    // ✅ TALLER-RESPUESTA-001: Anny recoge la respuesta pero NO autoriza nada.
+    // Prometer que "ya quedó autorizada" sería mentir: la decisión la aplica
+    // el taller con un click. Debe decir que lo pasa al taller y se confirma.
+    reglas: 'Ultrabreve. Informa la novedad y su valor, y pide autorización. NO negocies precio: si pide descuento o cambio, ESCALA. Cuando el cliente responda, agradece y dile que lo pasas al taller para confirmarle: NUNCA afirmes que la reparación ya quedó autorizada, aprobada o programada.'
   },
   RENOVACION_SAAS: {
     objetivo: 'Informar la cuenta de cobro de la suscripción y acordar el pago.',
@@ -441,6 +450,15 @@ async function buscarClienteEnBD(adminId, telefonoRaw) {
     const doc = snap.docs[0];
     const c = doc.data();
 
+    // ✅ ANNY-CONTEXTO-019: hasta aquí la ficha solo traía datos de identidad,
+    // así que Anny sabía CÓMO se llama el cliente pero no CUÁNTOS equipos tiene
+    // ni qué se le vence — y terminaba preguntando lo que el sistema ya sabe.
+    // Ambas consultas van en paralelo y solo para clientes YA registrados.
+    const [vencimientos, saldoCxC] = await Promise.all([
+      obtenerVencimientosCliente(adminId, doc.id),
+      obtenerSaldoCxC(adminId, doc.id)
+    ]);
+
     const sucursales = Array.isArray(c.sucursales)
       ? c.sucursales.map(s => ({
           nombre: s.nombre || s.descripcion || '',
@@ -458,11 +476,115 @@ async function buscarClienteEnBD(adminId, telefonoRaw) {
       direccion: c.direccionPrincipal || '',
       ciudad: c.ciudad || '',
       empresaNombre: c.empresaNombre || '',
-      sucursales
+      sucursales,
+      // ✅ ANNY-CONTEXTO-019
+      vencimientos,
+      saldoCxC
     };
   } catch (err) {
     console.error('[ANNY] Error buscando cliente en BD:', err.message);
     return { existe: false };
+  }
+}
+
+// ============================================================
+// ✅ ANNY-CONTEXTO-019: equipos por vencer / vencidos del cliente
+// ------------------------------------------------------------
+// Solo lectura, siempre filtrado por adminId. Se usa para que Anny
+// pueda decir "se le vencen 4 extintores este mes" en vez de
+// preguntarle al cliente qué equipos tiene.
+// Si la consulta falla, devuelve vacío: la conversación NUNCA se cae
+// por falta de este contexto (es enriquecimiento, no requisito).
+// ============================================================
+async function obtenerVencimientosCliente(adminId, clienteId) {
+  try {
+    if (!adminId || !clienteId) return { total: 0, vencidos: 0, proximos: 0, detalle: [] };
+
+    const snap = await db.collection('vencimientos')
+      .where('adminId', '==', adminId)
+      .where('clienteId', '==', clienteId)
+      .limit(200)
+      .get();
+
+    // Fecha Colombia (UTC-5) — mismo criterio que comercial.js
+    const hoy = new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+    const finDeMes = hoy.slice(0, 7) + '-31';
+
+    let vencidos = 0, proximos = 0, total = 0;
+    const detalle = [];
+
+    snap.forEach(d => {
+      const v = d.data();
+      if (v.gestionado || !v.fechaVencimiento) return;
+      const cant = Number(v.cantidad) || 1;
+      total += cant;
+      if (v.fechaVencimiento < hoy) vencidos += cant;
+      else if (v.fechaVencimiento <= finDeMes) proximos += cant;
+      if (detalle.length < 12) {
+        detalle.push({
+          equipo: v.descripcionEquipo || 'Extintor',
+          cantidad: cant,
+          fecha: v.fechaVencimiento,
+          sucursal: v.sucursal || null
+        });
+      }
+    });
+
+    return { total, vencidos, proximos, detalle };
+  } catch (err) {
+    console.error('[ANNY] Error leyendo vencimientos del cliente:', err.message);
+    return { total: 0, vencidos: 0, proximos: 0, detalle: [] };
+  }
+}
+
+// ============================================================
+// ✅ ANNY-CONTEXTO-019: saldo pendiente en cartera (solo lectura)
+// ------------------------------------------------------------
+// ⚠️ El saldo se le da a Anny para que NO cierre una venta nueva
+// ignorando una deuda vieja, y para la misión COBRANZA. NUNCA para
+// negociar: si el cliente discute el valor o dice que ya pagó, la
+// misión COBRANZA ya obliga a escalar.
+// ============================================================
+async function obtenerSaldoCxC(adminId, clienteId) {
+  try {
+    if (!adminId || !clienteId) return { saldo: 0, facturas: 0 };
+
+    // ⚠️ OJO: NO se consulta la colección `cxc`. Ese registro paralelo usa
+    // `userId` como campo de tenant (no `adminId`) y no es la fuente de
+    // verdad: el módulo CxC calcula la cartera desde `orders` (ver cxc.js
+    // GET /, líneas ~72-76). Se replica ESA misma lógica para que Anny y el
+    // módulo nunca muestren cifras distintas.
+    const snap = await db.collection('orders')
+      .where('adminId', '==', adminId)
+      .where('clienteId', '==', clienteId)
+      .limit(300)
+      .get();
+
+    const FORMAS_CREDITO = ['CXC', 'A crédito (CxC)', 'A crédito'];
+    let saldo = 0, facturas = 0;
+
+    snap.forEach(d => {
+      const o = d.data();
+      if (o.estado === 'anulada') return;
+
+      const esCredito =
+        o.estado === 'cxc' ||
+        o.cxcEstado === 'parcial' ||
+        (FORMAS_CREDITO.includes(o.formaPago) && !o.pagado);
+      if (!esCredito) return;
+
+      // Mismo cálculo de saldo real que cxc.js: total menos abonos.
+      const saldoReal = (Number(o.total) || 0) - (Number(o.montoPagado) || 0);
+      if (saldoReal <= 0) return;
+
+      saldo += saldoReal;
+      facturas += 1;
+    });
+
+    return { saldo, facturas };
+  } catch (err) {
+    console.error('[ANNY] Error leyendo cartera del cliente:', err.message);
+    return { saldo: 0, facturas: 0 };
   }
 }
 
@@ -732,7 +854,7 @@ async function obtenerEstadoPedidoHilo(adminId, telefono) {
 // FIX ANNY-CIERRE-007 + v22: Claude decide.
 // Motor único: PERFIL (quién es) × MISIÓN (a qué vino).
 // ============================================================
-async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = [], fichaCliente = { existe: false }, catalogo = [], perfil = PERFIL_DEFAULT, misionNombre = 'ATENCION', estadoPedido = { existe: false }) {
+async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = [], fichaCliente = { existe: false }, catalogo = [], perfil = PERFIL_DEFAULT, misionNombre = 'ATENCION', estadoPedido = { existe: false }, defectoPendiente = null) {
   try {
     const mision = obtenerMision(misionNombre);
 
@@ -765,6 +887,27 @@ async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {
         (sedes.length > 1
           ? `- Tiene ${sedes.length} sedes registradas: ${sedes.map(s => `${s.nombre}${s.direccion ? ' (' + s.direccion + ')' : ''}`).join(' | ')}\n  → PREGUNTA a cuál sede se envía el servicio.`
           : (sedes.length === 1 ? `- Sede: ${sedes[0].nombre}${sedes[0].direccion ? ' (' + sedes[0].direccion + ')' : ''}` : ''));
+
+      // ✅ ANNY-CONTEXTO-019: equipos y cartera. Esto es lo que evita que
+      // Anny pregunte "¿qué equipo tiene?" a un cliente cuyos 6 extintores
+      // están registrados en el sistema desde hace dos años.
+      const ven = fichaCliente.vencimientos;
+      if (ven && ven.total > 0) {
+        const partes = [];
+        if (ven.vencidos > 0) partes.push(`${ven.vencidos} YA VENCIDO(S)`);
+        if (ven.proximos > 0) partes.push(`${ven.proximos} vence(n) este mes`);
+        fichaTxt += `\n- EQUIPOS REGISTRADOS: ${ven.total} pendiente(s) de recarga${partes.length ? ` — ${partes.join(', ')}` : ''}`;
+        if (ven.detalle.length) {
+          fichaTxt += `\n  ${ven.detalle.map(e => `${e.cantidad}x ${e.equipo} (vence ${e.fecha})${e.sucursal ? ` — sede ${e.sucursal}` : ''}`).join('\n  ')}`;
+        }
+        fichaTxt += `\n  → NO le preguntes qué equipos tiene ni cuántos: ya lo sabes. Confírmalo si hace falta.`;
+      }
+
+      const cxc = fichaCliente.saldoCxC;
+      if (cxc && cxc.saldo > 0) {
+        fichaTxt += `\n- CARTERA: tiene $${Math.round(cxc.saldo).toLocaleString('es-CO')} pendiente(s) en ${cxc.facturas} orden(es).`;
+        fichaTxt += `\n  → Dato interno de contexto. NO se lo cobres si él no sacó el tema y la misión no es COBRANZA. Si discute el valor o dice que ya pagó, ESCALA.`;
+      }
     }
 
     // ANNY-ESTADO-013: bloque de estado real
@@ -779,6 +922,21 @@ async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {
         `- Datos aún pendientes: ${estadoPedido.datosPendientes.length ? estadoPedido.datosPendientes.join(', ') : 'ninguno'}\n` +
         `- Ya le confirmaste el resumen de este pedido: SÍ → NO se lo repitas.`;
     }
+
+    // ✅ TALLER-RESPUESTA-001: si este cliente tiene un defecto esperando
+    // autorización, Anny debe CLASIFICAR su respuesta — no ejecutarla.
+    // El umbral es deliberadamente alto: ante cualquier duda, null.
+    const bloqueDefecto = defectoPendiente ? `
+AUTORIZACIÓN DE REPARACIÓN PENDIENTE (orden ${defectoPendiente.numeroOrden}):
+Se le informó este defecto: "${defectoPendiente.descripcion}" por $${Math.round(defectoPendiente.costoReparacion).toLocaleString('es-CO')}, y se le pidió que autorice.
+
+Además de responderle, CLASIFICA su mensaje en el campo "respuestaTaller":
+- "APROBADO" solo si autoriza de forma INEQUÍVOCA ("sí", "sí autorizo", "hágale", "de una", "proceda").
+- "RECHAZADO" solo si niega de forma INEQUÍVOCA ("no", "no autorizo", "así déjelo", "no lo arreglen").
+- null en CUALQUIER otro caso: dudas, condiciones, preguntas de precio, "déjeme pensarlo", "sí pero...", "cuánto vale", o si el mensaje no habla de esta autorización.
+- Si es null Y el cliente sí está hablando del defecto sin definirse, ESCALA (tipo SERVICIO).
+- Tú NO autorizas nada: solo clasificas. El taller confirma. No le digas que ya quedó autorizado.
+` : '';
 
     const prompt = `
 Eres ${perfil.nombreAgente}, asesora por WhatsApp de ${perfil.empresa}, empresa de ${perfil.vertical}. Vendes bien, pero primero ATIENDES: resuelves lo que el cliente pregunta.
@@ -848,12 +1006,14 @@ REGLA CRÍTICA: NUNCA inventes precios, direcciones, estados ni datos. Si el dat
 
 PEDIDO CONFIRMADO: ${mision.permitePedido ? 'cuando el cliente confirme la compra Y tengas los mínimos, incluye el objeto "pedido". Si faltan los mínimos o falta confirmación, "pedido" debe ser null.' : 'en esta misión "pedido" SIEMPRE debe ser null.'}
 
+${bloqueDefecto}
+
 Responde SOLO en JSON (sin markdown):
 {
   "escalado": boolean,
   "tipo": "PRECIO|SERVICIO|DATOS|PAGO|NEGOCIACION|CAPACITACION|PROBLEMA|VENTA|HUMANO|OTRO",
   "respuesta": "tu respuesta si NO escalado",
-  "razon": "por qué escalas (si escalado)",
+  "razon": "por qué escalas (si escalado)",${defectoPendiente ? '\n  "respuestaTaller": "APROBADO" | "RECHAZADO" | null,' : ''}
   "pedido": null | {
     "producto": "descripción del producto/servicio",
     "cantidad": número,
@@ -901,6 +1061,14 @@ Responde SOLO en JSON (sin markdown):
     }
     // FIX ANNY-MISION-014: en misiones sin venta, ningún pedido.
     if (!mision.permitePedido) decision.pedido = null;
+
+    // ✅ TALLER-RESPUESTA-001: saneo duro. Solo se aceptan los dos valores
+    // exactos y solo si hay defecto pendiente. Cualquier otra cosa que
+    // devuelva el modelo (texto libre, "SI", true, "quizás") vale null.
+    if (!defectoPendiente ||
+        (decision.respuestaTaller !== 'APROBADO' && decision.respuestaTaller !== 'RECHAZADO')) {
+      decision.respuestaTaller = null;
+    }
 
     return decision;
 
@@ -1137,13 +1305,16 @@ async function procesarMensajeEntrante(props) {
       };
     }
 
-    // PASO 2: conocimiento + historial + ficha + catálogo + estado
-    const [respuestas, historial, fichaCliente, catalogo, estadoPedido] = await Promise.all([
+    // PASO 2: conocimiento + historial + ficha + catálogo + estado + defecto
+    const [respuestas, historial, fichaCliente, catalogo, estadoPedido, defectoPendiente] = await Promise.all([
       obtenerRespuestasTenant(adminId),
       obtenerHistorialReciente(adminId, telefono),
       buscarClienteEnBD(adminId, telefono),
       perfil.fuentePrecios === 'products' ? obtenerCatalogoProductos(adminId) : Promise.resolve([]),
-      obtenerEstadoPedidoHilo(adminId, telefono)
+      obtenerEstadoPedidoHilo(adminId, telefono),
+      // ✅ TALLER-RESPUESTA-001: solo lectura. Si no hay defecto esperando
+      // autorización devuelve null y todo el flujo sigue igual que antes.
+      tallerRespuestas.buscarDefectoPendiente(adminId, telefono).catch(() => null)
     ]);
 
     // FIX ANNY-CIERRE-007: ventana de hilo activo 24 h
@@ -1156,7 +1327,13 @@ async function procesarMensajeEntrante(props) {
       if (respuestaConfig.encontrada) {
         // FIX ANNY-BREV-011: también se sanea el formato de las
         // respuestas entrenadas (de ahí salían los bloques con ✓).
-        const textoSaneado = recortarRespuesta(respuestaConfig.respuesta, 400);
+        // ✅ FIX ANNY-BREV-018: el 400 estaba HARDCODEADO e ignoraba el
+        // límite de la misión (ATENCION 220, TALLER 260, COBRANZA 280).
+        // Por esa puerta se colaban las respuestas largas: el modelo
+        // respetaba su límite, pero la base de conocimiento no.
+        // OJO: `mision` (objeto) sólo existe dentro de claudeDecide; aquí
+        // hay que resolverlo desde misionNombre con obtenerMision().
+        const textoSaneado = recortarRespuesta(respuestaConfig.respuesta, obtenerMision(misionNombre).maxChars);
 
         await registrarConversacion(adminId, {
           telefono,
@@ -1183,7 +1360,7 @@ async function procesarMensajeEntrante(props) {
     // PASO 3: Claude decide (perfil × misión × estado real)
     const decision = await claudeDecide(
       adminId, nombreCliente, mensajeTexto, respuestas, historial,
-      fichaCliente, catalogo, perfil, misionNombre, estadoPedido
+      fichaCliente, catalogo, perfil, misionNombre, estadoPedido, defectoPendiente
     );
 
     if (decision.escalado) {
@@ -1237,6 +1414,35 @@ async function procesarMensajeEntrante(props) {
 
     await actualizarMetricas(adminId, 'respuestas_ia');
 
+    // ════════════════════════════════════════════════════════════════════
+    // ✅ TALLER-RESPUESTA-001: el cliente respondió la autorización.
+    // Se deja CONSTANCIA en el defecto y se avisa. NO se autoriza, no se
+    // cambia estado, no se mueve inventario: eso lo hace el taller con un
+    // click desde GestionTaller. Ver cabecera de services/tallerRespuestas.js
+    // ════════════════════════════════════════════════════════════════════
+    let avisoTaller = null;
+    let telefonoAvisoTaller = null;
+    if (decision.respuestaTaller && defectoPendiente) {
+      const reg = await tallerRespuestas.registrarRespuestaCliente(
+        adminId, telefono, decision.respuestaTaller, mensajeTexto
+      );
+      if (reg) {
+        const aprobo = reg.valor === 'APROBADO';
+        avisoTaller =
+          `${aprobo ? '✅ EL CLIENTE APROBÓ' : '❌ EL CLIENTE NO APROBÓ'} EL CAMBIO DE REPUESTO\n` +
+          `Orden ${reg.numeroOrden} — ${reg.clienteNombre || nombreCliente || telefono}\n` +
+          `${reg.descripcion} · $${Math.round(reg.costoReparacion).toLocaleString('es-CO')}\n` +
+          `Respondió: "${String(mensajeTexto).slice(0, 120)}"\n\n` +
+          `⚠️ Falta confirmarlo en Taller para que se aplique.`;
+        try {
+          const cfgDoc = await db.collection('annyConfig').doc(adminId).get();
+          telefonoAvisoTaller = cfgDoc.exists
+            ? (cfgDoc.data().notificarTallerA || cfgDoc.data().notificarEscalamientoA || null)
+            : null;
+        } catch (e) { telefonoAvisoTaller = null; }
+      }
+    }
+
     // Pedido confirmado → bandeja + aviso solo si es nuevo
     let notificarA = null;
     let pedidoParaAviso = null;
@@ -1262,6 +1468,10 @@ async function procesarMensajeEntrante(props) {
       respuesta: decision.respuesta,
       pedido: pedidoParaAviso,
       notificarA,
+      // ✅ TALLER-RESPUESTA-001: el canal Baileys envía este aviso al admin
+      // igual que ya hace con avisoEscalamiento.
+      avisoTaller,
+      notificarTallerA: telefonoAvisoTaller,
       telefonoCliente: telefono
     };
 

@@ -223,7 +223,18 @@ const GestionOrdenes = ({ user }) => {
                 // 2. Si la auditoría aprobó, exportar
                 exportarExcel(ordenes, [
                   { key: 'numeroOrden',   label: 'N° Orden' },
-                  { key: 'createdAt',     label: 'Fecha', getValue: o => o.createdAt ? new Date(o.createdAt).toLocaleDateString('es-CO') : '' },
+                  // ✅ FIX ORDEN-EXPORT-FECHA-001: createdAt viene de Firestore
+                  // serverTimestamp() y se serializa como {_seconds,_nanoseconds}.
+                  // `new Date(objeto)` daba Invalid Date → la columna salía vacía.
+                  // Se usa la MISMA lógica de la línea ~188 (vista de órdenes),
+                  // con fallback a fechaCreacion (ISO string) para órdenes viejas.
+                  { key: 'createdAt',     label: 'Fecha', getValue: o => {
+                    const s = o.createdAt?._seconds ?? o.createdAt?.seconds;
+                    const d = s ? new Date(s * 1000)
+                      : (o.createdAt || o.fechaCreacion) ? new Date(o.createdAt || o.fechaCreacion)
+                      : null;
+                    return d && !isNaN(d.getTime()) ? d.toLocaleDateString('es-CO') : '';
+                  } },
                   { key: 'clienteNombre', label: 'Cliente' },
                   { key: 'empresaNombre', label: 'Empresa' },
                   { key: 'estado',        label: 'Estado' },

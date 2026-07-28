@@ -1538,6 +1538,35 @@ export default function GestionTaller({ user }) {
                                   </div>
                                 )}
                                 <div style={{ marginTop: 2, fontWeight: 700 }}>Total cotizado: ${(d.costoReparacion || 0).toLocaleString('es-CO')}</div>
+
+                                {/* ✅ TALLER-RESPUESTA-001: constancia de lo que el cliente
+                                    respondió por WhatsApp. Es INFORMATIVO: el defecto sigue
+                                    pendiente hasta que alguien pulse el botón de al lado.
+                                    Se muestra el texto LITERAL a propósito — si Anny
+                                    interpretó mal, aquí se ve y se decide distinto. */}
+                                {d.estado === 'pendiente_autorizacion' && d.respuestaCliente && (
+                                  <div style={{
+                                    marginTop: 8, padding: '8px 10px', borderRadius: 6,
+                                    background: d.respuestaCliente.valor === 'APROBADO' ? '#ecfdf5' : '#fef2f2',
+                                    border: `1px solid ${d.respuestaCliente.valor === 'APROBADO' ? '#6ee7b7' : '#fca5a5'}`
+                                  }}>
+                                    <div style={{
+                                      fontSize: 12, fontWeight: 700,
+                                      color: d.respuestaCliente.valor === 'APROBADO' ? '#047857' : '#b91c1c'
+                                    }}>
+                                      {d.respuestaCliente.valor === 'APROBADO'
+                                        ? '💬 El cliente APROBÓ por WhatsApp'
+                                        : '💬 El cliente NO APROBÓ por WhatsApp'}
+                                    </div>
+                                    <div style={{ fontSize: 12, color: '#374151', marginTop: 3, fontStyle: 'italic' }}>
+                                      "{d.respuestaCliente.textoLiteral}"
+                                    </div>
+                                    <div style={{ fontSize: 11, color: '#6b7280', marginTop: 3 }}>
+                                      Confirma con el botón para que se aplique y entren los repuestos.
+                                    </div>
+                                  </div>
+                                )}
+
                                 {d.estado !== 'pendiente_autorizacion' && (
                                   <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
                                     {d.estado === 'autorizado' ? '✅ Autorizado' : '❌ Rechazado'} por {d.respondidoPorNombre || '—'}

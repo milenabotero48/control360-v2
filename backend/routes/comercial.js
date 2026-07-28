@@ -87,6 +87,19 @@ const siguienteDiaHabil = (fechaStr) => {
   return proximoDiaHabil(sumarDias(fechaStr, 1));
 };
 
+// ✅ TELEVENC-VISITA-001: último día HÁBIL del mes de la fecha dada.
+// Es la fecha límite del compromiso "paso por la oficina": el cliente tiene
+// todo el mes para venir; si el último día hábil no ha venido, vuelve a la cola.
+// Se retrocede (no se avanza) para no caer en el mes siguiente.
+const ultimoDiaHabilDelMes = (fechaStr) => {
+  const [y, m] = fechaStr.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m, 0)); // día 0 del mes siguiente = último de este
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+    d.setUTCDate(d.getUTCDate() - 1);
+  }
+  return d.toISOString().slice(0, 10);
+};
+
 // ✅ DUP-002: normalización telefónica UNIFICADA — fuente única de verdad para
 // todo el dominio comercial (importación, conversión, gestión). Regla:
 //   - Celular colombiano válido = exactamente 10 dígitos empezando en 3.
@@ -394,6 +407,7 @@ router.get('/mi-dia', async (req, res) => {
         const g = porCliente.get(v.clienteId) || {
           clienteId: v.clienteId, equipos: [], fechaMasAntigua: '9999-99-99',
           totalLlamadas: 0, notasUltimaLlamada: null, escaladoPorLucy: false,
+          compromiso: null, // ✅ TELEVENC-VISITA-001
         };
         g.equipos.push({
           id: v.id,
@@ -407,6 +421,11 @@ router.get('/mi-dia', async (req, res) => {
         const t = v.telemercadeo || {};
         if ((t.totalLlamadas || 0) > g.totalLlamadas) g.totalLlamadas = t.totalLlamadas;
         if (t.notas) g.notasUltimaLlamada = t.notas;
+        // ✅ TELEVENC-VISITA-001: se conserva el compromiso más reciente del
+        // cliente (los equipos comparten el mismo, pero por si acaso).
+        if (t.compromiso?.desde && (!g.compromiso || t.compromiso.desde > g.compromiso.desde)) {
+          g.compromiso = t.compromiso;
+        }
         porCliente.set(v.clienteId, g);
       });
 
@@ -470,6 +489,31 @@ router.get('/mi-dia', async (req, res) => {
           porClienteOrd.set(o.clienteId, arr);
         });
         vencidos.forEach(v => { v.serviciosMes = porClienteOrd.get(v.clienteId) || []; });
+
+        // ═══ ✅ TELEVENC-VISITA-001: cierre automático del compromiso ═══════
+        // El cliente dijo "paso por la oficina". Si desde ese día hay una orden
+        // suya, cumplió: NO se vuelve a llamar (cero trabajo manual, es lo
+        // acordado). Si no la hay y ya llegó la fecha límite, reaparece con la
+        // bandera para que el asesor sepa que prometió y no vino — que es
+        // justamente el cliente que más vale la pena llamar.
+        // Se reutiliza la lectura de órdenes de arriba: no hay query extra.
+        vencidos = vencidos.filter(v => {
+          const c = v.compromiso;
+          if (!c?.desde) return true;
+
+          const vinoDespues = (v.serviciosMes || []).some(o => o.fecha >= c.desde);
+          if (vinoDespues) {
+            // Cumplió: fuera de la cola. Los equipos que la orden no haya
+            // cubierto siguen vencidos en su módulo — esto solo evita la
+            // llamada de cobro a alguien que ya vino.
+            return false;
+          }
+          // Aún dentro del plazo → ya estaba fuera de la cola por proximaLlamada.
+          // Si llegó aquí es porque el plazo venció sin orden.
+          v.compromisoIncumplido = true;
+          v.compromisoHasta = c.hasta || null;
+          return true;
+        });
       }
     } catch (eV) {
       // La cola de vencidos NUNCA tumba Mi Día — si falla, se registra y sigue
@@ -547,7 +591,11 @@ router.post('/vencidos/:clienteId/llamada', async (req, res) => {
     // ✅ FIX TELEVENC-YAREC-001: nuevo resultado 'ya_recargo' — el cliente
     // ya hizo la recarga (con nosotros o con otro): equipos gestionados,
     // sin motivo obligatorio y SIN contar como conversión.
-    if (!['acepta', 'reprogramar', 'no_contesto', 'no_interesa', 'ya_recargo'].includes(resultado)) {
+    // ✅ TELEVENC-VISITA-001: nuevo resultado 'visita_oficina' — el cliente dice
+    // que pasa por la oficina. NO es una venta cerrada ni un descarte: es un
+    // COMPROMISO con fecha. Sale de la cola hasta el último día hábil del mes;
+    // si para entonces no hay orden suya, vuelve marcado como incumplido.
+    if (!['acepta', 'reprogramar', 'no_contesto', 'no_interesa', 'ya_recargo', 'visita_oficina'].includes(resultado)) {
       return res.status(400).json({ error: 'Resultado inválido' });
     }
     if (resultado === 'reprogramar' && !esFecha(proximaLlamada?.fecha)) {
@@ -632,6 +680,22 @@ router.post('/vencidos/:clienteId/llamada', async (req, res) => {
         update.gestionadoPor = uid;
         update.gestionadoPorNombre = req.user?.nombre || req.user?.email || null;
         update.fechaGestion = hoy;
+      } else if (resultado === 'visita_oficina') {
+        // ✅ TELEVENC-VISITA-001: compromiso de visita.
+        // NO se marca gestionado: el cliente no ha comprado nada todavía.
+        // Sale de la cola hasta el último día hábil del mes. El cierre es
+        // automático: si en mi-dia se detecta una orden suya posterior a esta
+        // fecha, no vuelve a aparecer. Si no, reaparece etiquetado.
+        const limite = ultimoDiaHabilDelMes(hoy);
+        seguimiento.proximaLlamada = { fecha: limite, hora: null };
+        seguimiento.intentosFallidos = 0;
+        seguimiento.compromiso = {
+          tipo: 'visita_oficina',
+          desde: hoy,          // el cierre automático compara órdenes contra esta fecha
+          hasta: limite,
+          notas: notas || null,
+        };
+        update.estadoCiclo = 'EN_TELEMERCADEO';
       } else if (resultado === 'ya_recargo') {
         // ✅ FIX TELEVENC-YAREC-001: al día — sale de la cola sin ser venta
         update.gestionado = true;
@@ -701,6 +765,180 @@ router.post('/vencidos/:clienteId/llamada', async (req, res) => {
     });
   } catch (err) {
     console.error('POST /comercial/vencidos/llamada:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ TELEVENC-WA-001: WhatsApp manual 1-a-1 desde Telemercadeo
+// ─────────────────────────────────────────────────────────────────────────────
+// PARA QUÉ: el cliente no contesta el teléfono pero sí lee WhatsApp. En vez de
+// perderlo, el asesor le manda UN mensaje personalizado con sus datos reales.
+//
+// NO es envío masivo, y la diferencia importa: sale por la línea de Anny
+// (misma que ya envía "tu pedido quedó registrado"), uno por uno, con preview
+// editable, solo a CLIENTES existentes con historial — nunca a números fríos.
+// Esos son los envíos que Meta castiga; estos no.
+//
+// Guardas: tope diario por tenant · 1 mensaje por cliente al mes · opt-out
+// permanente si el cliente pide que no le escriban.
+//
+// GET  .../mensaje-wa → texto sugerido para el preview (no envía nada)
+// POST .../whatsapp   → envía el texto YA REVISADO por el asesor
+// ═════════════════════════════════════════════════════════════════════════════
+const TOPE_WA_DIARIO = 40;      // por tenant y por día
+const DIAS_MIN_ENTRE_WA = 30;   // un mensaje por cliente al mes
+
+// Arma el texto sugerido con los datos REALES del cliente.
+// Sin precios inventados: el asesor los agrega en el preview si quiere.
+const construirMensajeVencidos = (cliente, equipos) => {
+  const nombre = (cliente.nombre || cliente.empresa || '').trim();
+  const total = equipos.reduce((a, e) => a + (Number(e.cantidad) || 1), 0);
+  const plural = total === 1 ? 'su extintor' : `sus ${total} extintores`;
+  const detalle = equipos.slice(0, 4)
+    .map(e => `${e.cantidad || 1} ${e.descripcionEquipo || 'extintor'}`)
+    .join(', ');
+
+  return `Hola ${nombre} 👋 Le escribimos de Extintores del Valle. ` +
+    `Vemos que ${plural} ya están para recarga${detalle ? ` (${detalle})` : ''}. ` +
+    `¿Le agendamos el servicio esta semana o prefiere pasar por la oficina?`;
+};
+
+router.get('/vencidos/:clienteId/mensaje-wa', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+
+    const cliDoc = await db.collection('clients').doc(req.params.clienteId).get();
+    if (!cliDoc.exists || cliDoc.data().adminId !== adminId) {
+      return res.status(403).json({ error: 'El cliente no pertenece a tu cuenta' });
+    }
+    const cliente = cliDoc.data();
+
+    const tel = normalizarTelefono(cliente.celular || cliente.telefono);
+    if (!tel) return res.status(400).json({ error: 'El cliente no tiene celular registrado' });
+
+    const vencSnap = await db.collection('vencimientos')
+      .where('adminId', '==', adminId)
+      .where('clienteId', '==', req.params.clienteId)
+      .get();
+    const equipos = vencSnap.docs.map(d => d.data()).filter(v => !v.gestionado);
+
+    // ─── Guardas informativas (el POST las vuelve a validar) ───
+    const hoy = hoyColombia();
+    let bloqueo = null;
+
+    if (cliente.whatsappOptOut) {
+      bloqueo = 'Este cliente pidió no recibir mensajes de WhatsApp.';
+    } else {
+      const ultimo = cliente.telemercadeoWhatsApp?.ultimo;
+      if (ultimo && sumarDias(ultimo, DIAS_MIN_ENTRE_WA) > hoy) {
+        bloqueo = `Ya se le escribió el ${ultimo}. Se puede volver a escribir a partir del ${sumarDias(ultimo, DIAS_MIN_ENTRE_WA)}.`;
+      }
+    }
+
+    const enviadosHoy = await db.collection('comercial_whatsapp')
+      .where('adminId', '==', adminId).where('fecha', '==', hoy).get();
+    if (!bloqueo && enviadosHoy.size >= TOPE_WA_DIARIO) {
+      bloqueo = `Se alcanzó el tope de ${TOPE_WA_DIARIO} mensajes por hoy.`;
+    }
+
+    return res.json({
+      telefono: tel,
+      mensaje: construirMensajeVencidos(cliente, equipos),
+      totalEquipos: equipos.reduce((a, e) => a + (Number(e.cantidad) || 1), 0),
+      bloqueo,
+      enviadosHoy: enviadosHoy.size,
+      topeDiario: TOPE_WA_DIARIO,
+    });
+  } catch (err) {
+    console.error('GET /comercial/vencidos/mensaje-wa:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/vencidos/:clienteId/whatsapp', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const uid = getUserId(req);
+    const hoy = hoyColombia();
+    const { mensaje, optOut } = req.body || {};
+
+    const cliRef = db.collection('clients').doc(req.params.clienteId);
+    const cliDoc = await cliRef.get();
+    if (!cliDoc.exists || cliDoc.data().adminId !== adminId) {
+      return res.status(403).json({ error: 'El cliente no pertenece a tu cuenta' });
+    }
+    const cliente = cliDoc.data();
+
+    // ─── Opt-out: el cliente pidió que no le escriban más ───
+    // Se atiende primero y no envía nada. Es lo que de verdad evita los
+    // reportes por spam, que es lo que bloquea una línea de WhatsApp.
+    if (optOut === true) {
+      await cliRef.update({ whatsappOptOut: true, whatsappOptOutFecha: hoy });
+      await auditar({
+        accion: 'whatsapp_optout',
+        descripcion: `${cliente.nombre || ''} marcado como "no escribir por WhatsApp"`,
+        usuarioId: uid, usuarioNombre: req.user?.nombre || req.user?.email,
+        datos: { clienteId: req.params.clienteId },
+      });
+      return res.json({ ok: true, optOut: true });
+    }
+
+    if (cliente.whatsappOptOut) {
+      return res.status(400).json({ error: 'Este cliente pidió no recibir mensajes de WhatsApp' });
+    }
+
+    const texto = String(mensaje || '').trim();
+    if (texto.length < 20) return res.status(400).json({ error: 'El mensaje es muy corto' });
+    if (texto.length > 700) return res.status(400).json({ error: 'El mensaje es muy largo para WhatsApp' });
+
+    const ultimo = cliente.telemercadeoWhatsApp?.ultimo;
+    if (ultimo && sumarDias(ultimo, DIAS_MIN_ENTRE_WA) > hoy) {
+      return res.status(400).json({ error: `Ya se le escribió el ${ultimo}. Espera al ${sumarDias(ultimo, DIAS_MIN_ENTRE_WA)}.` });
+    }
+
+    const enviadosHoy = await db.collection('comercial_whatsapp')
+      .where('adminId', '==', adminId).where('fecha', '==', hoy).get();
+    if (enviadosHoy.size >= TOPE_WA_DIARIO) {
+      return res.status(429).json({ error: `Tope diario alcanzado (${TOPE_WA_DIARIO} mensajes).` });
+    }
+
+    const tel = normalizarTelefono(cliente.celular || cliente.telefono);
+    if (!tel) return res.status(400).json({ error: 'El cliente no tiene celular registrado' });
+
+    // Se envía con misión REACTIVACION: así, cuando el cliente responda
+    // "sí agéndeme", Anny ya sabe de qué se trata y no arranca de cero.
+    const { notificarClienteWhatsApp } = require('../services/annyNotificaciones');
+    const enviado = await notificarClienteWhatsApp(adminId, tel, texto, 'REACTIVACION');
+
+    if (!enviado) {
+      return res.status(503).json({ error: 'No se pudo enviar: la línea de WhatsApp no está conectada.' });
+    }
+
+    await cliRef.update({
+      telemercadeoWhatsApp: { ultimo: hoy, enviadoPor: uid },
+    });
+
+    await db.collection('comercial_whatsapp').add({
+      adminId, clienteId: req.params.clienteId,
+      clienteNombre: cliente.nombre || '',
+      telefono: tel, mensaje: texto,
+      vendedoraId: uid,
+      vendedoraNombre: req.user?.nombre || req.user?.email || null,
+      fecha: hoy,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    await auditar({
+      accion: 'whatsapp_telemercadeo',
+      descripcion: `WhatsApp de recordatorio a "${cliente.nombre || ''}"`,
+      usuarioId: uid, usuarioNombre: req.user?.nombre || req.user?.email,
+      datos: { clienteId: req.params.clienteId, telefono: tel },
+    });
+
+    return res.json({ ok: true, enviadosHoy: enviadosHoy.size + 1, topeDiario: TOPE_WA_DIARIO });
+  } catch (err) {
+    console.error('POST /comercial/vencidos/whatsapp:', err);
     return res.status(500).json({ error: err.message });
   }
 });

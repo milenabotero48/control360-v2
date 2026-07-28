@@ -41,6 +41,10 @@ const UMBRALES = {
 
 // ── PRIORIDAD POR TIPO (para ordenar) ──
 const PRIORIDAD = {
+  // ✅ TALLER-RESPUESTA-001: el cliente ya contestó el WhatsApp del defecto.
+  // Es crítica porque hay un equipo detenido en taller esperando un click
+  // que nadie sabe que puede dar.
+  DEFECTO_RESPONDIDO: 'critica',
   FOTOS_FALTANTES: 'critica',
   TALLER_ATORADO:  'critica',
   PAGO_PENDIENTE:  'importante',
@@ -51,6 +55,7 @@ const PRIORIDAD = {
 
 // ── ROLES QUE VEN CADA TIPO ──
 const ROLES_DESTINO = {
+  DEFECTO_RESPONDIDO: ['admin', 'taller'], // ✅ TALLER-RESPUESTA-001
   FOTOS_FALTANTES: ['admin'],
   TALLER_ATORADO:  ['admin', 'taller'],
   PAGO_PENDIENTE:  ['admin', 'tesoreria'],
@@ -136,6 +141,60 @@ const detectarTallerAtorado = async (adminId) => {
       }
     });
   } catch (e) { log.error('alertas.taller', 'detección falló', e); }
+  return alertas;
+};
+
+// 🔴 DEFECTO_RESPONDIDO — el cliente ya contestó el WhatsApp del defecto
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ TALLER-RESPUESTA-001
+// Anny deja constancia de la respuesta del cliente en el defecto (campo
+// informativo `respuestaCliente`), pero NO autoriza nada. Este detector saca
+// esa constancia a la superficie para que el taller entre y dé el click.
+// La alerta desaparece sola cuando el defecto deja de estar pendiente.
+const detectarDefectoRespondido = async (adminId) => {
+  const alertas = [];
+  try {
+    const snap = await db.collection('orders')
+      .where('adminId', '==', adminId)
+      .where('tieneDefectosPendientes', '==', true)
+      .get();
+
+    snap.forEach(doc => {
+      const o = doc.data();
+      const defectos = Array.isArray(o.tallerDefectos) ? o.tallerDefectos : [];
+
+      defectos.forEach((d, idx) => {
+        if (d.estado !== 'pendiente_autorizacion') return;
+        const r = d.respuestaCliente;
+        if (!r || (r.valor !== 'APROBADO' && r.valor !== 'RECHAZADO')) return;
+
+        const aprobo = r.valor === 'APROBADO';
+        alertas.push({
+          tipo: 'DEFECTO_RESPONDIDO',
+          prioridad: PRIORIDAD.DEFECTO_RESPONDIDO,
+          rolesDestino: ROLES_DESTINO.DEFECTO_RESPONDIDO,
+          // referenciaId único por defecto: permite resolver una alerta sin
+          // ocultar las de otros defectos de la misma orden.
+          referenciaId: `${doc.id}_${idx}`,
+          titulo: aprobo
+            ? `El cliente APROBÓ el cambio de repuesto — orden ${o.numeroOrden}`
+            : `El cliente NO APROBÓ el cambio de repuesto — orden ${o.numeroOrden}`,
+          descripcion: `${o.clienteNombre || 'Cliente'} respondió por WhatsApp: "${String(r.textoLiteral || '').slice(0, 120)}". Confirma en Taller para aplicar la decisión.`,
+          datos: {
+            ordenId: doc.id,
+            numeroOrden: o.numeroOrden,
+            clienteNombre: o.clienteNombre || '',
+            defectoIndex: idx,
+            descripcionDefecto: d.descripcion || '',
+            costoReparacion: Number(d.costoReparacion) || 0,
+            respuesta: r.valor,
+            textoLiteral: r.textoLiteral || '',
+            fechaRespuesta: r.fecha || ''
+          }
+        });
+      });
+    });
+  } catch (e) { log.error('alertas.defectoRespondido', 'detección falló', e); }
   return alertas;
 };
 
@@ -332,15 +391,16 @@ router.get('/', async (req, res) => {
 
     if (!todasSinFiltro) {
       // Cache vacío o expirado → leer de Firestore (las 6 colecciones)
-      const [a1, a2, a3, a4, a5, a6] = await Promise.all([
+      const [a1, a2, a3, a4, a5, a6, a7] = await Promise.all([
         detectarFotosFaltantes(adminId),
         detectarTallerAtorado(adminId),
         detectarPagoPendiente(adminId),
         detectarPrestamosViejos(adminId),
         detectarCxCVencido(adminId),
         detectarClientesFugandose(adminId),
+        detectarDefectoRespondido(adminId), // ✅ TALLER-RESPUESTA-001
       ]);
-      todasSinFiltro = [...a1, ...a2, ...a3, ...a4, ...a5, ...a6];
+      todasSinFiltro = [...a1, ...a2, ...a3, ...a4, ...a5, ...a6, ...a7];
       guardarCache(adminId, todasSinFiltro);
       log.info('alertas', `cache regenerado para admin ${adminId} (${todasSinFiltro.length} alertas)`);
     }
@@ -436,3 +496,10 @@ router.post('/reabrir', async (req, res) => {
 });
 
 module.exports = router;
+
+// ✅ TALLER-RESPUESTA-001: se expone el invalidador de cache como propiedad
+// del router (no cambia el export por defecto — server.js sigue montando
+// `require('./routes/alertas')` como middleware sin ninguna modificación).
+// Lo usa services/tallerRespuestas.js para que la alerta del cliente aparezca
+// al instante y no dentro de los 5 minutos del TTL.
+module.exports.invalidarCacheAlertas = invalidarCache;

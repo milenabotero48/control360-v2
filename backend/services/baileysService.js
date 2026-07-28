@@ -271,6 +271,23 @@ async function procesarMensaje(adminId, msg) {
       console.error('[BAILEYS] Error avisando pedido a la admin:', eAviso.message);
     }
   }
+
+  // ✅ TALLER-RESPUESTA-001: el cliente contestó la autorización de un
+  // repuesto. Se avisa a la admin para que el equipo no quede parado en
+  // taller esperando que alguien lea el chat. La alerta también sale en el
+  // panel (tipo DEFECTO_RESPONDIDO, roles admin + taller).
+  // OJO: esto es SOLO un aviso — la autorización real la aplica el taller.
+  if (resultado?.avisoTaller && resultado?.notificarTallerA) {
+    try {
+      const numTaller = String(resultado.notificarTallerA).replace(/\D/g, '');
+      if (numTaller.length >= 10) {
+        const jidTaller = `${numTaller.startsWith('57') ? numTaller : '57' + numTaller}@s.whatsapp.net`;
+        await enviarMensaje(adminId, jidTaller, resultado.avisoTaller);
+      }
+    } catch (eTaller) {
+      console.error('[BAILEYS] Error avisando respuesta de taller:', eTaller.message);
+    }
+  }
 }
 
 // ============================================================
