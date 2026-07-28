@@ -934,9 +934,14 @@ function ModalAnularEgreso({ egreso, onAnular, onClose }) {
 }
 
 // ─── Modal Editar Pagado ──────────────────────────────────────────────────────
+// FIX PIN-UNICO-001: este modal pedia la CONTRASENA de login y llamaba a
+// /users/verificar-password, mientras el backend /egresos/:id/editar-pagado
+// exigia `pin` en el body — y el frontend nunca lo enviaba. El flujo estaba
+// roto y ademas usaba una credencial distinta a la del resto del sistema.
+// Ahora usa el MISMO PIN de 4 digitos que anular, cuadrar y validar pago.
 function ModalEditarPagado({ egreso, onSave, onClose }) {
   const [paso, setPaso]     = useState('auth');
-  const [pwd, setPwd]       = useState('');
+  const [pin, setPin]       = useState('');
   const [motivo, setMotivo] = useState('');
   const [form, setForm]     = useState({ ...egreso });
   const [saving, setSaving] = useState(false);
@@ -944,19 +949,21 @@ function ModalEditarPagado({ egreso, onSave, onClose }) {
   const [verificando, setVerificando] = useState(false);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
-  const verificarPassword = async () => {
-    if (!pwd.trim()) { setErrorAuth('Ingresa tu contrasena'); return; }
+  const verificarPinAdmin = async () => {
+    if (!/^\d{4}$/.test(pin)) { setErrorAuth('El PIN es de 4 digitos'); return; }
     if (!motivo.trim()) { setErrorAuth('El motivo es obligatorio'); return; }
     setVerificando(true); setErrorAuth('');
     try {
       const token = localStorage.getItem('token');
-      await axios.post(`${API}/users/verificar-password`,
-        { password: pwd },
+      // Pre-validacion (feedback + auditoria). El PIN se vuelve a enviar y a
+      // validar en el POST /editar-pagado — nunca se autoriza solo con la UI.
+      await axios.post(`${API}/users/verificar-pin`,
+        { pin, accion: 'editar_egreso_pagado', documento: egreso?.numero || null },
         { headers: { Authorization: `Bearer ${token}` } }
       );
       setPaso('editar');
     } catch (e) {
-      setErrorAuth(e.response?.data?.error || 'Contrasena incorrecta');
+      setErrorAuth(e.response?.data?.error || 'PIN incorrecto');
     }
     setVerificando(false);
   };
@@ -972,12 +979,14 @@ function ModalEditarPagado({ egreso, onSave, onClose }) {
           {paso === 'auth' ? (
             <>
               <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: 14, marginBottom: 16, fontSize: 13, color: '#991b1b' }}>
-                🚨 Este egreso ya fue <strong>PAGADO</strong>. Editarlo requiere contraseña de administrador y queda en auditoría.
+                🚨 Este egreso ya fue <strong>PAGADO</strong>. Editarlo requiere tu <strong>PIN de administrador</strong> (el mismo de anular y validar pagos) y queda en auditoría.
               </div>
               {errorAuth && <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#991b1b', marginBottom: 12 }}>{errorAuth}</div>}
               <div style={S.field}>
-                <label style={S.label}>Contraseña admin *</label>
-                <input type="password" style={S.input} value={pwd} onChange={e => setPwd(e.target.value)} placeholder="••••••••" onKeyDown={e => e.key === 'Enter' && verificarPassword()} />
+                <label style={S.label}>PIN admin (4 dígitos) *</label>
+                <input type="password" inputMode="numeric" maxLength={4} style={{ ...S.input, textAlign: 'center', letterSpacing: 10, fontWeight: 800, fontSize: 20 }}
+                  value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, '').slice(0, 4)); setErrorAuth(''); }}
+                  placeholder="••••" onKeyDown={e => e.key === 'Enter' && verificarPinAdmin()} />
               </div>
               <div style={S.field}>
                 <label style={S.label}>Motivo de edición *</label>
@@ -985,7 +994,7 @@ function ModalEditarPagado({ egreso, onSave, onClose }) {
               </div>
               <div style={S.modalFooter}>
                 <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
-                <button onClick={verificarPassword} disabled={verificando}
+                <button onClick={verificarPinAdmin} disabled={verificando}
                   style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#dc2626,#b91c1c)' }}>
                   {verificando ? 'Verificando...' : 'Continuar →'}
                 </button>
@@ -1003,7 +1012,7 @@ function ModalEditarPagado({ egreso, onSave, onClose }) {
               <div style={S.field}><label style={S.label}>Notas</label><textarea style={{ ...S.input, height: 56, resize: 'vertical' }} value={form.notas || ''} onChange={e => set('notas', e.target.value)} /></div>
               <div style={S.modalFooter}>
                 <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
-                <button onClick={async () => { setSaving(true); await onSave(form, motivo); setSaving(false); }} disabled={saving}
+                <button onClick={async () => { setSaving(true); await onSave(form, motivo, pin); setSaving(false); }} disabled={saving}
                   style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#dc2626,#b91c1c)' }}>
                   {saving ? 'Guardando...' : '🔐 Guardar con auditoría'}
                 </button>
@@ -1194,13 +1203,17 @@ export default function GestionEgresos({ user }) {
     }
   };
 
-  const editarPagado = async (form, motivo) => {
-    const update = { ...form, monto: Number(form.monto), motivoEdicion: motivo, editadoPor: user?.email };
+  // FIX PIN-UNICO-001: el body ahora incluye `pin`. Antes el backend lo exigia
+  // y el frontend no lo mandaba -> siempre respondia "PIN requerido".
+  const editarPagado = async (form, motivo, pin) => {
+    const update = { ...form, monto: Number(form.monto), motivoEdicion: motivo, editadoPor: user?.email, pin };
     // FIX: el backend define POST (no PUT) para /editar-pagado. Mismo bug
     // que pagarEgreso. Ahora espera respuesta, si falla muestra error.
     try {
       await axios.post(`${API}/egresos/${selected.id}/editar-pagado`, update, { headers: getHeaders() });
-      setEgresos(p => p.map(e => e.id === selected.id ? { ...e, ...update } : e));
+      // El PIN no debe quedar guardado en el estado de la lista.
+      const { pin: _omitirPin, ...updateUI } = update;
+      setEgresos(p => p.map(e => e.id === selected.id ? { ...e, ...updateUI } : e));
       setModal(null); setSelected(null);
     } catch (e) {
       alert('No se pudo editar el egreso: ' + (e.response?.data?.error || e.message));

@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const { db, admin } = require('../config/firebase');
 const bcrypt = require('bcryptjs');
+// FIX PIN-UNICO-001: verificador de PIN compartido. Este endpoint sigue siendo
+// la puerta que usa el frontend, pero la LOGICA de validacion vive ahora en
+// routes/_autorizacion.js, igual que la que usan orders.js y egresos.js.
+const { verificarPin, MATRIZ_ACCIONES } = require('./_autorizacion');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cambios Ola 1 sobre el original:
@@ -404,39 +408,37 @@ router.post('/verificar-pin', authenticate, async (req, res) => {
     if (!pin) return res.status(400).json({ autorizado: false, error: 'PIN requerido' });
 
     const yo = req.user.uid || req.user.id;
-    const doc = await db.collection('users').doc(yo).get();
-    if (!doc.exists) return res.status(404).json({ autorizado: false, error: 'Usuario no encontrado' });
 
-    const u = doc.data();
+    // FIX PIN-UNICO-001: delega en el verificador compartido (aplica ademas la
+    // matriz de roles por accion). El contrato de respuesta NO cambia.
+    const r = await verificarPin(yo, pin, accion || null);
 
-    if (u.role !== 'admin' && u.role !== 'tesoreria') {
-      return res.status(403).json({ autorizado: false, error: 'Tu rol no puede autorizar esta acción' });
-    }
-
-    if (!u.pin) {
-      return res.status(400).json({
-        autorizado: false,
-        error: 'No tienes PIN configurado. Pídele al administrador que te lo asigne.'
-      });
-    }
-
-    const ok = String(u.pin) === String(pin);
+    // Nombre legible para la auditoria, incluso si la verificacion fallo.
+    let quien = r.usuario ? r.usuario.nombre : (req.user.nombre || req.user.email || yo);
+    const etiqueta = (accion && MATRIZ_ACCIONES[accion] && MATRIZ_ACCIONES[accion].etiqueta) || accion || 'no especificada';
 
     await registrarAuditoria({
-      accion: ok ? 'PIN_AUTORIZADO' : 'PIN_FALLIDO',
+      accion: r.ok ? 'PIN_AUTORIZADO' : 'PIN_FALLIDO',
       modulo: 'auditoria',
-      descripcion: `${u.nombre || u.email} ${ok ? 'autorizó' : 'falló PIN para'} acción: ${accion || 'no especificada'}`,
+      descripcion: `${quien} ${r.ok ? 'autorizó' : 'falló PIN para'} acción: ${etiqueta}`,
       usuarioId: yo,
-      usuarioNombre: u.nombre || u.email,
+      usuarioNombre: quien,
       documento: documento || null,
-      datos: { accion, ok }
+      datos: { accion, ok: r.ok, codigo: r.codigo || null }
     });
 
-    if (!ok) return res.status(403).json({ autorizado: false, error: 'PIN incorrecto' });
+    if (!r.ok) {
+      // Se conservan EXACTAMENTE los mismos codigos HTTP que antes del fix:
+      //   404 usuario inexistente | 400 sin PIN configurado | 403 rol o PIN mal
+      const status = r.codigo === 'USUARIO_NO_EXISTE' ? 404
+                   : r.codigo === 'SIN_PIN'           ? 400
+                   : 403;
+      return res.status(status).json({ autorizado: false, error: r.error, codigo: r.codigo });
+    }
 
     res.json({
       autorizado: true,
-      usuario: { id: yo, nombre: u.nombre, role: u.role, email: u.email }
+      usuario: r.usuario
     });
   } catch (e) {
     console.error('verificar-pin:', e);

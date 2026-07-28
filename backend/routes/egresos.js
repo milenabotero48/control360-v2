@@ -5,6 +5,9 @@ const { db, admin } = require('../config/firebase');
 // usaba toISOString() (UTC): todo egreso digitado después de las 7 pm quedaba
 // con fecha del DÍA SIGUIENTE (causa real del reporte de fechas corridas).
 const { hoyEnCO } = require('./_helpers');
+// FIX PIN-UNICO-001: la autorizacion por PIN ya no vive aqui. Fuente unica de
+// verdad en routes/_autorizacion.js (matriz accion -> roles).
+const { verificarPin } = require('./_autorizacion');
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -31,19 +34,11 @@ const registrarAuditoria = async (datos) => {
   } catch (e) { console.error('Auditoría error:', e); }
 };
 
-const verificarPinUsuario = async (uid, pin) => {
-  if (!pin) return { ok: false, error: 'PIN requerido' };
-  if (!uid) return { ok: false, error: 'Sesión inválida' };
-  const doc = await db.collection('users').doc(uid).get();
-  if (!doc.exists) return { ok: false, error: 'Usuario no encontrado' };
-  const u = doc.data();
-  if (u.role !== 'admin' && u.role !== 'tesoreria') {
-    return { ok: false, error: 'Tu rol no puede autorizar esta acción' };
-  }
-  if (!u.pin) return { ok: false, error: 'No tienes PIN configurado' };
-  if (String(u.pin) !== String(pin)) return { ok: false, error: 'PIN incorrecto' };
-  return { ok: true };
-};
+// FIX PIN-UNICO-001: wrapper delgado sobre el verificador compartido.
+// Se conserva el MISMO nombre y el MISMO contrato de retorno ({ ok, error })
+// para no tocar ninguna llamada existente. Lo unico nuevo es el 3er parametro
+// `accion`, que aplica la matriz de roles de _autorizacion.js.
+const verificarPinUsuario = (uid, pin, accion = null) => verificarPin(uid, pin, accion);
 
 // ─── HELPER: generar número de egreso (ATÓMICO con transacción) ─────────────
 // Ola 2: protege contra colisiones cuando varios usuarios crean egresos
@@ -391,8 +386,8 @@ router.post('/:provisionalId/cuadrar-definitivo', async (req, res) => {
   try {
     const { pin, valorReal, facturaAdjunta, proveedor, notas, cajaId, formaPago } = req.body;
 
-    const verif = await verificarPinUsuario(req.user.uid || req.user.id, pin);
-    if (!verif.ok) return res.status(403).json({ error: verif.error });
+    const verif = await verificarPinUsuario(req.user.uid || req.user.id, pin, 'cuadrar_egreso');
+    if (!verif.ok) return res.status(403).json({ error: verif.error, codigo: verif.codigo });
 
     const provisionalRef = db.collection('egresos').doc(req.params.provisionalId);
     const provDoc = await provisionalRef.get();
@@ -535,8 +530,8 @@ router.post('/:id/editar-pagado', async (req, res) => {
     if (!motivoEdicion?.trim()) return res.status(400).json({ error: 'Motivo de edición requerido' });
 
     // Exigir PIN — acción sensible
-    const verif = await verificarPinUsuario(req.user.uid || req.user.id, pin);
-    if (!verif.ok) return res.status(403).json({ error: verif.error });
+    const verif = await verificarPinUsuario(req.user.uid || req.user.id, pin, 'editar_egreso_pagado');
+    if (!verif.ok) return res.status(403).json({ error: verif.error, codigo: verif.codigo });
 
     const ref = db.collection('egresos').doc(req.params.id);
     const doc = await ref.get();
@@ -627,8 +622,8 @@ router.post('/:id/anular', async (req, res) => {
     if (motivo.trim().length < 10) return res.status(400).json({ error: 'El motivo debe tener al menos 10 caracteres' });
 
     // Exigir PIN — acción sensible
-    const verif = await verificarPinUsuario(req.user.uid || req.user.id, pin);
-    if (!verif.ok) return res.status(403).json({ error: verif.error });
+    const verif = await verificarPinUsuario(req.user.uid || req.user.id, pin, 'anular_egreso');
+    if (!verif.ok) return res.status(403).json({ error: verif.error, codigo: verif.codigo });
 
     const ref = db.collection('egresos').doc(req.params.id);
     const doc = await ref.get();

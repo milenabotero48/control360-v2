@@ -18,6 +18,11 @@ const { notificarClienteWhatsApp } = require('../services/annyNotificaciones');
 // 'en_taller' y quedan muertas (no tiene quién las saque de ese estado).
 const { getCapacidades } = require('../services/capacidadesTenant');
 
+// FIX PIN-UNICO-001: verificador de PIN compartido (routes/_autorizacion.js).
+// Un solo PIN en todo el sistema: el del usuario logueado. Lo que cambia por
+// accion son los ROLES permitidos, no el PIN.
+const { verificarPin } = require('./_autorizacion');
+
 // ─── ESTADOS VÁLIDOS ──────────────────────────────────────────────────────────
 const ESTADOS = [
   'programada', 'en_ruta_recogida', 'en_taller', 'listo_entregar', 'facturado',
@@ -299,25 +304,9 @@ const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, ordenId,
 // Devuelve { ok: bool, error?: string }.
 // Solo Admin y Tesorería pueden tener PIN válido para acciones sensibles.
 // Esto sustituye al PIN global de empresa (que ya no se usa en Ola 1).
-const verificarPinUsuario = async (uid, pin) => {
-  if (!pin) return { ok: false, error: 'PIN requerido' };
-  if (!uid) return { ok: false, error: 'Sesión inválida' };
-
-  const doc = await db.collection('users').doc(uid).get();
-  if (!doc.exists) return { ok: false, error: 'Usuario no encontrado' };
-
-  const u = doc.data();
-  if (u.role !== 'admin' && u.role !== 'tesoreria') {
-    return { ok: false, error: 'Tu rol no puede autorizar esta acción' };
-  }
-  if (!u.pin) {
-    return { ok: false, error: 'No tienes PIN configurado. Pídele al administrador que te lo asigne.' };
-  }
-  if (String(u.pin) !== String(pin)) {
-    return { ok: false, error: 'PIN incorrecto' };
-  }
-  return { ok: true };
-};
+// FIX PIN-UNICO-001: wrapper delgado. Mismo nombre, mismo contrato de retorno
+// ({ ok, error }) que antes, para no romper ninguna llamada existente.
+const verificarPinUsuario = (uid, pin, accion = null) => verificarPin(uid, pin, accion);
 
 // ─── HELPER: generar número de orden (ATÓMICO con transacción) ──────────────
 // Ola 2: protege contra colisiones cuando varios usuarios crean órdenes
@@ -959,21 +948,35 @@ router.post('/', authenticate, async (req, res) => {
               diasVencido: diasVencidoMax
             });
           }
-          // Verificar PIN del admin del tenant
-          const verifPin = await verificarPinUsuario(adminIdCartera, pinCartera);
+          // FIX PIN-UNICO-001 (bug de fondo):
+          // ANTES: verificarPinUsuario(adminIdCartera, ...) -> validaba el PIN
+          // del ADMIN DUENO DEL TENANT, mientras el frontend validaba el PIN
+          // del USUARIO LOGUEADO. Con el PIN correcto igual devolvia 403.
+          // AHORA: se valida SIEMPRE el PIN del usuario logueado, y quien puede
+          // autorizar se decide por la matriz de roles ('autorizar_cartera').
+          const uidAutoriza = req.user.uid || req.user.id;
+          const verifPin = await verificarPinUsuario(uidAutoriza, pinCartera, 'autorizar_cartera');
           if (!verifPin.ok) {
+            await auditar({
+              accion: 'AUTORIZA_CARTERA_FALLIDA',
+              descripcion: `${req.user.nombre || req.user.email} intento autorizar cliente bloqueado por cartera y fallo: ${verifPin.error}`,
+              usuarioId: uidAutoriza,
+              usuarioNombre: req.user.nombre || req.user.email,
+              datos: { clienteId, diasVencido: diasVencidoMax, codigo: verifPin.codigo }
+            });
             return res.status(403).json({
-              error: 'PIN de autorización incorrecto. La orden no se creó.',
+              error: verifPin.error + ' La orden no se creó.',
+              codigo: verifPin.codigo,
               bloqueadoPorCartera: true
             });
           }
-          // PIN correcto → se autoriza y se deja rastro
+          // PIN correcto -> se autoriza y se deja rastro de QUIEN autorizo
           await auditar({
             accion: 'AUTORIZA_CARTERA_VENCIDA',
-            descripcion: `${req.user.nombre || req.user.email} autorizó crear orden a cliente bloqueado por cartera (${diasVencidoMax} días vencido)`,
-            usuarioId: adminIdCartera,
-            usuarioNombre: req.user.nombre || req.user.email,
-            datos: { clienteId, diasVencido: diasVencidoMax }
+            descripcion: `${verifPin.usuario.nombre} (${verifPin.usuario.role}) autorizó crear orden a cliente bloqueado por cartera (${diasVencidoMax} días vencido)`,
+            usuarioId: uidAutoriza,
+            usuarioNombre: verifPin.usuario.nombre,
+            datos: { clienteId, diasVencido: diasVencidoMax, autorizadoPor: verifPin.usuario.id }
           });
         }
       } catch (eCartera) {
@@ -1548,7 +1551,7 @@ router.put('/:id/estado', authenticate, async (req, res) => {
       }
 
       // Validar PIN del usuario logueado
-      const verificacion = await verificarPinUsuario(req.user.uid || req.user.id, pin);
+      const verificacion = await verificarPinUsuario(req.user.uid || req.user.id, pin, 'anular_orden');
       if (!verificacion.ok) {
         // Registrar intento fallido en auditoría
         await auditar({
@@ -2277,8 +2280,8 @@ router.post('/:id/validar-pago', authenticate, async (req, res) => {
 
     // Verificar PIN
     const userId = req.user.uid || req.user.id;
-    const pinCheck = await verificarPinUsuario(userId, pin);
-    if (!pinCheck.ok) return res.status(403).json({ error: pinCheck.error });
+    const pinCheck = await verificarPinUsuario(userId, pin, 'validar_pago');
+    if (!pinCheck.ok) return res.status(403).json({ error: pinCheck.error, codigo: pinCheck.codigo });
 
     const ordenRef = db.collection('orders').doc(id);
     const ordenDoc = await ordenRef.get();

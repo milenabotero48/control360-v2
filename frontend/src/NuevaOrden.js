@@ -114,6 +114,11 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [bloqueo, setBloqueo]             = useState(null);
   const [mostrarModalBloqueo, setMostrarModalBloqueo] = useState(false);
   const [pinDesbloqueado, setPinDesbloqueado] = useState(false);
+  // FIX PIN-UNICO-001: antes solo existia la bandera `pinDesbloqueado`. El PIN
+  // se verificaba en el frontend y NUNCA se enviaba al backend, que lo exigia
+  // como `pinCartera` -> la orden se rechazaba con 403 aunque el PIN fuera
+  // correcto. Ahora se conserva el PIN para mandarlo en el body.
+  const [pinCartera, setPinCartera] = useState('');
   const prodRef = useRef(null);
 
   // Ola 2.5: subir comprobante de pago adelantado a Cloudinary
@@ -233,6 +238,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const seleccionarCliente = (c) => {
     setClienteSel(c); setSucursalSel(null); setBuscarCliente('');
     setPinDesbloqueado(false);
+    setPinCartera(''); // FIX PIN-UNICO-001: la autorizacion no se hereda de otro cliente
     if (c.empresaId) { const emp = empresas.find(e => e.id === c.empresaId); if (emp) setEmpresaSel(emp); }
     verificarBloqueo(c.id);
     if (tipoServicio === 'cobranza') cargarCxcCliente(c.id);
@@ -362,6 +368,9 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
         pagoAdelantado: pagoAdelantado,
         pagado: pagoAdelantado ? true : undefined,
         pagoVirtualPendienteValidar: pagoAdelantado ? true : undefined,
+        // FIX PIN-UNICO-001: PIN de autorizacion de cartera vencida. El backend
+        // lo revalida (nunca confia en la bandera del frontend).
+        pinCartera: (bloqueo && bloqueo.bloqueado && pinDesbloqueado) ? pinCartera : undefined,
       }, { headers });
       setOrdenCreada({ ...res.data, items, clienteNombre: esInternaOProd ? 'TAREA INTERNA' : clienteSel.nombre, clienteNit: esInternaOProd ? '' : clienteSel.nit, clienteCelular: esInternaOProd ? '' : clienteSel.celular, sucursalNombre: sucursalSel ? sucursalSel.nombre : '', formaPago, notasOrden: notas, extintorPrestamo, numeroFactura, fechaProgramada, total, ordenesACobrar: tipoServicio === 'cobranza' ? cxcCliente.map(o => ({ ordenId: o.id, numeroOrden: o.numeroOrden, saldo: o.saldoPendiente })) : [], montoCobrar: tipoServicio === 'cobranza' ? cxcCliente.reduce((s, o) => s + o.saldoPendiente, 0) : 0 });
     } catch (err) { setError((err.response && err.response.data && err.response.data.error) ? err.response.data.error : 'Error al crear la orden'); }
@@ -1078,7 +1087,7 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
           bloqueo={bloqueo}
           empresas={empresas}
           clienteNombre={clienteSel?.nombre}
-          onAutorizado={() => { setPinDesbloqueado(true); setMostrarModalBloqueo(false); }}
+          onAutorizado={(pinOk) => { setPinCartera(pinOk); setPinDesbloqueado(true); setMostrarModalBloqueo(false); }}
           onCancelar={() => setMostrarModalBloqueo(false)}
         />
       )}
@@ -1092,20 +1101,29 @@ const ModalPinBloqueo = ({ bloqueo, empresas, clienteNombre, onAutorizado, onCan
   const [verificando, setVerificando] = useState(false);
   const fmt2 = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 
+  // FIX PIN-UNICO-001. Tres bugs corregidos aqui:
+  //   a) URL 'http://localhost:5000/...' hardcodeada -> rompia en produccion.
+  //      Ahora usa la constante API del modulo.
+  //   b) Apuntaba a /companies/verificar-pin (endpoint DEPRECADO) -> ahora va
+  //      a /users/verificar-pin, la fuente unica de verdad.
+  //   c) No devolvia el PIN: el padre lo necesita para enviarlo en el body de
+  //      POST /orders como `pinCartera`, que es lo que el backend valida.
   const verificar = async () => {
     if (pin.length !== 4) return setError('Ingresa los 4 dígitos del PIN');
     setVerificando(true); setError('');
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch('http://localhost:5000/api/companies/verificar-pin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ pin })
-      });
-      const data = await res.json();
-      if (data.autorizado) { onAutorizado(); }
+      const res = await axios.post(API + '/users/verificar-pin',
+        { pin, accion: 'autorizar_cartera' },
+        { headers: { Authorization: 'Bearer ' + token } }
+      );
+      if (res.data && res.data.autorizado) { onAutorizado(pin); }
       else { setError('PIN incorrecto'); setPin(''); }
-    } catch { setError('Error al verificar PIN'); }
+    } catch (e) {
+      const d = (e && e.response && e.response.data) || {};
+      setError(d.error || 'Error al verificar PIN');
+      if (d.codigo === 'PIN_INCORRECTO') setPin('');
+    }
     setVerificando(false);
   };
 
@@ -1114,7 +1132,7 @@ const ModalPinBloqueo = ({ bloqueo, empresas, clienteNombre, onAutorizado, onCan
       <div style={{ background: '#fff', borderRadius: 16, width: '100%', maxWidth: 400, boxShadow: '0 20px 60px rgba(0,0,0,0.3)', overflow: 'hidden' }}>
         <div style={{ background: 'linear-gradient(135deg,#dc2626,#b91c1c)', padding: '20px 24px' }}>
           <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: '#fff' }}>🔐 Autorización requerida</h3>
-          <p style={{ margin: '4px 0 0', fontSize: 13, color: 'rgba(255,255,255,0.85)' }}>Solo un administrador puede continuar</p>
+          <p style={{ margin: '4px 0 0', fontSize: 13, color: 'rgba(255,255,255,0.85)' }}>Requiere PIN de Admin o Tesorería</p>
         </div>
         <div style={{ padding: '20px 24px' }}>
           <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 10, padding: '14px 16px', marginBottom: 20 }}>
@@ -1129,7 +1147,7 @@ const ModalPinBloqueo = ({ bloqueo, empresas, clienteNombre, onAutorizado, onCan
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-            <label style={{ fontSize: 13, fontWeight: 700, color: '#374151' }}>PIN de administrador (4 dígitos)</label>
+            <label style={{ fontSize: 13, fontWeight: 700, color: '#374151' }}>Tu PIN personal (4 dígitos)</label>
             <input
               type="password" inputMode="numeric" maxLength={4}
               value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, '').slice(0, 4)); setError(''); }}
