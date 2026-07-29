@@ -95,6 +95,11 @@ const PanelSuscriptores = () => {
   const [minutosCfg, setMinutosCfg] = useState(null);
   const [minutosVal, setMinutosVal] = useState('');
 
+  // ✅ ANNY-CONSUMO-026: consumo de Anny por suscriptor (para facturar)
+  const [editConsumo, setEditConsumo] = useState(null);
+  const [consumoData, setConsumoData] = useState(null);
+  const [topeImgVal, setTopeImgVal] = useState('');
+
   // ✅ CAPACIDAD-TENANT-002: diagnóstico de órdenes atascadas por falta de módulo
   const [editAtascos, setEditAtascos] = useState(null); // suscriptor en revisión
   const [atascos, setAtascos] = useState(null);         // respuesta del backend
@@ -179,6 +184,35 @@ const PanelSuscriptores = () => {
       setMinutosVal(String(r.data.topeMinutosMes ?? ''));
     } catch (e) {
       setError(e.response?.data?.error || 'No se pudo leer la configuración de Lucy');
+    }
+  };
+
+  // ✅ ANNY-CONSUMO-026: consumo de Anny del suscriptor (mes actual + 5 previos)
+  const abrirConsumoAnny = async (s) => {
+    setEditConsumo(s);
+    setConsumoData(null);
+    try {
+      const r = await axios.get(`${API}/anny/superadmin/consumo/${s.adminId}`, { headers });
+      setConsumoData(r.data);
+      setTopeImgVal(String(r.data.limites?.imagenesMes ?? ''));
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo leer el consumo de Anny');
+    }
+  };
+
+  const guardarLimitesAnny = async () => {
+    const tope = Number(topeImgVal);
+    if (!Number.isFinite(tope) || tope < 0) { setError('El tope debe ser 0 o mayor (0 = sin límite)'); return; }
+    setGuardando(true);
+    setError('');
+    try {
+      await axios.put(`${API}/anny/limites/${editConsumo.adminId}`,
+        { imagenesMes: tope }, { headers });
+      setEditConsumo(null);
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo guardar el tope');
+    } finally {
+      setGuardando(false);
     }
   };
 
@@ -368,6 +402,11 @@ const PanelSuscriptores = () => {
               {(s.modulos || []).includes('llamadas_ia') && (
                 <button style={st.btnGhost} onClick={() => abrirMinutos(s)}>📞 Minutos Lucy</button>
               )}
+              {/* ✅ ANNY-CONSUMO-026: consumo real del suscriptor, para facturarle.
+                  Lista de módulos vacía = todos activos (invariante del sistema). */}
+              {((s.modulos || []).length === 0 || (s.modulos || []).includes('anny_ia')) && (
+                <button style={st.btnGhost} onClick={() => abrirConsumoAnny(s)}>💬 Consumo Anny</button>
+              )}
             </div>
           </div>
         );
@@ -375,6 +414,90 @@ const PanelSuscriptores = () => {
 
       {!cargando && suscriptores.length === 0 && !error && (
         <div style={{ ...st.card, color: '#6b6b85', textAlign: 'center' }}>No hay suscriptores registrados todavía.</div>
+      )}
+
+      {/* ─── ✅ ANNY-CONSUMO-026 · MODAL: CONSUMO DE ANNY ─── */}
+      {editConsumo && (
+        <div style={st.overlay} onClick={() => !guardando && setEditConsumo(null)}>
+          <div style={st.modal} onClick={(ev) => ev.stopPropagation()}>
+            <h2 style={{ ...st.h1, fontSize: 17 }}>
+              💬 Consumo de Anny — {editConsumo.empresa || editConsumo.nombre || editConsumo.email}
+            </h2>
+
+            {!consumoData ? (
+              <div style={{ color: '#6b6b85', fontSize: 13, marginTop: 14 }}>Cargando consumo…</div>
+            ) : (
+              <>
+                {/* Mes en curso — lo que se le factura */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10, marginTop: 14 }}>
+                  <div style={{ background: '#f5f3ff', borderRadius: 10, padding: '11px 13px' }}>
+                    <div style={{ fontSize: 11, color: '#6b6b85', fontWeight: 700 }}>MENSAJES ESTE MES</div>
+                    <div style={{ fontSize: 26, fontWeight: 800, color: '#6d28d9' }}>
+                      {consumoData.actual.mensajes.toLocaleString('es-CO')}
+                    </div>
+                  </div>
+                  <div style={{ background: '#f8fafc', borderRadius: 10, padding: '11px 13px' }}>
+                    <div style={{ fontSize: 11, color: '#6b6b85', fontWeight: 700 }}>COSTO REAL</div>
+                    <div style={{ fontSize: 26, fontWeight: 800, color: '#0f172a' }}>
+                      US${consumoData.actual.costoUSD.toFixed(2)}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: '#94a3b8' }}>
+                      US${consumoData.costoPorMensajeUSD.toFixed(5)} por mensaje
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ fontSize: 12, color: '#6b6b85', marginTop: 10 }}>
+                  {consumoData.actual.imagenes} fotos · {consumoData.actual.audios} audios ·{' '}
+                  {(consumoData.actual.tokensEntrada + consumoData.actual.tokensSalida).toLocaleString('es-CO')} tokens
+                </div>
+
+                {/* Historial: sirve para fijar la tarifa viendo la tendencia */}
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: '#0f172a', marginBottom: 6 }}>
+                    Últimos 6 meses
+                  </div>
+                  {consumoData.historial.map(h => (
+                    <div key={h.periodo} style={{
+                      display: 'flex', justifyContent: 'space-between',
+                      fontSize: 12, padding: '5px 0', borderBottom: '1px solid #f1f5f9',
+                    }}>
+                      <span style={{ color: '#6b6b85' }}>{h.periodo}</span>
+                      <span style={{ color: '#0f172a', fontWeight: 700 }}>
+                        {h.mensajes.toLocaleString('es-CO')} msj · US${h.costoUSD.toFixed(2)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Freno: tope de fotos del mes */}
+                <div style={{ marginTop: 16 }}>
+                  <label style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>
+                    Tope de fotos por mes (0 = sin límite)
+                  </label>
+                  <input
+                    type="number" min="0" value={topeImgVal}
+                    onChange={e => setTopeImgVal(e.target.value)}
+                    style={{ ...st.input, marginTop: 5 }}
+                  />
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                    Al alcanzarlo, las fotos dejan de analizarse y el mensaje escala a un asesor.
+                    Va en {consumoData.actual.imagenes} este mes.
+                  </div>
+                </div>
+
+                <div style={{ ...st.btns, marginTop: 16 }}>
+                  <button style={st.btnGhost} onClick={() => setEditConsumo(null)} disabled={guardando}>
+                    Cerrar
+                  </button>
+                  <button style={st.btn} onClick={guardarLimitesAnny} disabled={guardando}>
+                    {guardando ? 'Guardando…' : 'Guardar tope'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
 
       {/* ─── ✅ LUCY-MINUTOS-001 · MODAL: MINUTOS DE LUCY ─── */}

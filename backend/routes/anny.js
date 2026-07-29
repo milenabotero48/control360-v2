@@ -811,6 +811,53 @@ router.get('/consumo', authenticate, requireAnnyActivo, async (req, res) => {
 });
 
 // ------------------------------------------------------------
+// ✅ ANNY-CONSUMO-026: GET /api/anny/superadmin/consumo/:adminIdDestino
+// El consumo de CUALQUIER suscriptor — es lo que Sandra necesita para
+// facturarles. Mismo patrón que /llamadas-ia/superadmin/config/:adminId.
+// NO lleva requireAnnyActivo: el SuperAdmin debe poder consultarlo
+// aunque su propio tenant no tenga el módulo.
+// ------------------------------------------------------------
+router.get('/superadmin/consumo/:adminIdDestino', authenticate, async (req, res) => {
+  try {
+    const uid = req.user.uid || req.user.id;
+    const userDoc = await db.collection('users').doc(uid).get();
+    if (!userDoc.exists || !userDoc.data().superAdmin) {
+      return res.status(403).json({ error: 'Solo el SuperAdmin' });
+    }
+
+    const destino = req.params.adminIdDestino;
+    const periodo = req.query.periodo || annyConsumo.periodoActual();
+
+    // Mes actual + los 5 anteriores: sirve para ver la tendencia antes de
+    // fijarle una tarifa al suscriptor.
+    const periodos = [];
+    const [y, m] = periodo.split('-').map(Number);
+    for (let i = 0; i < 6; i++) {
+      const d = new Date(Date.UTC(y, m - 1 - i, 1));
+      periodos.push(d.toISOString().slice(0, 7));
+    }
+
+    const [historial, limites] = await Promise.all([
+      Promise.all(periodos.map(p => annyConsumo.obtenerConsumo(destino, p))),
+      annyConsumo.obtenerLimites(destino),
+    ]);
+
+    const actual = historial[0];
+    return res.json({
+      adminId: destino,
+      actual,
+      historial,
+      limites,
+      costoPorMensajeUSD: actual.mensajes > 0
+        ? Number((actual.costoUSD / actual.mensajes).toFixed(6))
+        : 0,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------
 // ✅ ANNY-CONSUMO-026: PUT /api/anny/limites — SOLO SuperAdmin
 // Los topes son comerciales (definen el plan que Sandra vende), así
 // que el suscriptor NO puede subírselos a sí mismo.
