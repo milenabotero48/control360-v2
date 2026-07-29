@@ -38,6 +38,8 @@ const { authenticate } = require('../middleware/auth');
 const annyService = require('../services/annyService');
 const baileysService = require('../services/baileysService');
 const annyNotificaciones = require('../services/annyNotificaciones');
+// ✅ ANNY-CONSUMO-026: medición de consumo por suscriptor
+const annyConsumo = require('../services/annyConsumo');
 
 // ============================================================
 // FIX ANNY-GATE-001: gate del módulo 'anny_ia'
@@ -783,6 +785,61 @@ router.get('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
 // el catálogo, no en la base de conocimiento: dos fuentes de
 // verdad garantizan contradicciones al actualizar tarifas.
 // ============================================================
+// ------------------------------------------------------------
+// ✅ ANNY-CONSUMO-026: GET /api/anny/consumo
+// Cuánto ha consumido ESTE suscriptor en el mes: mensajes atendidos,
+// fotos, audios y costo real. Es la base para facturarle el módulo.
+// ------------------------------------------------------------
+router.get('/consumo', authenticate, requireAnnyActivo, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const [consumo, limites] = await Promise.all([
+      annyConsumo.obtenerConsumo(adminId, req.query.periodo),
+      annyConsumo.obtenerLimites(adminId),
+    ]);
+    return res.json({
+      ...consumo,
+      limites,
+      // Costo por mensaje: sirve para fijar la tarifa con criterio
+      costoPorMensajeUSD: consumo.mensajes > 0
+        ? Number((consumo.costoUSD / consumo.mensajes).toFixed(6))
+        : 0,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------------------------------------
+// ✅ ANNY-CONSUMO-026: PUT /api/anny/limites — SOLO SuperAdmin
+// Los topes son comerciales (definen el plan que Sandra vende), así
+// que el suscriptor NO puede subírselos a sí mismo.
+// ------------------------------------------------------------
+router.put('/limites/:adminIdDestino', authenticate, async (req, res) => {
+  try {
+    const uid = req.user.uid || req.user.id;
+    const userDoc = await db.collection('users').doc(uid).get();
+    if (!userDoc.exists || !userDoc.data().superAdmin) {
+      return res.status(403).json({ error: 'Solo el SuperAdmin puede cambiar los topes' });
+    }
+
+    const { mensajesMes, imagenesMes, audiosMes, analizarImagenes, analizarAudios } = req.body || {};
+    const limites = {};
+    if (mensajesMes !== undefined) limites.mensajesMes = Math.max(0, Number(mensajesMes) || 0);
+    if (imagenesMes !== undefined) limites.imagenesMes = Math.max(0, Number(imagenesMes) || 0);
+    if (audiosMes !== undefined)   limites.audiosMes   = Math.max(0, Number(audiosMes) || 0);
+    if (analizarImagenes !== undefined) limites.analizarImagenes = !!analizarImagenes;
+    if (analizarAudios !== undefined)   limites.analizarAudios   = !!analizarAudios;
+
+    await db.collection('annyConfig').doc(req.params.adminIdDestino)
+      .set({ limites }, { merge: true });
+
+    return res.json({ ok: true, limites });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ------------------------------------------------------------
 // ✅ ANNY-KB-022: POST /api/anny/respuestas/sugerir
 // Devuelve una versión reescrita de la entrada. NO guarda nada:

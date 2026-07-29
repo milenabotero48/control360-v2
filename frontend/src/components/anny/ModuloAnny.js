@@ -35,6 +35,7 @@ const estaConectado = (e) => String(e?.estado || '').toLowerCase() === 'conectad
 export default function ModuloAnny({ onNavegar }) {
   const [activo, setActivo] = useState(null);
   const [cargando, setCargando] = useState(true);
+  const [consumo, setConsumo] = useState(null); // ✅ ANNY-CONSUMO-026
   const [tab, setTab] = useState('conversaciones');
 
   const [estado, setEstado] = useState(null);
@@ -63,16 +64,19 @@ export default function ModuloAnny({ onNavegar }) {
   // ── Carga de datos del encabezado ─────────────────────────
   const cargarResumen = useCallback(async () => {
     try {
-      const [m, c, p, e] = await Promise.all([
+      const [m, c, p, e, cons] = await Promise.all([
         fetch(`${API}/anny/metricas`, { headers: authHeaders() }).then(r => r.ok ? r.json() : null),
         fetch(`${API}/anny/casos-escalados?estado=pendiente`, { headers: authHeaders() }).then(r => r.ok ? r.json() : []),
         fetch(`${API}/anny/pedidos?estado=todos`, { headers: authHeaders() }).then(r => r.ok ? r.json() : []),
-        fetch(`${API}/anny/estado`, { headers: authHeaders() }).then(r => r.ok ? r.json() : null)
+        fetch(`${API}/anny/estado`, { headers: authHeaders() }).then(r => r.ok ? r.json() : null),
+        // ✅ ANNY-CONSUMO-026
+        fetch(`${API}/anny/consumo`, { headers: authHeaders() }).then(r => r.ok ? r.json() : null)
       ]);
       setMetricas(m);
       setCasos(Array.isArray(c) ? c : []);
       setPedidos(Array.isArray(p) ? p : []);
       setEstado(e);
+      setConsumo(cons); // ✅ ANNY-CONSUMO-026
     } catch (err) { /* silencioso */ }
   }, []);
 
@@ -212,7 +216,33 @@ export default function ModuloAnny({ onNavegar }) {
           <p style={S.kpiValor}>{pctSinHumano}%</p>
           <p style={S.kpiPie}>{totalHoy} conversaciones hoy</p>
         </div>
+
+        {/* ✅ ANNY-CONSUMO-026: lo que va consumiendo este suscriptor en el
+            mes. Es la cifra con la que se le factura el módulo. */}
+        <div style={S.kpi}>
+          <p style={S.kpiLabel}>Mensajes del mes</p>
+          <p style={S.kpiValor}>{consumo ? consumo.mensajes.toLocaleString('es-CO') : '—'}</p>
+          <p style={S.kpiPie}>
+            {consumo
+              ? `${consumo.imagenes} fotos · ${consumo.audios} audios${consumo.costoUSD ? ` · US$${consumo.costoUSD.toFixed(2)}` : ''}`
+              : 'Cargando…'}
+          </p>
+        </div>
       </div>
+
+      {/* Aviso de tope: el freno avisa ANTES de que el cliente note que
+          Anny dejó de analizar fotos. */}
+      {consumo?.limites?.imagenesMes > 0 && consumo.imagenes >= consumo.limites.imagenesMes * 0.8 && (
+        <div style={{
+          background: consumo.imagenes >= consumo.limites.imagenesMes ? '#fee2e2' : '#fef3c7',
+          color: consumo.imagenes >= consumo.limites.imagenesMes ? '#b91c1c' : '#92400e',
+          borderRadius: 9, padding: '9px 12px', fontSize: 12.5, fontWeight: 700, marginBottom: 12,
+        }}>
+          {consumo.imagenes >= consumo.limites.imagenesMes
+            ? `⛔ Tope de fotos del mes alcanzado (${consumo.imagenes}/${consumo.limites.imagenesMes}). Las fotos nuevas se escalan a un asesor.`
+            : `⚠️ Vas en ${consumo.imagenes} de ${consumo.limites.imagenesMes} fotos del mes.`}
+        </div>
+      )}
 
       {/* ─── Pestañas ─── */}
       <div style={S.tabs}>

@@ -71,6 +71,8 @@ const Anthropic = require('@anthropic-ai/sdk');
 // ✅ TALLER-RESPUESTA-001: constancia de la respuesta del cliente sobre un
 // defecto. Solo escribe un campo informativo — nunca autoriza ni mueve stock.
 const tallerRespuestas = require('./tallerRespuestas');
+// ✅ ANNY-CONSUMO-026: medición de consumo por suscriptor (para facturar)
+const annyConsumo = require('./annyConsumo');
 
 // ============================================================
 // FIX ANNY-BOOT-001: cliente Anthropic perezoso
@@ -111,6 +113,15 @@ const RESPUESTAS_BASE = {
     patrones: ['cotizacion', 'presupuesto', 'cuanto me cuesta', 'cotizar'],
     respuesta: 'Perfecto, envíame estos datos:\n✅ Nombre:\n✅ Cédula o NIT:\n✅ Correo:\n✅ Dirección y barrio:\n✅ Celular:',
     tipo: 'SOLICITUD_DATOS'
+  },
+  // ✅ ANNY-COLORES-027: en Colombia el color SÍ identifica el agente.
+  // Dato aportado por Sandra (operación real). Se usa como hipótesis fuerte
+  // que se CONFIRMA, no como certeza: hay equipos importados o antiguos que
+  // se salen de la convención, y cotizar mal un CO2 como ABC sale caro.
+  'extintor_por_color': {
+    patrones: ['no se cual es', 'no se que extintor', 'es el rojo', 'el amarillo', 'es verde', 'el plateado', 'el blanco', 'no se el tipo'],
+    respuesta: 'Por el color me oriento: amarillo es ABC, rojo suele ser CO2 o BC, verde es de agua, plateado es tipo K y blanco es Solkaflam. ¿De qué color es el tuyo? Si puedes, mándame una foto de la etiqueta y te confirmo.',
+    tipo: 'INFO'
   },
   'ubicacion': {
     patrones: ['donde estan', 'direccion', 'como llego', 'ubicacion'],
@@ -1085,6 +1096,18 @@ Responde SOLO en JSON (sin markdown):
         { role: 'user', content: contenido }
       ]
     });
+
+    // ✅ ANNY-CONSUMO-026: consumo real de ESTE mensaje, por suscriptor.
+    // Es lo que permite facturarle a cada uno según lo que gastó, en vez de
+    // mirar un total agregado en la consola de Anthropic que no se puede
+    // repartir. No se hace await: no debe demorar la respuesta al cliente.
+    try {
+      annyConsumo.registrarConsumo(adminId, {
+        inputTokens: message.usage?.input_tokens || 0,
+        outputTokens: message.usage?.output_tokens || 0,
+        conImagen: !!imagenAdjunta,
+      });
+    } catch (e) { /* el contador nunca puede tumbar la conversación */ }
 
     const respuestaTexto = message.content[0].text;
 

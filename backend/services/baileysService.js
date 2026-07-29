@@ -41,6 +41,8 @@ const { db, admin } = require('../config/firebase');
 const annyService = require('./annyService');
 // ✅ ANNY-MEDIA-024: visión para fotos y transcripción para notas de voz
 const annyMultimedia = require('./annyMultimedia');
+// ✅ ANNY-CONSUMO-026: freno por tope de consumo del suscriptor
+const annyConsumo = require('./annyConsumo');
 
 // ============================================================
 // FIX ANNY-QR-003: Baileys es ESM-only — import() dinámico
@@ -219,22 +221,38 @@ async function procesarMensaje(adminId, msg) {
   const medio = annyMultimedia.detectarMedio(msg.message);
 
   if (medio && !msg.key.fromMe) {
-    const buffer = await descargarMedia(msg).catch(() => null);
+    // ✅ ANNY-CONSUMO-026 (FRENO): antes de gastar, se consulta el tope del
+    // suscriptor. Si llegó a su límite del mes —o si desactivó el análisis—
+    // el medio NO se procesa y el mensaje escala a un asesor. Nunca se sigue
+    // gastando en silencio por encima de lo que el plan cubre.
+    const permiso = await annyConsumo.puedeAnalizarMedio(adminId, medio.tipo)
+      .catch(() => ({ permitido: true }));
 
-    if (medio.tipo === 'imagen') {
-      imagenAdjunta = buffer ? annyMultimedia.prepararImagen(buffer, medio.mimetype) : null;
-      // El caption (si lo hay) se conserva: suele traer el contexto
-      // ("estos son los que necesito recargar").
-      if (!texto) texto = imagenAdjunta ? '[el cliente envió una foto]' : '[el cliente envió una foto que no se pudo abrir]';
-    }
+    if (!permiso.permitido) {
+      const queEs = medio.tipo === 'imagen' ? 'una foto' : 'una nota de voz';
+      texto = `[el cliente envió ${queEs} — no se analizó (${permiso.motivo === 'tope_mes' ? 'tope del mes alcanzado' : 'análisis desactivado'})]`;
+      console.log(`[ANNY-CONSUMO] Medio ${medio.tipo} NO analizado para ${adminId}: ${permiso.motivo}`);
+    } else {
+      const buffer = await descargarMedia(msg).catch(() => null);
 
-    if (medio.tipo === 'audio') {
-      const transcrito = buffer ? await annyMultimedia.transcribirAudio(buffer, medio.mimetype) : null;
-      // Si no se pudo transcribir NO se responde a ciegas: se deja constancia
-      // para que Anny lo admita y pida que le escriban o escale.
-      texto = transcrito
-        ? `[nota de voz del cliente] ${transcrito}`
-        : '[el cliente envió una nota de voz que no se pudo escuchar]';
+      if (medio.tipo === 'imagen') {
+        imagenAdjunta = buffer ? annyMultimedia.prepararImagen(buffer, medio.mimetype) : null;
+        // El caption (si lo hay) se conserva: suele traer el contexto
+        // ("estos son los que necesito recargar").
+        if (!texto) texto = imagenAdjunta ? '[el cliente envió una foto]' : '[el cliente envió una foto que no se pudo abrir]';
+      }
+
+      if (medio.tipo === 'audio') {
+        const transcrito = buffer ? await annyMultimedia.transcribirAudio(buffer, medio.mimetype) : null;
+        // Si no se pudo transcribir NO se responde a ciegas: se deja constancia
+        // para que Anny lo admita y pida que le escriban o escale.
+        texto = transcrito
+          ? `[nota de voz del cliente] ${transcrito}`
+          : '[el cliente envió una nota de voz que no se pudo escuchar]';
+        // El audio se paga en créditos ElevenLabs, aparte de Anthropic:
+        // se cuenta aunque la transcripción haya fallado (el intento se cobra).
+        if (transcrito) annyConsumo.registrarConsumo(adminId, { conAudio: true }).catch(() => {});
+      }
     }
   }
 
