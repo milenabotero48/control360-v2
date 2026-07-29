@@ -863,17 +863,38 @@ const DIAS_MIN_ENTRE_WA = 30;   // un mensaje por cliente al mes
 
 // Arma el texto sugerido con los datos REALES del cliente.
 // Sin precios inventados: el asesor los agrega en el preview si quiere.
-const construirMensajeVencidos = (cliente, equipos) => {
+// ✅ ANNY-VERTICAL-025: el nombre de la empresa y la palabra "extintor" NO se
+// escriben a mano — este módulo lo usan suscriptores de otros rubros. La
+// empresa sale del perfil del tenant y los equipos de su propio registro.
+const construirMensajeVencidos = (cliente, equipos, nombreEmpresa) => {
   const nombre = (cliente.nombre || cliente.empresa || '').trim();
   const total = equipos.reduce((a, e) => a + (Number(e.cantidad) || 1), 0);
-  const plural = total === 1 ? 'su extintor' : `sus ${total} extintores`;
   const detalle = equipos.slice(0, 4)
-    .map(e => `${e.cantidad || 1} ${e.descripcionEquipo || 'extintor'}`)
+    .map(e => `${e.cantidad || 1} ${e.descripcionEquipo || 'equipo'}`)
     .join(', ');
+  const sujeto = total === 1 ? 'su equipo' : `sus ${total} equipos`;
+  const firma = nombreEmpresa ? ` Le escribimos de ${nombreEmpresa}.` : '';
 
-  return `Hola ${nombre} 👋 Le escribimos de Extintores del Valle. ` +
-    `Vemos que ${plural} ya están para recarga${detalle ? ` (${detalle})` : ''}. ` +
-    `¿Le agendamos el servicio esta semana o prefiere pasar por la oficina?`;
+  return `Hola ${nombre} 👋${firma} ` +
+    `Vemos que ${sujeto} ya están para renovar el servicio${detalle ? ` (${detalle})` : ''}. ` +
+    `¿Le agendamos esta semana o prefiere pasar por la oficina?`;
+};
+
+// Nombre comercial del tenant para firmar el mensaje. Se toma del perfil de
+// Anny (annyConfig.perfil.empresa); si no está, del documento del usuario.
+const obtenerNombreEmpresaTenant = async (adminId) => {
+  try {
+    const [cfgDoc, userDoc] = await Promise.all([
+      db.collection('annyConfig').doc(adminId).get(),
+      db.collection('users').doc(adminId).get(),
+    ]);
+    const perfilEmpresa = cfgDoc.exists ? (cfgDoc.data()?.perfil?.empresa || '') : '';
+    if (perfilEmpresa && perfilEmpresa !== 'la empresa') return perfilEmpresa;
+    const u = userDoc.exists ? userDoc.data() : {};
+    return u.empresaNombre || u.nombreEmpresa || u.nombre || '';
+  } catch (e) {
+    return '';
+  }
 };
 
 router.get('/vencidos/:clienteId/mensaje-wa', async (req, res) => {
@@ -914,9 +935,11 @@ router.get('/vencidos/:clienteId/mensaje-wa', async (req, res) => {
       bloqueo = `Se alcanzó el tope de ${TOPE_WA_DIARIO} mensajes por hoy.`;
     }
 
+    const nombreEmpresa = await obtenerNombreEmpresaTenant(adminId); // ✅ ANNY-VERTICAL-025
+
     return res.json({
       telefono: tel,
-      mensaje: construirMensajeVencidos(cliente, equipos),
+      mensaje: construirMensajeVencidos(cliente, equipos, nombreEmpresa),
       totalEquipos: equipos.reduce((a, e) => a + (Number(e.cantidad) || 1), 0),
       bloqueo,
       enviadosHoy: enviadosHoy.size,

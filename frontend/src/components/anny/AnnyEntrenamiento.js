@@ -80,6 +80,10 @@ export default function AnnyEntrenamiento() {
   const [editando, setEditando] = useState(null);
   const [guardando, setGuardando] = useState(false);
   const [mensaje, setMensaje] = useState(null);
+  // ✅ ANNY-KB-022: propuesta de reescritura pendiente de aprobación
+  const [sugerencia, setSugerencia] = useState(null);
+  const [sugiriendo, setSugiriendo] = useState(false);
+  const [errorSugerencia, setErrorSugerencia] = useState(null);
 
   const [form, setForm] = useState({ key: '', patrones: '', respuesta: '', tipo: 'CUSTOM' });
 
@@ -118,6 +122,42 @@ export default function AnnyEntrenamiento() {
     });
     setEditando(e.key);
     setMensaje(null);
+  };
+
+  // ✅ ANNY-KB-022: pide una reescritura y la muestra para aprobación.
+  const pedirSugerencia = async () => {
+    setSugiriendo(true);
+    setErrorSugerencia(null);
+    setSugerencia(null);
+    try {
+      const res = await fetch(`${API}/anny/respuestas/sugerir`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          key: form.key,
+          patrones: form.patrones.split(',').map(s => s.trim()).filter(Boolean),
+          respuesta: form.respuesta,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'No se pudo generar la propuesta');
+      setSugerencia(json);
+    } catch (e) {
+      setErrorSugerencia(e.message);
+    } finally {
+      setSugiriendo(false);
+    }
+  };
+
+  // La propuesta se copia al formulario: nunca se guarda por su cuenta.
+  const aplicarSugerencia = () => {
+    if (!sugerencia) return;
+    setForm(f => ({
+      ...f,
+      respuesta: sugerencia.respuesta,
+      patrones: sugerencia.patrones?.length ? sugerencia.patrones.join(', ') : f.patrones,
+    }));
+    setSugerencia(null);
   };
 
   const guardar = async () => {
@@ -236,6 +276,58 @@ export default function AnnyEntrenamiento() {
           {avisosEnVivo.map((a, i) => (
             <div key={i} style={S.avisoVivo}>{a.texto}</div>
           ))}
+
+          {/* ✅ ANNY-KB-022: el auditor dice qué está mal; esto propone cómo
+              se escribe bien. La propuesta NO se guarda sola — se aplica al
+              formulario y la suscriptora la edita y decide. */}
+          {form.respuesta.trim().length >= 10 && (
+            <button onClick={pedirSugerencia} disabled={sugiriendo}
+              style={{
+                marginTop: 8, width: '100%', border: '1px dashed #a78bfa',
+                background: '#faf5ff', color: '#6d28d9', borderRadius: 9,
+                padding: '9px 0', fontSize: 12.5, fontWeight: 700,
+                cursor: sugiriendo ? 'wait' : 'pointer',
+              }}>
+              {sugiriendo ? 'Escribiendo una propuesta…' : '✨ Escríbeme una versión mejor'}
+            </button>
+          )}
+
+          {errorSugerencia && (
+            <div style={{ marginTop: 8, background: '#fee2e2', color: '#b91c1c', borderRadius: 8, padding: '8px 10px', fontSize: 12, fontWeight: 700 }}>
+              {errorSugerencia}
+            </div>
+          )}
+
+          {sugerencia && (
+            <div style={{ marginTop: 10, background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 10, padding: '11px 13px' }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: '#6d28d9' }}>Propuesta</div>
+              <p style={{ fontSize: 13.5, color: '#1f2937', margin: '6px 0', lineHeight: 1.5 }}>
+                {sugerencia.respuesta}
+              </p>
+              <div style={{ fontSize: 11, color: '#7c3aed' }}>
+                {sugerencia.respuesta.length} caracteres
+                {sugerencia.patrones?.length ? ` · palabras clave: ${sugerencia.patrones.join(', ')}` : ''}
+              </div>
+              {sugerencia.queCambie && (
+                <div style={{ fontSize: 11.5, color: '#6b7280', marginTop: 5, fontStyle: 'italic' }}>
+                  {sugerencia.queCambie}
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 7, marginTop: 9 }}>
+                <button onClick={() => setSugerencia(null)} style={{
+                  flex: 1, border: '1px solid #e2e8f0', background: '#fff', color: '#64748b',
+                  borderRadius: 8, padding: '7px 0', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                }}>Descartar</button>
+                <button onClick={aplicarSugerencia} style={{
+                  flex: 2, border: 'none', background: '#7c3aed', color: '#fff',
+                  borderRadius: 8, padding: '7px 0', fontSize: 12, fontWeight: 800, cursor: 'pointer',
+                }}>Usar esta versión</button>
+              </div>
+              <div style={{ fontSize: 10.5, color: '#94a3b8', marginTop: 6 }}>
+                Se copia al formulario para que la edites. No se guarda hasta que pulses «Guardar entrada».
+              </div>
+            </div>
+          )}
 
           <div style={S.editorAcciones}>
             <button onClick={() => setEditando(null)} style={S.btnSec}>Cancelar</button>

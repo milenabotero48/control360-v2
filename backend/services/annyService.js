@@ -247,12 +247,29 @@ async function obtenerRespuestasTenant(adminId) {
   }
   try {
     const doc = await db.collection('respuestasAnny').doc(adminId).get();
-    const data = doc.exists ? doc.data() : RESPUESTAS_BASE;
+
+    // ✅ ANNY-VERTICAL-025: BUG MULTI-TENANT.
+    // Un suscriptor SIN respuestas propias heredaba RESPUESTAS_BASE, que son
+    // las de extintores: dirección de Cali, precios de recarga, horarios del
+    // taller. Un tenant de venta en línea habría respondido "Estamos en Cl. 22
+    // Nte., San Vicente, Cali" a sus propios clientes.
+    // Regla: el fallback de extintores SOLO aplica a tenants sin perfil
+    // configurado (los heredados, que efectivamente son de extintores). En
+    // cuanto el suscriptor define su perfil, arranca con la base vacía y
+    // construye la suya en Entrenamiento.
+    let data;
+    if (doc.exists) {
+      data = doc.data();
+    } else {
+      const perfil = await obtenerPerfilTenant(adminId);
+      data = perfil.configurado ? {} : RESPUESTAS_BASE;
+    }
+
     _cacheRespuestas.set(adminId, { data, ts: Date.now() });
     return data;
   } catch (err) {
     console.error('[ANNY] Error leyendo respuestas tenant:', err.message);
-    return RESPUESTAS_BASE;
+    return {};
   }
 }
 
@@ -854,7 +871,7 @@ async function obtenerEstadoPedidoHilo(adminId, telefono) {
 // FIX ANNY-CIERRE-007 + v22: Claude decide.
 // Motor único: PERFIL (quién es) × MISIÓN (a qué vino).
 // ============================================================
-async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = [], fichaCliente = { existe: false }, catalogo = [], perfil = PERFIL_DEFAULT, misionNombre = 'ATENCION', estadoPedido = { existe: false }, defectoPendiente = null) {
+async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = [], fichaCliente = { existe: false }, catalogo = [], perfil = PERFIL_DEFAULT, misionNombre = 'ATENCION', estadoPedido = { existe: false }, defectoPendiente = null, imagenAdjunta = null) {
   try {
     const mision = obtenerMision(misionNombre);
 
@@ -938,6 +955,18 @@ Además de responderle, CLASIFICA su mensaje en el campo "respuestaTaller":
 - Tú NO autorizas nada: solo clasificas. El taller confirma. No le digas que ya quedó autorizado.
 ` : '';
 
+    // ✅ ANNY-MEDIA-024: reglas para cuando el cliente manda una foto.
+    // Anny CONFIRMA lo que ve, nunca lo da por hecho: una etiqueta borrosa
+    // metida al pedido como certeza termina en una recarga equivocada.
+    const bloqueImagen = imagenAdjunta ? `
+EL CLIENTE ENVIÓ UNA FOTO (la estás viendo arriba):
+- Descríbele lo que identificas y PÍDELE QUE CONFIRME antes de usarlo. Ejemplo: "Veo [lo que sea que identifiques], ¿es correcto?".
+- Si no se lee bien o dudas de algún dato, DILO y pide otra foto más cerca. NO adivines.
+- Si ves varios artículos, di cuántos cuentas y pide confirmación.
+- NUNCA cierres un pedido con datos que solo salieron de una foto sin que el cliente los haya confirmado por texto.
+- Relaciona lo que ves con el CATÁLOGO de arriba; si no corresponde a nada del catálogo, dilo y ESCALA.
+` : '';
+
     const prompt = `
 Eres ${perfil.nombreAgente}, asesora por WhatsApp de ${perfil.empresa}, empresa de ${perfil.vertical}. Vendes bien, pero primero ATIENDES: resuelves lo que el cliente pregunta.
 
@@ -971,6 +1000,11 @@ FORMA DE ESCRIBIR (obligatorio — ANNY-BREV-011):
 - PROHIBIDO abrir con muletillas: "Perfecto", "Entendido", "Claro que sí", "Excelente". Entra directo al punto.
 - PROHIBIDO repetir un resumen o confirmación que ya aparezca en el historial. Si ya lo dijiste, no lo repitas: avanza.
 - Máximo UNA pregunta por mensaje.
+- ✅ ANNY-REPETICION-023 — REGLA ANTI-LORA (crítica):
+  Lee tus propios mensajes en el historial. Si YA hiciste esta misma pregunta (aunque con otras palabras), está PROHIBIDO volver a hacerla.
+  · Si el cliente respondió algo corto o vago ("por favor", "sí", "listo"), NO repitas la pregunta: reformúlala de otra forma, más simple y concreta, o da la opción más común y pide que confirme.
+  · Si ya la hiciste DOS veces y el cliente sigue sin darte el dato, deja de preguntar y ESCALA (tipo DATOS). Una persona no pregunta lo mismo tres veces: llama o pasa el caso.
+  · Nunca abras con "Perfecto, entiendo que..." repitiendo lo que el cliente acaba de decir. Eso es lo que te delata como máquina.
 - Sonar profesional NO es escribir largo: es saber la respuesta y darla directo.
 
 REGLAS DE ATENCIÓN (prioridad máxima):
@@ -1007,6 +1041,7 @@ REGLA CRÍTICA: NUNCA inventes precios, direcciones, estados ni datos. Si el dat
 PEDIDO CONFIRMADO: ${mision.permitePedido ? 'cuando el cliente confirme la compra Y tengas los mínimos, incluye el objeto "pedido". Si faltan los mínimos o falta confirmación, "pedido" debe ser null.' : 'en esta misión "pedido" SIEMPRE debe ser null.'}
 
 ${bloqueDefecto}
+${bloqueImagen}
 
 Responde SOLO en JSON (sin markdown):
 {
@@ -1031,13 +1066,23 @@ Responde SOLO en JSON (sin markdown):
 }
     `;
 
+    // ✅ ANNY-MEDIA-024: si el cliente mandó una foto, va como bloque de
+    // imagen ANTES del prompt. Claude Haiku tiene visión: puede leer el
+    // tipo y la capacidad en la etiqueta del extintor.
+    const contenido = imagenAdjunta
+      ? [
+          { type: 'image', source: { type: 'base64', media_type: imagenAdjunta.media_type, data: imagenAdjunta.data } },
+          { type: 'text', text: prompt }
+        ]
+      : prompt;
+
     const message = await getClaudeClient().messages.create({
       model: 'claude-haiku-4-5-20251001',
       // FIX ANNY-BREV-011: 600 → 300. Palanca mecánica contra la
       // verbosidad: aunque el prompt fallara, no cabe un folleto.
       max_tokens: 300,
       messages: [
-        { role: 'user', content: prompt }
+        { role: 'user', content: contenido }
       ]
     });
 
@@ -1217,10 +1262,11 @@ async function actualizarMetricas(adminId, tipo) {
 
 // ============================================================
 // FUNCIÓN PRINCIPAL: Procesar mensaje entrante
-// props: { adminId, telefono, nombreCliente, mensajeTexto, mision? }
+// props: { adminId, telefono, nombreCliente, mensajeTexto, mision?, imagenAdjunta? }
 // ============================================================
 async function procesarMensajeEntrante(props) {
-  const { adminId, telefono, nombreCliente, mensajeTexto } = props;
+  // ✅ ANNY-MEDIA-024: imagenAdjunta = { media_type, data(base64) } o null
+  const { adminId, telefono, nombreCliente, mensajeTexto, imagenAdjunta = null } = props;
   // FIX ANNY-MISION-014b: se resuelve más abajo, tras validar el gate.
   let misionNombre = props.mision || null;
 
@@ -1321,7 +1367,11 @@ async function procesarMensajeEntrante(props) {
     const ultimoTs = historial.length ? historial[historial.length - 1].ts : 0;
     const conversacionActiva = ultimoTs > 0 && (Date.now() - ultimoTs) < 24 * 60 * 60 * 1000;
 
-    if (!conversacionActiva && misionNombre === 'ATENCION') {
+    // ✅ ANNY-MEDIA-024: con imagen adjunta NO se usa la base de conocimiento.
+    // El texto es un marcador ("[el cliente envió una foto]") y podría hacer
+    // match con una entrada genérica, respondiendo un folleto a alguien que
+    // acaba de mandar la foto de su extintor. La foto la interpreta Claude.
+    if (!conversacionActiva && misionNombre === 'ATENCION' && !imagenAdjunta) {
       const respuestaConfig = buscarRespuestaConfigura(mensajeTexto, respuestas);
 
       if (respuestaConfig.encontrada) {
@@ -1360,7 +1410,8 @@ async function procesarMensajeEntrante(props) {
     // PASO 3: Claude decide (perfil × misión × estado real)
     const decision = await claudeDecide(
       adminId, nombreCliente, mensajeTexto, respuestas, historial,
-      fichaCliente, catalogo, perfil, misionNombre, estadoPedido, defectoPendiente
+      fichaCliente, catalogo, perfil, misionNombre, estadoPedido, defectoPendiente,
+      imagenAdjunta // ✅ ANNY-MEDIA-024
     );
 
     if (decision.escalado) {
@@ -1479,6 +1530,68 @@ async function procesarMensajeEntrante(props) {
     console.error('[ANNY] Error procesando mensaje:', err.message);
     return { procesado: false, error: err.message };
   }
+}
+
+// ============================================================
+// ✅ ANNY-KB-022: reescribe una entrada de entrenamiento.
+// ------------------------------------------------------------
+// El auditor (ANNY-KB-021) señalaba los problemas pero dejaba a la
+// suscriptora sola frente al texto: sabía QUÉ estaba mal, no CÓMO
+// escribirlo. Aquí se devuelve una propuesta concreta que ella lee,
+// edita si quiere y acepta — nunca se guarda sola.
+//
+// Regla dura: la sugerencia NO puede contener precios. Los precios
+// viven en el catálogo de productos; repetirlos aquí crea una segunda
+// fuente de verdad que se desactualiza en silencio al subir tarifas.
+// ============================================================
+async function sugerirRespuestaEntrenamiento(adminId, { key, patrones = [], respuesta = '' }) {
+  const perfil = await obtenerPerfilTenant(adminId);
+
+  const prompt = `Eres editora de mensajes de WhatsApp para ${perfil.empresa}, empresa de ${perfil.vertical}.
+
+Te paso una respuesta guardada en la base de conocimiento de la agente ${perfil.nombreAgente}. Está mal escrita para WhatsApp. Reescríbela.
+
+ENTRADA: "${key}"
+PALABRAS CLAVE ACTUALES: ${patrones.join(', ') || '(ninguna)'}
+TEXTO ACTUAL:
+"""
+${respuesta}
+"""
+
+REGLAS DE LA REESCRITURA:
+1. MÁXIMO 220 caracteres. Dos o tres líneas, como escribe una persona.
+2. Prosa corrida. PROHIBIDO: viñetas, guiones, ✓ ✅ •, TÍTULOS EN MAYÚSCULA, bloques tipo "VENTAJAS:" o "INVERSIÓN:".
+3. SIN PRECIOS NI CIFRAS DE DINERO. Si el texto original los tiene, quítalos: los precios salen del catálogo de productos. Si hace falta, di que se confirma el valor según el equipo.
+4. UNA SOLA intención. Si el texto mezcla dos negocios distintos (por ejemplo recarga y servicio de cambio), quédate con el que corresponde al nombre de la entrada y descarta el otro.
+5. Tono de asesora colombiana: cálido, directo, sin muletillas ("Perfecto", "Claro que sí", "Excelente"). Nada de sonar a folleto ni a robot.
+6. Termina con UNA pregunta corta que haga avanzar la conversación, solo si tiene sentido.
+7. Las palabras clave deben ser frases de 2+ palabras que un cliente escribiría de verdad. Nada de palabras de 4 letras o menos que hagan match con todo.
+
+Responde SOLO en JSON, sin markdown:
+{"respuesta": "el texto reescrito", "patrones": ["frase 1", "frase 2", "frase 3"], "queCambie": "una frase explicando el cambio principal"}`;
+
+  const message = await getClaudeClient().messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 400,
+    messages: [{ role: 'user', content: prompt }]
+  });
+
+  let limpio = message.content[0].text.replace(/```json|```/g, '').trim();
+  const ini = limpio.indexOf('{');
+  const fin = limpio.lastIndexOf('}');
+  if (ini !== -1 && fin > ini) limpio = limpio.slice(ini, fin + 1);
+
+  const out = JSON.parse(limpio);
+
+  // Red de seguridad: se aplica el mismo saneador que a las respuestas en
+  // vivo, por si el modelo devolvió viñetas o se pasó de largo.
+  return {
+    respuesta: recortarRespuesta(String(out.respuesta || ''), 220),
+    patrones: Array.isArray(out.patrones)
+      ? out.patrones.map(p => String(p).trim()).filter(p => p.length > 4).slice(0, 6)
+      : [],
+    queCambie: String(out.queCambie || '')
+  };
 }
 
 // ============================================================
@@ -1612,6 +1725,7 @@ module.exports = {
   reactivarAnny,
   buscarClienteEnBD,
   obtenerCatalogoProductos,
+  sugerirRespuestaEntrenamiento, // ✅ ANNY-KB-022
   RESPUESTAS_BASE,
   // ── v22 ──
   obtenerPerfilTenant,

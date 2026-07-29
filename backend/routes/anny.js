@@ -783,6 +783,31 @@ router.get('/respuestas', authenticate, requireAnnyActivo, async (req, res) => {
 // el catálogo, no en la base de conocimiento: dos fuentes de
 // verdad garantizan contradicciones al actualizar tarifas.
 // ============================================================
+// ------------------------------------------------------------
+// ✅ ANNY-KB-022: POST /api/anny/respuestas/sugerir
+// Devuelve una versión reescrita de la entrada. NO guarda nada:
+// la suscriptora lee la propuesta, la edita si quiere y decide.
+// El auditor dice qué está mal; esto dice cómo se escribe bien.
+// ------------------------------------------------------------
+router.post('/respuestas/sugerir', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const { key, patrones, respuesta } = req.body || {};
+    if (!respuesta || String(respuesta).trim().length < 10) {
+      return res.status(400).json({ error: 'Escribe primero la respuesta que quieres mejorar' });
+    }
+    const sugerencia = await annyService.sugerirRespuestaEntrenamiento(adminId, {
+      key: key || '',
+      patrones: Array.isArray(patrones) ? patrones : [],
+      respuesta: String(respuesta),
+    });
+    return res.json(sugerencia);
+  } catch (err) {
+    console.error('[ANNY-KB-022] sugerencia falló:', err.message);
+    return res.status(500).json({ error: 'No se pudo generar la sugerencia. Intenta de nuevo.' });
+  }
+});
+
 router.put('/respuestas', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
   try {
     const adminId = req.user.adminId || req.user.uid;

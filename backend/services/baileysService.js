@@ -39,6 +39,8 @@ const path = require('path');
 const fs = require('fs');
 const { db, admin } = require('../config/firebase');
 const annyService = require('./annyService');
+// ✅ ANNY-MEDIA-024: visión para fotos y transcripción para notas de voz
+const annyMultimedia = require('./annyMultimedia');
 
 // ============================================================
 // FIX ANNY-QR-003: Baileys es ESM-only — import() dinámico
@@ -57,7 +59,9 @@ async function cargarBaileys() {
       raiz.makeWASocket,
     useMultiFileAuthState: mod.useMultiFileAuthState || raiz.useMultiFileAuthState,
     DisconnectReason: mod.DisconnectReason || raiz.DisconnectReason,
-    fetchLatestBaileysVersion: mod.fetchLatestBaileysVersion || raiz.fetchLatestBaileysVersion
+    fetchLatestBaileysVersion: mod.fetchLatestBaileysVersion || raiz.fetchLatestBaileysVersion,
+    // ✅ ANNY-MEDIA-024: descarga de fotos y notas de voz
+    downloadMediaMessage: mod.downloadMediaMessage || raiz.downloadMediaMessage
   };
 
   if (typeof _baileys.makeWASocket !== 'function') {
@@ -159,6 +163,26 @@ function extraerTexto(message) {
 }
 
 // ============================================================
+// ✅ ANNY-MEDIA-024: descarga el contenido binario de un mensaje
+// (foto o nota de voz) usando el descifrado de Baileys.
+// Devuelve null ante cualquier fallo: el llamador nunca asume.
+// ============================================================
+async function descargarMedia(msg) {
+  try {
+    const { downloadMediaMessage } = await cargarBaileys();
+    if (typeof downloadMediaMessage !== 'function') {
+      console.warn('[ANNY-MEDIA] downloadMediaMessage no disponible en esta versión de Baileys');
+      return null;
+    }
+    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+    return Buffer.isBuffer(buffer) ? buffer : null;
+  } catch (err) {
+    console.error('[ANNY-MEDIA] Error descargando medio:', err.message);
+    return null;
+  }
+}
+
+// ============================================================
 // Anti-colisión: ¿hay caso escalado PENDIENTE de este teléfono?
 // ============================================================
 async function hayCasoPendiente(adminId, telefono) {
@@ -186,7 +210,34 @@ async function procesarMensaje(adminId, msg) {
   const jid = msg.key.remoteJid || '';
   if (jid.endsWith('@g.us') || jid === 'status@broadcast') return;
 
-  const texto = extraerTexto(msg.message);
+  let texto = extraerTexto(msg.message);
+
+  // ✅ ANNY-MEDIA-024: foto o nota de voz. Antes se descartaban en silencio
+  // con `if (!texto) return;` — el cliente mandaba la foto del extintor y
+  // para Anny ese mensaje nunca existió.
+  let imagenAdjunta = null;
+  const medio = annyMultimedia.detectarMedio(msg.message);
+
+  if (medio && !msg.key.fromMe) {
+    const buffer = await descargarMedia(msg).catch(() => null);
+
+    if (medio.tipo === 'imagen') {
+      imagenAdjunta = buffer ? annyMultimedia.prepararImagen(buffer, medio.mimetype) : null;
+      // El caption (si lo hay) se conserva: suele traer el contexto
+      // ("estos son los que necesito recargar").
+      if (!texto) texto = imagenAdjunta ? '[el cliente envió una foto]' : '[el cliente envió una foto que no se pudo abrir]';
+    }
+
+    if (medio.tipo === 'audio') {
+      const transcrito = buffer ? await annyMultimedia.transcribirAudio(buffer, medio.mimetype) : null;
+      // Si no se pudo transcribir NO se responde a ciegas: se deja constancia
+      // para que Anny lo admita y pida que le escriban o escale.
+      texto = transcrito
+        ? `[nota de voz del cliente] ${transcrito}`
+        : '[el cliente envió una nota de voz que no se pudo escuchar]';
+    }
+  }
+
   if (!texto) return;
 
   const telefono = jid.split('@')[0];
@@ -242,7 +293,8 @@ async function procesarMensaje(adminId, msg) {
     adminId,
     telefono,
     nombreCliente: msg.pushName || telefono,
-    mensajeTexto: texto
+    mensajeTexto: texto,
+    imagenAdjunta // ✅ ANNY-MEDIA-024
   });
 
   if (resultado?.accion === 'enviar_mensaje' && resultado.respuesta) {
