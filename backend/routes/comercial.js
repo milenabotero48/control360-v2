@@ -382,6 +382,13 @@ router.get('/mi-dia', async (req, res) => {
         lucyActiva = modulos.includes('llamadas_ia'); // mismo patrón que llamadasIA.js /config
       } catch (e) { /* sin doc → sin Lucy */ }
 
+      // ✅ TELEVENC-TODOS-001: interruptor "ver todos los vencidos".
+      // Con Lucy activa la cola solo trae lo que ella escaló, y los vencidos
+      // que ya existían antes de esa regla nunca aparecen (no hay retroactivo).
+      // Con ?todos=1 se ignora el handshake y se ven TODOS los vencidos del
+      // tenant. No cambia datos: es solo una vista más amplia.
+      if (req.query.todos === '1' || req.query.todos === 'true') lucyActiva = false;
+
       const vencSnap = await db.collection('vencimientos')
         .where('adminId', '==', adminId)
         .limit(2000)
@@ -960,7 +967,10 @@ router.post('/prospectos/:id/llamada', async (req, res) => {
     const { resultado, notas, proximaLlamada, motivoDescarte, equiposCapturados, telefonoCorregido,
             empresaId, empresaNombre } = req.body;
 
-    if (!['acepta', 'reprogramar', 'no_contesto', 'no_interesa', 'numero_errado'].includes(resultado)) {
+    // ✅ TELEVENC-VISITA-002: 'visita_oficina' también para prospectos —
+    // un prospecto también dice "yo paso por allá". Mismo trato que en
+    // vencidos: compromiso con fecha límite, no una venta ni un descarte.
+    if (!['acepta', 'reprogramar', 'no_contesto', 'no_interesa', 'numero_errado', 'visita_oficina'].includes(resultado)) {
       return res.status(400).json({ error: 'Resultado inválido' });
     }
 
@@ -1084,6 +1094,19 @@ router.post('/prospectos/:id/llamada', async (req, res) => {
         };
         update.intentosFallidos = 0;
         break;
+
+      // ✅ TELEVENC-VISITA-002: compromiso de visita del prospecto.
+      // Se reutiliza REPROGRAMADO (ya sale de la cola hasta la fecha) y se
+      // guarda el compromiso aparte para poder distinguir en Mi Día un
+      // "llamar después" normal de un "prometió venir y no vino".
+      case 'visita_oficina': {
+        const limite = ultimoDiaHabilDelMes(hoy);
+        update.estado = 'REPROGRAMADO';
+        update.proximaLlamada = { fecha: limite, hora: null };
+        update.intentosFallidos = 0;
+        update.compromiso = { tipo: 'visita_oficina', desde: hoy, hasta: limite, notas: notas || null };
+        break;
+      }
 
       case 'no_contesto': {
         const intentos = (p.intentosFallidos || 0) + 1;

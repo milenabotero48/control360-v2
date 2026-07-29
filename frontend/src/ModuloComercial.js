@@ -119,6 +119,9 @@ function MiDia({ user, onNavegar }) {
   const [mostrarNuevoP, setMostrarNuevoP] = useState(false);
   const [nuevoP, setNuevoP] = useState({ nombre: '', empresa: '', telefono: '', sucursal: '', notas: '' });
   const [agendaAbierta, setAgendaAbierta] = useState(false);
+  // ✅ TELEVENC-TODOS-001: con Lucy activa la cola solo trae lo que ella
+  // escaló. Este interruptor muestra TODOS los vencidos del tenant.
+  const [verTodosVencidos, setVerTodosVencidos] = useState(false);
 
   const crearProspectoMiDia = async () => {
     if (!nuevoP.nombre || !nuevoP.telefono) return alert('Nombre y teléfono son requeridos');
@@ -136,7 +139,8 @@ function MiDia({ user, onNavegar }) {
     try {
       const mesActual = new Date(Date.now() - 5*3600*1000).toISOString().slice(0,7);
       const [res, vencRes] = await Promise.all([
-        fetch(`${API}/comercial/mi-dia`, { headers: authHeaders() }),
+        // ✅ TELEVENC-TODOS-001
+        fetch(`${API}/comercial/mi-dia${verTodosVencidos ? '?todos=1' : ''}`, { headers: authHeaders() }),
         fetch(`${API}/vencimientos?mesServicio=${mesActual}`, { headers: authHeaders() }),
       ]);
       const json = await res.json();
@@ -151,7 +155,7 @@ function MiDia({ user, onNavegar }) {
       }
     } catch (e) { console.error(e); }
     setCargando(false);
-  }, []);
+  }, [verTodosVencidos]); // ✅ TELEVENC-TODOS-001: recarga al cambiar el interruptor
 
   // ✅ COMERCIAL-BASE-001: filtro por período de base (vista, no borra nada)
   const [filtroPeriodo, setFiltroPeriodo] = useState('todos');
@@ -241,6 +245,25 @@ function MiDia({ user, onNavegar }) {
       {/* ✅ TELEVENC-005: VENCIDOS del mes — PRIORIDAD sobre reintentos y nuevos.
           Son clientes con recarga vencida: retención, plata casi segura. */}
       <SeccionVencidos lista={filtrarPeriodo(cola.vencidos)} onLlamar={setVencidoActivo} onRefrescar={cargar} />
+
+      {/* ✅ TELEVENC-TODOS-001: con Lucy activa la cola de vencidos solo trae
+          los que ella escaló. Este interruptor deja ver TODOS — útil cuando la
+          cola sale vacía pero sí hay clientes con recarga vencida. */}
+      <div style={{ marginBottom: 18, marginTop: (cola.vencidos || []).length ? -6 : 0 }}>
+        <button onClick={() => { setCargando(true); setVerTodosVencidos(v => !v); }} style={{
+          border: `1px solid ${verTodosVencidos ? '#fca5a5' : '#e2e8f0'}`,
+          background: verTodosVencidos ? '#fef2f2' : '#f8fafc',
+          color: verTodosVencidos ? '#b91c1c' : '#64748b',
+          borderRadius: 9, padding: '7px 13px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+        }}>
+          {verTodosVencidos ? '👁️ Viendo TODOS los vencidos — volver a la cola normal' : '👁️ Ver todos los vencidos (no solo los que Lucy escaló)'}
+        </button>
+        {verTodosVencidos && (
+          <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
+            Incluye clientes que Lucy todavía está gestionando. Verifica antes de llamar para no duplicar contacto.
+          </div>
+        )}
+      </div>
 
       <Seccion titulo="🔁 Reintentos" sub="No contestaron antes — nuevo intento hoy" lista={filtrarPeriodo(cola.reintentos)}
         onLlamar={setProspectoActivo} clientesRecargados={clientesRecargados} />
@@ -959,6 +982,8 @@ function ModalLlamada({ prospecto, onCerrar, onCrearOrden }) {
     { value: 'no_contesto',    label: '📵 No contestó',        bg: '#f3f4f6', color: '#6b7280' },
     { value: 'no_interesa',    label: '❌ No le interesa',     bg: '#fee2e2', color: '#b91c1c' },
     { value: 'numero_errado',  label: '🚫 Número errado',      bg: '#fff7ed', color: '#c2410c' },
+    // ✅ TELEVENC-VISITA-002: mismo compromiso que en vencidos.
+    { value: 'visita_oficina', label: '🏢 Pasa por la oficina', bg: '#ede9fe', color: '#6d28d9' },
   ];
 
   // ✅ TELEVENC-003: ¿la captura trae FECHA de recarga? Entonces el prospecto
