@@ -366,6 +366,33 @@ const obtenerConfigTenant = async (adminId) => {
 // proyecto tras el bug de Temporal Dead Zone de LUCY-ELEVEN-001b es que nada
 // se use antes de su declaración, aunque la llamada sea diferida.
 // ═════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ LUCY-HUERFANOS-003 — Lucy no puede llamar → que lo vea un humano YA
+// ─────────────────────────────────────────────────────────────────────────────
+// PROBLEMA QUE RESUELVE: `escaladoTelemercadeo` solo se escribía en el webhook,
+// o sea DESPUÉS de una llamada. Cuando el motor descartaba un vencimiento sin
+// poder llamarlo (sin teléfono, cliente borrado, sin sede), no había webhook y
+// el vencimiento quedaba invisible para siempre: ni Lucy lo trabajaba ni el
+// asesor lo veía en Telemercadeo. Plata perdida en silencio.
+//
+// Lucy filtra y adelanta trabajo, pero NUNCA puede retener un vencimiento que
+// ella misma no es capaz de gestionar.
+// ═════════════════════════════════════════════════════════════════════════════
+const escalarPorqueLucyNoPuede = async (vencimientoId, motivo) => {
+  try {
+    if (!vencimientoId) return;
+    await db.collection('vencimientos').doc(vencimientoId).update({
+      escaladoTelemercadeo: true,
+      estadoCiclo: 'EN_TELEMERCADEO',
+      motivoEscalamiento: `lucy_no_puede_${motivo}`,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    console.log(`[LLAMADAS-IA] LUCY-HUERFANOS-003: vencimiento ${vencimientoId} escalado a telemercadeo (${motivo})`);
+  } catch (e) {
+    console.error('[LLAMADAS-IA] LUCY-HUERFANOS-003 falló:', e.message);
+  }
+};
+
 const esClientePrioritario = async (adminId, clienteId, umbral) => {
   try {
     const min = Number.isFinite(Number(umbral)) ? Number(umbral) : UMBRAL_PRIORIDAD_DEFAULT;
@@ -792,13 +819,18 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
 
           // 5) Cliente y teléfono
           const cliDoc = await db.collection('clients').doc(venc.clienteId).get();
-          if (!cliDoc.exists) { motivos.cliente_inexistente++; continue; }
+          if (!cliDoc.exists) {
+            motivos.cliente_inexistente++;
+            await escalarPorqueLucyNoPuede(venc.id, 'cliente_inexistente');
+            continue;
+          }
           const cliente = cliDoc.data();
           const telefonoRaw = venc.telefono || cliente.celular || cliente.telefono;
           const telefono = normalizarParaLlamada(telefonoRaw);
           if (!telefono) {
             motivos.sin_telefono++;
             console.warn(`[LLAMADAS-IA] Cliente ${venc.clienteId} sin teléfono válido — omitido`);
+            await escalarPorqueLucyNoPuede(venc.id, 'sin_telefono');
             continue;
           }
 
@@ -1115,7 +1147,15 @@ const procesarResultadoLlamada = async (payload) => {
     // pasa a un asesor humano. Regla de Sandra: solo se da por perdido cuando
     // telemercadeo también lo intentó. Lucy filtra, no descarta.
     const config = await obtenerConfigTenant(registroActual.adminId).catch(() => ({ maxIntentos: MAX_INTENTOS_DEFAULT }));
-    const intentosAgotados = resultado === 'sin_respuesta' && registroActual.intento >= (config.maxIntentos || MAX_INTENTOS_DEFAULT);
+
+    // ✅ LUCY-ESCALA-002: el vencimiento pasa a telemercadeo tras la SEGUNDA
+    // ronda sin respuesta, no al agotar los 3 intentos.
+    // Regla de Sandra: si no contestaron dos veces, no vale la pena que Lucy
+    // insista un mes entero mientras el cliente se enfría. Lucy sigue con su
+    // tercer intento si le queda, pero el humano ya lo puede ver y llamar.
+    const INTENTOS_PARA_ESCALAR = 2;
+    const intentosAgotados = resultado === 'sin_respuesta' &&
+      registroActual.intento >= Math.min(INTENTOS_PARA_ESCALAR, config.maxIntentos || MAX_INTENTOS_DEFAULT);
 
     // ✅ LUCY-PRIORIDAD-001: clientes de alto valor no esperan los 3 intentos.
     // Un cliente con varios equipos que no contesta la PRIMERA llamada pasa ya

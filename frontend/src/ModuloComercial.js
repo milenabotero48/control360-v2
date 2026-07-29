@@ -279,6 +279,7 @@ function MiDia({ user, onNavegar }) {
             {data.diagVencidos.agendadosAFuturo > 0 && <div>· {data.diagVencidos.agendadosAFuturo} tienen llamada agendada o compromiso de visita a futuro</div>}
             {data.diagVencidos.sinContacto > 0 && <div>· {data.diagVencidos.sinContacto} agotaron los 3 intentos sin lograr contacto</div>}
             {data.diagVencidos.sinFecha > 0 && <div>· {data.diagVencidos.sinFecha} no tienen fecha de vencimiento registrada</div>}
+            {data.diagVencidos.rescatados > 0 && <div>· {data.diagVencidos.rescatados} entraron por antigüedad aunque Lucy no los escaló</div>}
           </div>
         )}
       </div>
@@ -554,6 +555,18 @@ function SeccionVencidos({ lista = [], onLlamar, onRefrescar }) {
                 {v.compromisoIncumplido && (
                   <span style={{ background: '#fff7ed', color: '#c2410c', fontWeight: 800, fontSize: 10, padding: '3px 8px', borderRadius: 8 }}>
                     🏢 Prometió venir y no vino
+                  </span>
+                )}
+                {/* ✅ LUCY-HUERFANOS-003: Lucy no pudo ni intentarlo */}
+                {v.lucyNoPudo && (
+                  <span style={{ background: '#fef2f2', color: '#b91c1c', fontWeight: 800, fontSize: 10, padding: '3px 8px', borderRadius: 8 }}>
+                    {v.lucyNoPudo === 'sin_telefono' ? '📵 Sin teléfono válido — corrige la ficha' : '⚠️ Lucy no pudo llamarlo'}
+                  </span>
+                )}
+                {/* ✅ TELEVENC-RESCATE-001: entró por antigüedad, no por Lucy */}
+                {!v.escaladoPorLucy && v.rescatadoSinLucy && !v.lucyNoPudo && (
+                  <span style={{ background: '#fffbeb', color: '#b45309', fontWeight: 800, fontSize: 10, padding: '3px 8px', borderRadius: 8 }}>
+                    ⏳ Lucy no alcanzó a llamarlo
                   </span>
                 )}
               </div>

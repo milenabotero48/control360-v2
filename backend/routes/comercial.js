@@ -91,6 +91,20 @@ const siguienteDiaHabil = (fechaStr) => {
 // Es la fecha límite del compromiso "paso por la oficina": el cliente tiene
 // todo el mes para venir; si el último día hábil no ha venido, vuelve a la cola.
 // Se retrocede (no se avanza) para no caer en el mes siguiente.
+// ✅ TELEVENC-RESCATE-001: días entre dos fechas 'YYYY-MM-DD'.
+const diasDesde = (desde, hasta) => {
+  if (!desde || !hasta) return 0;
+  const a = new Date(desde + 'T12:00:00');
+  const b = new Date(hasta + 'T12:00:00');
+  return Math.floor((b - a) / 86400000);
+};
+
+// ✅ TELEVENC-RESCATE-001: días vencido tras los cuales el vencimiento entra a
+// la cola humana AUNQUE Lucy no lo haya escalado. Con la regla de escalar a la
+// segunda ronda, Lucy normalmente escala mucho antes; esto solo actúa cuando
+// Lucy no llegó a llamar (motor detenido, sin créditos, tope de minutos).
+const DIAS_RESCATE_TELEMERCADEO = 5;
+
 const ultimoDiaHabilDelMes = (fechaStr) => {
   const [y, m] = fechaStr.split('-').map(Number);
   const d = new Date(Date.UTC(y, m, 0)); // día 0 del mes siguiente = último de este
@@ -386,6 +400,7 @@ router.get('/mi-dia', async (req, res) => {
       agendadosAFuturo: 0,  // reprogramados o con compromiso de visita vigente
       sinContacto: 0,       // agotaron los 3 intentos del asesor
       sinFecha: 0,          // dato incompleto
+      rescatados: 0,        // ✅ TELEVENC-RESCATE-001: entraron pese a no estar escalados
       enCola: 0,
     };
     try {
@@ -422,7 +437,21 @@ router.get('/mi-dia', async (req, res) => {
 
           if (!v.fechaVencimiento) { diagVencidos.sinFecha++; return false; }
           if (v.fechaVencimiento >= limiteFecha) { diagVencidos.aunNoVencen++; return false; }
-          if (lucyActiva && v.escaladoTelemercadeo !== true) { diagVencidos.filtradosPorLucy++; return false; }
+
+          // ✅ TELEVENC-RESCATE-001: red de seguridad.
+          // `escaladoTelemercadeo` lo escribe el webhook de Lucy, o sea DESPUÉS
+          // de una llamada. Si la llamada nunca salió —motor detenido, sin
+          // créditos del proveedor, tope de minutos agotado— el vencimiento
+          // quedaba retenido indefinidamente: invisible para Lucy y para el
+          // asesor. Pasados DIAS_RESCATE sin gestión, entra a la cola humana
+          // sin importar lo que haya hecho o dejado de hacer Lucy.
+          // Lucy filtra y adelanta trabajo; no puede secuestrar un cliente.
+          const rescatado = diasDesde(v.fechaVencimiento, hoy) >= DIAS_RESCATE_TELEMERCADEO;
+          if (lucyActiva && v.escaladoTelemercadeo !== true && !rescatado) {
+            diagVencidos.filtradosPorLucy++;
+            return false;
+          }
+          if (rescatado && v.escaladoTelemercadeo !== true) diagVencidos.rescatados++;
 
           // Seguimiento de telemercadeo sobre el vencimiento (TELEVENC-002):
           // reprogramado a futuro o agotado (3 intentos) → fuera de la cola de HOY.
@@ -454,6 +483,11 @@ router.get('/mi-dia', async (req, res) => {
         });
         if (v.fechaVencimiento < g.fechaMasAntigua) g.fechaMasAntigua = v.fechaVencimiento;
         if (v.escaladoTelemercadeo) g.escaladoPorLucy = true;
+        // ✅ TELEVENC-RESCATE-001 / LUCY-HUERFANOS-003: por qué está aquí
+        if (!v.escaladoTelemercadeo) g.rescatadoSinLucy = true;
+        if (String(v.motivoEscalamiento || '').startsWith('lucy_no_puede_')) {
+          g.lucyNoPudo = String(v.motivoEscalamiento).replace('lucy_no_puede_', '');
+        }
         const t = v.telemercadeo || {};
         if ((t.totalLlamadas || 0) > g.totalLlamadas) g.totalLlamadas = t.totalLlamadas;
         if (t.notas) g.notasUltimaLlamada = t.notas;
