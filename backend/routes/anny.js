@@ -545,6 +545,83 @@ router.get('/pedidos/:id/prellenado', authenticate, requireAnnyActivo, async (re
     if (!p.direccion || p.direccion === 'PENDIENTE') faltantes.push('direccion');
     if (!p.producto) faltantes.push('producto');
 
+    // ✅ ANNY-PREFILL-021: coincidencia del texto del pedido con el catálogo.
+    // `p.producto` es TEXTO LIBRE que escribió una IA ("Recarga Extintor ABC 10
+    // libras + Domicilio"), no un producto del sistema. Se buscan coincidencias
+    // por nombre para pre-cargar los ítems con el PRECIO OFICIAL del catálogo,
+    // nunca con el que Anny le dijo al cliente.
+    // Si no hay coincidencia, se devuelve vacío y la orden se llena a mano:
+    // es preferible eso a colar un precio adivinado en una orden real.
+    let itemsSugeridos = [];
+    let coincidenciaParcial = false;
+    try {
+      // Se consulta `products` directamente (y NO obtenerCatalogoProductos,
+      // que solo devuelve nombre+precio) porque la orden necesita el
+      // productoId real: sin él no hay kardex ni descuento de inventario.
+      // ⚠️ products usa `creadoPor` como campo de tenant, NO adminId.
+      const prodSnap = await db.collection('products')
+        .where('creadoPor', '==', adminId)
+        .where('activo', '==', true)
+        .limit(300)
+        .get();
+      const catalogo = prodSnap.docs.map(d => ({
+        id: d.id,
+        nombre: d.data().nombre || '',
+        codigo: d.data().codigo || '',
+        categoria: d.data().categoria || '',
+        precio: Number(d.data().precioVenta) || 0,
+      })).filter(p => p.nombre);
+
+      const norm = (s) => String(s || '')
+        .toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-z0-9 ]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const textoPedido = norm(p.producto);
+      if (textoPedido) {
+        // Se prefiere el nombre más largo que aparezca dentro del texto: evita
+        // que "Extintor" gane sobre "Extintor ABC 10 libras".
+        const encontrados = (catalogo || [])
+          .filter(prod => {
+            const n = norm(prod.nombre);
+            return n.length >= 4 && textoPedido.includes(n);
+          })
+          .sort((a, b) => norm(b.nombre).length - norm(a.nombre).length);
+
+        // Se descartan los que son subcadena de otro ya elegido (Extintor vs
+        // Extintor ABC 10 libras): quedaría el producto duplicado en la orden.
+        const elegidos = [];
+        for (const prod of encontrados) {
+          const n = norm(prod.nombre);
+          if (elegidos.some(e => norm(e.nombre).includes(n))) continue;
+          elegidos.push(prod);
+        }
+
+        // Se devuelve el producto COMPLETO para que el frontend lo agregue con
+        // la misma función que el flujo manual (agregarProducto), y no con un
+        // ítem armado a mano que se saltaría las reglas de esCambio/categoría.
+        itemsSugeridos = elegidos.slice(0, 6).map(prod => ({
+          id: prod.id,
+          nombre: prod.nombre,
+          codigo: prod.codigo,
+          categoria: prod.categoria,
+          precioVenta: prod.precio,
+        }));
+
+        // Si el total que Anny acordó no coincide con el catálogo, se avisa:
+        // puede haber domicilio, descuento o un precio mal informado.
+        const totalPedido = Number(String(p.total || '').replace(/[^\d]/g, '')) || 0;
+        const cant = Number(p.cantidad) || 1;
+        const sumaItems = itemsSugeridos.reduce((a, i) => a + i.precioVenta * cant, 0);
+        coincidenciaParcial = itemsSugeridos.length > 0 && totalPedido > 0 && sumaItems !== totalPedido;
+      }
+    } catch (e) {
+      console.warn('[ANNY-PREFILL-021] coincidencia de catálogo falló:', e.message);
+      itemsSugeridos = [];
+    }
+
     return res.json({
       pedidoId: doc.id,
       estado: p.estado || 'NUEVO',
@@ -562,7 +639,11 @@ router.get('/pedidos/:id/prellenado', authenticate, requireAnnyActivo, async (re
         cantidad: Number(p.cantidad) || 1,
         total: p.total || '',
         fecha: p.fecha && p.fecha !== 'PENDIENTE' ? p.fecha : '',
-        origen: 'ANNY'
+        origen: 'ANNY',
+        // ✅ ANNY-PREFILL-021
+        empresaId: ficha.existe ? (ficha.empresaId || '') : '',
+        itemsSugeridos,
+        coincidenciaParcial,
       },
       datosPendientes: p.datosPendientes || [],
       bloqueantes: faltantes,

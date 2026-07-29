@@ -30,7 +30,9 @@ import AnnyEntrenamiento from './AnnyEntrenamiento';
 // FIX ANNY-ESTADO-025: única fuente de verdad de la conexión.
 const estaConectado = (e) => String(e?.estado || '').toLowerCase() === 'conectado';
 
-export default function ModuloAnny() {
+// ✅ ANNY-PREFILL-021: `onNavegar` ya venía desde GestionVencimientos, pero el
+// componente no lo declaraba y se perdía. Se usa para saltar a Órdenes.
+export default function ModuloAnny({ onNavegar }) {
   const [activo, setActivo] = useState(null);
   const [cargando, setCargando] = useState(true);
   const [tab, setTab] = useState('conversaciones');
@@ -234,7 +236,7 @@ export default function ModuloAnny() {
       {/* ─── Contenido ─── */}
       {tab === 'conversaciones' && <AnnyConversaciones />}
       {tab === 'entrenamiento' && <AnnyEntrenamiento />}
-      {tab === 'pedidos' && <Pedidos pedidos={pedidos} onCambio={cargarResumen} />}
+      {tab === 'pedidos' && <Pedidos pedidos={pedidos} onCambio={cargarResumen} onNavegar={onNavegar} />}
       {tab === 'casos' && <Casos casos={casos} onCambio={cargarResumen} />}
       {tab === 'config' && <Configuracion />}
     </div>
@@ -244,19 +246,74 @@ export default function ModuloAnny() {
 // ============================================================
 // Bandeja de pedidos — FIX ANNY-BORRADOR-015
 // ============================================================
-function Pedidos({ pedidos, onCambio }) {
+function Pedidos({ pedidos, onCambio, onNavegar }) {
   const [trabajando, setTrabajando] = useState(null);
+  const [errorAccion, setErrorAccion] = useState(null); // ✅ ANNY-PEDIDOS-020
 
+  // ✅ ANNY-PREFILL-021: abre Nueva Orden ya diligenciada con los datos del
+  // pedido. Se reutiliza el endpoint /prellenado (que ya existía sin usarse)
+  // y el canal `c360_orden_prefill` que Telemercadeo ya emplea.
+  // El pedido NO se cierra aquí: se cierra cuando la orden se crea de verdad.
+  const crearOrden = async (pedidoId) => {
+    setTrabajando(pedidoId);
+    setErrorAccion(null);
+    try {
+      const res = await fetch(`${API}/anny/pedidos/${pedidoId}/prellenado`, { headers: authHeaders() });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'No se pudo preparar la orden');
+
+      const pre = json.prellenado || {};
+      sessionStorage.setItem('c360_orden_prefill', JSON.stringify({
+        // Campos que NuevaOrden ya entendía
+        id: pre.clienteId || null,
+        nombre: pre.nombreCliente || '',
+        nit: pre.cedulaNit || '',
+        celular: pre.telefono || '',
+        empresaId: pre.empresaId || '',
+        // ✅ ANNY-PREFILL-021 — contexto del pedido
+        origen: 'ANNY',
+        pedidoId,
+        direccion: pre.direccion || '',
+        barrio: pre.barrio || '',
+        sucursal: pre.sucursal || '',
+        productoTexto: pre.producto || '',
+        totalAcordado: pre.total || '',
+        fechaAcordada: pre.fecha || '',
+        itemsSugeridos: pre.itemsSugeridos || [],
+        coincidenciaParcial: !!pre.coincidenciaParcial,
+        datosPendientes: json.datosPendientes || [],
+        clienteNuevo: !pre.clienteId,
+      }));
+
+      if (onNavegar) onNavegar('ordenes');
+      else setErrorAccion('Abre el módulo Órdenes: la orden quedó lista para diligenciar.');
+    } catch (e) {
+      setErrorAccion(e.message || 'No se pudo preparar la orden');
+    } finally {
+      setTrabajando(null);
+    }
+  };
+
+  // ✅ FIX ANNY-PEDIDOS-020: antes el error se tragaba en silencio
+  // (`catch (e) { }` sin mirar res.ok). Si el backend rechazaba la petición,
+  // el botón quedaba mudo y parecía que "no pasa nada". Ahora se muestra.
   const actualizar = async (id, estado) => {
     setTrabajando(id);
+    setErrorAccion(null);
     try {
-      await fetch(`${API}/anny/pedidos/${id}`, {
+      const res = await fetch(`${API}/anny/pedidos/${id}`, {
         method: 'PUT',
         headers: authHeaders(),
         body: JSON.stringify({ estado })
       });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || `No se pudo actualizar (error ${res.status})`);
+      }
       onCambio();
-    } catch (e) { /* silencioso */ }
+    } catch (e) {
+      setErrorAccion(e.message || 'No se pudo actualizar el pedido');
+    }
     finally { setTrabajando(null); }
   };
 
@@ -264,6 +321,15 @@ function Pedidos({ pedidos, onCambio }) {
 
   return (
     <div>
+      {/* ✅ ANNY-PEDIDOS-020: el error ya no se traga en silencio */}
+      {errorAccion && (
+        <div style={{
+          background: '#fee2e2', color: '#b91c1c', borderRadius: 8,
+          padding: '9px 12px', fontSize: 12.5, fontWeight: 700, marginBottom: 12,
+        }}>
+          ⚠️ {errorAccion}
+        </div>
+      )}
       {pedidos.map(p => {
         const pendientes = p.datosPendientes || [];
         const cerrado = ['ORDEN_CREADA', 'DESCARTADO'].includes(p.estado);
@@ -288,23 +354,48 @@ function Pedidos({ pedidos, onCambio }) {
               {p.sucursal ? ` · sede ${p.sucursal}` : ''}
             </p>
 
+            {/* ✅ FIX ANNY-PEDIDOS-020: el botón mandaba a EN_REVISION incluso
+                cuando el pedido YA estaba en EN_REVISION — pulsarlo no cambiaba
+                nada y parecía roto. Ahora cada estado ofrece su paso siguiente
+                real: revisar → orden creada → cerrado. */}
             {!cerrado && (
-              <div style={S.tarjetaAcciones}>
-                <button
-                  onClick={() => actualizar(p.id, 'EN_REVISION')}
-                  disabled={trabajando === p.id}
-                  style={S.btnPrim}
-                >
-                  Marcar listo para orden
-                </button>
-                <button
-                  onClick={() => actualizar(p.id, 'DESCARTADO')}
-                  disabled={trabajando === p.id}
-                  style={S.btnSec}
-                >
-                  Descartar
-                </button>
-              </div>
+              <>
+                <div style={S.tarjetaAcciones}>
+                  {p.estado === 'EN_REVISION' ? (
+                    // ✅ ANNY-PREFILL-021: en vez de pedirle a la admin que
+                    // marque a mano "ya creé la orden" (que se puede marcar sin
+                    // haberla creado), se abre Nueva Orden diligenciada y el
+                    // pedido se cierra solo cuando la orden existe de verdad.
+                    <button
+                      onClick={() => crearOrden(p.id)}
+                      disabled={trabajando === p.id}
+                      style={S.btnPrim}
+                    >
+                      {trabajando === p.id ? 'Preparando…' : '🧾 Crear orden con estos datos'}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => actualizar(p.id, 'EN_REVISION')}
+                      disabled={trabajando === p.id}
+                      style={S.btnPrim}
+                    >
+                      {trabajando === p.id ? 'Guardando…' : 'Marcar listo para orden'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => actualizar(p.id, 'DESCARTADO')}
+                    disabled={trabajando === p.id}
+                    style={S.btnSec}
+                  >
+                    Descartar
+                  </button>
+                </div>
+                {p.estado === 'EN_REVISION' && (
+                  <p style={{ fontSize: 11.5, color: '#94a3b8', marginTop: 6 }}>
+                    Se abre Nueva Orden con estos datos. Valida la forma de pago y el tipo de servicio antes de guardar.
+                  </p>
+                )}
+              </>
             )}
           </div>
         );

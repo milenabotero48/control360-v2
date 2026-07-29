@@ -374,6 +374,20 @@ router.get('/mi-dia', async (req, res) => {
     // los que Lucy escaló (escaladoTelemercadeo) tras agotar sus 2 intentos —
     // la cola humana arranca ~día 4. Sin Lucy, todos los vencidos entran ya.
     let vencidos = [];
+    // ✅ TELEVENC-DIAG-001: contador de por qué cada vencimiento quedó FUERA de
+    // la cola. Antes, cuando la cola salía vacía teniendo pendientes, no había
+    // forma de saber si era el filtro de Lucy, la fecha o un descarte previo.
+    // Mismo patrón que `motivos` en el motor de Lucy. Se declara AQUÍ (fuera
+    // del try) porque la respuesta lo usa aunque la detección falle.
+    const diagVencidos = {
+      totalPendientes: 0,   // no gestionados — lo que ves en el módulo Vencimientos
+      aunNoVencen: 0,       // la fecha de vencimiento todavía no llegó
+      filtradosPorLucy: 0,  // Lucy activa y aún no los ha escalado
+      agendadosAFuturo: 0,  // reprogramados o con compromiso de visita vigente
+      sinContacto: 0,       // agotaron los 3 intentos del asesor
+      sinFecha: 0,          // dato incompleto
+      enCola: 0,
+    };
     try {
       let lucyActiva = false;
       try {
@@ -387,23 +401,38 @@ router.get('/mi-dia', async (req, res) => {
       // que ya existían antes de esa regla nunca aparecen (no hay retroactivo).
       // Con ?todos=1 se ignora el handshake y se ven TODOS los vencidos del
       // tenant. No cambia datos: es solo una vista más amplia.
-      if (req.query.todos === '1' || req.query.todos === 'true') lucyActiva = false;
+      const modoTodos = req.query.todos === '1' || req.query.todos === 'true';
+      if (modoTodos) lucyActiva = false;
 
       const vencSnap = await db.collection('vencimientos')
         .where('adminId', '==', adminId)
         .limit(2000)
         .get();
 
+      // ✅ TELEVENC-DIAG-001: en modo "ver todos" también entran los que vencen
+      // ESTE MES aunque la fecha todavía no haya llegado — comercialmente es
+      // mejor llamar antes de que se venza, no después.
+      const limiteFecha = modoTodos ? (hoy.slice(0, 7) + '-32') : hoy;
+
       const candidatos = vencSnap.docs
         .map(d => ({ id: d.id, ...d.data() }))
-        .filter(v => !v.gestionado && v.fechaVencimiento && v.fechaVencimiento < hoy)
-        .filter(v => !lucyActiva || v.escaladoTelemercadeo === true)
-        // Seguimiento de telemercadeo sobre el vencimiento (TELEVENC-002):
-        // reprogramado a futuro o agotado (3 intentos) → fuera de la cola de HOY.
         .filter(v => {
+          if (v.gestionado) return false;
+          diagVencidos.totalPendientes++;
+
+          if (!v.fechaVencimiento) { diagVencidos.sinFecha++; return false; }
+          if (v.fechaVencimiento >= limiteFecha) { diagVencidos.aunNoVencen++; return false; }
+          if (lucyActiva && v.escaladoTelemercadeo !== true) { diagVencidos.filtradosPorLucy++; return false; }
+
+          // Seguimiento de telemercadeo sobre el vencimiento (TELEVENC-002):
+          // reprogramado a futuro o agotado (3 intentos) → fuera de la cola de HOY.
           const t = v.telemercadeo || {};
-          if (t.sinContacto) return false;
-          if (t.proximaLlamada?.fecha && t.proximaLlamada.fecha > hoy) return false;
+          if (t.sinContacto) { diagVencidos.sinContacto++; return false; }
+          if (t.proximaLlamada?.fecha && t.proximaLlamada.fecha > hoy) {
+            diagVencidos.agendadosAFuturo++;
+            return false;
+          }
+          diagVencidos.enCola++;
           return true;
         });
 
@@ -548,6 +577,8 @@ router.get('/mi-dia', async (req, res) => {
       // ✅ TELEVENC-001: vencidos entra a la cola con prioridad sobre
       // reintentos y nuevos (los reprogramados con hora acordada van primero)
       cola: { reprogramados, vencidos, reintentos, nuevos },
+      // ✅ TELEVENC-DIAG-001: por qué la cola de vencidos tiene lo que tiene
+      diagVencidos,
       // Ola 3: ventana al futuro — llamadas agendadas para después de hoy.
       // Solo consulta: no contamina la cola del día.
       agendaProxima: prospectos

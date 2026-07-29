@@ -260,7 +260,25 @@ function MiDia({ user, onNavegar }) {
         </button>
         {verTodosVencidos && (
           <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4 }}>
-            Incluye clientes que Lucy todavía está gestionando. Verifica antes de llamar para no duplicar contacto.
+            Incluye clientes que Lucy todavía está gestionando y los que vencen este mes. Verifica antes de llamar para no duplicar contacto.
+          </div>
+        )}
+
+        {/* ✅ TELEVENC-DIAG-001: si hay pendientes pero la cola está vacía,
+            se explica POR QUÉ en vez de dejar la pantalla en blanco. */}
+        {data.diagVencidos && data.diagVencidos.totalPendientes > 0 && !(cola.vencidos || []).length && (
+          <div style={{
+            marginTop: 8, background: '#f8fafc', border: '1px solid #e2e8f0',
+            borderRadius: 9, padding: '10px 12px', fontSize: 11.5, color: '#475569',
+          }}>
+            <div style={{ fontWeight: 800, color: '#334155', marginBottom: 4 }}>
+              Tienes {data.diagVencidos.totalPendientes} vencimiento(s) pendiente(s), pero ninguno entró a la cola de hoy:
+            </div>
+            {data.diagVencidos.aunNoVencen > 0 && <div>· {data.diagVencidos.aunNoVencen} todavía no llegan a su fecha de vencimiento</div>}
+            {data.diagVencidos.filtradosPorLucy > 0 && <div>· {data.diagVencidos.filtradosPorLucy} los está gestionando Lucy — activa «Ver todos» para llamarlos igual</div>}
+            {data.diagVencidos.agendadosAFuturo > 0 && <div>· {data.diagVencidos.agendadosAFuturo} tienen llamada agendada o compromiso de visita a futuro</div>}
+            {data.diagVencidos.sinContacto > 0 && <div>· {data.diagVencidos.sinContacto} agotaron los 3 intentos sin lograr contacto</div>}
+            {data.diagVencidos.sinFecha > 0 && <div>· {data.diagVencidos.sinFecha} no tienen fecha de vencimiento registrada</div>}
           </div>
         )}
       </div>

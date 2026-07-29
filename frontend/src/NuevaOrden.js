@@ -57,6 +57,10 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
   const [sectores, setSectores]           = useState([]); // Mini-Ola 2.6
   const [cxcCliente, setCxcCliente]       = useState([]);
   const [clienteSel, setClienteSel]       = useState(null);
+  // ✅ ANNY-PREFILL-021: contexto del pedido de Anny que originó esta orden.
+  // Se declara aquí (antes del useEffect que lo usa) por la regla del proyecto
+  // sobre orden de declaración.
+  const [ctxAnny, setCtxAnny]             = useState(null);
 
   // ── Ola 3: cliente preseleccionado desde Telemercadeo ─────────────────────
   // Tras convertir un prospecto, "Crear orden ahora" deja el cliente en
@@ -71,6 +75,16 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
       if (cli && cli.id) {
         setClienteSel({ id: cli.id, nombre: cli.nombre || '', nit: cli.nit || '', celular: cli.celular || '', empresaId: cli.empresaId || '' });
       }
+      // ✅ ANNY-PREFILL-021: si el prefill viene de un pedido de Anny, se
+      // guarda el contexto para mostrarlo como referencia al lado del
+      // formulario y para cerrar el pedido cuando la orden se cree.
+      // NO se autocompletan forma de pago ni tipo de servicio: son
+      // precisamente los dos campos que la admin quiere validar a mano.
+      // Los productos detectados NO se inyectan como ítems a mano: se ofrecen
+      // en el panel con un botón que llama a agregarProducto(), la MISMA
+      // función del flujo manual. Así se respetan las reglas de esCambio,
+      // categoría y productoId (sin productoId no hay kardex).
+      if (cli && cli.origen === 'ANNY') setCtxAnny(cli);
     } catch { /* prefill inválido: se ignora */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -373,6 +387,15 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
         pinCartera: (bloqueo && bloqueo.bloqueado && pinDesbloqueado) ? pinCartera : undefined,
       }, { headers });
       setOrdenCreada({ ...res.data, items, clienteNombre: esInternaOProd ? 'TAREA INTERNA' : clienteSel.nombre, clienteNit: esInternaOProd ? '' : clienteSel.nit, clienteCelular: esInternaOProd ? '' : clienteSel.celular, sucursalNombre: sucursalSel ? sucursalSel.nombre : '', formaPago, notasOrden: notas, extintorPrestamo, numeroFactura, fechaProgramada, total, ordenesACobrar: tipoServicio === 'cobranza' ? cxcCliente.map(o => ({ ordenId: o.id, numeroOrden: o.numeroOrden, saldo: o.saldoPendiente })) : [], montoCobrar: tipoServicio === 'cobranza' ? cxcCliente.reduce((s, o) => s + o.saldoPendiente, 0) : 0 });
+      // ✅ ANNY-PREFILL-021: la orden ya existe → se cierra el pedido de Anny
+      // y queda la trazabilidad. Se hace AQUÍ y no antes, para que el pedido
+      // nunca aparezca como ORDEN_CREADA si la orden no llegó a guardarse.
+      // Fire-and-forget: si falla, la orden ya está bien creada; el pedido se
+      // puede cerrar a mano desde la bandeja.
+      if (ctxAnny?.pedidoId && res.data?.id) {
+        axios.post(`${API}/anny/pedidos/${ctxAnny.pedidoId}/vincular-orden`,
+          { ordenId: res.data.id }, { headers }).catch(() => {});
+      }
     } catch (err) { setError((err.response && err.response.data && err.response.data.error) ? err.response.data.error : 'Error al crear la orden'); }
     finally { setGuardando(false); }
   };
@@ -473,6 +496,71 @@ const NuevaOrden = ({ user, onCreada, onCancelar, ordenEditar = null }) => {
         </div>
 
         {error && <div style={s.alertError}>{error}</div>}
+
+        {/* ✅ ANNY-PREFILL-021: referencia del pedido que capturó Anny.
+            Es CONTEXTO, no datos aplicados: la orden la valida la admin.
+            Forma de pago y tipo de servicio quedan en blanco a propósito. */}
+        {ctxAnny && (
+          <div style={{ background: '#f5f3ff', borderTop: '3px solid #7c3aed', padding: '12px 20px' }}>
+            <div style={{ fontSize: 12.5, fontWeight: 800, color: '#6d28d9' }}>
+              💬 Pedido capturado por Anny
+            </div>
+            <div style={{ fontSize: 13, color: '#374151', marginTop: 4 }}>
+              {ctxAnny.productoTexto || 'Sin detalle'}
+              {ctxAnny.totalAcordado ? <> · <strong>acordado: {ctxAnny.totalAcordado}</strong></> : null}
+            </div>
+            {(ctxAnny.direccion || ctxAnny.barrio) && (
+              <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
+                📍 {ctxAnny.direccion}{ctxAnny.barrio ? `, ${ctxAnny.barrio}` : ''}
+                {ctxAnny.sucursal ? ` · sede ${ctxAnny.sucursal}` : ''}
+              </div>
+            )}
+            {ctxAnny.fechaAcordada && (
+              <div style={{ fontSize: 12, color: '#6b7280' }}>📅 Fecha acordada: {ctxAnny.fechaAcordada}</div>
+            )}
+
+            {ctxAnny.clienteNuevo && (
+              <div style={{ fontSize: 11.5, color: '#b45309', background: '#fef3c7', borderRadius: 6, padding: '6px 9px', marginTop: 6, fontWeight: 700 }}>
+                ⚠️ Este cliente no existe todavía en el sistema — créalo antes de continuar.
+              </div>
+            )}
+            {(ctxAnny.datosPendientes || []).length > 0 && (
+              <div style={{ fontSize: 11.5, color: '#b45309', marginTop: 4 }}>
+                Faltaba por confirmar: {ctxAnny.datosPendientes.join(', ')}
+              </div>
+            )}
+
+            {(ctxAnny.itemsSugeridos || []).length > 0 ? (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 11.5, color: '#6b7280', marginBottom: 4 }}>
+                  Productos del catálogo que coinciden — agrégalos y verifica cantidad:
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {ctxAnny.itemsSugeridos.map(prod => (
+                    <button key={prod.id} type="button"
+                      onClick={() => agregarProducto(prod)}
+                      style={{
+                        border: '1px solid #c4b5fd', background: '#fff', color: '#6d28d9',
+                        borderRadius: 8, padding: '5px 10px', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                      }}>
+                      + {prod.nombre} · {fmt(prod.precioVenta)}
+                    </button>
+                  ))}
+                </div>
+                {ctxAnny.coincidenciaParcial && (
+                  <div style={{ fontSize: 11.5, color: '#b45309', marginTop: 6, fontWeight: 700 }}>
+                    ⚠️ El valor acordado no coincide con el precio del catálogo. Puede ser domicilio o un precio mal informado — verifícalo.
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11.5, color: '#6b7280', marginTop: 6 }}>
+                No se encontraron productos del catálogo en el texto del pedido — agrégalos manualmente.
+              </div>
+            )}
+          </div>
+        )}
+
         {bloqueo && bloqueo.bloqueado && !pinDesbloqueado && (
           <div style={{ background: '#fef2f2', borderTop: '3px solid #dc2626', padding: '12px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
             <div>
