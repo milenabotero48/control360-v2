@@ -37,18 +37,16 @@ const { db } = require('./config/firebase');
 // para que este script corra aislado y no arrastre dependencias del server.
 // ═════════════════════════════════════════════════════════════════════════════
 
-// services/vencimientosService.js → PALABRAS_VENCIMIENTO
-const PALABRAS_VENCIMIENTO = [
-  'recarga y mantenimiento', 'recarga', 'mantenimiento',
-  'extintor', 'extintores',
-  'prueba hidrostatica', 'prueba hidrostática',
-  'hidrostatica', 'hidrostática',
-];
-const esItemConVencimiento = (item = {}) => {
-  const cat = (item.categoria || '').toLowerCase().trim();
-  const nom = (item.nombre || '').toLowerCase().trim();
-  return PALABRAS_VENCIMIENTO.some(p => cat.includes(p) || nom.includes(p));
-};
+// ✅ Se importa del servicio REAL en vez de mantener una copia.
+// Tener el filtro duplicado hizo que este diagnóstico reportara como
+// "huérfanas" órdenes de válvulas, cilindros y pinturas que a propósito ya no
+// generan vencimiento: la herramienta de medición contradecía al sistema que
+// estaba midiendo. Una sola fuente de verdad.
+const {
+  esItemConVencimiento,
+  vencimientosDeItems,
+  PALABRAS_VENCIMIENTO,
+} = require('./services/vencimientosService');
 
 // services/capacidadesTenant.js → CLAVES
 const CLAVES_CAPACIDAD = ['taller', 'logistica', 'cxc', 'qr'];
@@ -56,9 +54,12 @@ const CLAVES_CAPACIDAD = ['taller', 'logistica', 'cxc', 'qr'];
 // routes/orders.js → el hook SOLO dispara si la orden NACE en este estado.
 const ESTADO_QUE_DISPARA_HOOK = 'completada';
 
-// routes/vencimientos.js → topes de los endpoints del panel
-const TOPE_PANEL = 2000;   // GET /            .limit(2000)
-const TOPE_RESUMEN = 5000; // GET /resumen     .limit(5000)
+// ✅ VENC-TOPE-001 resuelto (2026-07-29): el panel ya NO corta.
+// Antes, `GET /` traía .limit(2000) sin orden y agrupaba por mes después, así
+// que a Sur (8.045 vencimientos) le ocultaba el 75%. Hoy el backend agrega por
+// mes sobre el 100% y el detalle se pide por mes. Se deja este umbral solo
+// como referencia de volumen — NO es un corte y no debe alarmar.
+const VOLUMEN_ALTO = 5000;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // UTILIDADES DE PRESENTACIÓN
@@ -251,7 +252,7 @@ async function analizarTenant(tenant, { detallado }) {
   // Los caminos que pasan por 'facturado' o 'listo_entregar' antes de
   // completarse pierden el vencimiento porque nadie lo crea en ese salto.
   const caminos = {};
-  let totalOrdenes = 0, conItemsVenc = 0, sinItemsVenc = 0;
+  let totalOrdenes = 0, conItemsVenc = 0, sinItemsVenc = 0, noAplicanPorEstado = 0;
   let nacieronCompletada = 0, conVencimientoCreado = 0;
   let huerfanas = 0, sinClienteId = 0, itemsCategoriaVacia = 0;
   let huerfanaFugaReal = 0, huerfanaPosibleAntidup = 0;
@@ -285,7 +286,20 @@ async function analizarTenant(tenant, { detallado }) {
         items.forEach(it => { if (!String(it.categoria || '').trim()) itemsCategoriaVacia++; });
       }
 
-      const tieneItems = items.some(esItemConVencimiento);
+      // ✅ Una orden anulada, de producción o interna NO debe tener
+      // vencimiento: contarla como huérfana era inflar la fuga con casos
+      // correctos. Antes, las 51 "huérfanas" del sistema eran casi todas
+      // órdenes anuladas.
+      const estadoNorm = String(estado).toLowerCase();
+      const tipoNorm = String(o.tipoOrden || '').toLowerCase();
+      const noDebeVencer = estadoNorm === 'anulada'
+        || tipoNorm === 'produccion' || tipoNorm === 'interna';
+      if (noDebeVencer) { noAplicanPorEstado++; return; }
+
+      // Se mide por lo que el sistema REALMENTE generaría, no por lo que
+      // dispara el filtro: los accesorios sueltos del kit disparan pero no
+      // producen vencimiento.
+      const tieneItems = vencimientosDeItems(items).length > 0;
       if (tieneItems) conItemsVenc++; else sinItemsVenc++;
       if (inicial === ESTADO_QUE_DISPARA_HOOK) nacieronCompletada++;
       if (!o.clienteId) sinClienteId++;
@@ -369,12 +383,11 @@ async function analizarTenant(tenant, { detallado }) {
     vencimientos: {
       total: totalVencimientos, vencPorOrigenDato, vencPorMes,
       vencSinClienteId, vencSinFecha,
-      excedeTopePanel: totalVencimientos > TOPE_PANEL,
-      ocultosPorTope: Math.max(0, totalVencimientos - TOPE_PANEL),
+      volumenAlto: totalVencimientos > VOLUMEN_ALTO,
     },
     ordenes: {
       totalOrdenes, conItemsVenc, sinItemsVenc, nacieronCompletada,
-      conVencimientoCreado, huerfanas, sinClienteId, itemsCategoriaVacia,
+      conVencimientoCreado, huerfanas, sinClienteId, itemsCategoriaVacia, noAplicanPorEstado,
       huerfanaFugaReal, huerfanaPosibleAntidup,
       porEstado, porEstadoInicial, porLugar, matriz, caminos, huerfanasPorMes,
       categoriasVistas, huerfanasEjemplos,
@@ -393,8 +406,8 @@ function hallazgosDe(a) {
     h.push(`${a.ordenes.huerfanas} órdenes con ítems válidos no tienen vencimiento (${pct(a.ordenes.huerfanas, a.ordenes.conItemsVenc)} de fuga).`);
   if (a.ordenes.nacieronCompletada < a.ordenes.conItemsVenc)
     h.push(`Solo ${a.ordenes.nacieronCompletada} de ${a.ordenes.conItemsVenc} órdenes que aplican nacieron en "completada", el único estado que dispara el hook.`);
-  if (a.vencimientos.excedeTopePanel)
-    h.push(`El panel oculta ${a.vencimientos.ocultosPorTope} vencimientos por el tope de ${TOPE_PANEL}.`);
+  if (a.vencimientos.volumenAlto)
+    h.push(`Volumen alto: ${a.vencimientos.total} vencimientos. El panel los agrega en servidor, pero conviene vigilar el tiempo de respuesta.`);
   if (a.clientes.totalProspectos > 0)
     h.push(`${a.clientes.totalProspectos} registros están en Prospectos (Telemercadeo), no en Vencimientos: se importaron sin fecha de última recarga.`);
   if (a.ordenes.sinClienteId > 0)
@@ -454,6 +467,7 @@ async function reportarUno(tenant) {
   titulo('C. ÓRDENES QUE DEBERÍAN HABER CREADO VENCIMIENTO');
   const o = a.ordenes;
   linea(`   Órdenes totales                         : ${num(o.totalOrdenes)}`);
+  linea(`   Anuladas / producción / internas        : ${num(o.noAplicanPorEstado)}  (no deben tener vencimiento)`);
   linea(`   Con ítems que SÍ generan vencimiento    : ${num(o.conItemsVenc)}  (${pct(o.conItemsVenc, o.totalOrdenes)})`);
   linea(`   Sin ítems que generen vencimiento       : ${num(o.sinItemsVenc)}`);
   linea(`   Nacieron en "completada" (dispara hook) : ${num(o.nacieronCompletada)}`);
@@ -517,18 +531,13 @@ async function reportarUno(tenant) {
 
   titulo('D. VENCIMIENTOS REALES POR MES  vs  LO QUE MUESTRA EL PANEL');
   linea(`   Documentos reales en la colección : ${num(a.vencimientos.total)}`);
-  linea(`   Tope del listado del panel        : ${num(TOPE_PANEL)}`);
-  linea(`   Tope de las tarjetas de resumen   : ${num(TOPE_RESUMEN)}`);
+  linea('   El panel ya no tiene tope: agrega por mes en servidor sobre el');
+  linea('   100% y pide el detalle de un mes solo al abrirlo (VENC-TOPE-001).');
   linea('');
-  if (a.vencimientos.excedeTopePanel) {
-    linea(`   🚨 EL PANEL ESTÁ OCULTANDO ${a.vencimientos.ocultosPorTope} vencimientos (${pct(a.vencimientos.ocultosPorTope, a.vencimientos.total)}).`);
-    linea('   Los meses del acordeón muestran cifras ARBITRARIAS: Firestore devuelve');
-    linea('   los primeros 2000 por ID interno, sin relación con la fecha.');
-  } else {
-    linea(`   ✔ Por debajo del tope. Margen: ${TOPE_PANEL - a.vencimientos.total} documentos.`);
+  if (a.vencimientos.volumenAlto) {
+    linea(`   Volumen alto (${a.vencimientos.total}). Se muestran todos, pero vale`);
+    linea('   la pena vigilar cuánto tarda en abrir el panel.');
   }
-  if (a.vencimientos.total > TOPE_RESUMEN)
-    linea(`   🚨 Incluso las TARJETAS de resumen están cortadas (tope ${TOPE_RESUMEN}).`);
 
   sub('Vencimientos por mes (conteo REAL, todos los documentos)');
   Object.keys(a.vencimientos.vencPorMes).sort()
@@ -588,7 +597,7 @@ async function reportarTodos() {
   titulo('TABLA COMPARATIVA  (ordenada por fuga de vencimientos)');
   linea('');
   linea('   ' + cortar('SUSCRIPTOR', 26) + ' ' +
-        ['CLIENT', 'PROSP', 'VENCIM', 'ORDEN', 'APLICA', 'HUÉRF', 'FUGA%', 'IVA', 'TOPE'].map(h => h.padStart(7)).join(' '));
+        ['CLIENT', 'PROSP', 'VENCIM', 'ORDEN', 'APLICA', 'HUÉRF', 'FUGA%', 'IVA', 'VOL'].map(h => h.padStart(7)).join(' '));
   linea('   ' + '─'.repeat(26) + ' ' + '─'.repeat(71));
 
   ok.slice().sort((a, b) => {
@@ -606,14 +615,14 @@ async function reportarTodos() {
       a.ordenes.huerfanas,
       pct(a.ordenes.huerfanas, a.ordenes.conItemsVenc),
       a.empresasConIva.length ? 'SÍ' : 'no',
-      a.vencimientos.excedeTopePanel ? '🚨' : 'ok',
+      a.vencimientos.volumenAlto ? 'alto' : 'ok',
     ].map(v => String(v).padStart(7)).join(' '));
   });
   linea('');
   linea('   APLICA = órdenes con ítems que SÍ deberían generar vencimiento');
   linea('   HUÉRF  = de esas, cuántas no tienen ningún vencimiento asociado');
   linea('   IVA    = tiene al menos una empresa facturadora con IVA > 0');
-  linea('   TOPE   = supera los 2000 documentos que el panel puede mostrar');
+  linea('   VOL    = volumen alto de vencimientos (informativo, ya no hay tope)');
 
   // ─── Agregados globales ────────────────────────────────────────────────────
   const tot = (f) => ok.reduce((s, a) => s + f(a), 0);
@@ -640,8 +649,7 @@ async function reportarTodos() {
 
   // ─── Patrones transversales ────────────────────────────────────────────────
   const conIva = ok.filter(a => a.empresasConIva.length);
-  const sobreTope = ok.filter(a => a.vencimientos.excedeTopePanel);
-  const cercaDelTope = ok.filter(a => !a.vencimientos.excedeTopePanel && a.vencimientos.total > TOPE_PANEL * 0.8);
+  const volumenAlto = ok.filter(a => a.vencimientos.volumenAlto);
   const fugaTotal = ok.filter(a => a.ordenes.conItemsVenc > 0 && a.ordenes.huerfanas === a.ordenes.conItemsVenc);
   const sinTaller = ok.filter(a => !a.tenant.capacidades.taller);
   const vencioNada = ok.filter(a => a.vencimientos.total === 0 && a.ordenes.conItemsVenc > 0);
@@ -655,11 +663,10 @@ async function reportarTodos() {
   sub(`Suscriptores con fuga TOTAL (0 vencimientos de sus órdenes): ${fugaTotal.length}`);
   fugaTotal.forEach(a => linea(`   · ${cortar(a.tenant.nombre, 30)} ${a.ordenes.conItemsVenc} órdenes aplicaban, 0 vencimientos creados`));
 
-  sub(`Suscriptores que YA superan el tope de ${TOPE_PANEL}: ${sobreTope.length}`);
-  sobreTope.forEach(a => linea(`   · ${cortar(a.tenant.nombre, 30)} ${a.vencimientos.total} vencimientos → oculta ${a.vencimientos.ocultosPorTope}`));
-
-  sub(`Suscriptores al 80% del tope (reventarán pronto): ${cercaDelTope.length}`);
-  cercaDelTope.forEach(a => linea(`   · ${cortar(a.tenant.nombre, 30)} ${a.vencimientos.total} de ${TOPE_PANEL}`));
+  sub(`Suscriptores de volumen alto (informativo): ${volumenAlto.length}`);
+  linea('   El panel los muestra completos. Solo hay que vigilar el tiempo de');
+  linea('   respuesta a medida que crezcan.');
+  volumenAlto.forEach(a => linea(`   · ${cortar(a.tenant.nombre, 30)} ${a.vencimientos.total} vencimientos`));
 
   sub(`Suscriptores sin capacidad "taller": ${sinTaller.length}`);
   linea('   En estos, las órdenes de oficina no pasan por taller: el único camino');
@@ -699,8 +706,7 @@ async function reportarTodos() {
     patrones: {
       conIva: conIva.map(a => a.tenant.nombre),
       fugaTotal: fugaTotal.map(a => a.tenant.nombre),
-      sobreTope: sobreTope.map(a => a.tenant.nombre),
-      cercaDelTope: cercaDelTope.map(a => a.tenant.nombre),
+      volumenAlto: volumenAlto.map(a => a.tenant.nombre),
       sinTaller: sinTaller.map(a => a.tenant.nombre),
       vencioNada: vencioNada.map(a => a.tenant.nombre),
     },
