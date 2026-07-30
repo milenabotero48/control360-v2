@@ -186,60 +186,126 @@ const partirEquipos = (equipoStr, cantidadFila) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// GET /api/vencimientos — Listar con filtros (estado, clienteId, mes)
-// Orden en memoria por fechaVencimiento (regla: sin orderBy/índices compuestos)
+// ✅ VENC-TOPE-001 (2026-07-29) — EL TOPE DE 2000 QUE MENTÍA
+// ─────────────────────────────────────────────────────────────────────────────
+// PROBLEMA: `GET /` hacía `.limit(2000)` SIN orderBy y agrupaba por mes DESPUÉS,
+// en memoria. Firestore devuelve los primeros 2000 por ID interno, sin relación
+// con la fecha, así que el acordeón mostraba cifras ARBITRARIAS: Extintores del
+// Sur tiene 8.027 vencimientos y el panel mostraba 2.000 — ocultaba el 75% y
+// "Julio 2027" aparecía con 36 clientes en vez de los reales. Lo mismo Valle
+// con 7.744. El `/resumen` tenía el mismo vicio con tope de 5000.
+//
+// SOLUCIÓN: se recorre la colección COMPLETA en páginas de 1000 ordenando por
+// __name__ (no requiere índice compuesto — se respeta la regla del proyecto),
+// se enriquece con los datos del cliente UNA vez, y el resultado queda en una
+// caché en memoria por tenant con TTL de 60s. Sobre esa caché responden los
+// tres endpoints de lectura, así que el acordeón, las tarjetas y el detalle de
+// cada mes salen SIEMPRE del mismo universo de datos y ninguno puede mentir.
+//
+// COSTO: 1 escaneo por tenant por minuto en el peor caso. Con 30.000
+// vencimientos son 30 lecturas de página, no 30.000 consultas.
+// ═════════════════════════════════════════════════════════════════════════════
+// La caché vive en services/vencimientosCache.js para que el servicio que
+// CREA vencimientos y la ruta que los LEE puedan invalidarla sin depender uno
+// del otro (evita la dependencia circular ruta ↔ servicio).
+const cacheVenc = require('../services/vencimientosCache');
+const invalidarCache = cacheVenc.invalidar;
+
+// Recorre TODOS los vencimientos del tenant y los devuelve enriquecidos.
+const cargarTodos = async (adminId) => {
+  const enCache = cacheVenc.obtener(adminId);
+  if (enCache) return enCache;
+
+  // 1. Escaneo completo paginado — sin topes arbitrarios.
+  const TAM = 1000;
+  let ultimo = null;
+  const crudos = [];
+  for (;;) {
+    let q = db.collection('vencimientos')
+      .where('adminId', '==', adminId)
+      .orderBy('__name__')
+      .limit(TAM);
+    if (ultimo) q = q.startAfter(ultimo);
+    const snap = await q.get();
+    if (snap.empty) break;
+    snap.docs.forEach(d => crudos.push({ id: d.id, ...d.data() }));
+    ultimo = snap.docs[snap.docs.length - 1];
+    if (snap.size < TAM) break;
+  }
+
+  // 2. Estado calculado al vuelo (no se "pudre" en la base).
+  const hoy = hoyColombia();
+  crudos.forEach(v => { v.estado = calcularEstado(v, hoy); });
+
+  // 3. Enriquecimiento con datos del cliente — FIX VENC-NOMBRE-001: el cruce
+  // se hace acá con getAll por lotes y no en el frontend contra /clients, que
+  // está paginado a 100 y dejaba "Sin nombre" a todo cliente fuera de esa
+  // ventana. Funciona con bases de cualquier tamaño.
+  const idsUnicos = [...new Set(crudos.map(v => v.clienteId).filter(Boolean))];
+  const clientesMap = new Map();
+  for (let i = 0; i < idsUnicos.length; i += 300) {
+    const refs = idsUnicos.slice(i, i + 300).map(id => db.collection('clients').doc(id));
+    if (!refs.length) break;
+    const docs = await db.getAll(...refs);
+    docs.forEach(d => {
+      // Defensa multi-tenant: solo clientes del mismo tenant
+      if (d.exists && d.data().adminId === adminId) clientesMap.set(d.id, d.data());
+    });
+  }
+  const filas = crudos.map(v => {
+    const c = clientesMap.get(v.clienteId);
+    if (!c) return v;
+    return {
+      ...v,
+      clienteNombre:    c.nombre || c.empresa || '',
+      clienteContacto:  c.contacto || '',
+      clienteTelefono:  c.celular || c.telefono || '',
+      clienteDireccion: c.direccionPrincipal || c.direccion || '',
+      clienteBarrio:    c.barrio || '',
+      clienteEmail:     c.emailLegal || c.email || ''
+    };
+  });
+
+  filas.sort((a, b) => (a.fechaVencimiento || '9999').localeCompare(b.fechaVencimiento || '9999'));
+  cacheVenc.guardar(adminId, filas);
+  console.log(`[VENC] Caché reconstruida para ${adminId}: ${filas.length} vencimientos`);
+  return filas;
+};
+
+// Texto sobre el que corre la búsqueda del panel.
+const coincideBusqueda = (v, q) => {
+  if (!q) return true;
+  const t = q.toLowerCase();
+  return [
+    v.descripcionEquipo, v.sucursal, v.clienteNombre, v.clienteContacto,
+    v.clienteTelefono, v.telefono, v.numeroOrden, v.clienteBarrio,
+  ].some(campo => String(campo || '').toLowerCase().includes(t));
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GET /api/vencimientos — Listar con filtros (estado, clienteId, mes, q)
+// Con `mes`, `clienteId` o `q` devuelve TODAS las filas que cumplen: ya no hay
+// tope silencioso. Sin ningún filtro se limita a 2000 por peso de red, pero el
+// panel ya no usa esa ruta: pide el acordeón por /meses y el detalle por mes.
 // ═════════════════════════════════════════════════════════════════════════════
 router.get('/', async (req, res) => {
   try {
     const adminId = getAdminId(req);
-    const { estado, clienteId, mes } = req.query; // mes: 'YYYY-MM'
+    const { estado, clienteId, mes, q, todos } = req.query; // mes: 'YYYY-MM'
 
-    let query = db.collection('vencimientos').where('adminId', '==', adminId);
-    if (clienteId) query = query.where('clienteId', '==', clienteId);
+    let lista = await cargarTodos(adminId);
 
-    const snap = await query.limit(2000).get();
-    const hoy = hoyColombia();
+    if (clienteId) lista = lista.filter(v => v.clienteId === clienteId);
+    if (mes)       lista = lista.filter(v => (v.fechaVencimiento || '').startsWith(mes));
+    if (estado)    lista = lista.filter(v => v.estado === estado);
+    if (q)         lista = lista.filter(v => coincideBusqueda(v, q));
 
-    let lista = snap.docs.map(d => {
-      const data = { id: d.id, ...d.data() };
-      data.estado = calcularEstado(data, hoy);
-      return data;
-    });
-
-    if (estado) lista = lista.filter(v => v.estado === estado);
-    if (mes) lista = lista.filter(v => (v.fechaVencimiento || '').startsWith(mes));
-
-    // ✅ FIX VENC-NOMBRE-001 (2026-07-01): el vencimiento solo guarda clienteId;
-    // el nombre lo resolvía el FRONTEND cruzando contra /clients — pero /clients
-    // quedó paginado a 100 en Ola 3 y todo cliente fuera de esa ventana salía
-    // "Sin nombre". Ahora el cruce se hace AQUÍ con getAll por lotes: funciona
-    // con bases de cualquier tamaño (Luz Marina 1,000+) y sin migrar datos.
-    const idsUnicos = [...new Set(lista.map(v => v.clienteId).filter(Boolean))];
-    const clientesMap = new Map();
-    for (let i = 0; i < idsUnicos.length; i += 300) {
-      const refs = idsUnicos.slice(i, i + 300).map(id => db.collection('clients').doc(id));
-      if (!refs.length) break;
-      const docs = await db.getAll(...refs);
-      docs.forEach(d => {
-        // Defensa multi-tenant: solo clientes del mismo tenant
-        if (d.exists && d.data().adminId === adminId) clientesMap.set(d.id, d.data());
-      });
-    }
-    lista = lista.map(v => {
-      const c = clientesMap.get(v.clienteId);
-      if (!c) return v;
-      return {
-        ...v,
-        clienteNombre:    c.nombre || c.empresa || '',
-        clienteContacto:  c.contacto || '',
-        clienteTelefono:  c.celular || c.telefono || '',
-        clienteDireccion: c.direccionPrincipal || c.direccion || '',
-        clienteBarrio:    c.barrio || '',
-        clienteEmail:     c.emailLegal || c.email || ''
-      };
-    });
-
-    lista.sort((a, b) => (a.fechaVencimiento || '9999').localeCompare(b.fechaVencimiento || '9999'));
+    // Solo se acota cuando NO hay filtro NI se pidió todo explícitamente
+    // (evita mandar 30.000 filas a un navegador que no las pidió). `todos=1`
+    // lo usan los exports, que sí necesitan la base completa.
+    const pidioTodo = todos === '1' || todos === 'true';
+    const sinFiltros = !clienteId && !mes && !estado && !q;
+    if (sinFiltros && !pidioTodo && lista.length > 2000) lista = lista.slice(0, 2000);
 
     return res.json(lista);
   } catch (err) {
@@ -249,22 +315,69 @@ router.get('/', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// GET /api/vencimientos/meses — Acordeón por mes, contado sobre el 100%
+// Devuelve lo que la pantalla necesita para pintar las cabeceras sin tener que
+// bajarse todas las filas: por mes, cuántos CLIENTES distintos, cuántos
+// equipos, y el desglose por estado. Acepta `q` para que la búsqueda siga
+// funcionando sobre la base completa.
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/meses', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const { q, estado } = req.query;
+
+    let filas = await cargarTodos(adminId);
+    if (estado) filas = filas.filter(v => v.estado === estado);
+    if (q)      filas = filas.filter(v => coincideBusqueda(v, q));
+
+    const porMes = new Map();
+    filas.forEach(v => {
+      const mk = (v.fechaVencimiento || '').slice(0, 7) || 'sin_fecha';
+      if (!porMes.has(mk)) {
+        porMes.set(mk, { key: mk, equipos: 0, clientes: new Map() });
+      }
+      const m = porMes.get(mk);
+      m.equipos += 1;
+      const cKey = v.clienteId || v.telefono || 'sin_cliente';
+      // El estado del cliente en el mes es el MÁS URGENTE de sus equipos,
+      // igual que hace la pantalla: VENCIDO > POR_VENCER > VIGENTE.
+      const prioridad = { VENCIDO: 4, POR_VENCER: 3, VIGENTE: 2, SIN_FECHA: 1, GESTIONADO: 0 };
+      const actual = m.clientes.get(cKey);
+      if (!actual || (prioridad[v.estado] || 0) > (prioridad[actual] || 0)) {
+        m.clientes.set(cKey, v.estado);
+      }
+    });
+
+    const meses = [...porMes.values()].map(m => {
+      const estados = { VENCIDO: 0, POR_VENCER: 0, VIGENTE: 0, GESTIONADO: 0, SIN_FECHA: 0 };
+      m.clientes.forEach(e => { estados[e] = (estados[e] || 0) + 1; });
+      return { key: m.key, totalClientes: m.clientes.size, totalEquipos: m.equipos, estados };
+    }).sort((a, b) => a.key.localeCompare(b.key));
+
+    return res.json({
+      meses,
+      totalEquipos: filas.length,
+      totalMeses: meses.length,
+    });
+  } catch (err) {
+    console.error('GET /vencimientos/meses:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 // GET /api/vencimientos/resumen — Tarjetas del dashboard
+// Cuenta sobre el 100% de la colección: antes tenía tope de 5000 y a Sur y
+// Valle les mentía igual que el listado.
 // ═════════════════════════════════════════════════════════════════════════════
 router.get('/resumen', async (req, res) => {
   try {
     const adminId = getAdminId(req);
-    const snap = await db.collection('vencimientos')
-      .where('adminId', '==', adminId)
-      .limit(5000)
-      .get();
+    const filas = await cargarTodos(adminId);
 
-    const hoy = hoyColombia();
     const resumen = { VENCIDO: 0, POR_VENCER: 0, VIGENTE: 0, GESTIONADO: 0, SIN_FECHA: 0, total: 0 };
-
-    snap.docs.forEach(d => {
-      const e = calcularEstado(d.data(), hoy);
-      resumen[e] = (resumen[e] || 0) + 1;
+    filas.forEach(v => {
+      resumen[v.estado] = (resumen[v.estado] || 0) + 1;
       resumen.total++;
     });
 
@@ -324,6 +437,7 @@ router.post('/', async (req, res) => {
       datos: { vencimientoId: ref.id, clienteId }
     });
 
+    invalidarCache(adminId); // VENC-TOPE-001: el panel debe verlo al instante
     return res.status(201).json({ id: ref.id, ...nuevo });
   } catch (err) {
     console.error('POST /vencimientos:', err);
@@ -572,6 +686,7 @@ router.post('/importar', async (req, res) => {
       datos: { totalFilas: filas.length, errores: resultado.errores.length }
     });
 
+    invalidarCache(adminId); // VENC-TOPE-001
     return res.json({ ...resultado, ...resultadoExtra });
   } catch (err) {
     console.error('POST /vencimientos/importar:', err);
@@ -698,6 +813,8 @@ router.post('/cerrar-ciclos-servidos', async (req, res) => {
       });
     }
 
+    if (aplicar && aCerrar.length) invalidarCache(adminId); // VENC-TOPE-001
+
     return res.json({
       simulacion: !aplicar,
       clientesConServicio: servidos.size,
@@ -743,6 +860,7 @@ router.put('/:id', async (req, res) => {
       datos: { cambios: Object.keys(update) }
     });
 
+    invalidarCache(adminId); // VENC-TOPE-001
     return res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });

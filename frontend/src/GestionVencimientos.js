@@ -63,7 +63,18 @@ const estadoMasUrgente = (equipos) => {
 };
 
 export default function GestionVencimientos({ user, onNavegar }) {
-  const [lista,        setLista]        = useState([]);
+  // ✅ VENC-TOPE-001 (2026-07-29): antes esta pantalla se bajaba TODA la
+  // colección de una (`GET /vencimientos`) y agrupaba por mes en el navegador.
+  // El backend cortaba en 2000 documentos sin avisar, así que con Extintores
+  // del Sur (8.027 vencimientos) el acordeón mostraba el 25% de la base y
+  // "Julio 2027" salía con 36 clientes en vez de los reales.
+  // Ahora: el backend cuenta el 100% y devuelve el acordeón ya agregado por
+  // mes (`/vencimientos/meses`), y las filas de un mes se piden solo cuando
+  // se abre ese mes. Escala igual con 900 que con 30.000.
+  const [meses,        setMeses]        = useState([]);   // cabeceras del acordeón
+  const [filasPorMes,  setFilasPorMes]  = useState({});   // { 'YYYY-MM': [filas] }
+  const [cargandoMes,  setCargandoMes]  = useState(null); // mes que se está trayendo
+  const [totalEquipos, setTotalEquipos] = useState(0);
   const [resumen,      setResumen]      = useState(null);
   const [clientes,     setClientes]     = useState([]);
   const [cargando,     setCargando]     = useState(true);
@@ -92,25 +103,53 @@ export default function GestionVencimientos({ user, onNavegar }) {
   const [empresaImportSel, setEmpresaImportSel] = useState('');
   const [archivoImportSel, setArchivoImportSel] = useState(null);
 
+  // Trae el acordeón (agregado en backend sobre el 100% de la base) + tarjetas.
+  // Los filtros de estado y búsqueda viajan al servidor: si se aplicaran acá
+  // volveríamos a filtrar sobre una muestra parcial, que es el bug original.
   const cargar = useCallback(async () => {
     setCargando(true);
     try {
-      const url = filtroEstado ? `${API}/vencimientos?estado=${filtroEstado}` : `${API}/vencimientos`;
-      const [r1,r2,r3] = await Promise.all([
+      const qs = new URLSearchParams();
+      if (filtroEstado) qs.set('estado', filtroEstado);
+      if (busqueda.trim()) qs.set('q', busqueda.trim());
+      const sufijo = qs.toString() ? `?${qs}` : '';
+
+      const [r1, r2] = await Promise.all([
         fetch(`${API}/vencimientos/resumen`, { headers: authHeaders() }),
-        fetch(url, { headers: authHeaders() }),
-        fetch(`${API}/clients`, { headers: authHeaders() }),
+        fetch(`${API}/vencimientos/meses${sufijo}`, { headers: authHeaders() }),
       ]);
-      const [res,lst,clis] = await Promise.all([r1.json(),r2.json(),r3.json()]);
+      const [res, ms] = await Promise.all([r1.json(), r2.json()]);
       setResumen(res);
-      setLista(Array.isArray(lst) ? lst : []);
-      const arr = Array.isArray(clis) ? clis : (clis.clientes||clis.clients||[]);
-      setClientes(arr);
+      setMeses(Array.isArray(ms?.meses) ? ms.meses : []);
+      setTotalEquipos(ms?.totalEquipos || 0);
+      setFilasPorMes({});   // el filtro cambió: lo ya traído dejó de ser válido
+      setMesAbierto(null);
     } catch(e) { console.error(e); }
     setCargando(false);
-  }, [filtroEstado]);
+  }, [filtroEstado, busqueda]);
 
-  useEffect(() => { cargar(); }, [cargar]);
+  // Debounce de la búsqueda para no pegarle al backend en cada tecla.
+  useEffect(() => {
+    const t = setTimeout(() => { cargar(); }, busqueda ? 350 : 0);
+    return () => clearTimeout(t);
+  }, [cargar, busqueda]);
+
+  // Trae las filas de un mes solo cuando se abre (y una sola vez).
+  const abrirMes = useCallback(async (mesKeyPedido) => {
+    if (!mesKeyPedido || filasPorMes[mesKeyPedido]) return;
+    setCargandoMes(mesKeyPedido);
+    try {
+      const qs = new URLSearchParams({ mes: mesKeyPedido });
+      if (filtroEstado) qs.set('estado', filtroEstado);
+      if (busqueda.trim()) qs.set('q', busqueda.trim());
+      const r = await fetch(`${API}/vencimientos?${qs}`, { headers: authHeaders() });
+      const filas = await r.json();
+      setFilasPorMes(prev => ({ ...prev, [mesKeyPedido]: Array.isArray(filas) ? filas : [] }));
+    } catch(e) { console.error(e); }
+    setCargandoMes(null);
+  }, [filasPorMes, filtroEstado, busqueda]);
+
+  useEffect(() => { if (mesAbierto) abrirMes(mesAbierto); }, [mesAbierto, abrirMes]);
 
   // ✅ NUEVO: cargar empresas del tenant para el selector de importación
   useEffect(() => {
@@ -122,74 +161,83 @@ export default function GestionVencimientos({ user, onNavegar }) {
 
   const buscarCliente = (id) => clientes.find(c => (c.id||c.uid) === id);
 
-  // Agrupar: mes → cliente → equipos
-  const agruparPorMesYCliente = () => {
-    const filtrados = lista.filter(v => {
-      if (!busqueda) return true;
-      const q = busqueda.toLowerCase();
-      const cli = buscarCliente(v.clienteId);
-      return (
-        (v.descripcionEquipo||'').toLowerCase().includes(q) ||
-        (v.sucursal||'').toLowerCase().includes(q) ||
-        (v.clienteNombre||'').toLowerCase().includes(q) ||
-        (v.clienteContacto||'').toLowerCase().includes(q) ||
-        (cli?.nombre||'').toLowerCase().includes(q) ||
-        (cli?.empresa||'').toLowerCase().includes(q) ||
-        (v.clienteTelefono||'').includes(q) ||
-        (v.telefono||'').includes(q)
-      );
-    });
-
-    // Nivel 1: por mes
-    const meses = {};
-    filtrados.forEach(v => {
-      const mk = mesKey(v.fechaVencimiento);
-      if (!meses[mk]) meses[mk] = { key:mk, label:formatMes(v.fechaVencimiento), clientes:{} };
-      // Nivel 2: por cliente dentro del mes
-      const cli = buscarCliente(v.clienteId);
+  // Agrupa por CLIENTE las filas de UN mes ya traído del servidor.
+  // El backend manda los datos del cliente en cada fila (VENC-NOMBRE-001), así
+  // que ya no hace falta cruzar contra /clients, que estaba paginado a 100 y
+  // dejaba "Sin nombre" a todo cliente fuera de esa ventana.
+  const agruparClientes = (filas = []) => {
+    const porCliente = {};
+    filas.forEach(v => {
       const cKey = v.clienteId || v.telefono || 'sin_cliente';
-      if (!meses[mk].clientes[cKey]) {
-        meses[mk].clientes[cKey] = {
+      if (!porCliente[cKey]) {
+        porCliente[cKey] = {
           cKey, clienteId: v.clienteId,
-          nombre: v.clienteNombre || cli?.nombre || cli?.empresa || 'Sin nombre',
-          contacto: v.clienteContacto || cli?.contacto || null,
-          telefono: v.clienteTelefono || cli?.celular || cli?.telefono || v.telefono || null,
-          direccion: v.clienteDireccion || cli?.direccionPrincipal || cli?.direccion || null,
-          barrio: v.clienteBarrio || cli?.barrio || null,
-          email: v.clienteEmail || cli?.emailLegal || cli?.email || null,
+          nombre:    v.clienteNombre || 'Sin nombre',
+          contacto:  v.clienteContacto || null,
+          telefono:  v.clienteTelefono || v.telefono || null,
+          direccion: v.clienteDireccion || null,
+          barrio:    v.clienteBarrio || null,
+          email:     v.clienteEmail || null,
           equipos: [],
         };
       }
-      meses[mk].clientes[cKey].equipos.push(v);
+      porCliente[cKey].equipos.push(v);
     });
-
-    return Object.values(meses)
-      .sort((a,b) => a.key.localeCompare(b.key))
-      .map(m => ({
-        ...m,
-        clientes: Object.values(m.clientes),
-        total: Object.values(m.clientes).length,
-        estados: Object.values(m.clientes).reduce((acc, c) => {
-          const e = estadoMasUrgente(c.equipos);
-          acc[e] = (acc[e]||0) + 1;
-          return acc;
-        }, {}),
-      }));
+    return Object.values(porCliente);
   };
 
-  const agrupado = agruparPorMesYCliente();
+  // Cabeceras del acordeón: los totales vienen contados en backend sobre el
+  // 100% de la base. Las filas solo existen para el mes que esté abierto.
+  const agrupado = meses.map(m => ({
+    key: m.key,
+    label: m.key === 'sin_fecha' ? 'Sin fecha' : formatMes(`${m.key}-01`),
+    total: m.totalClientes,
+    totalEquipos: m.totalEquipos,
+    estados: m.estados || {},
+    clientes: agruparClientes(filasPorMes[m.key] || []),
+  }));
 
   // ✅ FIX GESTIONADO-001: el backend expone PUT /:id y espera
   // { gestionado: true } — el frontend mandaba PATCH { estado } y la marca
   // NUNCA se guardaba (la fila volvía a aparecer al recargar).
-  const marcarGestionado = async (vencId) => {
+  // Refresca solo lo necesario: las cabeceras del acordeón, las tarjetas y las
+  // filas del mes abierto. No se usa cargar() porque cerraría el mes que la
+  // usuaria está gestionando en ese momento.
+  const refrescarMesAbierto = async () => {
+    try {
+      const qs = new URLSearchParams();
+      if (filtroEstado) qs.set('estado', filtroEstado);
+      if (busqueda.trim()) qs.set('q', busqueda.trim());
+      const sufijo = qs.toString() ? `?${qs}` : '';
+
+      const [r1, r2] = await Promise.all([
+        fetch(`${API}/vencimientos/resumen`, { headers: authHeaders() }),
+        fetch(`${API}/vencimientos/meses${sufijo}`, { headers: authHeaders() }),
+      ]);
+      const [res, ms] = await Promise.all([r1.json(), r2.json()]);
+      setResumen(res);
+      setMeses(Array.isArray(ms?.meses) ? ms.meses : []);
+      setTotalEquipos(ms?.totalEquipos || 0);
+
+      if (mesAbierto) {
+        const q2 = new URLSearchParams({ mes: mesAbierto });
+        if (filtroEstado) q2.set('estado', filtroEstado);
+        if (busqueda.trim()) q2.set('q', busqueda.trim());
+        const r = await fetch(`${API}/vencimientos?${q2}`, { headers: authHeaders() });
+        const filas = await r.json();
+        setFilasPorMes(prev => ({ ...prev, [mesAbierto]: Array.isArray(filas) ? filas : [] }));
+      }
+    } catch(e) { console.error(e); }
+  };
+
+  const marcarGestionado = async (vencId, refrescar = true) => {
     try {
       await fetch(`${API}/vencimientos/${vencId}`, {
         method: 'PUT',
         headers: authHeaders(),
         body: JSON.stringify({ gestionado: true })
       });
-      cargar();
+      if (refrescar) await refrescarMesAbierto();
     } catch(e) { console.error(e); }
   };
 
@@ -197,7 +245,9 @@ export default function GestionVencimientos({ user, onNavegar }) {
     e.stopPropagation?.();
     const ids = equipos.map(eq => eq.id).filter(Boolean);
     if (ids.length === 0) return;
-    for (const id of ids) await marcarGestionado(id);
+    // Un solo refresco al final, no uno por equipo.
+    for (const id of ids) await marcarGestionado(id, false);
+    await refrescarMesAbierto();
   };
 
   // ✅ FIX IMPORT-VENC-001: la importación estaba ROTA — el frontend enviaba el
@@ -379,10 +429,22 @@ export default function GestionVencimientos({ user, onNavegar }) {
     }
   };
 
-  const exportarCSV = () => {
+  // ✅ VENC-TOPE-001: los exports ya no pueden leer de una lista en memoria —
+  // esa lista era justamente la muestra truncada a 2000. Piden los datos al
+  // servidor, que responde sobre el 100% de la base.
+  const traerFilas = async (params = {}) => {
+    const qs = new URLSearchParams(params);
+    if (busqueda.trim() && !params.q) qs.set('q', busqueda.trim());
+    const r = await fetch(`${API}/vencimientos?${qs}`, { headers: authHeaders() });
+    const filas = await r.json();
+    return Array.isArray(filas) ? filas : [];
+  };
+
+  const exportarCSV = async () => {
+    const filas = await traerFilas(filtroEstado ? { estado: filtroEstado } : { todos: '1' });
     const rows = [['Cliente','Empresa','Teléfono','Equipo','Cantidad','Sucursal','Vencimiento','Estado']];
-    lista.forEach(v => {
-      rows.push([v.clienteNombre||'',v.empresa||'',v.telefono||'',v.descripcionEquipo||'',v.cantidad||1,v.sucursal||'',v.fechaVencimiento||'',v.estado||'']);
+    filas.forEach(v => {
+      rows.push([v.clienteNombre||'',v.empresa||'',v.clienteTelefono||v.telefono||'',v.descripcionEquipo||'',v.cantidad||1,v.sucursal||'',v.fechaVencimiento||'',v.estado||'']);
     });
     const csv = rows.map(r => r.map(c => `"${c}"`).join(',')).join('\n');
     const link = document.createElement('a');
@@ -407,16 +469,24 @@ export default function GestionVencimientos({ user, onNavegar }) {
   //  · Solo se exportan vencidos y por vencer — no tiene sentido escribirle
   //    a quien está vigente.
   // ═══════════════════════════════════════════════════════════════════════════
-  const exportarGoogleContacts = () => {
+  const exportarGoogleContacts = async () => {
     const mesTag = new Date().toISOString().slice(0, 7); // AAAA-MM
     const etiqueta = `VENC-${mesTag}`;
 
+    // ✅ VENC-TOPE-001: se piden al servidor los VENCIDO y POR_VENCER de toda
+    // la base. Antes filtraba en memoria comparando contra 'vencido' y
+    // 'por_vencer' en minúscula, pero el backend devuelve los estados en
+    // MAYÚSCULA: el filtro no casaba nunca y el CSV de la campaña salía vacío.
+    const [vencidos, porVencer] = await Promise.all([
+      traerFilas({ estado: 'VENCIDO' }),
+      traerFilas({ estado: 'POR_VENCER' }),
+    ]);
+
     // 1) Agrupar por cliente (clave: id de cliente, o teléfono si no hay id)
     const porCliente = new Map();
-    lista
-      .filter(v => v.estado === 'vencido' || v.estado === 'por_vencer')
+    [...vencidos, ...porVencer]
       .forEach(v => {
-        const tel = String(v.telefono || '').replace(/\D/g, '');
+        const tel = String(v.clienteTelefono || v.telefono || '').replace(/\D/g, '');
         if (!tel) return; // sin teléfono no sirve para la campaña
         const clave = v.clienteId || tel;
         if (!porCliente.has(clave)) {
@@ -491,9 +561,13 @@ export default function GestionVencimientos({ user, onNavegar }) {
         </h1>
         {resumen && (
           <div style={{ display:'flex', gap:16, fontSize:13, color:'#6b7280' }}>
-            <span>🔴 {resumen.vencido} Vencido</span>
-            <span>🟡 {resumen.por_vencer} Por vencer</span>
-            <span>🟢 {resumen.vigente} Vigente</span>
+            {/* ✅ VENC-TOPE-001: el backend devuelve los estados en MAYÚSCULA
+                (VENCIDO/POR_VENCER/VIGENTE). Estas tarjetas leían las claves en
+                minúscula, así que siempre mostraban vacío. */}
+            <span>🔴 {resumen.VENCIDO ?? 0} Vencido</span>
+            <span>🟡 {resumen.POR_VENCER ?? 0} Por vencer</span>
+            <span>🟢 {resumen.VIGENTE ?? 0} Vigente</span>
+            <span style={{ color:'#9ca3af' }}>· {resumen.total ?? 0} equipos en total</span>
           </div>
         )}
       </div>
@@ -700,7 +774,8 @@ export default function GestionVencimientos({ user, onNavegar }) {
                     <div>
                       <div style={{ fontWeight:800, fontSize:14, color:'#1a1a2e' }}>{mes.label}</div>
                       <div style={{ fontSize:12, color:'#9ca3af', marginTop:2 }}>
-                        {mes.total} cliente{mes.total!==1?'s':''} • 
+                        {mes.total} cliente{mes.total!==1?'s':''}
+                        {mes.totalEquipos ? ` · ${mes.totalEquipos} equipo${mes.totalEquipos!==1?'s':''}` : ''} •
                         <span style={{ marginLeft:8, color:'#b91c1c' }}>🔴 {mes.estados.VENCIDO||0}</span>
                         <span style={{ marginLeft:8, color:'#b45309' }}>🟡 {mes.estados.POR_VENCER||0}</span>
                         <span style={{ marginLeft:8, color:'#15803d' }}>🟢 {mes.estados.VIGENTE||0}</span>
@@ -709,9 +784,14 @@ export default function GestionVencimientos({ user, onNavegar }) {
                     <div style={{ fontSize:18, color:'#9ca3af' }}>{mesAbierto === mes.key ? '▼' : '▶'}</div>
                   </button>
 
-                  {/* Clientes del mes */}
+                  {/* Clientes del mes — se piden al servidor al abrir el mes */}
                   {mesAbierto === mes.key && (
                     <div style={{ padding:'0 16px 16px', background:'#f9fafb' }}>
+                      {cargandoMes === mes.key && (
+                        <div style={{ textAlign:'center', color:'#9ca3af', padding:16, fontSize:13 }}>
+                          Cargando {mes.total} cliente{mes.total!==1?'s':''}...
+                        </div>
+                      )}
                       {mes.clientes.map((c, idx) => {
                         const todosGestionados = c.equipos.every(e => e.estado === 'GESTIONADO');
                         const est = ESTADOS[estadoMasUrgente(c.equipos)] || ESTADOS.VIGENTE;

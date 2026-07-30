@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const { authenticate, validarTenant } = require('../middleware/auth');
 
 // Servicio de vencimientos — hook por categoría (RECARGA Y MANTENIMIENTO / EXTINTORES)
-const { crearVencimientosDeOrden } = require('../services/vencimientosService');
+const { crearVencimientosDeOrden, anularVencimientosDeOrden } = require('../services/vencimientosService');
 
 // ✅ FIX ANNY-NOTIF-001: notificaciones al cliente vía la línea de Anny.
 // Fire-and-forget: si el tenant no tiene anny_ia o no está conectado,
@@ -1308,10 +1308,18 @@ router.post('/', authenticate, async (req, res) => {
       datos: { numeroOrden, clienteNombre, total, tipoOrden: tipoFinal, pagadoAlCrear, esCxc, formaPago, lugarAtencion: lugarNorm }
     });
 
-    // ── Hook vencimientos: órdenes que nacen completadas (oficina/cambio) ────
-    // Las de domicilio y taller se cubren en logistics.js y workshop.js.
-    // Aquí aplica solo si estadoInicial === 'completada' Y tiene items de recarga.
-    if (estadoInicial === 'completada' && !esProduccion && !esInterna) {
+    // ── Hook vencimientos ─────────────────────────────────────────────────────
+    // ✅ VENC-CREACION-001 (2026-07-29): antes esto exigía
+    // `estadoInicial === 'completada'` y confiaba en que logistics.js y
+    // workshop.js cubrieran los demás flujos. logistics.js NUNCA lo llamó, y
+    // el de workshop solo dispara si el taller avanza directo a 'completada'
+    // (un único caso de cinco). Resultado medido: 565 de 1.594 órdenes del
+    // sistema sin vencimiento, 55% de fuga en los tenants con taller.
+    // Ahora la regla es la misma que la de CxC: la orden se crea, entra.
+    // El estado y la forma de pago son irrelevantes — el tiempo del pago no
+    // tiene nada que ver con el tiempo del servicio. Si luego se anula, sale.
+    // El servicio es idempotente: no duplica si ya existen.
+    if (!esProduccion && !esInterna) {
       const adminId = req.adminId || req.user?.uid;
       crearVencimientosDeOrden(adminId, {
         ...nuevaOrden,
@@ -1645,6 +1653,11 @@ router.put('/:id/estado', authenticate, async (req, res) => {
         dineroEnCaja: false, // ✅ marcar que ya no está en caja
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
+      // ✅ VENC-CREACION-001: "si luego la anulan, sale de vencimiento".
+      // Fire-and-forget: solo retira los vencimientos con origenDato 'orden'
+      // que apunten a ESTA orden. Los importados nunca se tocan.
+      anularVencimientosDeOrden(actual.adminId || usuarioId, id).catch(() => {});
+
       await auditar({
         accion: 'ANULAR_ORDEN',
         descripcion: `${usuarioNombre} anuló orden ${actual.numeroOrden} — Motivo: ${notas}${cajaRevertida ? ` — Caja revertida: -$${cajaRevertida.montoRevertido.toLocaleString('es-CO')}` : ''}`,

@@ -6,3 +6,11 @@ backend/config/*.json
 backend/.env
 .env
 node_modules/
+
+# Reportes del diagnóstico de vencimientos: contienen datos de clientes
+# (nombres, teléfonos, órdenes) de los suscriptores. NUNCA al repositorio.
+backend/diagnostico-sistema-*.json
+backend/diagnostico-vencimientos-*.json
+
+# Mensaje de commit temporal
+commit-msg.txt
