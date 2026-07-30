@@ -65,21 +65,139 @@ const PALABRAS_VENCIMIENTO = [
 // ítem "GARANTIA" dentro de la categoría de extintores generaban vencimiento,
 // y el sistema terminaba llamando al cliente a recargar una canastilla.
 const PALABRAS_EXCLUIDAS = [
+  // Soportes y accesorios del extintor
   'canastilla', 'soporte', 'porta extintor', 'portaextintor', 'base extintor',
   'gabinete', 'garantia', 'garantía',
   'señalizacion', 'señalización', 'senalizacion', 'vinilo',
+  // ✅ Repuestos y partes: llevan "extintor" en la categoría pero no se
+  // recargan. Sin esto se le crea vencimiento a una válvula o un tornillo y
+  // al año siguiente el sistema llama al cliente a "renovar" un repuesto.
   'manguera', 'manometro', 'manómetro',
+  'valvula', 'válvula', 'cilindro', 'cilindros', 'tornillo',
+  'partes del extintor', 'repuesto', 'repuestos',
+  // Servicios que no generan ciclo de recarga
+  'pintura', 'alquiler',
 ];
 
 const textoDelItem = (item = {}) =>
   `${item.categoria || ''} ${item.nombre || ''} ${item.descripcion || ''}`
     .toLowerCase().trim();
 
+// ─── Palabras que SÍ son el servicio de recarga ─────────────────────────────
+// Distinción clave: "recarga"/"mantenimiento" describen el SERVICIO que abre
+// el ciclo de 12 meses. "extintor" a secas describe un PRODUCTO, y ese
+// producto puede ser el equipo (vence) o un repuesto (no vence).
+// Por eso el servicio manda siempre, y la palabra "extintor" queda sujeta a
+// la lista de exclusiones. Sin esta separación, "PINTURA EXTINTOR DE 10 LB"
+// y "VALVULA GRANDE [PARTES DEL EXTINTOR]" generaban vencimiento.
+const PALABRAS_SERVICIO = [
+  'recarga y mantenimiento', 'recargas y mantenimiento',
+  'recarga', 'recargas', 'mantenimiento',
+  'prueba hidrostatica', 'prueba hidrostática',
+  'hidrostatica', 'hidrostática',
+];
+
+// Excepciones dentro del servicio: mantener partes no abre ciclo de recarga.
+const SERVICIO_NO_VENCE = ['otras partes', 'de partes'];
+
+// El NOMBRE describe la cosa; la CATEGORÍA solo dice en qué estante vive.
+// Cuando se contradicen, manda el nombre: "CILINDROS 20 LBS ABC" está en la
+// categoría RECARGA Y MANTENIMIENTO pero es un repuesto, no una recarga.
 const esItemConVencimiento = (item = {}) => {
   const texto = textoDelItem(item);
   if (!texto) return false;
+  const nombre = String(item.nombre || item.descripcion || '').toLowerCase().trim();
+
+  // 1. El nombre EMPIEZA con el servicio ("RECARGA ...", "MANTENIMIENTO ...").
+  //    Es lo más confiable que hay: es el servicio, punto.
+  if (PALABRAS_SERVICIO.some(p => nombre.startsWith(p))) {
+    return !SERVICIO_NO_VENCE.some(p => texto.includes(p));
+  }
+
+  // 2. El nombre es un repuesto o un servicio que no abre ciclo, aunque la
+  //    categoría diga otra cosa.
+  if (PALABRAS_EXCLUIDAS.some(p => nombre.includes(p))) return false;
+
+  // 3. El servicio aparece en la categoría y el nombre no lo contradice.
+  if (PALABRAS_SERVICIO.some(p => texto.includes(p))) {
+    return !SERVICIO_NO_VENCE.some(p => texto.includes(p));
+  }
+
+  // 4. Producto: acá sí aplican todas las exclusiones sobre el texto completo.
   if (PALABRAS_EXCLUIDAS.some(p => texto.includes(p))) return false;
   return PALABRAS_VENCIMIENTO.some(p => texto.includes(p));
+};
+
+// ─── Kit de carretera: UN vencimiento por kit, no uno por componente ─────────
+// El kit se vende como varios ítems sueltos (alfombra, linterna, chaleco,
+// herramientas) que comparten la categoría "KIT DE CARRETERA". Sin esta regla,
+// una sola venta de kit generaba CINCO vencimientos y cuatro eran de cosas que
+// no se recargan nunca. Regla definida por Sandra: un kit vendido = un
+// vencimiento, a nombre del kit.
+const PALABRAS_KIT = ['kit de carretera', 'kit carretera'];
+
+const esItemKit = (item = {}) => {
+  const texto = textoDelItem(item);
+  return PALABRAS_KIT.some(p => texto.includes(p));
+};
+
+// ─── ¿El ítem ES el kit, o es un accesorio suelto de esa categoría? ─────────
+// Regla definida por Sandra: el vencimiento nace SOLO si se vendió el kit.
+// En la categoría "KIT DE CARRETERA" conviven el producto kit (KIT BASICO) y
+// accesorios que se venden sueltos (chaleco, linterna, alfombra, taco,
+// cruceta). Sin esta distinción, quien compraba un chaleco quedaba con un
+// vencimiento de "KIT DE CARRETERA" y al año siguiente Anny lo llamaba a
+// renovar un kit que nunca compró.
+//
+// KIT DE HERRAMIENTAS es un juego de herramientas, NO un kit de carretera.
+const PALABRAS_NO_SON_KIT = ['herramienta', 'herramientas'];
+
+const esProductoKit = (item = {}) => {
+  const nom = String(item.nombre || item.descripcion || '').toLowerCase();
+  if (!nom.includes('kit')) return false;
+  if (PALABRAS_NO_SON_KIT.some(p => nom.includes(p))) return false;
+  return true;
+};
+
+// Cuántos kits se vendieron: la suma de las cantidades de los productos kit.
+const contarKits = (productosKit = []) =>
+  productosKit.reduce((s, i) => s + (Number(i.cantidad) || 1), 0) || 1;
+
+// ═════════════════════════════════════════════════════════════════════════════
+// QUÉ VENCIMIENTOS GENERA UNA ORDEN — fuente única de verdad
+// ─────────────────────────────────────────────────────────────────────────────
+// La usa tanto la creación real como la simulación del script de recuperación.
+// Si estuviera duplicada, la simulación podría mostrar una cosa y escribirse
+// otra: exactamente el tipo de mentira que causó todo este problema.
+// Devuelve [{ descripcion, cantidad, esKit }].
+// ═════════════════════════════════════════════════════════════════════════════
+const vencimientosDeItems = (items = []) => {
+  const aplican = (items || []).filter(esItemConVencimiento);
+  if (!aplican.length) return [];
+
+  // Todo lo que pertenece al mundo "kit de carretera" (producto o accesorio)
+  const delMundoKit = aplican.filter(esItemKit);
+  // El resto (recargas, extintores, mantenimiento, PH) genera uno cada uno.
+  const itemsSueltos = aplican.filter(i => !esItemKit(i));
+
+  const salida = itemsSueltos.map(i => ({
+    descripcion: String(i.nombre || i.descripcion || 'Extintor').trim(),
+    cantidad: Number(i.cantidad) || 1,
+    esKit: false,
+  }));
+
+  // Solo si se vendió el PRODUCTO kit nace el vencimiento, y uno solo:
+  // los accesorios que lo acompañan quedan absorbidos. Si la orden trae
+  // únicamente accesorios sueltos, no vence nada.
+  const productosKit = delMundoKit.filter(esProductoKit);
+  if (productosKit.length) {
+    salida.push({
+      descripcion: 'KIT DE CARRETERA',
+      cantidad: contarKits(productosKit),
+      esKit: true,
+    });
+  }
+  return salida;
 };
 
 // ─── Mes de una fecha, tolerante al tipo que venga de Firestore ──────────────
@@ -231,7 +349,13 @@ const cerrarCiclosAnteriores = async (adminId, { clienteId, telefono, sucursal, 
 // Idempotente. Uso normal (fire-and-forget, nunca bloquea la orden):
 //   crearVencimientosDeOrden(adminId, { ...orden, id: ref.id }).catch(() => {});
 // ═════════════════════════════════════════════════════════════════════════════
-const crearVencimientosDeOrden = async (adminId, orden = {}) => {
+// `opciones.cerrarCiclos` (default true): en el uso normal hay que cerrar el
+// ciclo anterior del cliente. En la recuperación retroactiva se apaga, porque
+// cerrarCiclosAnteriores escanea hasta 3000 documentos POR ORDEN y con 565
+// órdenes serían más de un millón de lecturas. Para ese caso existe el
+// endpoint masivo /vencimientos/cerrar-ciclos-servidos, que lo hace de una.
+const crearVencimientosDeOrden = async (adminId, orden = {}, opciones = {}) => {
+  const { cerrarCiclos = true } = opciones;
   const ordenId = orden.id || null;
   try {
     if (!adminId || !ordenId) return { creados: 0, motivo: 'sin adminId u ordenId' };
@@ -273,12 +397,16 @@ const crearVencimientosDeOrden = async (adminId, orden = {}) => {
       || mesActualColombia();
     const mesVencimiento = calcularMesVencimiento(mesServicio);
 
+    // Misma función que usa la simulación del script de recuperación.
+    const aCrear = vencimientosDeItems(items);
+    if (!aCrear.length) return { creados: 0, motivo: 'sin ítems con vencimiento' };
+
     const batch = db.batch();
     let creados = 0;
 
-    for (const item of items) {
-      const descripcion = String(item.nombre || item.descripcion || 'Extintor').trim();
-      const cantidad = Number(item.cantidad) || 1;
+    for (const item of aCrear) {
+      const descripcion = item.descripcion;
+      const cantidad = item.cantidad;
       const ref = db.collection('vencimientos').doc();
       batch.set(ref, {
         adminId,
@@ -292,6 +420,7 @@ const crearVencimientosDeOrden = async (adminId, orden = {}) => {
         fechaVencimiento: mesVencimiento,        // 'YYYY-MM-01'
         gestionado: false,
         origenDato: 'orden',
+        esKit: item.esKit || false,
         ordenId,
         numeroOrden: orden.numeroOrden || null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -307,13 +436,15 @@ const crearVencimientosDeOrden = async (adminId, orden = {}) => {
 
     // ✅ VENC-CICLO-001: cerrar el ciclo anterior. Va DESPUÉS del commit para
     // que el vencimiento nuevo ya exista y no se cierre a sí mismo.
-    await cerrarCiclosAnteriores(adminId, {
-      clienteId,
-      telefono,
-      sucursal: orden.sucursal || orden.sucursalDireccion || null,
-      ordenId,
-      mesServicio,
-    });
+    if (cerrarCiclos) {
+      await cerrarCiclosAnteriores(adminId, {
+        clienteId,
+        telefono,
+        sucursal: orden.sucursal || orden.sucursalDireccion || null,
+        ordenId,
+        mesServicio,
+      });
+    }
 
     return { creados, mesServicio, mesVencimiento };
   } catch (e) {
@@ -438,8 +569,11 @@ module.exports = {
   crearVencimientosDeOrden,
   anularVencimientosDeOrden,
   esItemConVencimiento,
+  esItemKit,
+  vencimientosDeItems,
   PALABRAS_VENCIMIENTO,
   PALABRAS_EXCLUIDAS,
+  PALABRAS_KIT,
   cerrarCiclosAnteriores,
   normalizarTelefono,
   archivarVencimientosViejos,
