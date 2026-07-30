@@ -216,22 +216,21 @@ const cargarTodos = async (adminId) => {
   const enCache = cacheVenc.obtener(adminId);
   if (enCache) return enCache;
 
-  // 1. Escaneo completo paginado — sin topes arbitrarios.
-  const TAM = 1000;
-  let ultimo = null;
+  // 1. Escaneo completo — el bug era el `.limit(2000)`, no la falta de
+  // paginación. Una consulta sin limit devuelve TODOS los documentos que
+  // cumplen el filtro: Firestore los entrega en streaming, no hay tope.
+  //
+  // ⚠️ NO agregar `.orderBy('__name__')` para paginar: combinado con el
+  // `where('adminId')` exige un índice compuesto que este proyecto no tiene
+  // (regla del proyecto: sin orderBy/índices compuestos). Al intentarlo, la
+  // consulta lanzaba FAILED_PRECONDITION, los tres endpoints devolvían 500 y
+  // el panel quedaba en "Sin vencimientos". El orden se hace en memoria más
+  // abajo, que es lo que ya hacía el código original.
   const crudos = [];
-  for (;;) {
-    let q = db.collection('vencimientos')
-      .where('adminId', '==', adminId)
-      .orderBy('__name__')
-      .limit(TAM);
-    if (ultimo) q = q.startAfter(ultimo);
-    const snap = await q.get();
-    if (snap.empty) break;
-    snap.docs.forEach(d => crudos.push({ id: d.id, ...d.data() }));
-    ultimo = snap.docs[snap.docs.length - 1];
-    if (snap.size < TAM) break;
-  }
+  const snap = await db.collection('vencimientos')
+    .where('adminId', '==', adminId)
+    .get();
+  snap.docs.forEach(d => crudos.push({ id: d.id, ...d.data() }));
 
   // 2. Estado calculado al vuelo (no se "pudre" en la base).
   const hoy = hoyColombia();
@@ -383,6 +382,7 @@ router.get('/resumen', async (req, res) => {
 
     return res.json(resumen);
   } catch (err) {
+    console.error('GET /vencimientos/resumen:', err);
     return res.status(500).json({ error: err.message });
   }
 });

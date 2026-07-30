@@ -75,6 +75,7 @@ export default function GestionVencimientos({ user, onNavegar }) {
   const [filasPorMes,  setFilasPorMes]  = useState({});   // { 'YYYY-MM': [filas] }
   const [cargandoMes,  setCargandoMes]  = useState(null); // mes que se está trayendo
   const [totalEquipos, setTotalEquipos] = useState(0);
+  const [error,        setError]        = useState(null); // falla real del backend
   const [resumen,      setResumen]      = useState(null);
   const [clientes,     setClientes]     = useState([]);
   const [cargando,     setCargando]     = useState(true);
@@ -118,13 +119,26 @@ export default function GestionVencimientos({ user, onNavegar }) {
         fetch(`${API}/vencimientos/resumen`, { headers: authHeaders() }),
         fetch(`${API}/vencimientos/meses${sufijo}`, { headers: authHeaders() }),
       ]);
+      // Si el backend falla, hay que DECIRLO. Mostrar "Sin vencimientos"
+      // cuando en realidad la consulta reventó es el mismo pecado que el
+      // tope de 2000: la pantalla mintiendo sobre el estado de la base.
+      if (!r1.ok || !r2.ok) {
+        const detalle = await (r2.ok ? r1 : r2).json().catch(() => ({}));
+        throw new Error(detalle.error || `El servidor respondió ${r2.ok ? r1.status : r2.status}`);
+      }
       const [res, ms] = await Promise.all([r1.json(), r2.json()]);
       setResumen(res);
       setMeses(Array.isArray(ms?.meses) ? ms.meses : []);
       setTotalEquipos(ms?.totalEquipos || 0);
+      setError(null);
       setFilasPorMes({});   // el filtro cambió: lo ya traído dejó de ser válido
       setMesAbierto(null);
-    } catch(e) { console.error(e); }
+    } catch(e) {
+      console.error(e);
+      setError(e.message || 'No se pudieron cargar los vencimientos');
+      setMeses([]);
+      setResumen(null);
+    }
     setCargando(false);
   }, [filtroEstado, busqueda]);
 
@@ -751,6 +765,30 @@ export default function GestionVencimientos({ user, onNavegar }) {
           {/* Lista de vencimientos */}
           {cargando ? (
             <div style={{ textAlign:'center', color:'#9ca3af', padding:20 }}>Cargando...</div>
+          ) : error ? (
+            /* No decir "Sin vencimientos" cuando lo que pasó es que el backend
+               falló: esa mentira fue justamente la que ocultó el tope de 2000
+               durante meses. Si algo se rompió, se dice. */
+            <div style={{
+              textAlign:'center', padding:24, background:'#fef2f2',
+              border:'1px solid #fecaca', borderRadius:10, color:'#b91c1c'
+            }}>
+              <div style={{ fontWeight:800, marginBottom:6 }}>
+                No se pudieron cargar los vencimientos
+              </div>
+              <div style={{ fontSize:13, marginBottom:12 }}>{error}</div>
+              <div style={{ fontSize:12, color:'#7f1d1d', marginBottom:12 }}>
+                Los datos están intactos: falló la consulta, no la base.
+              </div>
+              <button
+                onClick={() => cargar()}
+                style={{
+                  padding:'8px 18px', border:'none', borderRadius:8,
+                  background:'#b91c1c', color:'#fff', fontWeight:700, cursor:'pointer'
+                }}>
+                Reintentar
+              </button>
+            </div>
           ) : agrupado.length === 0 ? (
             <div style={{ textAlign:'center', color:'#9ca3af', padding:20 }}>Sin vencimientos</div>
           ) : (

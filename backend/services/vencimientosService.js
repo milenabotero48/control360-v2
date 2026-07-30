@@ -32,14 +32,13 @@
 //   2. FECHA: se toma el mes de la ORDEN, no el mes de hoy. Una orden de
 //      mayo registrada en julio vence en mayo del año siguiente.
 //   3. VENCE: mes de la orden + 12 meses, guardado como 'YYYY-MM-01'.
-//   4. IDEMPOTENTE: si la orden ya tiene vencimientos, no duplica. Se puede
-//      llamar al crear, en un reintento, o desde la recuperación retroactiva
-//      de órdenes históricas, sin riesgo.
+//   4. IDEMPOTENTE: si la orden ya tiene vencimientos, no duplica.
 //   5. ANULACIÓN: al anular la orden, sus vencimientos se retiran.
-//   6. AISLAMIENTO: toda operación filtra por adminId (multi-tenant).
-//   7. NO BLOQUEA: si falla, la orden sigue su flujo. Pero el error queda en
-//      audit_logs — antes se lo tragaba un .catch(() => {}) y nadie se
-//      enteró durante un año.
+//   6. CICLOS: al nacer el vencimiento nuevo se cierra el anterior del mismo
+//      cliente/sucursal (VENC-CICLO-001), que queda como RENOVADO.
+//   7. AISLAMIENTO: toda operación filtra por adminId (multi-tenant).
+//   8. NO BLOQUEA: si falla, la orden sigue su flujo. Pero el error queda en
+//      audit_logs — antes se lo tragaba un .catch(() => {}).
 // ============================================================
 
 const { db, admin } = require('../config/firebase');
@@ -118,6 +117,26 @@ const calcularMesVencimiento = (yyyymm) => {
   return `${anio}-${String(mes).padStart(2, '0')}-01`;
 };
 
+// Últimos 10 dígitos — tolera +57, espacios, guiones y prefijos.
+const normalizarTelefono = (t) => {
+  if (!t) return null;
+  const d = String(t).replace(/\D/g, '');
+  return d.length >= 10 ? d.slice(-10) : (d || null);
+};
+
+const normalizarSucursal = (s) =>
+  String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').trim();
+
+// ¿La sucursal de la orden corresponde a la del vencimiento?
+// Si a cualquiera de los dos le falta el dato, se acepta: es preferible cerrar
+// de más en clientes de una sola sede que dejar el ciclo abierto para siempre.
+const mismaSucursal = (sucursalOrden, sucursalVenc) => {
+  const a = normalizarSucursal(sucursalOrden);
+  const b = normalizarSucursal(sucursalVenc);
+  if (!a || !b) return true;
+  return a === b || a.includes(b) || b.includes(a);
+};
+
 // ─── Auditoría de fallos (antes se perdían en silencio) ──────────────────────
 const auditarFallo = async (adminId, ordenId, mensaje) => {
   try {
@@ -134,10 +153,82 @@ const auditarFallo = async (adminId, ordenId, mensaje) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ VENC-CICLO-001 — cerrar el ciclo anterior
+// Cuando el cliente vuelve a recargar, el vencimiento del año pasado deja de
+// perseguirse: queda RENOVADO. Sin esto, la campaña del mes arrastraría
+// clientes que ya vinieron.
+// ═════════════════════════════════════════════════════════════════════════════
+const cerrarCiclosAnteriores = async (adminId, { clienteId, telefono, sucursal, ordenId, mesServicio }) => {
+  try {
+    const telNorm = normalizarTelefono(telefono);
+    if (!telNorm && !clienteId) return { cerrados: 0 };
+
+    // Frontera: todo lo que vence HASTA el último día del mes de servicio.
+    // Un vencimiento de agosto no se cierra con una orden de julio.
+    const limite = `${mesServicio}-31`;
+
+    // Firestore no soporta OR: se consulta por cada clave y se unifica por id.
+    const candidatos = new Map();
+
+    if (clienteId) {
+      const s = await db.collection('vencimientos')
+        .where('adminId', '==', adminId)
+        .where('clienteId', '==', clienteId)
+        .where('gestionado', '==', false)
+        .limit(300).get();
+      s.docs.forEach(d => candidatos.set(d.id, d));
+    }
+
+    if (telNorm) {
+      // El teléfono puede estar guardado con distintos formatos; se filtra en
+      // memoria contra la forma normalizada.
+      const s = await db.collection('vencimientos')
+        .where('adminId', '==', adminId)
+        .where('gestionado', '==', false)
+        .limit(3000).get();
+      s.docs.forEach(d => {
+        if (normalizarTelefono(d.data().telefono) === telNorm) candidatos.set(d.id, d);
+      });
+    }
+
+    if (!candidatos.size) return { cerrados: 0 };
+
+    const batch = db.batch();
+    let cerrados = 0;
+
+    candidatos.forEach(doc => {
+      const v = doc.data();
+      if (!v.fechaVencimiento) return;
+      if (v.fechaVencimiento > limite) return;                 // aún vigente
+      if (!mismaSucursal(sucursal, v.sucursal)) return;        // otra sede
+      if (v.ordenId === ordenId) return;                       // el que acaba de nacer
+
+      batch.update(doc.ref, {
+        gestionado: true,
+        estadoCiclo: 'RENOVADO',
+        cerradoPorOrdenId: ordenId || null,
+        cerradoMotivo: 'servicio_facturado',
+        cerradoAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      cerrados++;
+    });
+
+    if (cerrados) {
+      await batch.commit();
+      cacheVenc.invalidar(adminId);
+      console.log(`[VENC-CICLO] Orden ${ordenId}: ${cerrados} ciclo(s) anterior(es) cerrado(s)`);
+    }
+    return { cerrados };
+  } catch (e) {
+    console.error('[VENC-CICLO] Error cerrando ciclos anteriores:', e.message);
+    return { cerrados: 0, error: e.message };
+  }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 // CREAR los vencimientos de una orden
-// ─────────────────────────────────────────────────────────────────────────────
-// Idempotente: si la orden ya tiene vencimientos, no hace nada.
-// Uso normal (fire-and-forget, nunca bloquea la orden):
+// Idempotente. Uso normal (fire-and-forget, nunca bloquea la orden):
 //   crearVencimientosDeOrden(adminId, { ...orden, id: ref.id }).catch(() => {});
 // ═════════════════════════════════════════════════════════════════════════════
 const crearVencimientosDeOrden = async (adminId, orden = {}) => {
@@ -213,6 +304,17 @@ const crearVencimientosDeOrden = async (adminId, orden = {}) => {
       cacheVenc.invalidar(adminId);
       console.log(`[VENC] Orden ${orden.numeroOrden || ordenId}: ${creados} vencimientos → ${mesVencimiento}`);
     }
+
+    // ✅ VENC-CICLO-001: cerrar el ciclo anterior. Va DESPUÉS del commit para
+    // que el vencimiento nuevo ya exista y no se cierre a sí mismo.
+    await cerrarCiclosAnteriores(adminId, {
+      clienteId,
+      telefono,
+      sucursal: orden.sucursal || orden.sucursalDireccion || null,
+      ordenId,
+      mesServicio,
+    });
+
     return { creados, mesServicio, mesVencimiento };
   } catch (e) {
     console.error('[VENC] Error creando vencimientos:', e.message);
@@ -222,8 +324,7 @@ const crearVencimientosDeOrden = async (adminId, orden = {}) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ANULAR los vencimientos de una orden
-// ─────────────────────────────────────────────────────────────────────────────
+// ANULAR los vencimientos de una orden — VENC-CREACION-001
 // "Si luego la anulan, sale de vencimiento."
 // Solo toca los vencimientos con origenDato 'orden' que apunten a ESTA orden:
 // los importados manualmente jamás se borran desde acá.
@@ -259,10 +360,88 @@ const anularVencimientosDeOrden = async (adminId, ordenId) => {
   }
 };
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ ARCHIVADO AUTOMÁTICO — VENC-CICLO-004
+// ─────────────────────────────────────────────────────────────────────────────
+// Sin esto, al cerrar el año habría doce meses apilados de clientes que nunca
+// volvieron, y cada campaña tendría que revolver toda esa acumulación.
+//
+// Regla (definida con Sandra): un vencimiento con más de 6 MESES de vencido
+// pasa a PERDIDO y sale de la base activa. Seis y no cuatro porque en este
+// negocio es normal que el cliente aparezca uno o dos meses tarde.
+//
+// NO se borra nada: queda con estadoCiclo PERDIDO para campañas de
+// reactivación anuales, que es distinto a perseguirlo todos los meses. Y si el
+// cliente vuelve, cerrarCiclosAnteriores lo reactiva solo.
+// ═════════════════════════════════════════════════════════════════════════════
+const MESES_PARA_PERDIDO = Number(process.env.VENC_MESES_PERDIDO) || 6;
+
+const archivarVencimientosViejos = async () => {
+  try {
+    const hoyCO = new Date(Date.now() - 5 * 3600 * 1000);
+    const corte = new Date(hoyCO.getFullYear(), hoyCO.getMonth() - MESES_PARA_PERDIDO, 1)
+      .toISOString().slice(0, 10);
+
+    const snap = await db.collection('vencimientos')
+      .where('gestionado', '==', false)
+      .limit(2000)
+      .get();
+
+    const viejos = snap.docs.filter(d => {
+      const f = d.data().fechaVencimiento;
+      return f && f < corte;
+    });
+    if (!viejos.length) return { archivados: 0 };
+
+    const tenantsTocados = new Set();
+    for (let i = 0; i < viejos.length; i += 450) {
+      const batch = db.batch();
+      viejos.slice(i, i + 450).forEach(d => {
+        tenantsTocados.add(d.data().adminId);
+        batch.update(d.ref, {
+          gestionado: true,
+          estadoCiclo: 'PERDIDO',
+          motivoPerdido: `sin_servicio_mas_de_${MESES_PARA_PERDIDO}_meses`,
+          archivadoAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+      await batch.commit();
+    }
+    // VENC-TOPE-001: el cron toca varios tenants, hay que refrescarles la caché.
+    tenantsTocados.forEach(t => cacheVenc.invalidar(t));
+
+    console.log(`[VENC-CICLO] Archivados ${viejos.length} vencimiento(s) con más de ${MESES_PARA_PERDIDO} meses`);
+    return { archivados: viejos.length };
+  } catch (e) {
+    console.error('[VENC-CICLO] Error archivando vencimientos viejos:', e.message);
+    return { archivados: 0, error: e.message };
+  }
+};
+
+// Cron diario a las 4 AM Colombia — fuera de horario de operación.
+const iniciarCronArchivado = () => {
+  let ultimaEjecucion = null;
+  const verificar = () => {
+    const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
+    const hoy = ahoraCO.toISOString().slice(0, 10);
+    if (ahoraCO.getUTCHours() !== 4) return;
+    if (ultimaEjecucion === hoy) return;
+    ultimaEjecucion = hoy;
+    archivarVencimientosViejos().catch(e => console.error('[VENC-CICLO-CRON]', e.message));
+  };
+  setInterval(verificar, 30 * 60 * 1000);
+  console.log(`✅ Cron de archivado de vencimientos activo — PERDIDO tras ${MESES_PARA_PERDIDO} meses`);
+};
+
 module.exports = {
   crearVencimientosDeOrden,
   anularVencimientosDeOrden,
   esItemConVencimiento,
   PALABRAS_VENCIMIENTO,
   PALABRAS_EXCLUIDAS,
+  cerrarCiclosAnteriores,
+  normalizarTelefono,
+  archivarVencimientosViejos,
+  iniciarCronArchivado,
 };
