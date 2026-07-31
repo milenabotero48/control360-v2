@@ -6,6 +6,13 @@ import { exportarExcel } from './exportExcel';
 // ✅ CAJA-REDISENO-001: gráficas SVG puras (dona + flujo mensual), livianas
 // ✅ FIX CAJA-FLUJO-001: fechaMovISO normaliza Timestamps de Firestore
 import { DonaDistribucion, FlujoMensual, colorPorIndice, fechaMovISO } from './CajaGraficas';
+// ✅ MOVIMIENTOS-SIGNO-001: fuente única de verdad del signo de un movimiento.
+// Antes cada pantalla reinventaba la regla y no coincidían entre sí (caso real
+// OS-0759: un traslado recibido se pintaba negativo en la caja destino).
+import {
+  esEntrada, esTraslado, signoDe, colorDe, iconoDe, etiquetaDe,
+  montoAbs, montoConSigno, COLOR_TRASLADO
+} from './utils/movimientos';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -676,9 +683,11 @@ export default function GestionCaja({ user }) {
   const totalSaldo = cajasVisibles.filter(c => c.saldo !== null && c.saldo !== undefined).reduce((a, c) => a + Number(c.saldo || 0), 0);
   const hayReservadas = !esAdminUser;
 
-  const iconTipo = (tipo) => ({ ingreso: '📥', egreso: '📤', traslado_salida: '🔄↗', traslado_entrada: '🔄↘', ajuste: '⚖️' }[tipo] || '💰');
-  const colorTipo = (tipo) => ['ingreso', 'traslado_entrada'].includes(tipo) ? '#16a34a' : '#dc2626';
-  const esPositivo = (tipo) => ['ingreso', 'traslado_entrada'].includes(tipo);
+  // ✅ MOVIMIENTOS-SIGNO-001: estos helpers ahora delegan en utils/movimientos.
+  // Se conservan los nombres locales para no tocar los puntos de uso existentes.
+  const iconTipo = iconoDe;
+  const colorTipo = colorDe;
+  const esPositivo = esEntrada;
 
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>⏳ Cargando cajas...</div>;
 
@@ -783,7 +792,7 @@ export default function GestionCaja({ user }) {
                   {fechaMovISO(m) || '—'}{m.referencia ? ` · ${m.referencia}` : ''}{m.formaPago ? ` · ${m.formaPago}` : ''}
                 </div>
               </div>
-              <div style={{ fontWeight: 800, fontSize: 15, color: m.tipo === 'egreso' ? '#dc2626' : '#16a34a' }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: colorDe(m.tipo) }}>
                 {m.tipo === 'egreso' ? '-' : '+'}{fmt(Math.abs(Number(m.monto) || 0))}
               </div>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -948,9 +957,9 @@ export default function GestionCaja({ user }) {
                     <td style={S.td}><span style={{ fontSize: 12, color: '#64748b' }}>{fmtDate(mv.createdAt)}</span></td>
                     <td style={S.td}><span style={{ fontWeight: 600, fontSize: 13, color: '#1e293b' }}>{mv.concepto}</span></td>
                     <td style={S.td}><span style={{ fontSize: 12, color: '#475569' }}>{caja?.nombre || '—'}</span></td>
-                    <td style={S.td}><span style={{ fontSize: 12, color: colorTipo(mv.tipo) }}>{iconTipo(mv.tipo)} {mv.tipo}</span></td>
-                    <td style={{ ...S.td, fontWeight: 700, color: esPositivo(mv.tipo) ? '#16a34a' : '#dc2626', fontSize: 14 }}>
-                      {esPositivo(mv.tipo) ? '+' : '-'}{fmt(mv.monto)}
+                    <td style={S.td}><span style={{ fontSize: 12, color: colorTipo(mv.tipo) }}>{iconTipo(mv.tipo)} {etiquetaDe(mv.tipo)}</span></td>
+                    <td style={{ ...S.td, fontWeight: 700, color: colorDe(mv.tipo), fontSize: 14 }}>
+                      {signoDe(mv.tipo)}{fmt(montoAbs(mv))}
                     </td>
                     <td style={S.td}><span style={{ fontSize: 11, color: '#94a3b8' }}>{mv.referencia || '—'}</span></td>
                   </tr>
@@ -1083,19 +1092,40 @@ export default function GestionCaja({ user }) {
                       <div style={{ maxHeight: 320, overflowY: 'auto' }}>
                         {movsFiltrados.length === 0 ? (
                           <div style={{ textAlign: 'center', padding: 30, color: '#94a3b8', fontSize: 13 }}>Sin movimientos</div>
-                        ) : movsFiltrados.map((m, i) => (
-                          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
-                            <div style={{ flex: 1 }}>
-                              <div style={{ fontSize: 13, color: '#334155', fontWeight: 600 }}>{m.concepto}</div>
-                              {/* ✅ FIX CAJA-FLUJO-001: fecha real del movimiento (antes salía
-                                  vacía porque createdAt es Timestamp, no string) */}
-                              <div style={{ fontSize: 11, color: '#94a3b8' }}>{fechaMovISO(m) || '—'}{m.referencia ? ` · ${m.referencia}` : ''}</div>
+                        ) : movsFiltrados.map((m, i) => {
+                          // ✅ MOVIMIENTOS-SIGNO-001: el signo sale del helper compartido.
+                          // ANTES: `m.tipo === 'ingreso' ? '+' : '-'` pintaba en ROJO los
+                          // 'traslado_entrada' — plata que ENTRA a esta caja (caso OS-0759).
+                          const traslado = esTraslado(m.tipo);
+                          const contraparte = traslado
+                            ? cajas.find(c => c.id === (m.cajaDestinoId || m.cajaOrigenId))?.nombre
+                            : null;
+                          return (
+                            <div key={m.id || i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f1f5f9' }}>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 13, color: '#334155', fontWeight: 600 }}>
+                                  {/* Un traslado se marca explícitamente: su concepto es texto
+                                      libre y puede parecer el pago de una orden. */}
+                                  {traslado && (
+                                    <span style={{ fontSize: 10, fontWeight: 800, color: COLOR_TRASLADO, background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: 5, padding: '1px 6px', marginRight: 6, whiteSpace: 'nowrap' }}>
+                                      {iconoDe(m.tipo)} TRASLADO
+                                    </span>
+                                  )}
+                                  {m.concepto}
+                                </div>
+                                <div style={{ fontSize: 11, color: '#94a3b8' }}>
+                                  {fechaMovISO(m) || '—'}
+                                  {m.referencia ? ` · ${m.referencia}` : ''}
+                                  {contraparte ? ` · ${esEntrada(m.tipo) ? 'desde' : 'hacia'} ${contraparte}` : ''}
+                                  {m.creadoPor ? ` · ${m.creadoPor}` : ''}
+                                </div>
+                              </div>
+                              <div style={{ fontWeight: 800, fontSize: 14, color: colorDe(m.tipo), whiteSpace: 'nowrap', paddingLeft: 10 }}>
+                                {signoDe(m.tipo)}{fmt(montoAbs(m))}
+                              </div>
                             </div>
-                            <div style={{ fontWeight: 800, fontSize: 14, color: m.tipo === 'ingreso' ? '#16a34a' : '#dc2626' }}>
-                              {m.tipo === 'ingreso' ? '+' : '-'}{fmt(Math.abs(Number(m.monto) || 0))}
-                            </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   </div>

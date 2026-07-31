@@ -133,10 +133,17 @@ export const FlujoMensual = ({ movimientos = [], mes, width = 520, height = 200 
     if (mes && !fecha.startsWith(mes)) return;
     const dia = fecha.slice(8, 10);
     if (!dia) return;
-    if (!porDia[dia]) porDia[dia] = { ingreso: 0, egreso: 0 };
+    if (!porDia[dia]) porDia[dia] = { ingreso: 0, egreso: 0, traslEnt: 0, traslSal: 0 };
     const monto = Math.abs(Number(m.monto) || 0);
+    // ✅ MOVIMIENTOS-SIGNO-001: ANTES los traslados se descartaban en silencio
+    // (no eran 'ingreso' ni 'egreso'), así que la gráfica NO podía explicar el
+    // saldo de la caja: faltaba toda la plata movida entre cajas propias.
+    // AHORA se contabilizan, pero SEPARADOS del flujo operativo: un traslado
+    // no es venta ni gasto, es dinero cambiando de bolsillo — no toca resultados.
     if (m.tipo === 'ingreso') porDia[dia].ingreso += monto;
     else if (m.tipo === 'egreso') porDia[dia].egreso += monto;
+    else if (m.tipo === 'traslado_entrada') porDia[dia].traslEnt += monto;
+    else if (m.tipo === 'traslado_salida') porDia[dia].traslSal += monto;
   });
 
   const dias = Object.keys(porDia).sort();
@@ -150,7 +157,10 @@ export const FlujoMensual = ({ movimientos = [], mes, width = 520, height = 200 
   }
 
   const maxVal = Math.max(
-    ...dias.map(d => Math.max(porDia[d].ingreso, porDia[d].egreso)),
+    ...dias.map(d => Math.max(
+      porDia[d].ingreso + porDia[d].traslEnt,
+      porDia[d].egreso + porDia[d].traslSal
+    )),
     1
   );
   const padding = { top: 20, bottom: 24, left: 8, right: 8 };
@@ -162,24 +172,48 @@ export const FlujoMensual = ({ movimientos = [], mes, width = 520, height = 200 
 
   const totalIngreso = dias.reduce((s, d) => s + porDia[d].ingreso, 0);
   const totalEgreso = dias.reduce((s, d) => s + porDia[d].egreso, 0);
+  const totalTraslEnt = dias.reduce((s, d) => s + porDia[d].traslEnt, 0);
+  const totalTraslSal = dias.reduce((s, d) => s + porDia[d].traslSal, 0);
+  const hayTraslados = totalTraslEnt > 0 || totalTraslSal > 0;
+  // Variación real del saldo de la caja en el mes. Esta cifra SÍ cuadra contra
+  // el saldo: es lo que antes no se podía comprobar desde esta gráfica.
+  const netoCaja = (totalIngreso + totalTraslEnt) - (totalEgreso + totalTraslSal);
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 16, marginBottom: 10, fontSize: 12 }}>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 10, fontSize: 12, flexWrap: 'wrap' }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ width: 10, height: 10, borderRadius: 2, background: '#10b981' }} /> Ingresos <strong>{fmt(totalIngreso)}</strong>
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ width: 10, height: 10, borderRadius: 2, background: '#ef4444' }} /> Egresos <strong>{fmt(totalEgreso)}</strong>
         </span>
+        {hayTraslados && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#64748b' }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: '#94a3b8' }} /> Traslados <strong>+{fmt(totalTraslEnt)} / -{fmt(totalTraslSal)}</strong>
+          </span>
+        )}
+      </div>
+      {/* Cuadre: variación neta del saldo de la caja en el mes (operativo + traslados) */}
+      <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+        Variación del saldo en el mes:{' '}
+        <strong style={{ color: netoCaja >= 0 ? '#16a34a' : '#dc2626' }}>
+          {netoCaja >= 0 ? '+' : '-'}{fmt(Math.abs(netoCaja))}
+        </strong>
+        {hayTraslados && <span> · incluye traslados entre cajas propias (no son ingresos ni gastos)</span>}
       </div>
       <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet">
         {/* Línea base cero */}
         <line x1={padding.left} y1={midY} x2={width - padding.right} y2={midY} stroke="#e2e8f0" strokeWidth="1" />
         {dias.map((d, i) => {
           const x = padding.left + i * paso + (paso - anchoBarra) / 2;
-          const hIngreso = (porDia[d].ingreso / maxVal) * (chartH / 2);
-          const hEgreso = (porDia[d].egreso / maxVal) * (chartH / 2);
+          const esc = (v) => (v / maxVal) * (chartH / 2);
+          const hIngreso = esc(porDia[d].ingreso);
+          const hEgreso = esc(porDia[d].egreso);
+          // Los traslados se apilan en gris sobre la barra operativa: se ven,
+          // se suman al saldo, pero no se confunden con ventas ni con gastos.
+          const hTraslEnt = esc(porDia[d].traslEnt);
+          const hTraslSal = esc(porDia[d].traslSal);
           return (
             <g key={d}>
               {porDia[d].ingreso > 0 && (
@@ -187,9 +221,19 @@ export const FlujoMensual = ({ movimientos = [], mes, width = 520, height = 200 
                   <title>Día {d}: +{fmt(porDia[d].ingreso)}</title>
                 </rect>
               )}
+              {porDia[d].traslEnt > 0 && (
+                <rect x={x} y={midY - hIngreso - hTraslEnt} width={anchoBarra} height={hTraslEnt} rx="2" fill="#94a3b8">
+                  <title>Día {d}: traslado recibido +{fmt(porDia[d].traslEnt)}</title>
+                </rect>
+              )}
               {porDia[d].egreso > 0 && (
                 <rect x={x} y={midY} width={anchoBarra} height={hEgreso} rx="2" fill="#ef4444">
                   <title>Día {d}: -{fmt(porDia[d].egreso)}</title>
+                </rect>
+              )}
+              {porDia[d].traslSal > 0 && (
+                <rect x={x} y={midY + hEgreso} width={anchoBarra} height={hTraslSal} rx="2" fill="#94a3b8">
+                  <title>Día {d}: traslado enviado -{fmt(porDia[d].traslSal)}</title>
                 </rect>
               )}
               {/* etiqueta de día cada ciertos pasos para no saturar */}
