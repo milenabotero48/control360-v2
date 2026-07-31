@@ -10,7 +10,7 @@ const { crearVencimientosDeOrden, anularVencimientosDeOrden } = require('../serv
 // ✅ FIX ANNY-NOTIF-001: notificaciones al cliente vía la línea de Anny.
 // Fire-and-forget: si el tenant no tiene anny_ia o no está conectado,
 // se omite en silencio — NUNCA afecta al módulo que llama.
-const { notificarClienteWhatsApp } = require('../services/annyNotificaciones');
+const { notificarClienteWhatsApp, notificarVentaCliente } = require('../services/annyNotificaciones');
 
 // ✅ FIX CAPACIDAD-TENANT-001: capacidades operativas del tenant (qué módulos
 // tiene realmente contratado). Entran como parámetro de la máquina de estados
@@ -1349,8 +1349,22 @@ router.post('/', authenticate, async (req, res) => {
         `💰 Valor: $${Math.round(total).toLocaleString('es-CO')}\n\n` +
         (dirNotif ? `Si la dirección no es correcta, respóndenos a este chat y la corregimos.\n\n` : '') +
         `Te mantendremos informado del avance. ¡Gracias por confiar en nosotros! 🙌`;
-      notificarClienteWhatsApp(nuevaOrden.adminId, nuevaOrden.clienteCelular, msgOrden)
-        .catch(() => {});
+      // ✅ ANNY-VENTA-034: si el tenant activó la confirmación de venta,
+      // el aviso sale con medios de pago y deja marcada la misión
+      // CONFIRMACION_VENTA (la respuesta del cliente se atiende como pago/
+      // entrega, no como consulta comercial nueva). Si no la activó, se
+      // conserva el aviso clásico. Ambos fire-and-forget.
+      notificarVentaCliente(nuevaOrden.adminId, {
+        celular: nuevaOrden.clienteCelular,
+        nombreCliente: clienteNombre,
+        numeroOrden,
+        descripcion: (items || []).map(i => i.nombre || i.descripcion || '').filter(Boolean).slice(0, 3).join(', '),
+        total
+      }).then(r => {
+        if (!r.ok && r.error === 'aviso_desactivado') {
+          return notificarClienteWhatsApp(nuevaOrden.adminId, nuevaOrden.clienteCelular, msgOrden);
+        }
+      }).catch(() => {});
     }
 
     res.status(201).json({ id: ref.id, ...nuevaOrden });

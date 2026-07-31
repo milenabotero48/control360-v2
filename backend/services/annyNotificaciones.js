@@ -250,6 +250,46 @@ async function ejecutarCobranzaCxC() {
 }
 
 // ============================================================
+// ✅ ANNY-VENTA-034: confirmación de venta al cliente final
+// ------------------------------------------------------------
+// La suscriptora registra una venta (orden) y Anny le escribe al
+// cliente: qué compró, el total y los medios de pago del perfil.
+// Se activa por tenant (perfil.avisarVentaCliente = true) y se
+// dispara fire-and-forget desde la creación de la orden — un
+// fallo aquí JAMÁS puede tumbar el guardado de la venta.
+// La respuesta del cliente llega bajo misión CONFIRMACION_VENTA.
+// ============================================================
+async function notificarVentaCliente(adminId, datos = {}) {
+  try {
+    const { celular, nombreCliente, numeroOrden, descripcion, total } = datos;
+    if (!celular) return { ok: false, error: 'sin_celular' };
+
+    const activo = await annyService.tenantTieneAnnyActiva(adminId);
+    if (!activo) return { ok: false, error: 'anny_inactivo' };
+
+    const perfil = await annyService.obtenerPerfilTenant(adminId);
+    if (perfil.avisarVentaCliente !== true) return { ok: false, error: 'aviso_desactivado' };
+
+    const totalTxt = Number(total) > 0 ? ` por $${Number(total).toLocaleString('es-CO')}` : '';
+    const ordenTxt = numeroOrden ? ` (orden ${numeroOrden})` : '';
+    const queTxt = descripcion ? `: ${String(descripcion).slice(0, 120)}` : '';
+    const pagoTxt = perfil.mediosPago
+      ? ` Puedes pagar así: ${perfil.mediosPago}.`
+      : ' ¿Te comparto los medios de pago?';
+
+    const msg = `Hola${nombreCliente ? ' ' + nombreCliente : ''} 👋 ` +
+      `Quedó registrada tu compra${ordenTxt}${queTxt}${totalTxt}.${pagoTxt} ` +
+      `Cuando hagas el pago me envías el comprobante por aquí y coordinamos la entrega.`;
+
+    const ok = await notificarClienteWhatsApp(adminId, celular, msg, 'CONFIRMACION_VENTA');
+    return { ok, enviado: ok };
+  } catch (err) {
+    console.error('[ANNY-VENTA] Error confirmando venta:', err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+// ============================================================
 // FIX ANNY-TALLER-018: notificación de cambio de repuesto
 // ------------------------------------------------------------
 // Misión NOTIFICACION_TALLER: informar la novedad y obtener un
@@ -591,6 +631,7 @@ module.exports = {
   enviarAvisoInterno,
   marcarMisionActiva,
   notificarCambioTaller,
+  notificarVentaCliente, // ✅ ANNY-VENTA-034
   ejecutarRenovacionSaaS
 };
 // FIN annyNotificaciones.js (v22)

@@ -64,6 +64,29 @@
 //                   Se desnormaliza en chatsAnny/{adminId}/chats
 //                   con paginación por ultimaFechaMs. Escritura
 //                   dual: el histórico legado NO se toca.
+//
+// ════════════════════════════════════════════════════════════
+// NUEVO EN v24 (correcciones de operación real — jul 2026):
+// - ANNY-MISION-028 : en misiones sin venta el CATÁLOGO no entra
+//                   al prompt y la identidad deja de ser "vendes
+//                   bien". Causa raíz de que Anny ofreciera
+//                   servicios respondiendo una cobranza.
+// - ANNY-PROMESA-029: prohibido prometer acciones futuras
+//                   ("permíteme revisar", "ya te confirmo").
+//                   Aplica al modelo y al texto fijo de escalado.
+// - ANNY-ENTRENA-030: la base de conocimiento (pestaña
+//                   Entrenamiento) se declara fuente de verdad:
+//                   el modelo debe responder DESDE la entrada que
+//                   coincida, no parafrasearla ni ignorarla.
+// - ANNY-FOTO-031 : foto que no se pudo descargar/analizar →
+//                   respuesta determinística pidiendo el dato por
+//                   texto. Antes el marcador entraba al modelo y
+//                   salía un "permíteme revisar" sin salida.
+// - ANNY-MEMORIA-032: historial 8 → 20 turnos. Evita re-preguntar
+//                   lo que el cliente ya dijo (caso extintor rojo).
+// - Escalado por foto fuera de catálogo: solo cuando el cliente
+//                   confirma que quiere el producto, no al primer
+//                   vistazo.
 // ============================================================
 
 const { db, admin } = require('../config/firebase');
@@ -158,6 +181,50 @@ const PERFIL_DEFAULT = {
   notificarEscalamientoA: null
 };
 
+// ============================================================
+// ✅ ANNY-NICHO-033: plantillas de perfil por actividad económica.
+// Al activar Anny a un suscriptor, el SuperAdmin elige el nicho y
+// el perfil se precarga con estos valores (luego se pueden afinar
+// campo por campo). Un solo motor, cada tenant con su oficio.
+// ============================================================
+const NICHOS = {
+  extintores: {
+    etiqueta: 'Extintores y seguridad industrial',
+    vertical: 'venta, recarga y mantenimiento de extintores y seguridad industrial en Colombia',
+    queVende: 'recarga de extintores, venta de extintores nuevos, mantenimiento y elementos de seguridad industrial',
+    fuentePrecios: 'products',
+    reglasNegocio: 'El color del extintor orienta el agente: amarillo ABC, rojo CO2 o BC, verde agua, plateado tipo K, blanco Solkaflam. Confírmalo siempre, no lo des por hecho. Los extintores tienen fecha de vencimiento de recarga: si el cliente menciona que está vencido, prioriza agendar la recarga.'
+  },
+  venta_online: {
+    etiqueta: 'Venta en línea / tienda',
+    vertical: 'venta de productos en línea con entrega a domicilio',
+    queVende: 'productos del catálogo de la tienda, con envío o entrega a domicilio',
+    fuentePrecios: 'products',
+    reglasNegocio: 'Cuando confirmes una compra, informa los medios de pago y el paso a seguir para el envío. Pide comprobante de pago cuando el cliente diga que ya pagó, y avisa que el pedido se despacha al confirmarse el pago.'
+  },
+  servicios: {
+    etiqueta: 'Servicios profesionales',
+    vertical: 'prestación de servicios profesionales con cita o agendamiento',
+    queVende: 'servicios que se cotizan y se agendan con fecha y hora',
+    fuentePrecios: 'products',
+    reglasNegocio: 'El objetivo comercial es AGENDAR: propón fecha y hora concretas. Si el servicio requiere valoración previa, dilo y ofrece la cita de valoración. No prometas resultados del servicio.'
+  },
+  restaurante: {
+    etiqueta: 'Restaurante / comidas',
+    vertical: 'restaurante con venta a domicilio y en local',
+    queVende: 'platos del menú, con domicilio o recogida en local',
+    fuentePrecios: 'products',
+    reglasNegocio: 'Toma el pedido plato por plato y confirma el total antes de cerrar. Pregunta si es para domicilio o para recoger. Informa el tiempo estimado de entrega si está en la base de conocimiento; si no está, no lo inventes.'
+  },
+  repuestos: {
+    etiqueta: 'Repuestos y autopartes',
+    vertical: 'venta de repuestos y autopartes',
+    queVende: 'repuestos y autopartes del catálogo',
+    fuentePrecios: 'products',
+    reglasNegocio: 'Para cotizar un repuesto necesitas marca, modelo/línea y año del vehículo (o foto de la pieza): pídelos antes de dar precio. Si la referencia exacta no está en el catálogo, NO improvises equivalencias: escala. Aclara si el repuesto es original o alterno cuando el catálogo lo indique.'
+  }
+};
+
 const _cachePerfil = new Map(); // adminId -> { data, ts }
 
 async function obtenerPerfilTenant(adminId) {
@@ -177,6 +244,10 @@ async function obtenerPerfilTenant(adminId) {
       // ANNY-HUMANO-012: si no hay canal propio de escalamiento,
       // cae al WhatsApp de avisos que la suscriptora YA configuró.
       notificarEscalamientoA: p.notificarEscalamientoA || cfg.notificarPedidosA || null,
+      // ✅ ANNY-NICHO-033 / ANNY-VENTA-034
+      nicho: p.nicho || null,
+      mediosPago: p.mediosPago || '',
+      avisarVentaCliente: p.avisarVentaCliente === true,
       configurado: !!cfg.perfil
     };
     _cachePerfil.set(adminId, { data, ts: Date.now() });
@@ -212,9 +283,14 @@ const MISIONES = {
   COBRANZA: {
     objetivo: 'Recordar de forma amable un saldo pendiente y acordar cómo y cuándo paga.',
     permiteVenta: false,
-    permitePedido: false,
+    // ✅ ANNY-VENTA-034: venta REACTIVA. Anny no ofrece nada durante un
+    // cobro (eso fue el bug del viernes), pero si el CLIENTE pide comprar
+    // o cotizar, lo atiende y puede cerrar el pedido — un cliente que debe
+    // y aún así quiere comprar no se manda a esperar un asesor.
+    ventaReactiva: true,
+    permitePedido: true,
     maxChars: 280,
-    reglas: 'NO ofrezcas productos ni catálogo. NO vendas. Solo saldo, medio de pago y fecha. Si el cliente discute el valor o dice que ya pagó, ESCALA.'
+    reglas: 'NO ofrezcas productos por iniciativa propia: el tema es el saldo, el medio de pago y la fecha. Si el cliente discute el valor o dice que ya pagó, ESCALA. Si el cliente pide comprar o cotizar algo, atiéndelo con el catálogo y recuérdale amablemente que también quede pendiente el saldo.'
   },
   NOTIFICACION_TALLER: {
     objetivo: 'Informar un cambio de repuesto o novedad del taller y obtener autorización SÍ/NO.',
@@ -232,6 +308,18 @@ const MISIONES = {
     permitePedido: false,
     maxChars: 300,
     reglas: 'Hablas de la SUSCRIPCIÓN AL SOFTWARE, nunca de productos físicos. NO menciones catálogo de productos. Si pide cambio de plan o descuento, ESCALA.'
+  },
+  // ✅ ANNY-VENTA-034: la suscriptora registra una venta y Anny le confirma
+  // al cliente por WhatsApp: qué compró, cuánto es y cómo pagar. La
+  // respuesta del cliente ("¿a qué cuenta?", "ya pagué") se atiende bajo
+  // esta misma misión.
+  CONFIRMACION_VENTA: {
+    objetivo: 'Confirmar al cliente la compra que acaba de registrarse, informarle los medios de pago y resolver sus dudas sobre el pago o la entrega.',
+    permiteVenta: false,
+    ventaReactiva: true,
+    permitePedido: true,
+    maxChars: 300,
+    reglas: 'El pedido YA está registrado: NO lo vuelvas a tomar ni abras uno nuevo por lo mismo. Resuelve dudas de pago y entrega con la base de conocimiento. Si dice que ya pagó, agradece y dile que se valida el comprobante — NUNCA confirmes tú que el pago quedó registrado. Si discute el valor, ESCALA.'
   },
   REACTIVACION: {
     objetivo: 'Reactivar a un cliente con servicio vencido o inactivo e invitarlo a agendar.',
@@ -749,7 +837,12 @@ async function listarChats(adminId, opciones = {}) {
 // (histórico anterior a v22), cae a la colección legada — que
 // NO se modifica ni se migra.
 // ============================================================
-async function obtenerHistorialReciente(adminId, telefono, limite = 8) {
+// ✅ ANNY-MEMORIA-032: 8 → 20 turnos. Con 8, lo que el cliente dijo hace
+// media conversación ("mi extintor es rojo") se caía de la ventana y Anny
+// volvía a preguntarlo — el cliente siente que no lo escuchan y pide humano.
+// Haiku es barato: 12 turnos más de contexto cuestan centavos y ahorran
+// escalados.
+async function obtenerHistorialReciente(adminId, telefono, limite = 20) {
   // — Ruta nueva —
   try {
     const snap = await refChat(adminId, telefono)
@@ -899,7 +992,13 @@ async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {
       .join('\n');
 
     // ANNY-CFG-010: catálogo solo si el perfil lo declara
-    const catalogoTxt = perfil.fuentePrecios === 'products'
+    // ✅ ANNY-MISION-028: en misiones SIN venta (COBRANZA, TALLER, SAAS) el
+    // catálogo NO entra al prompt. Tenerlo a la vista era la tentación:
+    // el modelo respondía un cobro ofreciendo recargas. Sin catálogo no
+    // hay nada que ofrecer.
+    // ✅ ANNY-VENTA-034: el catálogo también entra en misiones con venta
+    // reactiva (el cliente puede pedir comprar en medio de un cobro).
+    const catalogoTxt = (perfil.fuentePrecios === 'products' && (mision.permiteVenta || mision.ventaReactiva))
       ? (catalogo || []).map(p => `- ${p.nombre}: $${p.precio.toLocaleString('es-CO')}`).join('\n')
       : '';
 
@@ -975,18 +1074,25 @@ EL CLIENTE ENVIÓ UNA FOTO (la estás viendo arriba):
 - Si no se lee bien o dudas de algún dato, DILO y pide otra foto más cerca. NO adivines.
 - Si ves varios artículos, di cuántos cuentas y pide confirmación.
 - NUNCA cierres un pedido con datos que solo salieron de una foto sin que el cliente los haya confirmado por texto.
-- Relaciona lo que ves con el CATÁLOGO de arriba; si no corresponde a nada del catálogo, dilo y ESCALA.
+- Relaciona lo que ves con el CATÁLOGO de arriba. Si no corresponde a nada del catálogo, describe lo que ves y PREGUNTA al cliente qué necesita con ese equipo. ESCALA (tipo PRECIO) solo cuando el cliente confirme que quiere ese producto/servicio y no tengas precio para dárselo.
 ` : '';
 
     const prompt = `
-Eres ${perfil.nombreAgente}, asesora por WhatsApp de ${perfil.empresa}, empresa de ${perfil.vertical}. Vendes bien, pero primero ATIENDES: resuelves lo que el cliente pregunta.
+Eres ${perfil.nombreAgente}, asesora por WhatsApp de ${perfil.empresa}, empresa de ${perfil.vertical}. ${mision.permiteVenta ? 'Vendes bien, pero primero ATIENDES: resuelves lo que el cliente pregunta.' : (mision.ventaReactiva ? 'En esta conversación viniste a un trámite puntual: te centras en él, y solo vendes si el cliente te lo pide.' : 'En esta conversación NO eres vendedora: viniste a un trámite puntual y te limitas a él.')}
 
 QUÉ OFRECE LA EMPRESA: ${perfil.queVende}
 
 MISIÓN DE ESTA CONVERSACIÓN: ${misionNombre}
 Objetivo: ${mision.objetivo}
 Reglas de la misión: ${mision.reglas}
-${mision.permiteVenta ? '' : 'EN ESTA MISIÓN NO VENDES: no ofrezcas productos, no cites catálogo, no abras pedidos.'}
+${mision.permiteVenta ? '' : (mision.ventaReactiva ? `VENTA SOLO REACTIVA (ANNY-VENTA-034):
+- NO ofrezcas productos ni servicios por iniciativa propia: viniste a un trámite (míralo en el historial) y la respuesta del cliente es sobre ESO. Continúa ese hilo.
+- Si el cliente pregunta otra cosa puntual (horario, dirección), respóndela en una frase y vuelve al trámite pendiente.
+- EXCEPCIÓN: si el CLIENTE pide comprar o cotizar algo, sí lo atiendes con el catálogo y puedes cerrar el pedido. Atendida la compra, recuérdale con amabilidad el tema pendiente.` : `EN ESTA MISIÓN NO VENDES (regla absoluta — ANNY-MISION-028):
+- NO ofrezcas productos ni servicios, NO cites precios de catálogo, NO abras pedidos.
+- CONTINÚA EL HILO con el que se abrió esta conversación (míralo en el historial). La respuesta del cliente es sobre ESO.
+- Si el cliente pregunta otra cosa puntual (horario, dirección), respóndela en una frase y vuelve al trámite pendiente.
+- Si el cliente por su propia iniciativa quiere comprar algo, dile que con gusto le ayudas apenas cierren este tema, y ESCALA (tipo VENTA) para que un asesor lo atienda.`)}
 
 HISTORIAL RECIENTE DE LA CONVERSACIÓN (viejo → nuevo):
 ${hilo || '(primera interacción con este cliente)'}
@@ -999,10 +1105,11 @@ ${fichaTxt}
 ESTADO REAL DEL PEDIDO (única fuente válida — el sistema, no tu memoria):
 ${estadoTxt}
 
-${catalogoTxt ? `CATÁLOGO OFICIAL DE PRODUCTOS Y PRECIOS VIGENTES (única fuente válida de precios):\n${catalogoTxt}` : '(esta empresa NO maneja catálogo de productos físicos — no inventes productos ni precios)'}
+${catalogoTxt ? `CATÁLOGO OFICIAL DE PRODUCTOS Y PRECIOS VIGENTES (única fuente válida de precios):\n${catalogoTxt}` : (mision.permiteVenta ? '(esta empresa NO maneja catálogo de productos físicos — no inventes productos ni precios)' : '(en esta misión NO tienes catálogo: no cites productos ni precios)')}
 
 BASE DE CONOCIMIENTO DE LA EMPRESA (domicilio, horarios, medios de pago, políticas):
 ${conocimiento || '(sin datos configurados)'}
+→ ✅ ANNY-ENTRENA-030: esta base la escribió la DUEÑA del negocio y es la fuente de verdad. Si el mensaje del cliente coincide con una entrada, tu respuesta debe salir de ESA entrada (adáptala al hilo, pero sin cambiarle datos, condiciones ni sentido). NO la parafrasees hasta perder la información ni respondas con tu criterio si aquí ya hay una respuesta definida.
 ${perfil.reglasNegocio ? `\nREGLAS PROPIAS DE ESTA EMPRESA:\n${perfil.reglasNegocio}` : ''}
 
 FORMA DE ESCRIBIR (obligatorio — ANNY-BREV-011):
@@ -1017,6 +1124,7 @@ FORMA DE ESCRIBIR (obligatorio — ANNY-BREV-011):
   · Si ya la hiciste DOS veces y el cliente sigue sin darte el dato, deja de preguntar y ESCALA (tipo DATOS). Una persona no pregunta lo mismo tres veces: llama o pasa el caso.
   · Nunca abras con "Perfecto, entiendo que..." repitiendo lo que el cliente acaba de decir. Eso es lo que te delata como máquina.
 - Sonar profesional NO es escribir largo: es saber la respuesta y darla directo.
+- ✅ ANNY-PROMESA-029 — PROHIBIDO prometer acciones futuras que tú no puedes ejecutar: "permíteme revisar", "déjame verificar", "ya te confirmo", "dame un momento". Tú NO puedes revisar nada después de este mensaje. Lo que sabes, lo dices AHORA; lo que no sabes, lo admites y escalas. Un "permíteme revisar" tras el cual no pasa nada destruye la confianza del cliente.
 
 REGLAS DE ATENCIÓN (prioridad máxima):
 - Responde PRIMERO lo que el cliente pregunta en su último mensaje. Si cambió de tema, síguelo — NO insistas en vender.
@@ -1329,6 +1437,38 @@ async function procesarMensajeEntrante(props) {
     }
 
     // ══════════════════════════════════════════════════════════
+    // ✅ ANNY-FOTO-031: el cliente mandó una foto pero NO llegó al
+    // modelo (no se pudo descargar, pesa >5MB, tope del mes o
+    // análisis desactivado). Antes ese marcador entraba al modelo
+    // sin imagen y Anny respondía "permíteme revisar" — y no
+    // pasaba nada. Ahora se responde determinístico: se le pide
+    // el dato por texto, sin prometer una revisión que no existe.
+    // ══════════════════════════════════════════════════════════
+    if (!imagenAdjunta && /^\[el cliente envió una foto/i.test(String(mensajeTexto).trim())) {
+      // Texto neutro entre verticales: no menciona extintores porque el
+      // motor es multipropósito (ANNY-CFG-010).
+      const respuestaFoto = 'No logré abrir la foto que enviaste. ¿Me la reenvías, o me escribes por texto lo que necesitas? Así te ayudo de una vez.';
+
+      await registrarConversacion(adminId, {
+        telefono,
+        nombreCliente,
+        mensajeCliente: mensajeTexto,
+        respuestaAgente: respuestaFoto,
+        respondidoPor: 'AGENTE_AUTOMATICO',
+        tipo: 'FOTO_NO_PROCESADA',
+        escalado: false,
+        caseId: null
+      });
+
+      return {
+        procesado: true,
+        tipo: 'FOTO_NO_PROCESADA',
+        accion: 'enviar_mensaje',
+        respuesta: respuestaFoto
+      };
+    }
+
+    // ══════════════════════════════════════════════════════════
     // PASO 1.6 — FIX ANNY-HUMANO-012: el cliente pide un humano.
     // Se resuelve ANTES del modelo: es determinístico y no puede
     // fallar. Anny escala, avisa y SE CALLA en ese chat.
@@ -1447,7 +1587,10 @@ async function procesarMensajeEntrante(props) {
         asignadoA: adminId
       });
 
-      const respuestaEsc = 'Dame un momento, lo reviso con el equipo y te confirmo.';
+      // ✅ ANNY-PROMESA-029: antes decía "lo reviso y te confirmo" — Anny no
+      // revisa nada: queda muda hasta que la admin resuelva el caso. Ahora
+      // fija la expectativa correcta: te contacta UNA PERSONA del equipo.
+      const respuestaEsc = 'Este tema lo maneja directamente el equipo: ya les pasé tu caso y un asesor te escribe por aquí.';
 
       await registrarConversacion(adminId, {
         telefono,
@@ -1715,11 +1858,26 @@ async function actualizarPerfilTenant(adminId, perfil) {
   try {
     const permitidos = [
       'nombreAgente', 'empresa', 'vertical', 'queVende',
-      'fuentePrecios', 'reglasNegocio', 'notificarEscalamientoA'
+      'fuentePrecios', 'reglasNegocio', 'notificarEscalamientoA',
+      // ✅ ANNY-NICHO-033 / ANNY-VENTA-034
+      'nicho', 'mediosPago', 'avisarVentaCliente'
     ];
     const limpio = {};
+
+    // ✅ ANNY-NICHO-033: si llega un nicho válido, la plantilla precarga
+    // vertical/queVende/reglas; lo que venga explícito en `perfil` la
+    // sobreescribe (la plantilla es punto de partida, no camisa de fuerza).
+    if (perfil && perfil.nicho && NICHOS[perfil.nicho]) {
+      const n = NICHOS[perfil.nicho];
+      limpio.nicho = perfil.nicho;
+      limpio.vertical = n.vertical;
+      limpio.queVende = n.queVende;
+      limpio.fuentePrecios = n.fuentePrecios;
+      limpio.reglasNegocio = n.reglasNegocio;
+    }
+
     for (const k of permitidos) {
-      if (perfil && perfil[k] !== undefined && perfil[k] !== null) limpio[k] = perfil[k];
+      if (perfil && perfil[k] !== undefined && perfil[k] !== null && perfil[k] !== '') limpio[k] = perfil[k];
     }
     await db.collection('annyConfig').doc(adminId).set({ perfil: limpio }, { merge: true });
     invalidarCachePerfil(adminId);
@@ -1760,6 +1918,7 @@ module.exports = {
   recortarRespuesta,
   pidePersonaHumana,
   MISIONES,
-  PERFIL_DEFAULT
+  PERFIL_DEFAULT,
+  NICHOS // ✅ ANNY-NICHO-033
 };
 // FIN annyService.js (v23)

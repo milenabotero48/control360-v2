@@ -150,6 +150,8 @@ router.get('/perfil/:adminId', authenticate, soloSuperAdmin, async (req, res) =>
       perfil,
       fuentesPrecios: ['products', 'planes', 'ninguna'],
       misionesDisponibles: Object.keys(annyService.MISIONES),
+      // ✅ ANNY-NICHO-033: plantillas por actividad económica para el selector
+      nichos: Object.entries(annyService.NICHOS).map(([id, n]) => ({ id, etiqueta: n.etiqueta })),
       porDefecto: annyService.PERFIL_DEFAULT
     });
   } catch (err) {
@@ -163,15 +165,23 @@ router.put('/perfil/:adminId', authenticate, soloSuperAdmin, async (req, res) =>
     const { adminId } = req.params;
     const {
       nombreAgente, empresa, vertical, queVende,
-      fuentePrecios, reglasNegocio, notificarEscalamientoA
+      fuentePrecios, reglasNegocio, notificarEscalamientoA,
+      // ✅ ANNY-NICHO-033 / ANNY-VENTA-034
+      nicho, mediosPago, avisarVentaCliente
     } = req.body || {};
 
     if (fuentePrecios && !['products', 'planes', 'ninguna'].includes(fuentePrecios)) {
       return res.status(400).json({ error: 'fuentePrecios inválida' });
     }
+    if (nicho && !annyService.NICHOS[nicho]) {
+      return res.status(400).json({ error: 'nicho inválido' });
+    }
 
     const resultado = await annyService.actualizarPerfilTenant(adminId, {
       nombreAgente, empresa, vertical, queVende, fuentePrecios, reglasNegocio,
+      nicho,
+      mediosPago,
+      avisarVentaCliente: avisarVentaCliente !== undefined ? avisarVentaCliente === true : undefined,
       notificarEscalamientoA: notificarEscalamientoA !== undefined
         ? String(notificarEscalamientoA).replace(/\D/g, '')
         : undefined

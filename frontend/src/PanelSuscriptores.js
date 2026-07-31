@@ -100,6 +100,11 @@ const PanelSuscriptores = () => {
   const [consumoData, setConsumoData] = useState(null);
   const [topeImgVal, setTopeImgVal] = useState('');
 
+  // ✅ ANNY-NICHO-033: perfil de negocio de Anny por suscriptor (nicho)
+  const [editPerfil, setEditPerfil] = useState(null);   // suscriptor en edición
+  const [nichosDisp, setNichosDisp] = useState([]);     // plantillas del backend
+  const [formPerfil, setFormPerfil] = useState(null);   // campos del perfil
+
   // ✅ CAPACIDAD-TENANT-002: diagnóstico de órdenes atascadas por falta de módulo
   const [editAtascos, setEditAtascos] = useState(null); // suscriptor en revisión
   const [atascos, setAtascos] = useState(null);         // respuesta del backend
@@ -211,6 +216,44 @@ const PanelSuscriptores = () => {
       setEditConsumo(null);
     } catch (e) {
       setError(e.response?.data?.error || 'No se pudo guardar el tope');
+    } finally {
+      setGuardando(false);
+    }
+  };
+
+  // ✅ ANNY-NICHO-033: abrir/guardar el perfil de negocio de Anny.
+  // El nicho precarga la plantilla en el backend; los demás campos afinan.
+  const abrirPerfilAnny = async (s) => {
+    setEditPerfil(s);
+    setFormPerfil(null);
+    try {
+      const r = await axios.get(`${API}/anny/perfil/${s.adminId}`, { headers });
+      const p = r.data.perfil || {};
+      setNichosDisp(r.data.nichos || []);
+      setFormPerfil({
+        nicho: p.nicho || '',
+        nombreAgente: p.nombreAgente || 'Anny',
+        empresa: p.empresa || '',
+        queVende: p.queVende || '',
+        reglasNegocio: p.reglasNegocio || '',
+        mediosPago: p.mediosPago || '',
+        avisarVentaCliente: p.avisarVentaCliente === true,
+        notificarEscalamientoA: p.notificarEscalamientoA || ''
+      });
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo leer el perfil de Anny');
+    }
+  };
+
+  const guardarPerfilAnny = async () => {
+    setGuardando(true);
+    setError('');
+    try {
+      await axios.put(`${API}/anny/perfil/${editPerfil.adminId}`, formPerfil, { headers });
+      setEditPerfil(null);
+      flashExito('Perfil de Anny guardado');
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo guardar el perfil de Anny');
     } finally {
       setGuardando(false);
     }
@@ -405,7 +448,11 @@ const PanelSuscriptores = () => {
               {/* ✅ ANNY-CONSUMO-026: consumo real del suscriptor, para facturarle.
                   Lista de módulos vacía = todos activos (invariante del sistema). */}
               {((s.modulos || []).length === 0 || (s.modulos || []).includes('anny_ia')) && (
-                <button style={st.btnGhost} onClick={() => abrirConsumoAnny(s)}>💬 Consumo Anny</button>
+                <>
+                  <button style={st.btnGhost} onClick={() => abrirConsumoAnny(s)}>💬 Consumo Anny</button>
+                  {/* ✅ ANNY-NICHO-033: nicho + perfil de negocio del suscriptor */}
+                  <button style={st.btnGhost} onClick={() => abrirPerfilAnny(s)}>🧬 Perfil Anny</button>
+                </>
               )}
             </div>
           </div>
@@ -492,6 +539,76 @@ const PanelSuscriptores = () => {
                   </button>
                   <button style={st.btn} onClick={guardarLimitesAnny} disabled={guardando}>
                     {guardando ? 'Guardando…' : 'Guardar tope'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── ✅ ANNY-NICHO-033 · MODAL: PERFIL DE NEGOCIO DE ANNY ─── */}
+      {editPerfil && (
+        <div style={st.overlay} onClick={() => !guardando && setEditPerfil(null)}>
+          <div style={st.modal} onClick={(ev) => ev.stopPropagation()}>
+            <h2 style={{ ...st.h1, fontSize: 17 }}>
+              🧬 Perfil de Anny — {editPerfil.empresa || editPerfil.nombre || editPerfil.email}
+            </h2>
+
+            {!formPerfil ? (
+              <div style={{ color: '#6b6b85', fontSize: 13, marginTop: 14 }}>Cargando perfil…</div>
+            ) : (
+              <>
+                <label style={st.label}>Actividad económica (nicho)</label>
+                <select style={st.input} value={formPerfil.nicho}
+                  onChange={e => setFormPerfil({ ...formPerfil, nicho: e.target.value })}>
+                  <option value="">— Sin plantilla (perfil manual) —</option>
+                  {nichosDisp.map(n => (
+                    <option key={n.id} value={n.id}>{n.etiqueta}</option>
+                  ))}
+                </select>
+                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                  Al guardar con un nicho, Anny se precarga con las reglas de esa actividad.
+                  Los campos de abajo que llenes tienen prioridad sobre la plantilla.
+                </div>
+
+                <label style={st.label}>Nombre del agente</label>
+                <input type="text" style={st.input} value={formPerfil.nombreAgente}
+                  onChange={e => setFormPerfil({ ...formPerfil, nombreAgente: e.target.value })} />
+
+                <label style={st.label}>Nombre de la empresa (como se presenta al cliente)</label>
+                <input type="text" style={st.input} value={formPerfil.empresa}
+                  onChange={e => setFormPerfil({ ...formPerfil, empresa: e.target.value })} />
+
+                <label style={st.label}>Qué vende (opcional — la plantilla ya trae uno)</label>
+                <input type="text" style={st.input} value={formPerfil.queVende}
+                  onChange={e => setFormPerfil({ ...formPerfil, queVende: e.target.value })} />
+
+                <label style={st.label}>Reglas propias del negocio (opcional)</label>
+                <textarea style={{ ...st.input, minHeight: 70, resize: 'vertical' }} value={formPerfil.reglasNegocio}
+                  onChange={e => setFormPerfil({ ...formPerfil, reglasNegocio: e.target.value })} />
+
+                <label style={st.label}>Medios de pago (ej: Nequi 300..., Bancolombia ahorros ...)</label>
+                <input type="text" style={st.input} value={formPerfil.mediosPago}
+                  onChange={e => setFormPerfil({ ...formPerfil, mediosPago: e.target.value })} />
+
+                <label style={{ ...st.modRow, marginTop: 12, border: 'none' }}>
+                  <input type="checkbox" checked={formPerfil.avisarVentaCliente}
+                    onChange={e => setFormPerfil({ ...formPerfil, avisarVentaCliente: e.target.checked })} />
+                  <span>
+                    <b>Confirmar ventas por WhatsApp</b> — al registrar una orden, Anny le escribe
+                    al cliente con el resumen y los medios de pago.
+                  </span>
+                </label>
+
+                <label style={st.label}>WhatsApp para avisos de escalamiento</label>
+                <input type="text" style={st.input} placeholder="3001234567" value={formPerfil.notificarEscalamientoA}
+                  onChange={e => setFormPerfil({ ...formPerfil, notificarEscalamientoA: e.target.value })} />
+
+                <div style={{ ...st.btns, justifyContent: 'flex-end' }}>
+                  <button style={st.btnGhost} disabled={guardando} onClick={() => setEditPerfil(null)}>Cancelar</button>
+                  <button style={st.btn} disabled={guardando} onClick={guardarPerfilAnny}>
+                    {guardando ? 'Guardando…' : 'Guardar perfil'}
                   </button>
                 </div>
               </>
