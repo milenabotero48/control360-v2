@@ -171,7 +171,10 @@ router.get('/provisionales-pendientes', async (req, res) => {
       .where('tipo', '==', 'provisional')
       .where('cuadrado', '==', false)
       .get();
-    const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    // ✅ EGRESO-PROV-001: doble filtro — cuadrado (Ola 2) y legalizado (Ola 4)
+    const lista = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(e => e.legalizado !== true && e.anulado !== true);
     res.json({ total: lista.length, egresos: lista });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -184,11 +187,58 @@ router.post('/', async (req, res) => {
     const {
       concepto, proveedor, categoria, monto, totalPagar, ivaVal, ivaPct, retenVal, retenPct,
       formaPago, cajaId, empresaId, fecha, notas, pagarAhora, productosCompra,
-      tipo, mensajeroId, mensajeroNombre, numeroOrdenInterna, cuadrado
+      tipo, mensajeroId, mensajeroNombre, numeroOrdenInterna, cuadrado,
+      // ✅ EGRESO-PROV-001: legalización de anticipo desde el egreso normal
+      provisionalId, pin
     } = req.body;
 
     if (!concepto?.trim()) return res.status(400).json({ error: 'Concepto requerido' });
     if (!monto || Number(monto) <= 0) return res.status(400).json({ error: 'Monto inválido' });
+
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ EGRESO-PROV-001 — LEGALIZACIÓN DE ANTICIPO
+    // ──────────────────────────────────────────────────────────────────────
+    // El egreso provisional es un ANTICIPO al mensajero, no un gasto. Cuando
+    // vuelve con la factura real, se registra un egreso NORMAL (con IVA y
+    // retención, formulario completo) y se marca forma de pago "Legalizar
+    // comprobante provisional". Aquí:
+    //   - la plata NO vuelve a salir de caja (ya salió al dar el anticipo)
+    //   - solo se mueve la DIFERENCIA: vuelto a caja o salida adicional
+    //   - el provisional queda cerrado y enlazado, nunca se borra
+    // ══════════════════════════════════════════════════════════════════════
+    const esLegalizacion = !!provisionalId;
+    let prov = null, provRef = null, baseAnticipo = 0, diferenciaLegal = 0;
+
+    if (esLegalizacion) {
+      const verifLeg = await verificarPinUsuario(req.user.uid || req.user.id, pin, 'cuadrar_egreso');
+      if (!verifLeg.ok) return res.status(403).json({ error: verifLeg.error, codigo: verifLeg.codigo });
+
+      provRef = db.collection('egresos').doc(provisionalId);
+      const provDoc = await provRef.get();
+      if (!provDoc.exists) return res.status(404).json({ error: 'Comprobante provisional no encontrado' });
+
+      prov = provDoc.data();
+      if (prov.userId !== (req.adminId || req.user.uid)) {
+        return res.status(403).json({ error: 'Comprobante provisional de otra empresa' });
+      }
+      if (prov.tipo !== 'provisional') {
+        return res.status(400).json({ error: 'El comprobante seleccionado no es provisional' });
+      }
+      if (prov.legalizado === true || prov.cuadrado === true) {
+        return res.status(400).json({ error: `El comprobante ${prov.numero} ya fue legalizado` });
+      }
+      if (prov.anulado === true) {
+        return res.status(400).json({ error: `El comprobante ${prov.numero} está anulado` });
+      }
+
+      baseAnticipo   = Number(prov.totalPagar || prov.monto) || 0;
+      const realLegal = Number(totalPagar) || Number(monto);
+      diferenciaLegal = baseAnticipo - realLegal; // >0 vuelto · <0 falta plata
+
+      if (!(cajaId || prov.cajaId)) {
+        return res.status(400).json({ error: 'Caja requerida para ajustar la diferencia del anticipo' });
+      }
+    }
 
     const numero = await genNumero(req.adminId || req.user.uid);
     const esProvisional = tipo === 'provisional';
@@ -206,18 +256,27 @@ router.post('/', async (req, res) => {
       retenVal: Number(retenVal) || 0,
       retenPct: Number(retenPct) || 0,
       formaPago: formaPago || '',
-      cajaId: cajaId || '',
-      empresaId: empresaId || '',
+      // ✅ EGRESO-PROV-001: al legalizar, hereda la caja del anticipo si no se eligió otra
+      cajaId: cajaId || (esLegalizacion ? (prov.cajaId || '') : ''),
+      empresaId: empresaId || (esLegalizacion ? (prov.empresaId || '') : ''),
       fecha: fecha || hoyEnCO(), // ✅ FIX FECHA-CO-001
       notas: notas || '',
       productosCompra: productosCompra || [],
       // Campos provisional / orden interna
       tipo: esProvisional ? 'provisional' : (tipo || 'normal'),
       cuadrado: esProvisional ? (cuadrado === true ? true : false) : true,
+      // ✅ EGRESO-PROV-001: el anticipo nace SIN legalizar
+      legalizado: esProvisional ? false : true,
       mensajeroId: mensajeroId || '',
       mensajeroNombre: mensajeroNombre || '',
       numeroOrdenInterna: numeroOrdenInterna || '',
-      estado: pagarAhora ? 'PAGADO' : 'PENDIENTE',
+      // ✅ EGRESO-PROV-001: enlace al anticipo que este egreso legaliza
+      legalizaProvisionalId: esLegalizacion ? provisionalId : '',
+      legalizaProvisionalNumero: esLegalizacion ? (prov.numero || '') : '',
+      // ✅ EGRESO-PROV-001: estado propio del anticipo. NO es 'PENDIENTE'
+      // (la plata ya salió de caja) ni 'PAGADO' (no es gasto todavía).
+      // Este estado lo excluye del ERI y del dashboard, y bloquea el botón Pagar.
+      estado: esProvisional ? 'ANTICIPO' : ((pagarAhora || esLegalizacion) ? 'PAGADO' : 'PENDIENTE'),
       creadoPor: req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -225,9 +284,61 @@ router.post('/', async (req, res) => {
 
     const ref = await db.collection('egresos').add(nuevo);
 
+    // ✅ EGRESO-PROV-001: en una LEGALIZACIÓN la plata NO sale otra vez.
+    // Solo se ajusta la diferencia contra la caja elegida.
+    if (esLegalizacion) {
+      const cajaIdFinal = cajaId || prov.cajaId;
+      const cajaRefLeg  = db.collection('cajas').doc(cajaIdFinal);
+
+      if (diferenciaLegal !== 0) {
+        await cajaRefLeg.update({
+          saldo: admin.firestore.FieldValue.increment(diferenciaLegal),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+        await db.collection('movimientos').add({
+          userId: req.adminId || req.user.uid,
+          cajaId: cajaIdFinal,
+          tipo: diferenciaLegal > 0 ? 'ingreso' : 'egreso',
+          concepto: diferenciaLegal > 0
+            ? `Reintegro (vuelto) anticipo ${prov.numero} — legaliza ${numero}`
+            : `Diferencia adicional anticipo ${prov.numero} — legaliza ${numero}`,
+          monto: Math.abs(diferenciaLegal),
+          referencia: `${numero} · ${prov.numero}`,
+          egresoId: ref.id,
+          formaPago: formaPago || prov.formaPago || '',
+          creadoPor: req.user.email,
+          createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      }
+
+      // Cerrar el anticipo: nunca se borra, queda enlazado y con trazabilidad.
+      await provRef.update({
+        legalizado: true,
+        cuadrado: true,
+        egresoDefinitivoId: ref.id,
+        egresoDefinitivoNumero: numero,
+        definitivoId: ref.id,          // compatibilidad con Ola 2
+        definitivoNumero: numero,      // compatibilidad con Ola 2
+        legalizadoEn: new Date().toISOString(),
+        legalizadoPor: req.user.email,
+        cuadradoEn: new Date().toISOString(),
+        cuadradoPor: req.user.email,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      await registrarAuditoria({
+        accion: 'EGRESO_PROVISIONAL_LEGALIZADO',
+        modulo: 'egresos',
+        descripcion: `${numero} legaliza el anticipo ${prov.numero}: base ${fmt(baseAnticipo)} → real ${fmt(Number(totalPagar) || Number(monto))} (${diferenciaLegal >= 0 ? 'vuelto ' + fmt(diferenciaLegal) : 'gasto adicional ' + fmt(Math.abs(diferenciaLegal))})`,
+        usuarioId: req.adminId || req.user.uid,
+        usuarioNombre: req.user.email,
+        documento: numero,
+        datos: { provisionalId, definitivoId: ref.id, base: baseAnticipo, real: Number(totalPagar) || Number(monto), diferencia: diferenciaLegal }
+      });
+    }
     // Si paga ahora O es provisional → descontar de caja
     // Provisionales: el dinero sale físicamente de caja al dárselo al mensajero
-    if ((pagarAhora || esProvisional) && cajaId) {
+    else if ((pagarAhora || esProvisional) && cajaId) {
       const totalAPagar = Number(totalPagar) || Number(monto);
       const cajaRef = db.collection('cajas').doc(cajaId);
       await cajaRef.update({
@@ -265,7 +376,18 @@ router.post('/', async (req, res) => {
       documento: numero
     });
 
-    res.status(201).json({ id: ref.id, ...nuevo, alertasMargen });
+    res.status(201).json({
+      id: ref.id, ...nuevo, alertasMargen,
+      // ✅ EGRESO-PROV-001: el frontend pinta el consecutivo REAL con esto
+      ...(esLegalizacion ? {
+        legalizacion: {
+          provisionalNumero: prov.numero,
+          base: baseAnticipo,
+          real: Number(totalPagar) || Number(monto),
+          diferencia: diferenciaLegal
+        }
+      } : {})
+    });
   } catch (e) {
     console.error('POST egresos:', e);
     res.status(500).json({ error: 'Error al crear egreso' });
@@ -311,6 +433,13 @@ router.post('/:id/pagar', async (req, res) => {
 
     const egreso = egresoDoc.data();
     if (egreso.estado === 'PAGADO') return res.status(400).json({ error: 'Ya está pagado' });
+    // ✅ EGRESO-PROV-001: un anticipo NO se paga — se legaliza. Pagarlo aquí
+    // descontaba la plata de caja por segunda vez y lo contaba como gasto.
+    if (egreso.tipo === 'provisional') {
+      return res.status(400).json({
+        error: `${egreso.numero} es un anticipo, no un gasto. La plata ya salió de caja. Registra el egreso con la factura real y márcalo como "Legalizar comprobante provisional".`
+      });
+    }
 
     const cajaRef = db.collection('cajas').doc(cajaId);
     const cajaDoc = await cajaRef.get();
@@ -400,9 +529,13 @@ router.post('/:provisionalId/cuadrar-definitivo', async (req, res) => {
     if (provisional.cuadrado === true) {
       return res.status(400).json({ error: 'Este provisional ya fue cuadrado' });
     }
-    if (!provisional.numeroOrdenInterna) {
-      return res.status(400).json({ error: 'El provisional no tiene Orden Interna asociada' });
+    // ✅ EGRESO-PROV-001: la Orden Interna dejó de ser obligatoria. Un anticipo
+    // puede ser una vuelta suelta sin OI. Antes esto dejaba TODO provisional
+    // creado desde el modal (que nunca enviaba la OI) imposible de cuadrar.
+    if (provisional.legalizado === true) {
+      return res.status(400).json({ error: 'Este provisional ya fue legalizado' });
     }
+    const oiRef = provisional.numeroOrdenInterna || 'sin OI';
 
     const base = Number(provisional.monto) || 0;
     const real = Number(valorReal);
@@ -426,7 +559,7 @@ router.post('/:provisionalId/cuadrar-definitivo', async (req, res) => {
     batch.set(definitivoRef, {
       userId: req.adminId || req.user.uid,
       numero,
-      concepto: `Cuadre OI ${provisional.numeroOrdenInterna} — ${provisional.concepto}`,
+      concepto: `Cuadre ${oiRef} — ${provisional.concepto}`,
       proveedor: proveedor || provisional.proveedor || '',
       categoria: provisional.categoria || 'Orden Interna',
       monto: real,
@@ -455,6 +588,9 @@ router.post('/:provisionalId/cuadrar-definitivo', async (req, res) => {
     // 2) Marcar el provisional como cuadrado y referenciar el definitivo
     batch.update(provisionalRef, {
       cuadrado: true,
+      legalizado: true, // ✅ EGRESO-PROV-001
+      egresoDefinitivoId: definitivoRef.id,
+      egresoDefinitivoNumero: numero,
       definitivoId: definitivoRef.id,
       definitivoNumero: numero,
       cuadradoEn: new Date().toISOString(),
@@ -477,9 +613,9 @@ router.post('/:provisionalId/cuadrar-definitivo', async (req, res) => {
       await db.collection('movimientos').add({
         userId: req.adminId || req.user.uid,
         cajaId: cajaIdFinal, tipo: 'ingreso',
-        concepto: `Vuelto OI ${provisional.numeroOrdenInterna} (cuadre ${numero})`,
+        concepto: `Vuelto ${oiRef} (cuadre ${numero})`,
         monto: diferencia,
-        referencia: `${numero} · ${provisional.numeroOrdenInterna}`,
+        referencia: `${numero} · ${provisional.numero}`,
         egresoId: definitivoRef.id,
         creadoPor: req.user.email,
         createdAt: admin.firestore.FieldValue.serverTimestamp()
@@ -488,9 +624,9 @@ router.post('/:provisionalId/cuadrar-definitivo', async (req, res) => {
       await db.collection('movimientos').add({
         userId: req.adminId || req.user.uid,
         cajaId: cajaIdFinal, tipo: 'egreso',
-        concepto: `Diferencia adicional OI ${provisional.numeroOrdenInterna} (cuadre ${numero})`,
+        concepto: `Diferencia adicional ${oiRef} (cuadre ${numero})`,
         monto: Math.abs(diferencia),
-        referencia: `${numero} · ${provisional.numeroOrdenInterna}`,
+        referencia: `${numero} · ${provisional.numero}`,
         egresoId: definitivoRef.id,
         creadoPor: req.user.email,
         createdAt: admin.firestore.FieldValue.serverTimestamp()
@@ -500,10 +636,10 @@ router.post('/:provisionalId/cuadrar-definitivo', async (req, res) => {
     await registrarAuditoria({
       accion: 'EGRESO_PROVISIONAL_CUADRADO',
       modulo: 'egresos',
-      descripcion: `Cuadre OI ${provisional.numeroOrdenInterna}: base ${fmt(base)} → real ${fmt(real)} (${diferencia >= 0 ? 'vuelto ' + fmt(diferencia) : 'gasto adicional ' + fmt(Math.abs(diferencia))})`,
+      descripcion: `Cuadre ${oiRef}: base ${fmt(base)} → real ${fmt(real)} (${diferencia >= 0 ? 'vuelto ' + fmt(diferencia) : 'gasto adicional ' + fmt(Math.abs(diferencia))})`,
       usuarioId: req.adminId || req.user.uid,
       usuarioNombre: req.user.email,
-      documento: provisional.numeroOrdenInterna,
+      documento: provisional.numero,
       datos: { provisionalId: req.params.provisionalId, definitivoId: definitivoRef.id, base, real, diferencia }
     });
 

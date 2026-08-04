@@ -13,6 +13,8 @@ node_modules/
 backend/diagnostico-sistema-*.json
 backend/diagnostico-vencimientos-*.json
 backend/recuperacion-vencimientos-*.json
+backend/duplicados-vencimientos-*.json
+backend/respaldo-eliminados-*.json
 
 # Mensaje de commit temporal
 commit-msg.txt

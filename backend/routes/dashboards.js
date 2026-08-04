@@ -182,10 +182,18 @@ router.get('/admin', async (req, res) => {
       .get();
     egSnap.forEach(d => {
       const e = d.data();
-      if (e.estado === 'PAGADO' && dentroDeRango(e.pagadoEn || e.createdAt, mes.inicioISO, mes.finISO)) {
+      // ✅ EGRESO-PROV-001: un ANTICIPO no es gasto. Si suma aquí, contamina
+      // egresosMes y por tanto utilidadMes (ventasMes − egresosMes), y se
+      // cuenta doble cuando el anticipo se legaliza con su egreso definitivo.
+      const esAnticipo = e.tipo === 'provisional' || e.estado === 'ANTICIPO';
+      if (!esAnticipo && e.anulado !== true
+          && e.estado === 'PAGADO'
+          && dentroDeRango(e.pagadoEn || e.createdAt, mes.inicioISO, mes.finISO)) {
         egresosMes += Number(e.totalPagar || e.monto) || 0;
       }
-      if (e.tipo === 'provisional' && e.cuadrado === false) {
+      // ✅ EGRESO-PROV-001: pendiente = sin legalizar (cubre docs viejos que
+      // solo tienen `cuadrado` y nuevos que ya traen `legalizado`).
+      if (e.tipo === 'provisional' && e.legalizado !== true && e.cuadrado !== true && e.anulado !== true) {
         provisionalesPendientes++;
       }
     });

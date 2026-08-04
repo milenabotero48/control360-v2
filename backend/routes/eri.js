@@ -158,6 +158,14 @@ router.get('/', async (req, res) => {
       if (e.estado !== 'PAGADO') return;
       // Excluir retenciones automáticas (ya están en la orden, no doble-contar)
       if (e.tipo === 'retencion') return;
+      // ✅ EGRESO-PROV-001: los ANTICIPOS a mensajeros NO son gasto. El gasto
+      // entra al ERI cuando se legaliza, por el egreso definitivo con su
+      // factura, IVA y retención. Exclusión EXPLÍCITA — antes solo quedaban
+      // fuera por accidente (nacían en estado 'PENDIENTE'); si alguien le daba
+      // "Pagar" al anticipo, empezaba a contar como gasto y se duplicaba.
+      if (e.tipo === 'provisional' || e.estado === 'ANTICIPO') return;
+      // Excluir anulados (no se devengó nada)
+      if (e.anulado === true) return;
       const fechaRef = parseFecha(e.fechaPago || e.fecha || e.createdAt);
       if (!fechaRef) return;
       if (fechaRef < desdeDate || fechaRef > hastaDate) return;

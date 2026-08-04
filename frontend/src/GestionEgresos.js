@@ -29,7 +29,11 @@ const fmtDate = (ts) => {
   const d = new Date(s);
   return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'America/Bogota' });
 };
-const genId = (prefix) => `${prefix}-${String(Math.floor(Math.random() * 9000) + 1000)}`;
+// ✅ EGRESO-NUM-002: eliminado genId(). El frontend pintaba un consecutivo
+// ALEATORIO (ej. EGR-5325) que nunca se guardaba: el backend genera el número
+// real de forma atómica en counters/{userId}_egresos (ej. EGR-0012). Al
+// refrescar aparecía el correcto y parecía un bug de consecutivo. Ahora el
+// número lo manda siempre el backend en la respuesta.
 
 const CATEGORIAS_DEFAULT = ['Insumos taller', 'Transporte / Combustible', 'Arriendo', 'Servicios públicos', 'Papelería', 'Mantenimiento', 'Nómina', 'Marketing', 'Impuestos', 'Compra de Mercancia', 'Otros'];
 
@@ -111,13 +115,31 @@ const EgresoProvisional = ({ mensajeros, cajas, formasPagoConfig, onCrear, onCer
   const [concepto, setConcepto]       = useState('');
   const [monto, setMonto]             = useState('');
   const [cajaId, setCajaId]           = useState('');
+  // ✅ EGRESO-PROV-001: OI opcional — un anticipo puede ser una vuelta suelta
+  const [numeroOrdenInterna, setOI]   = useState('');
   const [guardando, setGuardando]     = useState(false);
   const [error, setError]             = useState('');
 
   const guardar = async () => {
-    if (!mensajeroId || !concepto || !monto || !cajaId) return setError('Todos los campos son requeridos');
+    if (!mensajeroId || !concepto || !monto || !cajaId) return setError('Mensajero, concepto, monto y caja son requeridos');
     setGuardando(true);
-    await onCrear({ mensajeroId, concepto, monto: Number(monto), cajaId, tipo: 'provisional', cuadrado: false });
+    // ✅ EGRESO-PROV-001: antes solo se enviaba mensajeroId/concepto/monto/cajaId.
+    // Faltaban mensajeroNombre (la columna salía "—") y formaPago. La caja se
+    // resuelve por su forma de pago configurada para que el movimiento cuadre.
+    const cajaSel  = (cajas || []).find(c => c.id === cajaId);
+    const confPago = (formasPagoConfig || []).find(f => f.cajaId === cajaId);
+    await onCrear({
+      mensajeroId,
+      mensajeroNombre: (mensajeros || []).find(m => m.id === mensajeroId)?.nombre || '',
+      concepto,
+      monto: Number(monto),
+      totalPagar: Number(monto),
+      cajaId,
+      formaPago: confPago?.nombre || cajaSel?.nombre || 'Efectivo',
+      numeroOrdenInterna: numeroOrdenInterna.trim(),
+      tipo: 'provisional',
+      cuadrado: false
+    });
     setGuardando(false);
   };
 
@@ -152,8 +174,15 @@ const EgresoProvisional = ({ mensajeros, cajas, formasPagoConfig, onCrear, onCer
               {cajas.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
             </select>
           </div>
+          <div style={S.field}>
+            <label style={S.label}>Orden Interna (opcional)</label>
+            <input style={S.input} placeholder="Ej: OS-0475 — dejar vacío si es una vuelta suelta"
+              value={numeroOrdenInterna} onChange={e => setOI(e.target.value)} />
+          </div>
           <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8, padding: 10, fontSize: 12, color: '#92400e' }}>
-            💡 El mensajero verá este valor en su cuadre. Al cuadrar, la diferencia regresa a caja.
+            💡 Esto es un <strong>anticipo</strong>, no un gasto: la plata sale de caja ya, pero no cuenta
+            en el ERI ni en la utilidad. Cuando el mensajero traiga la factura, registra el egreso normal
+            (con IVA y retención) y elige <strong>"Legalizar comprobante provisional"</strong>.
           </div>
         </div>
         <div style={S.modalFooter}>
@@ -419,12 +448,14 @@ const calcularTotales = (monto, ivaPct, retenPct) => {
 };
 
 // ─── Modal Nuevo / Editar ─────────────────────────────────────────────────────
-function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, categoriasList, onSave, onClose }) {
+function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, categoriasList, provisionales, provisionalInicial, onSave, onClose }) {
   const [form, setForm] = useState({
     concepto: '', proveedor: '', categoria: (categoriasList || CATEGORIAS_DEFAULT)[0],
     monto: '', ivaPct: 0, retenPct: 0, retenManual: '',
     formaPago: '', cajaId: '', cajaLabel: '',
     pagarAhora: false, notas: '',
+    // ✅ EGRESO-PROV-001: legalización de un anticipo entregado al mensajero
+    provisionalId: provisionalInicial?.id || '', pinLegal: '',
     fecha: new Date().toISOString().slice(0, 10),
     ...(egreso || {})
   });
@@ -473,8 +504,38 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
     set('cajaLabel', caja?.nombre || '');
   };
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ✅ EGRESO-PROV-001 — LEGALIZAR COMPROBANTE PROVISIONAL
+  // El anticipo ya sacó la plata de caja. Al legalizar, este egreso queda como
+  // el gasto real (con IVA y retención) y a caja solo se mueve la DIFERENCIA.
+  // ══════════════════════════════════════════════════════════════════════════
+  const listaProv    = (provisionales || []).filter(p => p.legalizado !== true && p.anulado !== true);
+  const provSel      = listaProv.find(p => p.id === form.provisionalId) || null;
+  const esLegalizar  = !!form.provisionalId;
+  const baseAnticipo = provSel ? (Number(provSel.totalPagar || provSel.monto) || 0) : 0;
+  const diferenciaLegal = baseAnticipo - totalPagar; // >0 vuelto · <0 falta
+
+  const activarLegalizacion = (id) => {
+    setForm(f => {
+      const prov = listaProv.find(p => p.id === id);
+      return {
+        ...f,
+        provisionalId: id,
+        pagarAhora: false,
+        formaPago: id ? 'Legaliza anticipo' : '',
+        cajaId:    id ? (prov?.cajaId || f.cajaId) : '',
+        cajaLabel: id ? ((cajas || []).find(c => c.id === prov?.cajaId)?.nombre || '') : ''
+      };
+    });
+  };
+
   const handleSubmit = async () => {
     if (!form.concepto.trim()) return alert('El concepto es requerido');
+    // ✅ EGRESO-PROV-001: la legalización mueve plata en caja → exige PIN
+    if (esLegalizar) {
+      if (!/^\d{4}$/.test(String(form.pinLegal || ''))) return alert('El PIN debe ser de 4 dígitos');
+      if (!form.cajaId) return alert('Selecciona la caja donde se ajusta la diferencia');
+    }
     if (esCompra && productosCompra.length === 0) return alert('Agrega al menos un producto a la compra');
     if (!esCompra && (!form.monto || Number(form.monto) <= 0)) return alert('El monto es requerido');
     if (form.pagarAhora && !form.cajaId && form.formaPago !== 'Cuenta por Pagar') return alert('Selecciona la forma de pago para pagar ahora');
@@ -489,6 +550,9 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
       retenVal,
       totalPagar,
       productosCompra: esCompra ? productosCompra : [],
+      // ✅ EGRESO-PROV-001: el backend espera `pin` (no `pinLegal`)
+      provisionalId: form.provisionalId || undefined,
+      pin: esLegalizar ? form.pinLegal : undefined,
     });
     if (res?.alertasMargen?.length > 0) setAlertasMargen(res.alertasMargen);
     else setSaving(false);
@@ -727,14 +791,74 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
             }}>📋 Cuenta por Pagar</button>
           </div>
 
+          {/* ✅ EGRESO-PROV-001 — Legalizar comprobante provisional */}
+          {!egreso && listaProv.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <button type="button" onClick={() => activarLegalizacion(esLegalizar ? '' : listaProv[0].id)} style={{
+                padding: '9px 18px', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 700, border: 'none',
+                background: esLegalizar ? '#d97706' : '#f3f4f6',
+                color: esLegalizar ? '#fff' : '#374151',
+              }}>💵 Legalizar comprobante provisional ({listaProv.length})</button>
+
+              {esLegalizar && (
+                <div style={{ background: '#fffbeb', border: '2px solid #fcd34d', borderRadius: 10, padding: 14, marginTop: 10 }}>
+                  <div style={S.field}>
+                    <label style={S.label}>Comprobante a legalizar *</label>
+                    <select style={S.select} value={form.provisionalId} onChange={e => activarLegalizacion(e.target.value)}>
+                      {listaProv.map(pv => (
+                        <option key={pv.id} value={pv.id}>
+                          {pv.numero} · {pv.mensajeroNombre || 'sin mensajero'} · {pv.concepto} · {fmt(pv.totalPagar || pv.monto)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div style={{ background: '#fff', borderRadius: 8, padding: 12, fontSize: 13, marginBottom: 12 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, color: '#6b7280' }}>
+                      <span>Anticipo entregado</span><span>{fmt(baseAnticipo)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, color: '#6b7280' }}>
+                      <span>Gasto real (con IVA y retención)</span><span>{fmt(totalPagar)}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 800, borderTop: '1px solid #e5e7eb', paddingTop: 8, marginTop: 4,
+                      color: diferenciaLegal > 0 ? '#16a34a' : diferenciaLegal < 0 ? '#dc2626' : '#6b7280' }}>
+                      <span>{diferenciaLegal > 0 ? '↩ Vuelto a caja' : diferenciaLegal < 0 ? '↪ Sale de caja' : '✓ Cuadra exacto'}</span>
+                      <span>{fmt(Math.abs(diferenciaLegal))}</span>
+                    </div>
+                  </div>
+
+                  <div style={S.field}>
+                    <label style={S.label}>Caja del ajuste *</label>
+                    <select style={S.select} value={form.cajaId}
+                      onChange={e => { const c = (cajas || []).find(x => x.id === e.target.value); set('cajaId', e.target.value); set('cajaLabel', c?.nombre || ''); }}>
+                      <option value="">— Seleccionar caja —</option>
+                      {(cajas || []).map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                    </select>
+                  </div>
+
+                  <div style={{ ...S.field, marginBottom: 0 }}>
+                    <label style={S.label}>PIN (Admin / Tesorería) *</label>
+                    <input type="password" inputMode="numeric" maxLength={4} style={S.input} placeholder="••••"
+                      value={form.pinLegal} onChange={e => set('pinLegal', e.target.value.replace(/\D/g, ''))} />
+                  </div>
+
+                  <div style={{ fontSize: 12, color: '#92400e', marginTop: 10 }}>
+                    ⚠️ La plata del anticipo <strong>ya salió de caja</strong>. Aquí solo se mueve la diferencia.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {form.formaPago === 'Cuenta por Pagar' && (
             <div style={{ background: '#ede9fe', border: '1px solid #c4b5fd', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#6d28d9' }}>
               📋 Esta compra quedará en <strong>Cuentas por Pagar</strong>. Cuando pagues al proveedor, regístralo desde el módulo <strong>CxP</strong>.
             </div>
           )}
 
-          {/* Pagar ahora — oculto si es Cuenta por Pagar */}
-          {form.formaPago !== 'Cuenta por Pagar' && (
+          {/* Pagar ahora — oculto si es Cuenta por Pagar o si legaliza un anticipo */}
+          {/* ✅ EGRESO-PROV-001: legalizar NO es pagar. La plata ya salió. */}
+          {form.formaPago !== 'Cuenta por Pagar' && !esLegalizar && (
           <div style={{ ...S.field, marginBottom: 0 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
               <input type="checkbox" id="pagarAhora" checked={form.pagarAhora}
@@ -776,7 +900,9 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
         <div style={S.modalFooter}>
           <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
           <button onClick={handleSubmit} disabled={saving} style={S.btnPrimary}>
-            {saving ? 'Guardando...' : egreso ? 'Guardar cambios' : form.pagarAhora ? `✅ Crear y pagar ${fmt(totalPagar)}` : 'Crear egreso'}
+            {saving ? 'Guardando...' : egreso ? 'Guardar cambios'
+              : esLegalizar ? `💵 Legalizar ${provSel?.numero || ''}`
+              : form.pagarAhora ? `✅ Crear y pagar ${fmt(totalPagar)}` : 'Crear egreso'}
           </button>
         </div>
       </div>
@@ -1109,10 +1235,18 @@ export default function GestionEgresos({ user }) {
   // Ola 2: pestañas + cuadre definitivo
   const [tab, setTab]                             = useState('todos');
   const [provisionalACuadrar, setProvisionalACuadrar] = useState(null);
+  // ✅ EGRESO-PROV-001: anticipo preseleccionado al abrir "nuevo egreso"
+  const [provisionalALegalizar, setProvisionalALegalizar] = useState(null);
 
   useEffect(() => { cargarDatos(); }, []);
 
   const getHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}` });
+
+  // ✅ EGRESO-PROV-001: un anticipo está PENDIENTE si no fue legalizado.
+  // Se revisan las dos banderas: `legalizado` (nueva) y `cuadrado` (Ola 2),
+  // para que los documentos históricos se comporten igual que los nuevos.
+  const esAnticipoPendiente = (e) =>
+    e.tipo === 'provisional' && e.legalizado !== true && e.cuadrado !== true && e.anulado !== true;
 
   const cargarDatos = async () => {
     setLoading(true);
@@ -1151,7 +1285,7 @@ export default function GestionEgresos({ user }) {
   const crearEgreso = async (form) => {
     const nuevo = {
       ...form,
-      numero: genId('EGR'),
+      // ✅ EGRESO-NUM-002: sin `numero` — lo asigna el backend
       estado: form.pagarAhora ? 'PAGADO' : 'PENDIENTE',
       monto: Number(form.monto),
       totalPagar: form.totalPagar,
@@ -1163,12 +1297,37 @@ export default function GestionEgresos({ user }) {
     };
     try {
       const res = await axios.post(`${API}/egresos`, nuevo, { headers: getHeaders() });
-      setEgresos(p => [{ ...nuevo, id: res.data?.id || 'local-' + Date.now() }, ...p]);
+      // ✅ EGRESO-NUM-002: pintamos el documento que devuelve el backend
+      // (numero, estado y banderas reales), no el objeto local optimista.
+      const creado = { ...nuevo, ...(res.data || {}), id: res.data?.id || 'local-' + Date.now() };
+      setEgresos(p => [creado, ...p]);
+
+      // ✅ EGRESO-PROV-001: si legalizó un anticipo, recargamos para que el
+      // comprobante salga de "Provisionales pendientes" y la caja quede al día.
+      if (nuevo.provisionalId) {
+        const L = res.data?.legalizacion;
+        if (L) {
+          alert(
+            `✅ ${creado.numero} legaliza el anticipo ${L.provisionalNumero}\n\n` +
+            `Anticipo entregado: ${fmt(L.base)}\n` +
+            `Gasto real: ${fmt(L.real)}\n` +
+            (L.diferencia > 0 ? `Vuelto reintegrado a caja: ${fmt(L.diferencia)}`
+             : L.diferencia < 0 ? `Salida adicional de caja: ${fmt(Math.abs(L.diferencia))}`
+             : 'Sin diferencia: el anticipo cuadró exacto.')
+          );
+        }
+        await cargarDatos();
+      }
+
       if (res.data?.alertasMargen?.length > 0) {
         setModal(null);
         return res.data;
       }
-    } catch {
+    } catch (e) {
+      // ✅ EGRESO-PROV-001: una legalización NUNCA debe fingir éxito local —
+      // mueve plata en caja. Si falla, se muestra el error y no se pinta nada.
+      const msg = e.response?.data?.error || e.message;
+      if (nuevo.provisionalId) { alert('No se pudo legalizar: ' + msg); setModal(null); return {}; }
       setEgresos(p => [{ id: 'local-' + Date.now(), ...nuevo, createdAt: new Date().toISOString() }, ...p]);
     }
     setModal(null);
@@ -1306,7 +1465,7 @@ export default function GestionEgresos({ user }) {
           }}>
           💵 Provisionales pendientes
           {(() => {
-            const pend = egresos.filter(e => e.tipo === 'provisional' && e.cuadrado === false).length;
+            const pend = egresos.filter(esAnticipoPendiente).length; // ✅ EGRESO-PROV-001
             return pend > 0 ? <span style={{ background: '#d97706', color: '#fff', borderRadius: 10, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>{pend}</span> : null;
           })()}
         </button>
@@ -1315,12 +1474,17 @@ export default function GestionEgresos({ user }) {
       {/* ── VISTA PROVISIONALES (Ola 2) ──────────────────────────────────────── */}
       {tab === 'provisionales' && (() => {
         const provisionales = egresos
-          .filter(e => e.tipo === 'provisional' && e.cuadrado === false)
+          .filter(esAnticipoPendiente) // ✅ EGRESO-PROV-001
           .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
         return (
           <div>
             <div style={{ background: '#fffbeb', border: '1px solid #fcd34d', padding: '14px 18px', borderRadius: 10, marginBottom: 16, fontSize: 13, color: '#92400e' }}>
-              <strong>¿Qué son los egresos provisionales?</strong> Cuando un mensajero sale a hacer un mandado de Orden Interna (compra de insumos, gastos varios) le entregas un valor estimado. Al regresar con la factura real y el vuelto, cuadras aquí el egreso definitivo. La Orden Interna no se puede cerrar sin el cuadre completo.
+              {/* ✅ EGRESO-PROV-001 */}
+              <strong>¿Qué son los egresos provisionales?</strong> Son <strong>anticipos</strong>: le entregas plata al mensajero
+              para un mandado. Sale de caja de una vez, pero <strong>no cuenta como gasto</strong> (no suma al ERI ni a la utilidad).
+              Cuando vuelve con la factura, presiona <strong>"Legalizar con factura"</strong>: se abre el formulario normal de egreso —
+              con IVA, retención y proveedor — y a caja solo se mueve la diferencia (vuelto o faltante). El anticipo no se borra:
+              queda cerrado y enlazado al egreso definitivo.
             </div>
 
             {provisionales.length === 0 ? (
@@ -1352,9 +1516,16 @@ export default function GestionEgresos({ user }) {
                           {cajas.find(c => c.id === eg.cajaId)?.nombre || '—'}
                         </td>
                         <td style={{ padding: '12px 16px' }}>
-                          <button onClick={() => setProvisionalACuadrar(eg)}
+                          {/* ✅ EGRESO-PROV-001: ruta principal — legalizar con
+                              el formulario completo (IVA / retención / proveedor) */}
+                          <button onClick={() => { setProvisionalALegalizar(eg); setModal('nuevo'); }}
                             style={{ padding: '6px 14px', background: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 700 }}>
-                            ✓ Cuadrar definitivo
+                            ✓ Legalizar con factura
+                          </button>
+                          {/* Ruta rápida heredada (Ola 2): sin IVA ni retención */}
+                          <button onClick={() => setProvisionalACuadrar(eg)} title="Cuadre rápido sin IVA ni retención"
+                            style={{ padding: '6px 10px', marginLeft: 6, background: '#f3f4f6', color: '#6b7280', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>
+                            ⚡ Rápido
                           </button>
                         </td>
                       </tr>
@@ -1427,9 +1598,14 @@ export default function GestionEgresos({ user }) {
                 {/* Cabecera: número + estado */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                   <span style={S.badge}>{eg.numero || 'EGR-?'}</span>
+                  {/* ✅ EGRESO-PROV-001: badge de anticipo también en móvil */}
+                  {esAnticipoPendiente(eg) ? (
+                    <span style={{ ...S.estadoBadge, background: '#ffedd5', color: '#9a3412', border: '1px solid #fdba74' }}>💵 ANTICIPO</span>
+                  ) : (
                   <span style={{ ...S.estadoBadge, background: esPagado ? '#dcfce7' : '#fef3c7', color: esPagado ? '#166534' : '#92400e', border: `1px solid ${esPagado ? '#bbf7d0' : '#fde68a'}` }}>
                     {esPagado ? '✅ PAGADO' : '⏳ PENDIENTE'}
                   </span>
+                  )}
                 </div>
                 {/* Concepto */}
                 <div style={{ fontWeight: 700, fontSize: 14, color: '#1e293b', marginBottom: 2 }}>{eg.concepto}</div>
@@ -1524,12 +1700,24 @@ export default function GestionEgresos({ user }) {
                   <td style={S.td}>{eg.retenVal > 0 ? <span style={{ fontSize: 12, color: '#7c3aed', fontWeight: 600 }}>{fmt(eg.retenVal)}</span> : <span style={{ color: '#d1d5db' }}>—</span>}</td>
                   <td style={{ ...S.td, fontWeight: 700, color: '#1e293b', fontSize: 14 }}>{fmt(eg.totalPagar || eg.monto)}</td>
                   <td style={S.td}>
+                    {/* ✅ EGRESO-PROV-001: el ANTICIPO tiene estado propio —
+                        la plata salió de caja pero todavía NO es gasto. */}
+                    {esAnticipoPendiente(eg) ? (
+                      <span style={{ ...S.estadoBadge, background: '#ffedd5', color: '#9a3412', border: '1px solid #fdba74' }}>💵 ANTICIPO</span>
+                    ) : (
                     <span style={{ ...S.estadoBadge, background: eg.estado === 'PAGADO' ? '#dcfce7' : eg.estado === 'ANULADO' ? '#f3f4f6' : '#fef3c7', color: eg.estado === 'PAGADO' ? '#166534' : eg.estado === 'ANULADO' ? '#6b7280' : '#92400e', border: `1px solid ${eg.estado === 'PAGADO' ? '#bbf7d0' : eg.estado === 'ANULADO' ? '#d1d5db' : '#fde68a'}` }}>
                       {eg.estado === 'PAGADO' ? '✅ PAGADO' : eg.estado === 'ANULADO' ? '❌ ANULADO' : '⏳ PENDIENTE'}
                     </span>
+                    )}
                   </td>
                   <td style={{ ...S.td, whiteSpace: 'nowrap' }}>
-                    {eg.estado === 'PENDIENTE' && <>
+                    {/* ✅ EGRESO-PROV-001: un anticipo NO se paga (la plata ya
+                        salió). Se legaliza registrando el egreso con factura. */}
+                    {esAnticipoPendiente(eg) && (
+                      <button onClick={() => { setProvisionalALegalizar(eg); setModal('nuevo'); }}
+                        style={{ ...S.actionBtn, background: '#ffedd5', color: '#9a3412', fontWeight: 700 }}>💵 Legalizar</button>
+                    )}
+                    {!esAnticipoPendiente(eg) && eg.estado === 'PENDIENTE' && <>
                       <button onClick={() => { setSelected(eg); setModal('editar'); }} style={S.actionBtn}>✏️</button>
                       <button onClick={() => { setSelected(eg); setModal('pagar'); }} style={{ ...S.actionBtn, background: '#dcfce7', color: '#166534' }}>💳 Pagar</button>
                     </>}
@@ -1550,7 +1738,10 @@ export default function GestionEgresos({ user }) {
       </>}
       {/* ── Fin vista normal ─────────────────────────────────────────────── */}
 
-      {modal === 'nuevo' && <ModalEgreso empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias} onSave={crearEgreso} onClose={() => setModal(null)} />}
+      {modal === 'nuevo' && <ModalEgreso empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias}
+        provisionales={egresos.filter(esAnticipoPendiente)}
+        provisionalInicial={provisionalALegalizar}
+        onSave={crearEgreso} onClose={() => { setModal(null); setProvisionalALegalizar(null); }} />}
       {modal === 'editar' && selected && <ModalEgreso egreso={{ ...selected, _categorias: categorias }} empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias} onSave={editarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'pagar' && selected && <ModalPagar egreso={selected} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} onPagar={pagarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'editarPagado' && selected && <ModalEditarPagado egreso={selected} onSave={editarPagado} onClose={() => { setModal(null); setSelected(null); }} />}
