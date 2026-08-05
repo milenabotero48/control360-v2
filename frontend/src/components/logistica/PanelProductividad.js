@@ -68,14 +68,17 @@ const PanelProductividad = ({ headers, isMobile }) => {
   const [mes, setMes]           = useState(meses[0].valor);
   const [data, setData]         = useState(null);
   const [cargando, setCargando] = useState(true);
+  const [fallo, setFallo]       = useState('');
   const [colapsado, setColapsado] = useState(false);
 
   useEffect(() => {
     let vivo = true;
-    setCargando(true);
+    setCargando(true); setFallo('');
     axios.get(`${API}/logistica/productividad?mes=${mes}`, { headers })
       .then(r => { if (vivo) setData(r.data); })
-      .catch(() => { if (vivo) setData(null); })
+      // Un panel vacío por error de red y uno vacío por falta de datos son
+      // problemas distintos: mostrarlos igual manda a buscar donde no es.
+      .catch(e => { if (vivo) { setData(null); setFallo(e.response?.data?.error || 'No se pudo cargar la productividad'); } })
       .finally(() => { if (vivo) setCargando(false); });
     return () => { vivo = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -111,6 +114,8 @@ const PanelProductividad = ({ headers, isMobile }) => {
         <>
           {cargando ? (
             <div style={st.vacio}>Cargando productividad...</div>
+          ) : fallo ? (
+            <div style={{ ...st.vacio, color: '#dc2626' }}>⚠️ {fallo}</div>
           ) : lista.length === 0 ? (
             <div style={st.vacio}>Sin actividad registrada en este mes</div>
           ) : (

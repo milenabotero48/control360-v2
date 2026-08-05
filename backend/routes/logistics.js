@@ -1942,11 +1942,24 @@ router.get('/productividad', async (req, res) => {
       if (!o.mensajeroId) return;
       if (!ESTADOS_VUELTA.includes(o.estado)) return;
 
-      // Fecha de referencia del mes: la programada; si falta, la de creación.
-      const fecha = o.fechaProgramada
-        || o.createdAt?.toDate?.()?.toISOString()?.split('T')[0]
-        || '';
-      if (!String(fecha).startsWith(mes)) return;
+      // ── ¿A qué mes pertenece esta vuelta? ──────────────────────────────────
+      // NO se usa fechaProgramada: una orden programada el 23 de julio que el
+      // mensajero trabajó el 4 de agosto es trabajo de AGOSTO. Filtrar por lo
+      // programado dejaba el panel vacío al arrancar el mes, justo cuando el
+      // equipo venía arrastrando la cola del mes anterior.
+      // Se toma la fecha en que el mensajero REALMENTE la movió, del evento más
+      // definitivo al más débil. Todas se normalizan a 'YYYY-MM-DD'.
+      const soloFecha = (v) => {
+        if (!v) return '';
+        if (typeof v?.toDate === 'function') return v.toDate().toISOString().split('T')[0];
+        return String(v).split('T')[0];
+      };
+      const fecha = soloFecha(o.fechaCompletada)   // se cerró
+        || soloFecha(o.fechaCuadre)                // se cuadró su dinero
+        || soloFecha(o.fechaAsignacion)            // salió a la calle
+        || soloFecha(o.fechaProgramada)            // se planeó
+        || soloFecha(o.createdAt);                 // se creó
+      if (!fecha.startsWith(mes)) return;
 
       if (!porMensajero[o.mensajeroId]) {
         porMensajero[o.mensajeroId] = {
