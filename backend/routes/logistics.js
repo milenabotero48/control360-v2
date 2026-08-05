@@ -1305,11 +1305,16 @@ router.get('/cuadre/:mensajeroId', async (req, res) => {
     });
 
     res.json({
-      // El mensajero solo entrega EFECTIVO (más lo provisional que le dieron)
+      // ✅ ANTICIPO-CUADRE-001: el mensajero entrega el EFECTIVO QUE COBRÓ A LOS
+      // CLIENTES. Los anticipos (provisionales) ya NO se suman aquí: se legalizan
+      // en el módulo Egresos con su factura. Sumarlos inflaba el esperado del
+      // cuadre y generaba faltantes fantasma contra el arqueo, que siempre usó
+      // solo el efectivo cobrado. `totalProvisional` y `egresosProv` se siguen
+      // devolviendo, pero como INFORMACIÓN de lo que el mensajero debe legalizar.
       totalCobrado: totalEfectivo,
       totalVirtual,
       totalProvisional,
-      totalAEntregar: totalEfectivo + totalProvisional,
+      totalAEntregar: totalEfectivo,
       ordenesCobro,
       ordenesVirtual,
       ordenesSinPago,         // entregadas sin pago → pasarán a CxC al confirmar
@@ -1339,8 +1344,22 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
     // ✅ CUADRE-CAJA-002: cajasPorOrden = { ordenId: cajaId } para el EFECTIVO
     // (cada orden puede entrar a una caja distinta); cajasVirtualesPorOrden
     // = { ordenId: cajaId } como caja SUGERIDA para validar el pago virtual.
-    const { pin, montoRecibido, extintoresDevueltos, cajaEfectivoId,
+    // ✅ CUADRE-CAJA-003: montoRecibidoPorCaja = { cajaId: monto } — el receptor
+    // cuenta el dinero SEPARADO por caja destino, tal como lo marcó orden por
+    // orden arriba. Antes solo existía un montoRecibido global contra una única
+    // caja general: si las órdenes iban a MAY EFECTIVO y a Efectivo Sala, el
+    // arqueo quedaba mal repartido por diseño. `montoRecibido` (total) se
+    // conserva para compatibilidad con clientes viejos y con el histórico.
+    const { pin, montoRecibido, montoRecibidoPorCaja, extintoresDevueltos, cajaEfectivoId,
             cajasPorOrden, cajasVirtualesPorOrden } = req.body;
+
+    // Total efectivamente contado: si viene el desglose por caja, manda el
+    // desglose (su suma). Si no, se usa el monto global de siempre.
+    const hayDesgloseCajas = montoRecibidoPorCaja && typeof montoRecibidoPorCaja === 'object'
+      && Object.keys(montoRecibidoPorCaja).length > 0;
+    const montoRecibidoTotal = hayDesgloseCajas
+      ? Object.values(montoRecibidoPorCaja).reduce((s, v) => s + (Number(v) || 0), 0)
+      : montoRecibido;
     const { mensajeroId } = req.params;
     const adminId = req.adminId || req.user?.uid || req.user?.id;
 
@@ -1372,21 +1391,22 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
 
     const batch = db.batch();
 
-    // Marcar egresos provisionales como cuadrados
-    const snapEgresos = await db.collection('egresos')
-      .where('mensajeroId', '==', mensajeroId)
-      .where('tipo', '==', 'provisional')
-      .where('cuadrado', '==', false)
-      .get();
-
-    snapEgresos.forEach(doc => {
-      batch.update(doc.ref, {
-        cuadrado: true,
-        fechaCuadre: new Date().toISOString(),
-        cuadradoPor: req.user.email,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-    });
+    // ✅ ANTICIPO-CUADRE-001: el cuadre de logística YA NO TOCA los anticipos.
+    // ─────────────────────────────────────────────────────────────────────────
+    // ANTES este bloque marcaba `cuadrado: true` todos los egresos provisionales
+    // del mensajero. Eso venía de la Ola 2, cuando el anticipo se saldaba aquí.
+    // Desde EGRESO-PROV-001 el anticipo tiene ciclo propio en el módulo Egresos:
+    // se LEGALIZA con su factura, IVA/retención y ajuste del vuelto contra caja.
+    //
+    // La fuga que producía: /egresos/provisionales-pendientes filtra primero por
+    // `cuadrado == false` y solo después mira `legalizado`. Al cuadrar la ruta,
+    // el anticipo quedaba cuadrado:true / legalizado:false → desaparecía de la
+    // alerta de fin de día SIN factura y sin legalizar. Plata salida de caja sin
+    // soporte contable y sin nadie persiguiéndola.
+    //
+    // Ahora el anticipo solo se cierra desde su propia legalización. El cuadre
+    // los muestra (GET /cuadre devuelve `egresosProv`) pero no los altera:
+    // una cosa es recibir el dinero de los clientes y otra legalizar un gasto.
 
     // Marcar extintores devueltos
     if (extintoresDevueltos?.length > 0) {
@@ -1450,7 +1470,8 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
         esperadoPrevio += montoPre;
       }
     });
-    const montoRecibidoDigitado = montoRecibido !== undefined && montoRecibido !== null && montoRecibido !== '';
+    const montoRecibidoDigitado = hayDesgloseCajas
+      || (montoRecibido !== undefined && montoRecibido !== null && montoRecibido !== '');
     if (esperadoPrevio > 0 && !montoRecibidoDigitado) {
       return res.status(400).json({
         error: `Debes digitar el monto recibido. El mensajero debe entregar $${esperadoPrevio.toLocaleString('es-CO')} en efectivo — cuéntalo y digítalo antes de confirmar.`,
@@ -1697,10 +1718,36 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
     // ══════════════════════════════════════════════════════════════════════
     try {
       const esperadoEntregar = sumaEfectivo; // efectivo que debía entregar a caja
-      const recibidoReal = montoRecibido !== undefined && montoRecibido !== null
-        ? Number(montoRecibido)
+      const recibidoReal = montoRecibidoTotal !== undefined && montoRecibidoTotal !== null
+        ? Number(montoRecibidoTotal)
         : esperadoEntregar;
       const descuadre = recibidoReal - esperadoEntregar; // <0 faltante, >0 sobrante
+
+      // ✅ CUADRE-CAJA-003: descuadre CAJA POR CAJA. `arqueoPorCaja` ya trae lo
+      // que de verdad entró a cada caja (esperado); aquí se cruza con lo que el
+      // receptor contó físicamente en cada una. Un faltante en MAY EFECTIVO ya
+      // no se compensa con un sobrante en Efectivo Sala: cada caja responde por
+      // lo suyo, que es lo que exige el arqueo contable.
+      const desgloseCajas = [];
+      if (hayDesgloseCajas) {
+        const idsCaja = new Set([
+          ...Array.from(arqueoPorCaja.keys()),
+          ...Object.keys(montoRecibidoPorCaja)
+        ]);
+        for (const cid of idsCaja) {
+          const g = arqueoPorCaja.get(cid);
+          const esperadoCaja = g ? g.monto : 0;
+          const recibidoCaja = Number(montoRecibidoPorCaja[cid]) || 0;
+          desgloseCajas.push({
+            cajaId: cid,
+            cajaNombre: (g && g.cajaNombre) || '',
+            esperado: esperadoCaja,
+            recibido: recibidoCaja,
+            descuadre: recibidoCaja - esperadoCaja,
+            ordenes: (g && g.ordenes) || []
+          });
+        }
+      }
 
       const arqueo = {
         adminId,
@@ -1723,6 +1770,8 @@ router.post('/cuadre/:mensajeroId/confirmar', async (req, res) => {
         cajaEfectivoId: cajaEfectivoId || null,
         // ✅ CUADRE-CAJA-002: resumen de cajas destino (efectivo por caja)
         cajasDestino: cajasDestinoArqueo,
+        // ✅ CUADRE-CAJA-003: esperado vs contado vs descuadre POR CAJA
+        desgloseCajas,
         extintoresDevueltos: Array.isArray(extintoresDevueltos) ? extintoresDevueltos : [],
         // Estado del arqueo
         anulado: false
@@ -1845,6 +1894,105 @@ router.get('/resumen-mensajeros', async (req, res) => {
 
     res.json(Object.values(porMensajero));
   } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ✅ LOGISTICA-PROD-001: PRODUCTIVIDAD DE MENSAJEROS (Admin / Coordinador)
+// GET /api/logistica/productividad?mes=YYYY-MM
+// ─────────────────────────────────────────────────────────────────────────────
+// Resumen mensual por mensajero para el panel de control del coordinador:
+// vueltas realizadas, recaudo del mes y calidad de la evidencia fotográfica.
+//
+// Ojo con la diferencia respecto a /resumen-mensajeros: ese endpoint responde
+// "¿cuánta plata me debe HOY cada mensajero?" (excluye lo ya cuadrado). Este
+// responde "¿cómo se desempeñó cada uno ESTE MES?" (incluye todo lo cerrado).
+// Son preguntas distintas — por eso son endpoints distintos y NO se comparten.
+//
+// Universo: órdenes con mensajeroId cuya fechaProgramada cae dentro del mes.
+// Se cuenta como "vuelta" toda orden efectivamente atendida (no las que
+// siguen programadas sin tocar), para que el ranking mida trabajo hecho.
+// ═══════════════════════════════════════════════════════════════════════════════
+router.get('/productividad', async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user?.uid || req.user?.id;
+
+    // Mes objetivo: 'YYYY-MM'. Por defecto, el mes en curso en hora Colombia.
+    const mes = /^\d{4}-\d{2}$/.test(String(req.query.mes || ''))
+      ? req.query.mes
+      : hoyEnCO().slice(0, 7);
+
+    // Estados que representan trabajo realizado por el mensajero. Una orden
+    // 'programada' o en 'despacho' aún no salió a la calle: no es una vuelta.
+    const ESTADOS_VUELTA = [
+      'en_ruta_recogida', 'en_ruta_entrega', 'en_taller',
+      'entrega_cobranza', 'cuadre_dinero', 'completada', 'cxc'
+    ];
+
+    // Mismo patrón que /ordenes y /resumen-mensajeros: filtrar por adminId en
+    // Firestore y el resto en memoria (evita exigir índices compuestos).
+    const snap = await db.collection('orders')
+      .where('adminId', '==', adminId)
+      .get();
+
+    const porMensajero = {};
+    snap.forEach(doc => {
+      const o = doc.data();
+      if (!o.mensajeroId) return;
+      if (!ESTADOS_VUELTA.includes(o.estado)) return;
+
+      // Fecha de referencia del mes: la programada; si falta, la de creación.
+      const fecha = o.fechaProgramada
+        || o.createdAt?.toDate?.()?.toISOString()?.split('T')[0]
+        || '';
+      if (!String(fecha).startsWith(mes)) return;
+
+      if (!porMensajero[o.mensajeroId]) {
+        porMensajero[o.mensajeroId] = {
+          mensajeroId: o.mensajeroId,
+          mensajeroNombre: o.mensajeroNombre || 'Sin nombre',
+          vueltas: 0,
+          conFoto: 0,
+          sinFoto: 0,
+          recaudado: 0,
+          entregadas: 0,
+          enCurso: 0,
+          aCxC: 0
+        };
+      }
+      const m = porMensajero[o.mensajeroId];
+      m.vueltas++;
+
+      // Evidencia fotográfica: basta una foto (recogida o entrega) para contar
+      // la vuelta como documentada. Es indicador informativo, no punitivo.
+      if (o.fotoRecogida || o.fotoEntrega) m.conFoto++; else m.sinFoto++;
+
+      // Recaudo del mes: TODO lo que el mensajero cobró, esté cuadrado o no.
+      m.recaudado += Number(o.montoRecaudado) || 0;
+
+      if (['entrega_cobranza', 'cuadre_dinero', 'completada'].includes(o.estado)) m.entregadas++;
+      if (['en_ruta_recogida', 'en_ruta_entrega', 'en_taller'].includes(o.estado)) m.enCurso++;
+      if (o.estado === 'cxc') m.aCxC++;
+    });
+
+    const lista = Object.values(porMensajero).map(m => ({
+      ...m,
+      // % de vueltas con evidencia fotográfica — el dato que pediste ver.
+      pctFoto: m.vueltas > 0 ? Math.round((m.conFoto / m.vueltas) * 100) : 0
+    })).sort((a, b) => b.vueltas - a.vueltas); // ranking por vueltas
+
+    res.json({
+      mes,
+      mensajeros: lista,
+      totales: {
+        vueltas:    lista.reduce((s, m) => s + m.vueltas, 0),
+        recaudado:  lista.reduce((s, m) => s + m.recaudado, 0),
+        sinFoto:    lista.reduce((s, m) => s + m.sinFoto, 0)
+      }
+    });
+  } catch (e) {
+    console.error('GET logistica/productividad:', e);
     res.status(500).json({ error: e.message });
   }
 });

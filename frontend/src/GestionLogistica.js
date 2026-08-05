@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import NuevaOrden from './NuevaOrden';
+// ✅ LOGISTICA-PROD-001: panel de productividad mensual del equipo de mensajeros
+import PanelProductividad from './components/logistica/PanelProductividad';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
@@ -542,6 +544,21 @@ const comprimirImagen = (file, maxWidth = 1200, quality = 0.82) => {
             <EstadoBadge estado={orden.estado} orden={orden} />
             <span style={{ color: '#16a34a', fontWeight: 700 }}>→ Siguiente paso del flujo</span>
           </div>
+
+          {/* ✅ NOTA-MENSAJERO-001: la nota también arriba del formulario de
+              avance — es el momento exacto en que el mensajero está frente al
+              cliente y necesita esa instrucción a la vista. */}
+          {orden.notas && (
+            <div style={{
+              background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8,
+              padding: '10px 14px', marginBottom: 16
+            }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: '#b45309', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 4 }}>
+                💬 Nota del servicio
+              </div>
+              <div style={{ fontSize: 13, color: '#78350f', lineHeight: 1.45 }}>{orden.notas}</div>
+            </div>
+          )}
 
           {/* Alerta QR sin asignar — solo en despacho */}
           {orden.estado === 'despacho' && (() => {
@@ -1241,21 +1258,72 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
       .catch(() => {});
   }, [mensajeroId]);
 
-  const esperado = cuadre?.totalAEntregar || 0;
-  const recibidoNum = Number(montoRecibido) || 0;
+  // ✅ CUADRE-CAJA-003: el efectivo se cuenta SEPARADO por caja destino.
+  // ANTES: se marcaba la caja orden por orden arriba y luego el sistema pedía
+  // UNA caja general + UN monto único — el dinero quedaba mal repartido por
+  // diseño. AHORA el sistema agrupa las órdenes por la caja que marcaste y
+  // pide el conteo físico de cada caja por separado.
+  const [montosPorCaja, setMontosPorCaja] = useState({}); // { cajaId: '12000' }
+
+  const nombreCaja = (cid) => (cajasEfectivo.find(c => c.id === cid) || {}).nombre
+    || (cid === '_sin_caja' ? 'Caja sin definir' : 'Caja');
+
+  // Agrupa el efectivo cobrado por la caja destino elegida en cada orden.
+  // Sin elección explícita, la orden cae en la caja por defecto del cuadre.
+  // ⚠️ Los ANTICIPOS (egresos provisionales) NO entran en esta cuenta.
+  // Desde EGRESO-PROV-001 tienen su propio ciclo en el módulo Egresos: se
+  // legalizan allí con factura, IVA/retención y ajuste del vuelto contra caja.
+  // Meterlos aquí sería contarlos dos veces. El desglose refleja únicamente el
+  // EFECTIVO COBRADO A CLIENTES, agrupado por la caja marcada en cada orden.
+  const desgloseCajas = (() => {
+    const map = {};
+    (cuadre?.ordenesCobro || []).forEach(o => {
+      const cid = cajasPorOrden[o.id] || cajaEfectivoId || '_sin_caja';
+      if (!map[cid]) map[cid] = { cajaId: cid, esperado: 0, ordenes: 0 };
+      map[cid].esperado += Number(o.monto) || 0;
+      map[cid].ordenes++;
+    });
+    return Object.values(map).map(g => ({
+      ...g,
+      nombre: nombreCaja(g.cajaId),
+      aEntregar: g.esperado // lo cobrado a clientes es lo que debe entregar
+    }));
+  })();
+
+  const usaDesglose = desgloseCajas.length > 0;
+  // Con desglose, el esperado es la suma del efectivo cobrado — EXACTAMENTE el
+  // mismo universo que el backend congela como `efectivoEsperado` en el arqueo.
+  // (`totalAEntregar` incluye anticipos, que ya no se cuadran por aquí.)
+  const esperado = usaDesglose
+    ? desgloseCajas.reduce((s, g) => s + g.aEntregar, 0)
+    : (cuadre?.totalAEntregar || 0);
+  // Total contado: suma del desglose si aplica; si no, el monto global de siempre.
+  const recibidoNum = usaDesglose
+    ? desgloseCajas.reduce((s, g) => s + (Number(montosPorCaja[g.cajaId]) || 0), 0)
+    : (Number(montoRecibido) || 0);
   const descuadre = recibidoNum - esperado; // <0 faltante, >0 sobrante
   const hayDescuadre = cuadre && Math.abs(descuadre) > 0;
+  // ¿Faltan cajas por contar? (no se puede confirmar a medias)
+  const cajasSinContar = usaDesglose
+    ? desgloseCajas.filter(g => g.aEntregar > 0 && (montosPorCaja[g.cajaId] === undefined || montosPorCaja[g.cajaId] === ''))
+    : [];
 
   const handleConfirmar = async () => {
     if (pin.length !== 4) return setError('Ingresa el PIN de 4 dígitos');
     // ✅ FIX CUADRE-MONTO-001: si hay efectivo esperado, el monto recibido se
     // digita obligatoriamente (conteo físico). El backend también lo valida.
-    if (esperado > 0 && montoRecibido === '') {
+    // ✅ CUADRE-CAJA-003: con desglose, se cuenta caja por caja. Sin desglose
+    // (cuadres sin cobros en efectivo) se mantiene el comportamiento anterior.
+    if (usaDesglose) {
+      if (cajasSinContar.length > 0) {
+        return setError(`⛔ Cuenta el dinero de cada caja. Falta digitar: ${cajasSinContar.map(g => g.nombre).join(', ')}.`);
+      }
+    } else if (esperado > 0 && montoRecibido === '') {
       return setError(`⛔ Cuenta el dinero y digita el monto recibido. El mensajero debe entregar ${fmt(esperado)}.`);
     }
     // ✅ CUADRE-CAJA-001: si entra efectivo, la caja destino es obligatoria
     if (recibidoNum > 0 && cajasEfectivo.length > 0 && !cajaEfectivoId) {
-      return setError('Selecciona la caja de efectivo donde entra el dinero.');
+      return setError('Selecciona la caja por defecto donde entra el efectivo.');
     }
     // ✅ Opción (c): si hay descuadre, exigir motivo antes de confirmar
     if (hayDescuadre && !motivoDescuadre.trim()) {
@@ -1269,9 +1337,19 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
         Object.keys(obj || {}).forEach(k => { if (obj[k]) out[k] = obj[k]; });
         return Object.keys(out).length > 0 ? out : undefined;
       };
+      // ✅ CUADRE-CAJA-003: enviar el conteo físico caja por caja. El backend
+      // guarda el descuadre individual de cada una en el arqueo inmutable.
+      const montoRecibidoPorCaja = usaDesglose
+        ? desgloseCajas.reduce((acc, g) => {
+            if (g.cajaId !== '_sin_caja') acc[g.cajaId] = Number(montosPorCaja[g.cajaId]) || 0;
+            return acc;
+          }, {})
+        : undefined;
+
       await onConfirmar({
         pin,
         montoRecibido: recibidoNum,
+        montoRecibidoPorCaja,
         motivoDescuadre: motivoDescuadre.trim() || undefined,
         cajaEfectivoId: cajaEfectivoId || undefined, // ✅ CUADRE-CAJA-001
         cajasPorOrden: limpiar(cajasPorOrden),               // ✅ CUADRE-CAJA-002
@@ -1299,7 +1377,11 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
               {/* Resumen */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 16 }}>
                 <div style={s.kpi}><span style={s.kpiLabel}>Cobros clientes</span><span style={{ fontWeight: 800, color: '#16a34a', fontSize: 16 }}>{fmt(cuadre.totalCobrado)}</span></div>
-                <div style={s.kpi}><span style={s.kpiLabel}>Gastos previos</span><span style={{ fontWeight: 800, color: '#dc2626', fontSize: 16 }}>{fmt(cuadre.totalProvisional)}</span></div>
+                {/* Informativo: los anticipos se legalizan en Egresos, NO aquí */}
+                <div style={s.kpi} title="Anticipos entregados al mensajero. Se legalizan en el módulo Egresos con su factura — no entran en este cuadre.">
+                  <span style={s.kpiLabel}>Anticipos</span>
+                  <span style={{ fontWeight: 800, color: '#dc2626', fontSize: 16 }}>{fmt(cuadre.totalProvisional)}</span>
+                </div>
                 <div style={{ ...s.kpi, background: '#f0fdf4', border: '1px solid #86efac' }}><span style={s.kpiLabel}>Total a entregar</span><span style={{ fontWeight: 800, color: '#16a34a', fontSize: 18 }}>{fmt(cuadre.totalAEntregar)}</span></div>
               </div>
 
@@ -1464,11 +1546,15 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                 </div>
               )}
 
-              {/* ✅ CUADRE-CAJA-001: caja destino del efectivo — la elige quien
-                  recibe el dinero, no el sistema a ciegas. */}
-              {cajasEfectivo.length > 0 && (
+              {/* ✅ CUADRE-CAJA-001: caja POR DEFECTO — recibe las órdenes a las
+                  que no se les marcó una caja específica arriba. Ya no es "la"
+                  caja del cuadre: es el fallback del desglose. */}
+              {cajasEfectivo.length > 1 && (
                 <div style={{ marginBottom: 14 }}>
-                  <label style={s.label}>🏦 Caja donde entra el efectivo <span style={{ color: '#dc2626' }}>*</span></label>
+                  <label style={s.label}>🏦 Caja por defecto <span style={{ color: '#dc2626' }}>*</span></label>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 6 }}>
+                    Recibe las órdenes que no tienen una caja marcada arriba.
+                  </div>
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
                     {cajasEfectivo.map(c => (
                       <button key={c.id} type="button" onClick={() => setCajaEfectivoId(c.id)} style={{
@@ -1482,9 +1568,74 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                 </div>
               )}
 
-              {/* ✅ LOGISTICA-CUADRE-001: monto realmente recibido + descuadre.
-                  Deja registrar lo que el mensajero entregó de verdad; si no
-                  coincide con lo esperado, exige motivo y queda en el arqueo. */}
+              {/* ✅ CUADRE-CAJA-003: CONTEO FÍSICO POR CAJA.
+                  Una tarjeta por cada caja que recibe dinero, con su esperado y
+                  su input propio. El descuadre se calcula por caja: un faltante
+                  en MAY EFECTIVO ya no se tapa con un sobrante en Efectivo Sala. */}
+              {usaDesglose && (
+                <div style={{ marginBottom: 14 }}>
+                  <label style={s.label}>💵 Conteo del efectivo recibido</label>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 4 }}>
+                    {desgloseCajas.map(g => {
+                      const digitado = montosPorCaja[g.cajaId];
+                      const contado = Number(digitado) || 0;
+                      const dif = digitado === undefined || digitado === '' ? null : contado - g.aEntregar;
+                      return (
+                        <div key={g.cajaId} style={{
+                          padding: '12px 14px', borderRadius: 10,
+                          background: '#f8fafc', border: '1px solid #e2e8f0'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                            <span style={{ fontSize: 13, fontWeight: 800, color: '#111' }}>🏦 {g.nombre}</span>
+                            <span style={{ fontSize: 11, color: '#6b7280' }}>
+                              {g.ordenes} {g.ordenes === 1 ? 'orden' : 'órdenes'}
+                            </span>
+                          </div>
+
+                          {/* Cobrado a clientes con destino a esta caja */}
+                          <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 8 }}>
+                            <strong style={{ color: '#16a34a' }}>Debe entregar {fmt(g.aEntregar)}</strong>
+                          </div>
+
+                          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <input type="number" inputMode="numeric"
+                              value={digitado === undefined ? '' : digitado}
+                              onChange={e => setMontosPorCaja(p => ({ ...p, [g.cajaId]: e.target.value }))}
+                              style={{ ...s.input, width: 150, fontSize: 16, fontWeight: 700 }}
+                              placeholder="0" />
+                            {dif !== null && dif !== 0 && (
+                              <span style={{
+                                fontSize: 12, fontWeight: 800, padding: '5px 10px', borderRadius: 8,
+                                background: dif < 0 ? '#fef2f2' : '#eff6ff',
+                                color: dif < 0 ? '#dc2626' : '#1d4ed8'
+                              }}>
+                                {dif < 0 ? '⚠️ Faltan' : '↑ Sobran'} {fmt(Math.abs(dif))}
+                              </span>
+                            )}
+                            {dif === 0 && (
+                              <span style={{ fontSize: 12, fontWeight: 800, color: '#16a34a' }}>✓ Cuadra</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Total consolidado del conteo */}
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    marginTop: 10, padding: '10px 14px', borderRadius: 10,
+                    background: '#0f172a', color: '#fff', fontSize: 13, fontWeight: 700
+                  }}>
+                    <span>TOTAL CONTADO</span>
+                    <span>{fmt(recibidoNum)} <span style={{ opacity: 0.6, fontWeight: 500 }}>de {fmt(esperado)}</span></span>
+                  </div>
+                </div>
+              )}
+
+              {/* ✅ LOGISTICA-CUADRE-001: monto único — solo cuando NO hay cobros
+                  en efectivo que desglosar (cuadres sin caja involucrada). */}
+              {!usaDesglose && (
               <div style={{ marginBottom: 14, padding: '12px 14px', background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0' }}>
                 <label style={s.label}>💵 Monto en efectivo recibido</label>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 4 }}>
@@ -1494,6 +1645,11 @@ const ModalCuadre = ({ mensajeroId, mensajeroNombre, headers, onConfirmar, onCer
                     placeholder="0" />
                   <span style={{ fontSize: 12, color: '#6b7280' }}>Esperado: <strong>{fmt(esperado)}</strong></span>
                 </div>
+              </div>
+              )}
+
+              {/* Motivo del descuadre — obligatorio, común a ambos modos */}
+              <div style={{ marginBottom: 14 }}>
                 {hayDescuadre && (
                   <div style={{ marginTop: 10 }}>
                     <div style={{
@@ -1553,7 +1709,10 @@ const useIsMobile = () => {
 // COMPONENTE PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
 const GestionLogistica = ({ user }) => {
-  const [tab, setTab]                   = useState('ordenes');
+  // ✅ LOGISTICA-TABS-001: 'pendientes' = sin asignar. Ver ordenesDelTab abajo.
+  const [tab, setTab]                   = useState('pendientes');
+  // Mensajero desplegado dentro de la pestaña "En ruta" (null = todos)
+  const [mensajeroAbierto, setMensajeroAbierto] = useState(null);
   const [ordenes, setOrdenes]           = useState([]);
   const [mensajeros, setMensajeros]     = useState([]);
   const [resumenMens, setResumenMens]   = useState([]);
@@ -1638,16 +1797,88 @@ const GestionLogistica = ({ user }) => {
   });
   const hayFiltroActivo = !!(qOrdenes || filtroEstadoLista || filtroMensajeroLista);
 
-  const ordenesPorSector = (() => {
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ LOGISTICA-TABS-001: SEPARAR PENDIENTES DE LO QUE YA ESTÁ EN LA CALLE
+  // ─────────────────────────────────────────────────────────────────────────
+  // El backend devuelve 5 estados en la misma lista y antes se pintaban todos
+  // juntos bajo "Órdenes pendientes". Consecuencia real: una orden ya entregada
+  // seguía apareciendo como pendiente hasta que se cuadraba, se mezclaba con
+  // las nuevas y se llegó a asignar la MISMA orden a dos mensajeros.
+  //
+  // Ahora la misma data se reparte en tres vistas con significado propio:
+  //   pendientes → sin mensajero: lo que falta despachar (lo único asignable)
+  //   ruta       → con mensajero y aún en calle: seguimiento por persona
+  //   cuadre     → entregadas: esperan recepción de dinero, NO estorban arriba
+  //
+  // Nota: 'en_taller' NO llega a este módulo — GET /logistica/ordenes no lo
+  // incluye en `estadosLogistica`. Esas órdenes viven en el módulo Taller y
+  // vuelven a logística cuando pasan a despacho. No hay pestaña de taller
+  // porque no habría nada que mostrar.
+  // Es derivación en el cliente: no cambia ningún contrato del backend.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const ESTADOS_ENTREGADA = ['entrega_cobranza', 'cuadre_dinero', 'completada'];
+  const tieneMensajero = o => !!(o.mensajeroId && o.mensajeroId !== '');
+
+  const clasificar = (o) => {
+    if (ESTADOS_ENTREGADA.includes(o.estado)) return 'cuadre';
+    return tieneMensajero(o) ? 'ruta' : 'pendientes';
+  };
+
+  // Contadores para los badges de las pestañas (sobre TODAS las órdenes, no
+  // sobre las filtradas — el badge indica carga real, no resultado de búsqueda)
+  const conteoTabs = ordenes.reduce((acc, o) => {
+    const k = clasificar(o); acc[k] = (acc[k] || 0) + 1; return acc;
+  }, {});
+
+  // El mensajero ve su ruta completa sin pestañas — su app no cambia.
+  const ordenesDelTab = isMensajero
+    ? ordenesVisibles
+    : ordenesVisibles.filter(o => clasificar(o) === tab);
+
+  // ── Agrupación de la lista ──────────────────────────────────────────────
+  // En "Pendientes" agrupa por SECTOR (así se arma la ruta geográfica).
+  // En "En ruta" agrupa por MENSAJERO (así se revisa a quién le diste qué).
+  const gruposVisibles = (() => {
+    if (tab === 'ruta' && !isMensajero) {
+      const porMens = {};
+      ordenesDelTab.forEach(o => {
+        const mid = o.mensajeroId || '_sin';
+        if (!porMens[mid]) {
+          porMens[mid] = {
+            sector: {
+              id: mid,
+              etiqueta: `🚚 ${o.mensajeroNombre || 'Sin nombre'}`,
+              color: '#7c3aed'
+            },
+            ordenes: []
+          };
+        }
+        porMens[mid].ordenes.push(o);
+      });
+      const lista = Object.values(porMens);
+      // Si hay un mensajero desplegado, mostrar solo el suyo.
+      return mensajeroAbierto ? lista.filter(g => g.sector.id === mensajeroAbierto) : lista;
+    }
     const grupos = {};
     sectores.forEach(s => { grupos[s.id] = { sector: s, ordenes: [] }; });
-    grupos['_sin_asignar'] = { sector: { id: '_sin_asignar', etiqueta: 'Sin Asignar', color: '#9ca3af' }, ordenes: [] };
-    ordenesVisibles.forEach(o => {
+    grupos['_sin_asignar'] = { sector: { id: '_sin_asignar', etiqueta: 'Sin Sector', color: '#9ca3af' }, ordenes: [] };
+    ordenesDelTab.forEach(o => {
       const sid = o.sectorId || '_sin_asignar';
       if (grupos[sid]) grupos[sid].ordenes.push(o);
       else grupos['_sin_asignar'].ordenes.push(o);
     });
     return Object.values(grupos).filter(g => g.ordenes.length > 0);
+  })();
+
+  // Chips de mensajero para filtrar rápido dentro de "En ruta"
+  const mensajerosEnRuta = (() => {
+    const map = {};
+    ordenes.filter(o => clasificar(o) === 'ruta').forEach(o => {
+      const mid = o.mensajeroId;
+      if (!map[mid]) map[mid] = { id: mid, nombre: o.mensajeroNombre || 'Sin nombre', total: 0 };
+      map[mid].total++;
+    });
+    return Object.values(map).sort((a, b) => b.total - a.total);
   })();
 
   // Mini-Ola 2.6: helper para reasignar (admin)
@@ -1755,19 +1986,39 @@ const GestionLogistica = ({ user }) => {
       {exito && <div style={s.alertOk}>{exito}</div>}
       {error && <div style={s.alertError}>{error}</div>}
 
-      {/* TABS — solo admin/coordinador */}
+      {/* ✅ LOGISTICA-PROD-001: resumen de productividad del equipo */}
+      {!isMensajero && <PanelProductividad headers={headers} isMobile={isMobile} />}
+
+      {/* TABS — solo admin/coordinador.
+          ✅ LOGISTICA-TABS-001: scroll horizontal en móvil (4 pestañas no caben
+          en 360px) y contador por pestaña para ver la carga de un vistazo. */}
       {!isMensajero && (
-        <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        <div style={{
+          display: 'flex', gap: 8, marginBottom: 20,
+          overflowX: 'auto', paddingBottom: 4, WebkitOverflowScrolling: 'touch'
+        }}>
           {[
-            { key: 'ordenes', label: '📋 Órdenes pendientes' },
-            { key: 'mensajeros', label: '👥 Mensajeros' },
-            { key: 'extintores', label: '🧯 Extintores préstamo' },
+            { key: 'pendientes', label: '📋 Pendientes',  n: conteoTabs.pendientes },
+            { key: 'ruta',       label: '🚚 En ruta',     n: conteoTabs.ruta },
+            { key: 'cuadre',     label: '💰 Cuadre',      n: conteoTabs.cuadre },
+            { key: 'extintores', label: '🧯 Préstamos',   n: null },
           ].map(t => (
-            <button key={t.key} onClick={() => setTab(t.key)} style={{
-              padding: '9px 18px', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 13, border: 'none',
+            <button key={t.key} onClick={() => { setTab(t.key); setMensajeroAbierto(null); }} style={{
+              padding: '9px 16px', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: 13, border: 'none',
               background: tab === t.key ? '#7c3aed' : '#f3f4f6',
               color: tab === t.key ? '#fff' : '#374151',
-            }}>{t.label}</button>
+              whiteSpace: 'nowrap', flexShrink: 0,
+              display: 'flex', alignItems: 'center', gap: 7
+            }}>
+              {t.label}
+              {t.n > 0 && (
+                <span style={{
+                  fontSize: 11, fontWeight: 800, padding: '1px 7px', borderRadius: 20,
+                  background: tab === t.key ? 'rgba(255,255,255,0.28)' : '#e5e7eb',
+                  color: tab === t.key ? '#fff' : '#6b7280'
+                }}>{t.n}</span>
+              )}
+            </button>
           ))}
         </div>
       )}
@@ -1776,8 +2027,30 @@ const GestionLogistica = ({ user }) => {
 
         <>
           {/* ── ÓRDENES (Admin + Mensajero) ── */}
-          {(tab === 'ordenes' || isMensajero) && (
+          {(['pendientes', 'ruta'].includes(tab) || isMensajero) && (
             <div style={s.tableWrap}>
+              {/* ✅ LOGISTICA-TABS-001: chips de mensajero — click para ver solo
+                  las órdenes que le enviaste a esa persona. */}
+              {tab === 'ruta' && !isMensajero && mensajerosEnRuta.length > 0 && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+                  <button onClick={() => setMensajeroAbierto(null)} style={{
+                    padding: '8px 14px', borderRadius: 20, cursor: 'pointer', fontSize: 12, fontWeight: 700,
+                    border: !mensajeroAbierto ? '2px solid #7c3aed' : '1px solid #e5e7eb',
+                    background: !mensajeroAbierto ? '#f5f3ff' : '#fff',
+                    color: !mensajeroAbierto ? '#6d28d9' : '#374151'
+                  }}>Todos</button>
+                  {mensajerosEnRuta.map(m => (
+                    <button key={m.id} onClick={() => setMensajeroAbierto(m.id === mensajeroAbierto ? null : m.id)} style={{
+                      padding: '8px 14px', borderRadius: 20, cursor: 'pointer', fontSize: 12, fontWeight: 700,
+                      border: mensajeroAbierto === m.id ? '2px solid #7c3aed' : '1px solid #e5e7eb',
+                      background: mensajeroAbierto === m.id ? '#f5f3ff' : '#fff',
+                      color: mensajeroAbierto === m.id ? '#6d28d9' : '#374151'
+                    }}>
+                      🚚 {m.nombre} · {m.total}
+                    </button>
+                  ))}
+                </div>
+              )}
               {/* ✅ BUSCAR-LOGISTICA-001: buscador + filtros de la lista */}
               {ordenes.length > 0 && (
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
@@ -1804,7 +2077,7 @@ const GestionLogistica = ({ user }) => {
                   {hayFiltroActivo && (
                     <button onClick={() => { setBusquedaOrdenes(''); setFiltroEstadoLista(''); setFiltroMensajeroLista(''); }}
                       style={{ padding: '9px 14px', borderRadius: 8, border: '1px solid #e5e7eb', background: '#fff', cursor: 'pointer', fontSize: 13, fontWeight: 600, color: '#6b7280' }}>
-                      ✕ Limpiar ({ordenesVisibles.length} de {ordenes.length})
+                      ✕ Limpiar ({ordenesDelTab.length} de {ordenes.length})
                     </button>
                   )}
                 </div>
@@ -1813,11 +2086,15 @@ const GestionLogistica = ({ user }) => {
                 <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>
                   {isMensajero ? 'No tienes órdenes asignadas hoy' : 'No hay órdenes pendientes de logística'}
                 </div>
-              ) : ordenesVisibles.length === 0 ? (
+              ) : ordenesDelTab.length === 0 ? (
                 <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>
-                  🔍 Ninguna orden coincide con la búsqueda o los filtros
+                  {hayFiltroActivo
+                    ? '🔍 Ninguna orden coincide con la búsqueda o los filtros'
+                    : tab === 'ruta'
+                      ? '🚚 Ningún mensajero tiene órdenes en calle ahora mismo'
+                      : '✅ No hay órdenes pendientes por asignar'}
                 </div>
-              ) : ordenesPorSector.map(({ sector, ordenes: ordsGrupo }) => (
+              ) : gruposVisibles.map(({ sector, ordenes: ordsGrupo }) => (
                 <div key={sector.id} style={{ marginBottom: 24 }}>
                   {/* Cabecera del sector */}
                   <div style={{
@@ -1827,7 +2104,7 @@ const GestionLogistica = ({ user }) => {
                     color: '#fff', borderRadius: isMobile ? 10 : '10px 10px 0 0',
                     fontWeight: 700, fontSize: 14, marginBottom: isMobile ? 8 : 0
                   }}>
-                    📍 {sector.etiqueta}
+                    {tab === 'ruta' && !isMensajero ? '' : '📍 '}{sector.etiqueta}
                     <span style={{ background: 'rgba(255,255,255,0.25)', padding: '2px 10px', borderRadius: 10, fontSize: 12 }}>
                       {ordsGrupo.length} {ordsGrupo.length === 1 ? 'orden' : 'órdenes'}
                     </span>
@@ -1876,6 +2153,24 @@ const GestionLogistica = ({ user }) => {
                           <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 8 }}>
                             📅 {fmtFecha(o.fechaProgramada)} · <span style={{ textTransform: 'capitalize', fontWeight: 600 }}>{o.lugarAtencion || 'servicio'}</span>
                           </div>
+
+                          {/* ✅ NOTA-MENSAJERO-001: la nota de la orden trae
+                              información crítica del servicio (a quién buscar,
+                              horario de acceso, condiciones del sitio). Antes
+                              solo se veía abriendo "Ver" — el mensajero ni sabía
+                              que existía y llegaba sin contexto. Ahora va en la
+                              tarjeta, imposible de pasar por alto. */}
+                          {o.notas && (
+                            <div style={{
+                              background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: 8,
+                              padding: '8px 10px', marginBottom: 10
+                            }}>
+                              <div style={{ fontSize: 10, fontWeight: 800, color: '#b45309', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 }}>
+                                💬 Nota del servicio
+                              </div>
+                              <div style={{ fontSize: 13, color: '#78350f', lineHeight: 1.4 }}>{o.notas}</div>
+                            </div>
+                          )}
 
                           {/* Resumen de items */}
                           {Array.isArray(o.items) && o.items.length > 0 && (
@@ -1998,20 +2293,34 @@ const GestionLogistica = ({ user }) => {
             </div>
           )}
 
-          {/* ── RESUMEN MENSAJEROS ── */}
-          {tab === 'mensajeros' && !isMensajero && (
+          {/* ── ✅ LOGISTICA-TABS-001: CUADRE (antes "Mensajeros") ──
+              Aquí aterrizan las órdenes YA ENTREGADAS que esperan recepción de
+              dinero. Al salir de "Pendientes" dejan de mezclarse con las nuevas
+              — que era justo lo que provocaba asignar dos veces la misma orden. */}
+          {tab === 'cuadre' && !isMensajero && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {resumenMens.length === 0 && <div style={s.empty}><p style={{ fontSize: 40 }}>👥</p><p>No hay mensajeros activos hoy</p></div>}
-              {resumenMens.map((m, i) => (
+              {resumenMens.length === 0 && <div style={s.empty}><p style={{ fontSize: 40 }}>💰</p><p>No hay cuadres pendientes</p></div>}
+              {resumenMens.map((m, i) => {
+                // Órdenes entregadas de este mensajero, listas para cuadrar.
+                const entregadas = ordenes.filter(o =>
+                  o.mensajeroId === m.mensajeroId && ESTADOS_ENTREGADA.includes(o.estado));
+                const abierto = mensajeroAbierto === m.mensajeroId;
+                return (
                 <div key={i} style={s.card}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <div style={{ minWidth: 160 }}>
                       <div style={{ fontWeight: 700, fontSize: 16 }}>{m.mensajeroNombre}</div>
                       <div style={{ fontSize: 13, color: '#6b7280', marginTop: 2 }}>
                         {m.totalOrdenes} órdenes · {m.enRuta} en ruta · {m.completadas} entregadas
                       </div>
+                      {entregadas.length > 0 && (
+                        <button onClick={() => setMensajeroAbierto(abierto ? null : m.mensajeroId)}
+                          style={{ marginTop: 6, padding: '4px 10px', borderRadius: 20, border: '1px solid #e5e7eb', background: '#f9fafb', cursor: 'pointer', fontSize: 11, fontWeight: 700, color: '#6b7280' }}>
+                          {abierto ? '▲ Ocultar' : `▼ Ver ${entregadas.length} entregada${entregadas.length !== 1 ? 's' : ''}`}
+                        </button>
+                      )}
                     </div>
-                    <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ textAlign: 'right' }}>
                         <div style={{ fontSize: 11, color: '#9ca3af' }}>Recaudado</div>
                         <div style={{ fontWeight: 700, color: '#16a34a', fontSize: 16 }}>{fmt(m.totalRecaudado)}</div>
@@ -2027,8 +2336,40 @@ const GestionLogistica = ({ user }) => {
                       </button>
                     </div>
                   </div>
+
+                  {/* Detalle desplegable: las órdenes entregadas que sustentan
+                      el cuadre. Evita tener que ir a buscarlas a otra pestaña. */}
+                  {abierto && entregadas.length > 0 && (
+                    <div style={{ marginTop: 12, border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden' }}>
+                      {entregadas.map((o, j) => (
+                        <div key={o.id} style={{
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
+                          flexWrap: 'wrap', padding: '10px 12px',
+                          background: j % 2 === 0 ? '#fff' : '#f9fafb',
+                          borderBottom: j < entregadas.length - 1 ? '1px solid #f3f4f6' : 'none'
+                        }}>
+                          <div style={{ minWidth: 150, flex: 1 }}>
+                            <code style={{ fontSize: 12, color: '#6b7280' }}>{o.numeroOrden}</code>
+                            <span style={{ fontSize: 13, marginLeft: 8, fontWeight: 600 }}>{o.clienteNombre}</span>
+                            {o.notas && (
+                              <div style={{ fontSize: 11, color: '#92400e', marginTop: 2 }}>💬 {o.notas}</div>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <EstadoBadge estado={o.estado} orden={o} />
+                            <span style={{ fontWeight: 700, color: '#16a34a', fontSize: 13 }}>{fmt(o.total)}</span>
+                            <button onClick={() => setModalDetalleOrden(o)}
+                              style={{ padding: '4px 10px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 700 }}>
+                              👁 Ver
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
