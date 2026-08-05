@@ -31,11 +31,23 @@ const TIPOS_IMAGEN_OK  = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 // ¿Qué tipo de medio trae este mensaje de WhatsApp?
 // pttMessage = nota de voz (el botón del micrófono); audioMessage = archivo.
 // ════════════════════════════════════════════════════════════════════════════
+// ✅ ANNY-FOTO-040: quien llama debe pasar el mensaje YA DESENVUELTO
+// (ver baileysService.desenvolverMensaje). Aquí solo se clasifica.
 function detectarMedio(message) {
   if (!message) return null;
   if (message.imageMessage) return { tipo: 'imagen', mimetype: message.imageMessage.mimetype || 'image/jpeg' };
   if (message.audioMessage) return { tipo: 'audio', mimetype: message.audioMessage.mimetype || 'audio/ogg' };
   if (message.pttMessage)   return { tipo: 'audio', mimetype: message.pttMessage.mimetype || 'audio/ogg' };
+
+  // ✅ ANNY-FOTO-040: mucha gente manda la foto del extintor como ARCHIVO,
+  // no como imagen (galería → "documento", o arrastrándola en WhatsApp Web).
+  // Llega como documentMessage y antes se ignoraba por completo.
+  const doc = message.documentMessage;
+  if (doc) {
+    const mime = String(doc.mimetype || '');
+    if (mime.startsWith('image/')) return { tipo: 'imagen', mimetype: mime };
+    if (mime.startsWith('audio/')) return { tipo: 'audio', mimetype: mime };
+  }
   return null;
 }
 

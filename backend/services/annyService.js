@@ -109,46 +109,44 @@ function getClaudeClient() {
 }
 
 // ============================================================
-// Respuestas base (semilla para tenants sin configuración propia)
+// ⛔ ANNY-FUGA-035 — BUG CRÍTICO MULTI-TENANT (corregido)
+// ------------------------------------------------------------
+// CAUSA RAÍZ de "Anny le da a mis clientes precios de otro
+// suscriptor":
+//
+//   Estas RESPUESTAS_BASE tenían PRECIOS ($19.000 / $25.000),
+//   DIRECCIÓN (Cali) y HORARIOS quemados en el código, y se
+//   entregaban a cualquier tenant sin respuestas propias
+//   (línea ~364) y, peor todavía, se COPIABAN dentro del
+//   documento respuestasAnny/{adminId} la primera vez que un
+//   suscriptor guardaba UNA entrada de entrenamiento
+//   (routes/anny.js ~954). Desde ese momento la contaminación
+//   quedaba persistida y ya no dependía del fallback.
+//
+//   Peor aún: el patrón 'precio' hace match con CUALQUIER
+//   mensaje que contenga esa palabra, y el atajo pre-configurado
+//   se resuelve ANTES del modelo y ANTES del catálogo real. Así,
+//   un "¿cuánto vale una recarga?" en conversación fría devolvía
+//   "Recarga ABC 5 lb: $19.000" sin mirar el catálogo del tenant.
+//
+// REGLA NUEVA (invariante del motor):
+//   NINGÚN precio, dirección, horario ni dato comercial puede
+//   vivir en el código. Los precios salen SOLO de `products` del
+//   propio tenant (filtrado por creadoPor == adminId). Lo demás
+//   sale de la pestaña Entrenamiento de cada suscriptor.
+//
+// Lo que queda aquí son ayudas de CRITERIO, sin ninguna cifra ni
+// dato de una empresa concreta: sirven igual a cualquier tenant.
 // ============================================================
 const RESPUESTAS_BASE = {
-  'precio_abc_5lb': {
-    patrones: ['precio', 'cuanto cuesta', 'abc 5', 'recarga 5'],
-    respuesta: 'Recarga ABC 5 lb: $19.000',
-    tipo: 'PRECIO'
-  },
-  'precio_abc_10lb': {
-    patrones: ['precio abc 10', 'recarga 10 libras', 'abc 10'],
-    respuesta: 'Recarga ABC 10 lb: $25.000',
-    tipo: 'PRECIO'
-  },
-  'domicilio': {
-    patrones: ['domicilio', 'envio', 'hacen entrega', 'costo envio'],
-    respuesta: 'Sí, hacemos domicilio. Cali: $8.000. Otros sectores: se valida con logística. ¿A qué sector?',
-    tipo: 'SERVICIO'
-  },
-  'horario': {
-    patrones: ['horario', 'cuando abren', 'que horas', 'estan abiertos'],
-    respuesta: 'Martes-Viernes: 8am-5pm\nSábado: 8am-12pm\nDomingo-Lunes: Cerrado',
-    tipo: 'INFO'
-  },
-  'datos_cotizacion': {
-    patrones: ['cotizacion', 'presupuesto', 'cuanto me cuesta', 'cotizar'],
-    respuesta: 'Perfecto, envíame estos datos:\n✅ Nombre:\n✅ Cédula o NIT:\n✅ Correo:\n✅ Dirección y barrio:\n✅ Celular:',
-    tipo: 'SOLICITUD_DATOS'
-  },
   // ✅ ANNY-COLORES-027: en Colombia el color SÍ identifica el agente.
   // Dato aportado por Sandra (operación real). Se usa como hipótesis fuerte
   // que se CONFIRMA, no como certeza: hay equipos importados o antiguos que
   // se salen de la convención, y cotizar mal un CO2 como ABC sale caro.
+  // No lleva precios: es criterio técnico, no tarifa.
   'extintor_por_color': {
     patrones: ['no se cual es', 'no se que extintor', 'es el rojo', 'el amarillo', 'es verde', 'el plateado', 'el blanco', 'no se el tipo'],
     respuesta: 'Por el color me oriento: amarillo es ABC, rojo suele ser CO2 o BC, verde es de agua, plateado es tipo K y blanco es Solkaflam. ¿De qué color es el tuyo? Si puedes, mándame una foto de la etiqueta y te confirmo.',
-    tipo: 'INFO'
-  },
-  'ubicacion': {
-    patrones: ['donde estan', 'direccion', 'como llego', 'ubicacion'],
-    respuesta: 'Estamos en: Cl. 22 Nte. #5bn28, San Vicente, Cali, Valle del Cauca\nMaps: https://maps.google.com/maps/search/extintores+del+valle+sas',
     tipo: 'INFO'
   }
 };
@@ -171,13 +169,36 @@ const RESPUESTAS_BASE = {
 // obtenerPerfilTenant lo usa antes de la sección de respuestas.
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
+// ✅ ANNY-COTIZA-038: reglas de oficio del vertical extintores. Se declaran
+// una sola vez y las usan tanto PERFIL_DEFAULT (tenants heredados, que son
+// justamente de extintores) como la plantilla NICHOS.extintores. Antes esto
+// no existía y por eso Anny interrogaba: sin casos típicos, la única salida
+// que le dejaba el prompt era exigirle al cliente tipo y capacidad.
+const REGLAS_EXTINTORES = [
+  'El color del extintor orienta el agente: amarillo ABC, rojo CO2 o BC, verde agua, plateado tipo K, blanco Solkaflam. Confírmalo siempre, no lo des por hecho.',
+  'CASOS TÍPICOS para cotizar sin interrogar al cliente (preséntalos como "por lo general", nunca como certeza, y pide confirmación):',
+  '- del carro, camioneta, moto o taxi: casi siempre ABC de 5 lb (en camión, bus o tractomula suele ser de 10 o 20 lb)',
+  '- casa o apartamento: ABC de 5 o 10 lb',
+  '- almacén, local, bodega o empresa: normalmente ABC de 10 lb',
+  '- oficina, consultorio, recepción o sala de juntas: CO2',
+  '- cocina de restaurante, freidora o campana: tipo K',
+  '- tablero eléctrico, servidores o equipos de cómputo: Solkaflam',
+  'Si el cliente no sabe qué extintor tiene, pídele una foto de la etiqueta o del equipo completo: es más fácil que responderte con términos técnicos.',
+  'Los extintores tienen fecha de vencimiento de recarga: si el cliente menciona que está vencido, prioriza agendar la recarga.',
+  'Para una recarga lo que necesitas cerrar es CUÁNTOS equipos son y a qué dirección se recogen. El tipo y la capacidad se confirman al recoger si el cliente no los sabe: eso NO puede frenar la conversación.'
+].join('\n');
+
 const PERFIL_DEFAULT = {
   nombreAgente: 'Anny',
   empresa: 'la empresa',
   vertical: 'venta, recarga y mantenimiento de extintores y seguridad industrial en Colombia',
   queVende: 'recarga de extintores, venta de extintores nuevos, mantenimiento y elementos de seguridad industrial',
   fuentePrecios: 'products',
-  reglasNegocio: '',
+  // El perfil por defecto ES el de extintores (así se definió en ANNY-CFG-010
+  // para no romper a los tenants heredados). Dejar las reglas vacías aquí
+  // significaba que los tenants sin perfil configurado —la mayoría hoy— se
+  // quedaban sin criterio para cotizar.
+  reglasNegocio: REGLAS_EXTINTORES,
   notificarEscalamientoA: null
 };
 
@@ -193,7 +214,11 @@ const NICHOS = {
     vertical: 'venta, recarga y mantenimiento de extintores y seguridad industrial en Colombia',
     queVende: 'recarga de extintores, venta de extintores nuevos, mantenimiento y elementos de seguridad industrial',
     fuentePrecios: 'products',
-    reglasNegocio: 'El color del extintor orienta el agente: amarillo ABC, rojo CO2 o BC, verde agua, plateado tipo K, blanco Solkaflam. Confírmalo siempre, no lo des por hecho. Los extintores tienen fecha de vencimiento de recarga: si el cliente menciona que está vencido, prioriza agendar la recarga.'
+    // ✅ ANNY-COTIZA-038: los casos típicos viven en la plantilla del nicho,
+    // no en el prompt del motor. El motor es multivertical: si estas reglas
+    // estuvieran en el núcleo, un restaurante recibiría instrucciones sobre
+    // agentes extintores. Cada suscriptor puede editarlas después.
+    reglasNegocio: REGLAS_EXTINTORES
   },
   venta_online: {
     etiqueta: 'Venta en línea / tienda',
@@ -347,22 +372,17 @@ async function obtenerRespuestasTenant(adminId) {
   try {
     const doc = await db.collection('respuestasAnny').doc(adminId).get();
 
-    // ✅ ANNY-VERTICAL-025: BUG MULTI-TENANT.
-    // Un suscriptor SIN respuestas propias heredaba RESPUESTAS_BASE, que son
-    // las de extintores: dirección de Cali, precios de recarga, horarios del
-    // taller. Un tenant de venta en línea habría respondido "Estamos en Cl. 22
-    // Nte., San Vicente, Cali" a sus propios clientes.
-    // Regla: el fallback de extintores SOLO aplica a tenants sin perfil
-    // configurado (los heredados, que efectivamente son de extintores). En
-    // cuanto el suscriptor define su perfil, arranca con la base vacía y
-    // construye la suya en Entrenamiento.
-    let data;
-    if (doc.exists) {
-      data = doc.data();
-    } else {
-      const perfil = await obtenerPerfilTenant(adminId);
-      data = perfil.configurado ? {} : RESPUESTAS_BASE;
-    }
+    // ✅ ANNY-VERTICAL-025 → ✅ ANNY-FUGA-035 (endurecido).
+    // El parche anterior dejaba pasar el caso más común: tenant SIN perfil
+    // configurado seguía heredando la base de extintores con precios y
+    // dirección quemados. Ahora RESPUESTAS_BASE ya no tiene cifras, y aun
+    // así NO se hereda nunca de forma automática: cada suscriptor arranca
+    // con su base vacía y la construye en Entrenamiento.
+    //
+    // Consecuencia deliberada: un tenant sin nada configurado ya no tiene
+    // atajos y todo pasa por el modelo con SU catálogo real. Prefiero que
+    // Anny pregunte a que Anny cotice con la tarifa de otra empresa.
+    const data = doc.exists ? (doc.data() || {}) : {};
 
     _cacheRespuestas.set(adminId, { data, ts: Date.now() });
     return data;
@@ -378,13 +398,47 @@ function invalidarCacheRespuestas(adminId) {
 
 // ============================================================
 // Buscar respuesta pre-configurada (solo conversación fría)
+// ------------------------------------------------------------
+// ✅ ANNY-FUGA-035 / ANNY-PRECIO-036 — dos candados nuevos:
+//
+// 1) EL ATAJO NUNCA COTIZA. Este camino se resuelve ANTES del
+//    modelo y ANTES de leer el catálogo del tenant, así que una
+//    entrada con precio guardada aquí gana siempre contra la
+//    tarifa real de `products`. Toda entrada de tipo PRECIO —o
+//    cuyo texto contenga una cifra de dinero— se DESCARTA y el
+//    mensaje pasa al modelo, que sí cotiza con el catálogo del
+//    suscriptor. Esto neutraliza la contaminación YA persistida
+//    en los documentos respuestasAnny de tenants existentes, sin
+//    tener que borrarles nada.
+//
+// 2) PATRONES CORTOS FUERA. 'precio' (6 letras) hacía match con
+//    cualquier mensaje que mencionara la palabra. Se exige un
+//    patrón de al menos 8 caracteres o de 2+ palabras: frases que
+//    un cliente escribe de verdad, no comodines.
 // ============================================================
+const RE_DINERO = /\$\s?\d|\d{4,}\s*(pesos|cop\b)|\bcop\s?\$?\s?\d/i;
+
+function patronUtilizable(p) {
+  const s = String(p || '').trim();
+  if (s.length < 5) return false;
+  return s.length >= 8 || s.includes(' ');
+}
+
 function buscarRespuestaConfigura(mensajeTexto, respuestas) {
-  const texto = mensajeTexto.toLowerCase();
+  const texto = String(mensajeTexto || '').toLowerCase();
 
   for (const [key, config] of Object.entries(respuestas || {})) {
     if (!config || !config.respuesta || !Array.isArray(config.patrones)) continue;
-    if (config.patrones.some(p => p && texto.includes(String(p).toLowerCase()))) {
+
+    // Candado 1: el atajo no cotiza jamás.
+    if (String(config.tipo || '').toUpperCase() === 'PRECIO') continue;
+    if (RE_DINERO.test(String(config.respuesta))) continue;
+
+    // Candado 2: solo patrones específicos.
+    const patrones = config.patrones.filter(patronUtilizable);
+    if (!patrones.length) continue;
+
+    if (patrones.some(p => texto.includes(String(p).toLowerCase()))) {
       return {
         encontrada: true,
         respuesta: config.respuesta,
@@ -434,6 +488,56 @@ function pidePersonaHumana(mensajeTexto) {
 // lo genere y aunque venga heredado de la base de conocimiento.
 // No se toca el contenido: solo el formato y el largo.
 // ============================================================
+// \u2705 ANNY-MULETILLA-042: relleno de apertura que la delata como bot.
+// ------------------------------------------------------------
+// "Perfecto", "Entendido", "Con mucho gusto" ya estaban PROHIBIDOS en el
+// prompt, pero una prohibici\u00f3n en el prompt es una sugerencia: el modelo
+// las volv\u00eda a poner. Aqu\u00ed se quitan mec\u00e1nicamente, despu\u00e9s de generar, as\u00ed
+// que da igual si el modelo obedece o no.
+//
+// OJO: solo se eliminan al INICIO del mensaje y solo si va seguido de m\u00e1s
+// texto. "Con mucho gusto" como respuesta completa a un "gracias" es una
+// frase leg\u00edtima, no relleno, y esa no se toca.
+const MULETILLAS = [
+  'perfecto', 'entendido', 'excelente', 'claro que si', 'claro que s\u00ed', 'claro',
+  'con mucho gusto', 'con gusto', 'listo', 'de acuerdo', 'por supuesto',
+  'buenisimo', 'buen\u00edsimo', 'genial', 'que bueno', 'qu\u00e9 bueno',
+  'muchas gracias por escribirnos', 'gracias por escribirnos',
+  'gracias por contactarnos', 'gracias por tu mensaje', 'entiendo',
+  'comprendo', 'muy bien', 'vale', 'ok', 'okey'
+];
+
+function quitarMuletillas(texto) {
+  let t = String(texto || '').trim();
+
+  // Hasta dos pasadas: "Perfecto, claro que s\u00ed, te cuento..." lleva dos.
+  for (let i = 0; i < 2; i++) {
+    const sinTilde = t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    let cortado = false;
+
+    for (const m of MULETILLAS) {
+      const mn = m.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      // Debe ir seguida de coma, punto o "!" \u2014 es decir, ser una apertura
+      // suelta, no el comienzo de una frase con contenido.
+      const re = new RegExp(`^${mn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[,.!:]+\\s*`);
+      const match = sinTilde.match(re);
+      if (!match) continue;
+
+      const resto = t.slice(match[0].length).trim();
+      // Nunca dejar el mensaje vac\u00edo ni casi vac\u00edo: si lo \u00fanico que hab\u00eda
+      // era la cortes\u00eda, se conserva tal cual.
+      if (resto.length < 12) continue;
+
+      t = resto.charAt(0).toUpperCase() + resto.slice(1);
+      cortado = true;
+      break;
+    }
+    if (!cortado) break;
+  }
+
+  return t;
+}
+
 function recortarRespuesta(texto, maxChars = 350) {
   if (!texto) return texto;
 
@@ -460,6 +564,10 @@ function recortarRespuesta(texto, maxChars = 350) {
     .replace(/\s{2,}/g, ' ')
     .replace(/([.!?])\.+/g, '$1')
     .trim();
+
+  // ✅ ANNY-MULETILLA-042: se limpia el relleno ANTES de medir el largo, para
+  // que los caracteres disponibles se gasten en contenido y no en cortesía.
+  t = quitarMuletillas(t);
 
   // 5. Recorte duro respetando el final de la última frase completa
   if (t.length > maxChars) {
@@ -929,6 +1037,59 @@ async function obtenerMisionActiva(adminId, telefono) {
 }
 
 // ============================================================
+// ✅ ANNY-SALUDO-037: identidad del interlocutor
+// ------------------------------------------------------------
+// El número de WhatsApp NO identifica a la persona: escribe la
+// secretaria, el conductor, el jefe de seguridad. `pushName` de
+// Baileys es el alias del celular ("Juan", "Mi Amor", "Torre 3"),
+// no sirve para una orden de servicio ni para una factura.
+//
+// Anny se presenta y pregunta con quién habla y de qué empresa
+// UNA sola vez, y el dato queda guardado en el chat: en los
+// mensajes siguientes ya no lo vuelve a pedir. Es lo mismo que
+// hace una asesora humana y es lo que alimenta el CRM.
+// ============================================================
+async function obtenerContactoChat(adminId, telefono) {
+  try {
+    const doc = await refChat(adminId, telefono).get();
+    if (!doc.exists) return { nombre: null, empresa: null, presentada: false };
+    const d = doc.data() || {};
+    return {
+      nombre: d.contactoNombre || null,
+      empresa: d.contactoEmpresa || null,
+      presentada: d.annySePresento === true
+    };
+  } catch (err) {
+    console.error('[ANNY] Error leyendo contacto del chat:', err.message);
+    return { nombre: null, empresa: null, presentada: false };
+  }
+}
+
+async function guardarContactoChat(adminId, telefono, contacto = {}) {
+  try {
+    const patch = {};
+    // Solo se escribe lo que el modelo REALMENTE extrajo. Un string vacío o
+    // un "no sé" no puede pisar un dato bueno guardado antes.
+    const limpio = v => {
+      const s = String(v || '').trim();
+      if (s.length < 2 || s.length > 80) return null;
+      if (/^(no|n\/a|na|ninguna|ninguno|nose|no se|null|undefined)$/i.test(s)) return null;
+      return s;
+    };
+    const nombre = limpio(contacto.nombre);
+    const empresa = limpio(contacto.empresa);
+    if (nombre) patch.contactoNombre = nombre;
+    if (empresa) patch.contactoEmpresa = empresa;
+    if (contacto.presentada) patch.annySePresento = true;
+    if (!Object.keys(patch).length) return;
+    await refChat(adminId, telefono).set(patch, { merge: true });
+  } catch (err) {
+    // Nunca bloquea la conversación: es enriquecimiento del CRM.
+    console.error('[ANNY] Error guardando contacto del chat:', err.message);
+  }
+}
+
+// ============================================================
 // FIX ANNY-ESTADO-013: estado REAL del pedido en este hilo
 // ------------------------------------------------------------
 // Anny no tenía forma de saber si existía un pedido, así que
@@ -975,9 +1136,22 @@ async function obtenerEstadoPedidoHilo(adminId, telefono) {
 // FIX ANNY-CIERRE-007 + v22: Claude decide.
 // Motor único: PERFIL (quién es) × MISIÓN (a qué vino).
 // ============================================================
-async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = [], fichaCliente = { existe: false }, catalogo = [], perfil = PERFIL_DEFAULT, misionNombre = 'ATENCION', estadoPedido = { existe: false }, defectoPendiente = null, imagenAdjunta = null) {
+async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = [], fichaCliente = { existe: false }, catalogo = [], perfil = PERFIL_DEFAULT, misionNombre = 'ATENCION', estadoPedido = { existe: false }, defectoPendiente = null, imagenAdjunta = null, contactoChat = { nombre: null, empresa: null, presentada: false }) {
   try {
     const mision = obtenerMision(misionNombre);
+
+    // ✅ ANNY-SALUDO-037: primer contacto = no hay historial y Anny nunca se
+    // ha presentado en este chat. Solo aplica en ATENCION: en una cobranza o
+    // un aviso de taller la conversación la abrió ella, presentarse otra vez
+    // sonaría a que no recuerda lo que acaba de escribir.
+    const esPrimerContacto =
+      misionNombre === 'ATENCION' &&
+      (historial || []).length === 0 &&
+      !contactoChat.presentada;
+
+    // El saludo + la pregunta de identificación no caben en 220 caracteres
+    // junto con la respuesta. Se amplía SOLO en ese primer mensaje.
+    const maxChars = esPrimerContacto ? Math.max(mision.maxChars, 320) : mision.maxChars;
 
     const conocimiento = Object.entries(respuestas || {})
       .filter(([, c]) => c && c.respuesta)
@@ -990,6 +1164,21 @@ async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {
         return `${quien}: ${t.texto}`;
       })
       .join('\n');
+
+    // ✅ ANNY-REPETICION-043: el historial ya trae sus mensajes, pero mezclados
+    // con los del cliente el modelo los "lee" y aun así repite. Aquí se le
+    // ponen SUS PROPIAS frases aparte y en negativo: esto ya salió, no vuelve
+    // a salir. Es la queja concreta de la dueña: Anny repite lo que ya dijo.
+    const misMensajes = (historial || [])
+      .filter(t => t.rol === 'anny' && t.texto)
+      .slice(-5)
+      .map(t => `· "${String(t.texto).slice(0, 140)}"`);
+
+    const yaDicho = misMensajes.length ? `
+LO QUE TÚ YA LE ESCRIBISTE A ESTE CLIENTE (PROHIBIDO REPETIRLO):
+${misMensajes.join('\n')}
+→ Ninguna de estas ideas puede volver a aparecer en tu mensaje: ni igual, ni reformulada, ni "recordándosela". Si ya lo dijiste, ese punto está cerrado. Tu mensaje debe APORTAR ALGO NUEVO — si no tienes nada nuevo que aportar, haz la única pregunta que falta para avanzar, y nada más.
+` : '';
 
     // ANNY-CFG-010: catálogo solo si el perfil lo declara
     // ✅ ANNY-MISION-028: en misiones SIN venta (COBRANZA, TALLER, SAAS) el
@@ -1077,8 +1266,54 @@ EL CLIENTE ENVIÓ UNA FOTO (la estás viendo arriba):
 - Relaciona lo que ves con el CATÁLOGO de arriba. Si no corresponde a nada del catálogo, describe lo que ves y PREGUNTA al cliente qué necesita con ese equipo. ESCALA (tipo PRECIO) solo cuando el cliente confirme que quiere ese producto/servicio y no tengas precio para dárselo.
 ` : '';
 
+    // ✅ ANNY-SALUDO-037: presentación e identificación del interlocutor.
+    const bloquePresentacion = esPrimerContacto ? `
+PRIMER MENSAJE DE ESTA CONVERSACIÓN — PRESÉNTATE:
+- Abre EXACTAMENTE con esta idea: "Hola, soy ${perfil.nombreAgente}, asistente virtual de ${perfil.empresa}." Puedes ajustar la redacción, pero tu nombre y el de la empresa van sí o sí.
+- Enseguida responde lo que el cliente te preguntó (si preguntó algo). No lo dejes esperando por presentarte.
+- Cierra pidiendo identificarse en UNA sola pregunta natural: con quién tienes el gusto y de qué empresa escribe. Ejemplo: "¿Con quién tengo el gusto y de qué empresa me escribes?".
+- Si el cliente solo saludó, ese mensaje es completo así: preséntate, pregunta en qué le colaboras y con quién hablas.
+${fichaCliente && fichaCliente.existe ? '- OJO: este cliente YA está registrado (ver ficha). Preséntate y salúdalo POR SU NOMBRE. NO le preguntes de qué empresa es: ya lo sabes.' : ''}
+` : (contactoChat.nombre || contactoChat.empresa ? `
+QUIÉN TE ESCRIBE (ya identificado, NO lo vuelvas a preguntar):
+${contactoChat.nombre ? `- Persona: ${contactoChat.nombre}` : ''}
+${contactoChat.empresa ? `- Empresa: ${contactoChat.empresa}` : ''}
+` : `
+IDENTIFICACIÓN PENDIENTE:
+- Todavía no sabes con quién hablas. Si ya lo preguntaste una vez y no te respondieron, NO insistas: sigue atendiendo y pídelo al momento de cerrar el pedido.
+`);
+
+    // ✅ ANNY-COTIZA-038: cómo cotizar sin volverse un interrogatorio.
+    // CAUSA DEL PROBLEMA: la regla "nunca inventes precios" empujaba al
+    // modelo a exigir tipo + capacidad ANTES de decir nada. El cliente que
+    // no sabe qué extintor tiene (la mayoría) quedaba atascado y se iba.
+    // REGLA NUEVA: primero se da el precio del caso típico, señalado como
+    // tal, y se pide confirmar el dato. Se informa sin comprometerse.
+    const bloqueCotizacion = (mision.permiteVenta || mision.ventaReactiva) ? `
+CÓMO COTIZAR (ANNY-COTIZA-038 — regla anti-interrogatorio):
+- PROHIBIDO responder una pregunta de precio con puras preguntas. Es la queja número uno de los clientes.
+- Cuando pregunten "¿cuánto vale?" y no tengas el detalle exacto, RESPONDE CON EL CASO TÍPICO Y PIDE CONFIRMACIÓN EN EL MISMO MENSAJE. Nunca lo dejes esperando por un dato técnico que probablemente no conoce.
+- Deduce el producto a partir del USO o del sitio que el cliente menciona (mira las REGLAS PROPIAS DE ESTA EMPRESA, que traen los casos típicos del negocio). Preséntalo siempre como lo más común, jamás como un hecho: "por lo general es..., ¿me confirmas?".
+- El precio dado sobre un supuesto es ESTIMADO y debes decirlo: "confirmando ese dato te doy el valor en firme".
+- Si el cliente no sabe nada del producto, pídele UNA foto. Es más fácil para él que responder preguntas técnicas.
+- Los precios salen ÚNICAMENTE del catálogo de arriba, textuales. Si el catálogo no tiene ese ítem, no lo inventes: ESCALA (tipo PRECIO).
+
+QUÉ PREGUNTAR PRIMERO (orden correcto):
+1. CUÁNTAS unidades son y para qué uso o en qué sitio. Eso es lo que define la venta.
+2. Con eso ya das el estimado y pides confirmar el detalle técnico.
+3. Los datos de facturación van AL FINAL, cuando el cliente ya dijo que sí.
+- Nunca arranques pidiendo especificaciones técnicas. Eso espanta al cliente.
+` : '';
+
     const prompt = `
-Eres ${perfil.nombreAgente}, asesora por WhatsApp de ${perfil.empresa}, empresa de ${perfil.vertical}. ${mision.permiteVenta ? 'Vendes bien, pero primero ATIENDES: resuelves lo que el cliente pregunta.' : (mision.ventaReactiva ? 'En esta conversación viniste a un trámite puntual: te centras en él, y solo vendes si el cliente te lo pide.' : 'En esta conversación NO eres vendedora: viniste a un trámite puntual y te limitas a él.')}
+Eres ${perfil.nombreAgente}, ASESORA COMERCIAL INTEGRAL de ${perfil.empresa}, empresa de ${perfil.vertical}. Atiendes por WhatsApp.
+
+QUIÉN ERES (ANNY-PERFIL-041):
+- Eres una ejecutiva senior, no una recepcionista ni un bot de preguntas frecuentes. Manejas el negocio completo: atiendes, asesoras, cotizas, cierras ventas, haces seguimiento y gestionas cartera.
+- Escribes como una profesional con criterio y con poco tiempo: clara, directa, cálida, sin adornos. Vas al punto porque sabes la respuesta, no porque tengas afán.
+- Tienes CRITERIO PROPIO: si el cliente no sabe qué necesita, tú se lo propones con base en lo que te cuenta. No le trasladas el trabajo de averiguarlo.
+- Nunca suenas a máquina, a catálogo ni a call center. Suenas a la persona que resuelve.
+${mision.permiteVenta ? 'En esta conversación vendes, pero primero ATIENDES: resuelves lo que el cliente pregunta.' : (mision.ventaReactiva ? 'En esta conversación viniste a un trámite puntual: te centras en él, y solo vendes si el cliente te lo pide.' : 'En esta conversación NO eres vendedora: viniste a un trámite puntual y te limitas a él.')}
 
 QUÉ OFRECE LA EMPRESA: ${perfil.queVende}
 
@@ -1096,6 +1331,7 @@ ${mision.permiteVenta ? '' : (mision.ventaReactiva ? `VENTA SOLO REACTIVA (ANNY-
 
 HISTORIAL RECIENTE DE LA CONVERSACIÓN (viejo → nuevo):
 ${hilo || '(primera interacción con este cliente)'}
+${yaDicho}
 
 NUEVO MENSAJE del cliente ${clienteNombre}: "${mensajeTexto}"
 
@@ -1112,12 +1348,18 @@ ${conocimiento || '(sin datos configurados)'}
 → ✅ ANNY-ENTRENA-030: esta base la escribió la DUEÑA del negocio y es la fuente de verdad. Si el mensaje del cliente coincide con una entrada, tu respuesta debe salir de ESA entrada (adáptala al hilo, pero sin cambiarle datos, condiciones ni sentido). NO la parafrasees hasta perder la información ni respondas con tu criterio si aquí ya hay una respuesta definida.
 ${perfil.reglasNegocio ? `\nREGLAS PROPIAS DE ESTA EMPRESA:\n${perfil.reglasNegocio}` : ''}
 
+${bloquePresentacion}
+${bloqueCotizacion}
 FORMA DE ESCRIBIR (obligatorio — ANNY-BREV-011):
-- MÁXIMO ${mision.maxChars} caracteres. UN solo mensaje. Si no cabe, prioriza y calla el resto.
+- MÁXIMO ${maxChars} caracteres. UN solo mensaje. Si no cabe, prioriza y calla el resto.
 - PROHIBIDO: listas, viñetas, guiones, símbolos ✓ ✅ •, títulos en MAYÚSCULA sostenida, y bloques tipo "VENTAJAS:" o "INVERSIÓN:". Escribe en prosa, como una persona por WhatsApp.
-- PROHIBIDO abrir con muletillas: "Perfecto", "Entendido", "Claro que sí", "Excelente". Entra directo al punto.
+- ✅ ANNY-MULETILLA-042 — ARRANCA CON CONTENIDO, NUNCA CON CORTESÍA.
+  PROHIBIDO abrir con: "Perfecto", "Entendido", "Excelente", "Claro que sí", "Con mucho gusto", "Listo", "Muy bien", "Entiendo", "Gracias por escribirnos".
+  Tu primera palabra debe ser parte de la respuesta. Ejemplo de lo que NO se hace: "Perfecto, la recarga ABC de 10 lb está en $X". Así se hace: "La recarga ABC de 10 lb está en $X".
+  (Estas aperturas se eliminan automáticamente después de que escribas, así que ponerlas solo te gasta caracteres.)
 - PROHIBIDO repetir un resumen o confirmación que ya aparezca en el historial. Si ya lo dijiste, no lo repitas: avanza.
 - Máximo UNA pregunta por mensaje.
+- ✅ ANNY-PERFIL-041 — CADA MENSAJE TIENE QUE APORTAR ALGO NUEVO: un dato, un precio, una propuesta o la única pregunta que falta. Un mensaje que no aporta nada no se envía; en su lugar, avanza al siguiente paso.
 - ✅ ANNY-REPETICION-023 — REGLA ANTI-LORA (crítica):
   Lee tus propios mensajes en el historial. Si YA hiciste esta misma pregunta (aunque con otras palabras), está PROHIBIDO volver a hacerla.
   · Si el cliente respondió algo corto o vago ("por favor", "sí", "listo"), NO repitas la pregunta: reformúlala de otra forma, más simple y concreta, o da la opción más común y pide que confirme.
@@ -1168,6 +1410,7 @@ Responde SOLO en JSON (sin markdown):
   "tipo": "PRECIO|SERVICIO|DATOS|PAGO|NEGOCIACION|CAPACITACION|PROBLEMA|VENTA|HUMANO|OTRO",
   "respuesta": "tu respuesta si NO escalado",
   "razon": "por qué escalas (si escalado)",${defectoPendiente ? '\n  "respuestaTaller": "APROBADO" | "RECHAZADO" | null,' : ''}
+  "contacto": { "nombre": "nombre de la persona SI lo dijo en este mensaje, si no null", "empresa": "empresa que representa SI la dijo, si no null" },
   "pedido": null | {
     "producto": "descripción del producto/servicio",
     "cantidad": número,
@@ -1233,8 +1476,10 @@ Responde SOLO en JSON (sin markdown):
     // FIX ANNY-BREV-011: saneado determinístico — el formato de
     // folleto se elimina aunque el modelo lo haya generado.
     if (decision.respuesta) {
-      decision.respuesta = recortarRespuesta(decision.respuesta, mision.maxChars);
+      decision.respuesta = recortarRespuesta(decision.respuesta, maxChars);
     }
+    // ✅ ANNY-SALUDO-037: se marca para no volver a presentarse en este chat.
+    decision._primerContacto = esPrimerContacto;
     // FIX ANNY-MISION-014: en misiones sin venta, ningún pedido.
     if (!mision.permitePedido) decision.pedido = null;
 
@@ -1515,7 +1760,7 @@ async function procesarMensajeEntrante(props) {
     }
 
     // PASO 2: conocimiento + historial + ficha + catálogo + estado + defecto
-    const [respuestas, historial, fichaCliente, catalogo, estadoPedido, defectoPendiente] = await Promise.all([
+    const [respuestas, historial, fichaCliente, catalogo, estadoPedido, defectoPendiente, contactoChat] = await Promise.all([
       obtenerRespuestasTenant(adminId),
       obtenerHistorialReciente(adminId, telefono),
       buscarClienteEnBD(adminId, telefono),
@@ -1523,7 +1768,9 @@ async function procesarMensajeEntrante(props) {
       obtenerEstadoPedidoHilo(adminId, telefono),
       // ✅ TALLER-RESPUESTA-001: solo lectura. Si no hay defecto esperando
       // autorización devuelve null y todo el flujo sigue igual que antes.
-      tallerRespuestas.buscarDefectoPendiente(adminId, telefono).catch(() => null)
+      tallerRespuestas.buscarDefectoPendiente(adminId, telefono).catch(() => null),
+      // ✅ ANNY-SALUDO-037: con quién habla y si ya se presentó en este chat.
+      obtenerContactoChat(adminId, telefono)
     ]);
 
     // FIX ANNY-CIERRE-007: ventana de hilo activo 24 h
@@ -1534,7 +1781,14 @@ async function procesarMensajeEntrante(props) {
     // El texto es un marcador ("[el cliente envió una foto]") y podría hacer
     // match con una entrada genérica, respondiendo un folleto a alguien que
     // acaba de mandar la foto de su extintor. La foto la interpreta Claude.
-    if (!conversacionActiva && misionNombre === 'ATENCION' && !imagenAdjunta) {
+    // ✅ ANNY-SALUDO-037: en el PRIMER contacto el atajo se salta. El atajo
+    // devuelve un texto fijo, sin saludo y sin preguntar con quién habla —
+    // justo lo que hacía que Anny entrara respondiendo en seco a alguien que
+    // apenas escribía por primera vez. Ese caso lo atiende el modelo, que sí
+    // se presenta. El atajo sigue vigente para el resto de la conversación.
+    const primerContactoAbsoluto = historial.length === 0 && !contactoChat.presentada;
+
+    if (!conversacionActiva && misionNombre === 'ATENCION' && !imagenAdjunta && !primerContactoAbsoluto) {
       const respuestaConfig = buscarRespuestaConfigura(mensajeTexto, respuestas);
 
       if (respuestaConfig.encontrada) {
@@ -1574,8 +1828,18 @@ async function procesarMensajeEntrante(props) {
     const decision = await claudeDecide(
       adminId, nombreCliente, mensajeTexto, respuestas, historial,
       fichaCliente, catalogo, perfil, misionNombre, estadoPedido, defectoPendiente,
-      imagenAdjunta // ✅ ANNY-MEDIA-024
+      imagenAdjunta, // ✅ ANNY-MEDIA-024
+      contactoChat   // ✅ ANNY-SALUDO-037
     );
+
+    // ✅ ANNY-SALUDO-037: se guarda quién es el interlocutor apenas lo dice y
+    // se marca que Anny ya se presentó, para no repetir el saludo mañana.
+    // Fire-and-forget: si falla, la conversación sigue igual.
+    guardarContactoChat(adminId, telefono, {
+      nombre: decision.contacto?.nombre,
+      empresa: decision.contacto?.empresa,
+      presentada: decision._primerContacto === true
+    }).catch(() => {});
 
     if (decision.escalado) {
       const caseId = await registrarCasoEscalado(adminId, {
@@ -1590,7 +1854,18 @@ async function procesarMensajeEntrante(props) {
       // ✅ ANNY-PROMESA-029: antes decía "lo reviso y te confirmo" — Anny no
       // revisa nada: queda muda hasta que la admin resuelva el caso. Ahora
       // fija la expectativa correcta: te contacta UNA PERSONA del equipo.
-      const respuestaEsc = 'Este tema lo maneja directamente el equipo: ya les pasé tu caso y un asesor te escribe por aquí.';
+      // ✅ ANNY-TRANSFER-039: se dice explícitamente que la conversación se
+      // TRANSFIERE. "Un asesor te escribe" dejaba al cliente sin saber si
+      // debía seguir hablando con Anny o esperar.
+      const respuestaEsc = 'Este caso prefiero pasarlo a un asesor para no darte un dato equivocado. Ya le transferí tu conversación y te escribe por aquí mismo.';
+
+      // ✅ ANNY-TRANSFER-039: si Anny acaba de decir que transfiere, no puede
+      // seguir contestando. Antes solo se pausaba cuando el cliente PEDÍA un
+      // humano (ANNY-HUMANO-012); en un escalado por criterio propio Anny
+      // anunciaba al asesor y seguía respondiendo, pisando al humano que
+      // entraba. 45 min: suficiente para que el equipo tome el chat, y cada
+      // mensaje manual de la asesora refresca la pausa (ANNY-PAUSA-004).
+      await pausarAnny(adminId, telefono, 45, `escalado_${decision.tipo || 'OTRO'}`);
 
       await registrarConversacion(adminId, {
         telefono,
@@ -1915,8 +2190,14 @@ module.exports = {
   listarChats,
   obtenerEstadoPedidoHilo,
   obtenerMisionActiva,
+  // ✅ ANNY-SALUDO-037
+  obtenerContactoChat,
+  guardarContactoChat,
   recortarRespuesta,
   pidePersonaHumana,
+  // ✅ ANNY-PRECIO-036: expuesta para poder verificar los candados del atajo
+  // sin levantar Firestore.
+  buscarRespuestaConfigura,
   MISIONES,
   PERFIL_DEFAULT,
   NICHOS // ✅ ANNY-NICHO-033

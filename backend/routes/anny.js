@@ -950,8 +950,12 @@ router.put('/respuestas', authenticate, requireAnnyActivo, requireAdmin, async (
       avisos.push('Hay palabras clave muy cortas: hacen match con casi cualquier mensaje y se cruzan con otras entradas. Usa frases completas.');
     }
 
+    // ✅ ANNY-FUGA-035: aquí estaba la contaminación PERSISTENTE. Al guardar
+    // su PRIMERA entrada de entrenamiento, el suscriptor se llevaba copiadas
+    // a su propio documento las RESPUESTAS_BASE del código — con precios y
+    // dirección de otra empresa. Nunca más: se arranca de un objeto vacío.
     const doc = await db.collection('respuestasAnny').doc(adminId).get();
-    const respuestas = doc.exists ? doc.data() : { ...annyService.RESPUESTAS_BASE };
+    const respuestas = doc.exists ? (doc.data() || {}) : {};
 
     respuestas[key] = {
       patrones: patronesLimpios,
@@ -978,7 +982,9 @@ router.delete('/respuestas/:key', authenticate, requireAnnyActivo, requireAdmin,
 
     const docRef = db.collection('respuestasAnny').doc(adminId);
     const doc = await docRef.get();
-    const respuestas = doc.exists ? doc.data() : { ...annyService.RESPUESTAS_BASE };
+    // ✅ ANNY-FUGA-035: idem — borrar una entrada no puede sembrar la base
+    // de otra empresa en el documento del suscriptor.
+    const respuestas = doc.exists ? (doc.data() || {}) : {};
 
     if (!respuestas[key]) {
       return res.status(404).json({ error: 'Respuesta no encontrada' });

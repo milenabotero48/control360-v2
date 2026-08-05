@@ -151,6 +151,47 @@ async function guardarEstado(adminId, conexionEstado, numero = null) {
 }
 
 // ============================================================
+// ✅ ANNY-FOTO-040 — CAUSA DE "Anny no responde ninguna foto"
+// ------------------------------------------------------------
+// WhatsApp NO siempre entrega el contenido en la raíz de
+// `msg.message`. Lo ENVUELVE en un sobre según cómo se envió:
+//
+//   · viewOnceMessageV2 / viewOnceMessage  → foto "ver una vez"
+//   · ephemeralMessage                     → chat con mensajes temporales
+//   · documentWithCaptionMessage           → archivo con descripción
+//
+// El motor leía SOLO la raíz. Con cualquiera de esos sobres,
+// `message.imageMessage` era undefined → detectarMedio devolvía
+// null → extraerTexto devolvía '' → el mensaje moría en el
+// `if (!texto) return;` SIN dejar rastro. Ni respuesta, ni
+// registro, ni error en el log: para Anny esa foto no existió.
+//
+// Enviar fotos como "ver una vez" es lo normal en WhatsApp desde
+// el móvil, y muchas empresas tienen los mensajes temporales
+// activados por defecto. Por eso fallaban TODAS.
+//
+// Aquí se abre el sobre antes de mirar nada. Es recursivo porque
+// los sobres se anidan (ephemeral que contiene un viewOnce).
+// ============================================================
+const SOBRES_MENSAJE = [
+  'ephemeralMessage',
+  'viewOnceMessage',
+  'viewOnceMessageV2',
+  'viewOnceMessageV2Extension',
+  'documentWithCaptionMessage',
+  'editedMessage',
+];
+
+function desenvolverMensaje(message, profundidad = 0) {
+  if (!message || profundidad > 5) return message || null;
+  for (const sobre of SOBRES_MENSAJE) {
+    const dentro = message[sobre]?.message;
+    if (dentro) return desenvolverMensaje(dentro, profundidad + 1);
+  }
+  return message;
+}
+
+// ============================================================
 // Extraer texto de un mensaje de WhatsApp (tipos comunes)
 // ============================================================
 function extraerTexto(message) {
@@ -160,6 +201,9 @@ function extraerTexto(message) {
     message.extendedTextMessage?.text ||
     message.imageMessage?.caption ||
     message.videoMessage?.caption ||
+    // ✅ ANNY-FOTO-040: foto enviada como archivo/documento (galería →
+    // "documento", o desde WhatsApp Web arrastrando el archivo).
+    message.documentMessage?.caption ||
     ''
   ).trim();
 }
@@ -212,13 +256,25 @@ async function procesarMensaje(adminId, msg) {
   const jid = msg.key.remoteJid || '';
   if (jid.endsWith('@g.us') || jid === 'status@broadcast') return;
 
-  let texto = extraerTexto(msg.message);
+  // ✅ ANNY-FOTO-040: se abre el sobre (ver-una-vez / temporal / documento
+  // con descripción) ANTES de leer nada. Sin esto, las fotos enviadas de la
+  // forma más común en WhatsApp se descartaban en silencio.
+  const contenido = desenvolverMensaje(msg.message);
+
+  let texto = extraerTexto(contenido);
 
   // ✅ ANNY-MEDIA-024: foto o nota de voz. Antes se descartaban en silencio
   // con `if (!texto) return;` — el cliente mandaba la foto del extintor y
   // para Anny ese mensaje nunca existió.
   let imagenAdjunta = null;
-  const medio = annyMultimedia.detectarMedio(msg.message);
+  const medio = annyMultimedia.detectarMedio(contenido);
+
+  // ✅ ANNY-FOTO-040: traza de diagnóstico. Si una foto vuelve a perderse,
+  // el log dice exactamente en qué paso se cayó, en vez de no decir nada.
+  if (!msg.key.fromMe && !texto && !medio) {
+    console.warn('[ANNY-MEDIA] Mensaje sin texto ni medio reconocido. Claves:',
+      Object.keys(contenido || {}).join(', ') || '(vacío)');
+  }
 
   if (medio && !msg.key.fromMe) {
     // ✅ ANNY-CONSUMO-026 (FRENO): antes de gastar, se consulta el tope del
