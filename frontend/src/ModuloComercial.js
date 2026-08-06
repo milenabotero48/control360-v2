@@ -122,6 +122,13 @@ function MiDia({ user, onNavegar }) {
   // ✅ TELEVENC-TODOS-001: con Lucy activa la cola solo trae lo que ella
   // escaló. Este interruptor muestra TODOS los vencidos del tenant.
   const [verTodosVencidos, setVerTodosVencidos] = useState(false);
+  // ✅ COM-BUSCAR-001: búsqueda contra toda la base, no solo la cola visible.
+  // El caso de uso es el cliente que devuelve la llamada después de que se
+  // marcó "no contestó" — ese ya salió de la cola y filtrar lo visible no lo
+  // encuentra. Por eso la búsqueda va al servidor.
+  const [busqueda, setBusqueda] = useState('');
+  const [resultadoBusqueda, setResultadoBusqueda] = useState(null);
+  const [buscando, setBuscando] = useState(false);
 
   const crearProspectoMiDia = async () => {
     if (!nuevoP.nombre || !nuevoP.telefono) return alert('Nombre y teléfono son requeridos');
@@ -162,11 +169,30 @@ function MiDia({ user, onNavegar }) {
 
   useEffect(() => { cargar(); }, [cargar]);
 
+  // ✅ COM-BUSCAR-001: se espera 400 ms desde la última tecla antes de consultar.
+  // Sin esto, escribir "MISCELANEA" dispara 10 consultas y llegan desordenadas.
+  useEffect(() => {
+    const q = busqueda.trim();
+    if (q.length < 3) { setResultadoBusqueda(null); setBuscando(false); return; }
+    setBuscando(true);
+    let vigente = true;
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`${API}/comercial/buscar?q=${encodeURIComponent(q)}`, { headers: authHeaders() });
+        const json = await res.json();
+        if (vigente) setResultadoBusqueda(res.ok ? json : { vencidos: [], prospectos: [], error: json.error });
+      } catch (e) {
+        if (vigente) setResultadoBusqueda({ vencidos: [], prospectos: [], error: 'No se pudo buscar' });
+      }
+      if (vigente) setBuscando(false);
+    }, 400);
+    return () => { vigente = false; clearTimeout(t); };
+  }, [busqueda]);
+
   if (cargando) return <div style={{ padding: 40, textAlign: 'center', color: '#9ca3af' }}>Cargando tu día...</div>;
   if (!data) return <div style={{ padding: 40, textAlign: 'center', color: '#b91c1c' }}>No se pudo cargar. Intenta de nuevo.</div>;
 
   const { cola = {}, meta = {}, totalPendientes = 0 } = data;
-  const pct = Math.min(meta.porcentaje ?? 0, 100);
 
   // ✅ COMERCIAL-BASE-001: períodos presentes en la cola + filtro de vista
   // ✅ TELEVENC-005: la cola de vencidos también aporta sus períodos
@@ -179,23 +205,17 @@ function MiDia({ user, onNavegar }) {
 
   return (
     <div>
-      {/* Barra de meta diaria (R-COM-08) */}
-      {meta.objetivo > 0 && (
-        <div style={{ background: 'linear-gradient(135deg,#1e1b4b,#312e81)', borderRadius: 14, padding: '16px 18px', color: '#fff', marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, opacity: 0.8 }}>Meta de hoy</div>
-            <div style={{ fontSize: 22, fontWeight: 900 }}>
-              {meta.realizadas} <span style={{ fontSize: 13, fontWeight: 600, opacity: 0.7 }}>/ {meta.objetivo} llamadas</span>
-            </div>
-          </div>
-          <div style={{ background: 'rgba(255,255,255,0.15)', borderRadius: 99, height: 10, overflow: 'hidden' }}>
-            <div style={{ width: `${pct}%`, height: '100%', borderRadius: 99, background: pct >= 100 ? '#4ade80' : '#a78bfa', transition: 'width .4s' }} />
-          </div>
-          <div style={{ fontSize: 11, marginTop: 6, opacity: 0.75 }}>
-            {pct >= 100 ? '🎉 ¡Meta cumplida! Cada llamada extra suma.' : `${meta.porcentaje}% — te faltan ${Math.max(meta.objetivo - meta.realizadas, 0)} llamadas`}
-          </div>
-        </div>
-      )}
+      {/* ✅ COM-MARCADOR-001: cabecera con esfuerzo (llamadas) y resultado
+          (órdenes y pesos) juntos. Ver solo llamadas hacía ver como día
+          cumplido una jornada de 200 llamadas y cero ventas. */}
+      <CabeceraMiDia meta={meta} marcador={data.marcador} nombre={user?.nombre || user?.email} />
+
+      {/* ✅ COM-BUSCAR-001: buscador por nombre o teléfono contra TODA la base */}
+      <BuscadorCliente
+        valor={busqueda} onCambio={setBusqueda} buscando={buscando}
+        resultado={resultadoBusqueda}
+        onLlamarVencido={setVencidoActivo} onLlamarProspecto={setProspectoActivo}
+      />
 
       {totalPendientes === 0 && (
         <div style={{ background: '#fff', borderRadius: 14, padding: 40, textAlign: 'center', border: '1px solid #e5e7eb' }}>
@@ -264,15 +284,26 @@ function MiDia({ user, onNavegar }) {
           </div>
         )}
 
-        {/* ✅ TELEVENC-DIAG-001: si hay pendientes pero la cola está vacía,
-            se explica POR QUÉ en vez de dejar la pantalla en blanco. */}
-        {data.diagVencidos && data.diagVencidos.totalPendientes > 0 && !(cola.vencidos || []).length && (
+        {/* ✅ TELEVENC-DIAG-002 (2026-08-06): antes este recuadro SOLO aparecía
+            con la cola vacía. El caso real que se nos escapó es el intermedio:
+            el módulo Vencimientos mostraba 103 clientes del mes y Telemercadeo
+            16 tarjetas, sin decir en ninguna parte dónde estaban los otros 87.
+            Una cola corta sin explicación se lee como "ya no hay a quién
+            llamar", que es justo lo contrario de lo que pasa. Ahora se muestra
+            siempre que haya pendientes fuera de la cola, con o sin tarjetas. */}
+        {data.diagVencidos && data.diagVencidos.totalPendientes > (data.diagVencidos.enCola || 0) && (
           <div style={{
             marginTop: 8, background: '#f8fafc', border: '1px solid #e2e8f0',
             borderRadius: 9, padding: '10px 12px', fontSize: 11.5, color: '#475569',
           }}>
             <div style={{ fontWeight: 800, color: '#334155', marginBottom: 4 }}>
-              Tienes {data.diagVencidos.totalPendientes} vencimiento(s) pendiente(s), pero ninguno entró a la cola de hoy:
+              {/* OJO con los números: `totalPendientes` y `enCola` cuentan
+                  EQUIPOS; las tarjetas de arriba son CLIENTES (un cliente puede
+                  traer varios equipos). Por eso el texto habla de equipos y no
+                  dice "X de Y tarjetas", que sería comparar peras con manzanas. */}
+              {(cola.vencidos || []).length
+                ? `De ${data.diagVencidos.totalPendientes} equipos pendientes, hoy entraron ${data.diagVencidos.enCola} a la cola. El resto quedó fuera porque:`
+                : `Tienes ${data.diagVencidos.totalPendientes} equipo(s) pendiente(s), pero ninguno entró a la cola de hoy:`}
             </div>
             {data.diagVencidos.aunNoVencen > 0 && <div>· {data.diagVencidos.aunNoVencen} todavía no llegan a su fecha de vencimiento</div>}
             {data.diagVencidos.filtradosPorLucy > 0 && <div>· {data.diagVencidos.filtradosPorLucy} los está gestionando Lucy — activa «Ver todos» para llamarlos igual</div>}
@@ -353,6 +384,279 @@ function MiDia({ user, onNavegar }) {
           if (onNavegar) onNavegar('ordenes');
         }} />
       )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ✅ COM-MARCADOR-001 (2026-08-06) — CABECERA DE MI DÍA
+// ────────────────────────────────────────────────────────────────────────────
+// Tres anillos: llamadas (esfuerzo), órdenes y pesos (resultado). Antes solo
+// existía la barra de llamadas, y eso premiaba la actividad sin mirar la venta.
+//
+// Sobre los mensajes: son de aliento, no de presión. La frase se elige por
+// tramo de avance y se rota con una semilla que cambia cada media hora — así
+// no es la misma frase toda la mañana, pero tampoco cambia en cada clic (que
+// se siente errático y le quita credibilidad). Si no hay metas configuradas la
+// cabecera se muestra igual, en modo informativo.
+// ════════════════════════════════════════════════════════════════════════════
+const FRASES = {
+  // < 25 %
+  arranque: [
+    'Arranca el día. La primera llamada es la que cuesta.',
+    'Cada número de esta lista es un cliente que ya te compró antes.',
+    'Hoy es una página en blanco. Vamos a llenarla.',
+    'No necesitás que te digan que sí todos: con unos pocos alcanza.',
+  ],
+  // 25 – 59 %
+  medio: [
+    'Vas tomando ritmo. Seguí así.',
+    'Ya tenés medio camino andado.',
+    'Buen avance. El que sigue puede ser el que acepte.',
+    'Cada llamada te acerca. Vas bien.',
+  ],
+  // 60 – 99 %
+  recta: [
+    'Estás en la recta final, falta poquito.',
+    'Ya casi. Ese último tramo es el que más pesa y lo estás haciendo.',
+    'Falta menos de lo que ya hiciste.',
+    'Un empujón más y queda cerrado.',
+  ],
+  // >= 100 %
+  cumplida: [
+    '¡Meta cumplida! Todo lo que venga ahora es ganancia.',
+    'Lo lograste. Cada llamada extra es tuya.',
+    'Meta lista. Gran trabajo hoy.',
+    'Cerraste la meta. Que se note en la venta también.',
+  ],
+};
+
+function fraseDelMomento(pct) {
+  const grupo = pct >= 100 ? FRASES.cumplida : pct >= 60 ? FRASES.recta : pct >= 25 ? FRASES.medio : FRASES.arranque;
+  // Semilla por media hora: la frase rota sola, pero no baila en cada render.
+  const bloque = Math.floor(Date.now() / (30 * 60 * 1000));
+  return grupo[bloque % grupo.length];
+}
+
+const pesos = (n) => '$' + Math.round(Number(n) || 0).toLocaleString('es-CO');
+
+// Anillo de progreso en SVG puro — sin librerías nuevas en el bundle.
+function Anillo({ pct, color, icono, valor, sub, etiqueta }) {
+  const p = Math.max(0, Math.min(pct ?? 0, 100));
+  const R = 30, C = 2 * Math.PI * R;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 168 }}>
+      <div style={{ position: 'relative', width: 72, height: 72, flexShrink: 0 }}>
+        <svg width="72" height="72" style={{ transform: 'rotate(-90deg)' }}>
+          <circle cx="36" cy="36" r={R} fill="none" stroke="rgba(255,255,255,0.16)" strokeWidth="7" />
+          <circle cx="36" cy="36" r={R} fill="none" stroke={color} strokeWidth="7" strokeLinecap="round"
+            strokeDasharray={C} strokeDashoffset={C - (C * p) / 100}
+            style={{ transition: 'stroke-dashoffset .6s ease' }} />
+        </svg>
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', fontSize: 18,
+        }}>{icono}</div>
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 10.5, fontWeight: 700, opacity: 0.65, letterSpacing: 0.3, textTransform: 'uppercase' }}>{etiqueta}</div>
+        <div style={{ fontSize: 19, fontWeight: 900, lineHeight: 1.15 }}>{valor}</div>
+        <div style={{ fontSize: 11, opacity: 0.7 }}>{sub}</div>
+      </div>
+    </div>
+  );
+}
+
+function CabeceraMiDia({ meta = {}, marcador, nombre }) {
+  const m = marcador || { global: { vendido: 0, ordenes: 0 }, mio: { vendido: 0, ordenes: 0, deTelemercadeo: 0, ordenesTelemercadeo: 0 }, meta: {} };
+  const metaOrd = m.meta?.ordenes || 0;
+  const metaVta = m.meta?.venta || 0;
+
+  const pctLlam = meta.objetivo > 0 ? Math.round((meta.realizadas / meta.objetivo) * 100) : 0;
+  const pctOrd  = metaOrd > 0 ? Math.round((m.mio.ordenes / metaOrd) * 100) : 0;
+  const pctVta  = metaVta > 0 ? Math.round((m.mio.vendido / metaVta) * 100) : 0;
+
+  // El avance del día es el promedio de las metas QUE EXISTEN. Si solo hay
+  // meta de llamadas, no se castiga por unas metas de venta que nadie configuró.
+  const activos = [
+    meta.objetivo > 0 ? Math.min(pctLlam, 100) : null,
+    metaOrd > 0 ? Math.min(pctOrd, 100) : null,
+    metaVta > 0 ? Math.min(pctVta, 100) : null,
+  ].filter(v => v !== null);
+  const avance = activos.length ? Math.round(activos.reduce((a, b) => a + b, 0) / activos.length) : 0;
+
+  const sinMetas = !meta.objetivo && !metaOrd && !metaVta;
+
+  // Cuánto del total del día puso esta persona — el dato que hace que se sienta
+  // parte de un equipo y no una lista de llamadas suelta.
+  const pctDelEquipo = m.global.vendido > 0 ? Math.round((m.mio.vendido / m.global.vendido) * 100) : 0;
+
+  return (
+    <div style={{
+      background: 'linear-gradient(135deg,#1e1b4b 0%,#312e81 55%,#4c1d95 100%)',
+      borderRadius: 18, padding: '18px 20px', color: '#fff', marginBottom: 16,
+      boxShadow: '0 10px 30px -12px rgba(49,46,129,0.65)',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 900 }}>
+            {nombre ? `Hola, ${String(nombre).split(' ')[0]}` : 'Tu día'}
+          </div>
+          <div style={{ fontSize: 11.5, opacity: 0.72 }}>{fraseDelMomento(avance)}</div>
+        </div>
+        {!sinMetas && (
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 26, fontWeight: 900, lineHeight: 1 }}>{avance}%</div>
+            <div style={{ fontSize: 10.5, opacity: 0.7 }}>avance del día</div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginBottom: 14 }}>
+        <Anillo
+          etiqueta="Llamadas" icono="☎️" color={pctLlam >= 100 ? '#4ade80' : '#a78bfa'} pct={pctLlam}
+          valor={meta.objetivo > 0 ? `${meta.realizadas} / ${meta.objetivo}` : String(meta.realizadas || 0)}
+          sub={meta.objetivo > 0
+            ? (pctLlam >= 100 ? 'meta cumplida' : `faltan ${Math.max(meta.objetivo - meta.realizadas, 0)}`)
+            : 'sin meta configurada'}
+        />
+        <Anillo
+          etiqueta="Órdenes" icono="🧾" color={pctOrd >= 100 ? '#4ade80' : '#38bdf8'} pct={pctOrd}
+          valor={metaOrd > 0 ? `${m.mio.ordenes} / ${metaOrd}` : String(m.mio.ordenes)}
+          sub={metaOrd > 0
+            ? (pctOrd >= 100 ? 'meta cumplida' : `faltan ${Math.max(metaOrd - m.mio.ordenes, 0)}`)
+            : 'sin meta configurada'}
+        />
+        <Anillo
+          etiqueta="Vendido hoy" icono="💰" color={pctVta >= 100 ? '#4ade80' : '#fbbf24'} pct={pctVta}
+          valor={pesos(m.mio.vendido)}
+          sub={metaVta > 0
+            ? (pctVta >= 100 ? 'meta cumplida' : `faltan ${pesos(Math.max(metaVta - m.mio.vendido, 0))}`)
+            : 'sin meta configurada'}
+        />
+      </div>
+
+      {/* Burbuja equipo vs persona. Se muestra solo si hubo venta: un "$0 de $0"
+          a primera hora desanima sin aportar nada. */}
+      {m.global.vendido > 0 && (
+        <div style={{
+          background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.16)',
+          borderRadius: 13, padding: '11px 14px',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ fontSize: 12 }}>
+              <span style={{ opacity: 0.72 }}>La empresa vendió hoy </span>
+              <b>{pesos(m.global.vendido)}</b>
+              <span style={{ opacity: 0.72 }}> en {m.global.ordenes} {m.global.ordenes === 1 ? 'orden' : 'órdenes'}</span>
+            </div>
+            <div style={{ fontSize: 12 }}>
+              <span style={{ opacity: 0.72 }}>Tuyo: </span>
+              <b style={{ color: '#fbbf24' }}>{pesos(m.mio.vendido)}</b>
+              <span style={{ opacity: 0.72 }}> ({pctDelEquipo}% del día · {m.mio.ordenes} {m.mio.ordenes === 1 ? 'orden' : 'órdenes'})</span>
+            </div>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.14)', borderRadius: 99, height: 7, overflow: 'hidden', marginTop: 9 }}>
+            <div style={{ width: `${Math.min(pctDelEquipo, 100)}%`, height: '100%', borderRadius: 99, background: '#fbbf24', transition: 'width .5s' }} />
+          </div>
+          {m.mio.deTelemercadeo > 0 && (
+            <div style={{ fontSize: 11, opacity: 0.78, marginTop: 7 }}>
+              📞 {pesos(m.mio.deTelemercadeo)} salieron de tus llamadas de hoy
+              {m.mio.ordenesTelemercadeo > 0 && ` (${m.mio.ordenesTelemercadeo} ${m.mio.ordenesTelemercadeo === 1 ? 'orden' : 'órdenes'})`}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ✅ COM-BUSCAR-001 — BUSCADOR POR NOMBRE O TELÉFONO
+// ────────────────────────────────────────────────────────────────────────────
+// Busca contra TODA la base, no contra la cola visible. Es la diferencia entre
+// que funcione y que no: el cliente que devuelve la llamada después de un "no
+// contestó" ya NO está en la cola, y ese es justamente el que hay que atender.
+// Cada resultado dice por qué no estaba en la cola, para no repetir contacto.
+// ════════════════════════════════════════════════════════════════════════════
+function BuscadorCliente({ valor, onCambio, buscando, resultado, onLlamarVencido, onLlamarProspecto }) {
+  const hay = resultado && ((resultado.vencidos || []).length || (resultado.prospectos || []).length);
+  const buscoYNoHay = resultado && !hay && valor.trim().length >= 3 && !buscando;
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ position: 'relative' }}>
+        <input
+          value={valor}
+          onChange={e => onCambio(e.target.value)}
+          placeholder="🔎 Buscar cliente por nombre o teléfono (te devolvió la llamada)"
+          style={{
+            width: '100%', boxSizing: 'border-box', border: '1px solid #d1d5db',
+            borderRadius: 12, padding: '11px 38px 11px 14px', fontSize: 13.5,
+            outline: 'none', background: '#fff',
+          }}
+        />
+        {valor && (
+          <button onClick={() => onCambio('')} title="Limpiar" style={{
+            position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+            border: 'none', background: 'transparent', cursor: 'pointer', color: '#9ca3af', fontSize: 16,
+          }}>✕</button>
+        )}
+      </div>
+
+      {valor.trim().length > 0 && valor.trim().length < 3 && (
+        <div style={{ fontSize: 11.5, color: '#9ca3af', marginTop: 5 }}>Escribí al menos 3 caracteres.</div>
+      )}
+      {buscando && <div style={{ fontSize: 11.5, color: '#9ca3af', marginTop: 5 }}>Buscando…</div>}
+      {buscoYNoHay && (
+        <div style={{ fontSize: 12, color: '#6b7280', marginTop: 6, background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 10, padding: '9px 12px' }}>
+          Sin resultados para «{valor.trim()}». Probá con menos letras, o con los últimos dígitos del teléfono.
+        </div>
+      )}
+
+      {hay ? (
+        <div style={{ marginTop: 8, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 13, padding: '10px 12px' }}>
+          <div style={{ fontSize: 11.5, fontWeight: 800, color: '#6b7280', marginBottom: 7 }}>
+            Resultados fuera de la cola — podés registrar la llamada igual
+          </div>
+
+          {(resultado.vencidos || []).map(v => (
+            <div key={v.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: '1px solid #f3f4f6', flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 800, fontSize: 13.5, color: '#1a1a2e' }}>
+                  {v.nombre} <span style={{ fontSize: 11, fontWeight: 700, color: '#b91c1c', background: '#fef2f2', borderRadius: 6, padding: '1px 6px', marginLeft: 4 }}>vencimiento</span>
+                </div>
+                <div style={{ fontSize: 12, color: '#6b7280' }}>
+                  {v.telefono || 'sin teléfono'} · {v.totalEquipos} equipo(s) · vence {v.fechaMasAntigua}
+                </div>
+                {v.fueraDeCola && (
+                  <div style={{ fontSize: 11, color: '#b45309', marginTop: 2 }}>⚠️ No está en la cola: {v.fueraDeCola}</div>
+                )}
+              </div>
+              <button onClick={() => onLlamarVencido(v)} style={{
+                border: 'none', borderRadius: 9, padding: '8px 14px', background: '#b91c1c',
+                color: '#fff', fontWeight: 800, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap',
+              }}>☎ Registrar llamada</button>
+            </div>
+          ))}
+
+          {(resultado.prospectos || []).map(p => (
+            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: '1px solid #f3f4f6', flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 800, fontSize: 13.5, color: '#1a1a2e' }}>
+                  {p.nombre} <span style={{ fontSize: 11, fontWeight: 700, color: '#5b21b6', background: '#f5f3ff', borderRadius: 6, padding: '1px 6px', marginLeft: 4 }}>prospecto</span>
+                </div>
+                <div style={{ fontSize: 12, color: '#6b7280' }}>
+                  {p.telefono || 'sin teléfono'}{p.empresa ? ` · ${p.empresa}` : ''} · {p.estado}
+                </div>
+              </div>
+              <button onClick={() => onLlamarProspecto(p)} style={{
+                border: 'none', borderRadius: 9, padding: '8px 14px', background: '#7c3aed',
+                color: '#fff', fontWeight: 800, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap',
+              }}>☎ Registrar llamada</button>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1744,13 +2048,33 @@ function Metricas({ user }) {
 
   useEffect(() => { cargar(); }, [cargar]);
 
+  // ✅ COM-METAS-001: tres metas por vendedora. Se envía solo lo que se llenó,
+  // así cambiar la de pesos no borra la de llamadas. 0 significa "sin meta".
   const guardarMeta = async (vendedoraId) => {
-    const meta = Number(metasEdit[vendedoraId]);
-    if (!meta || meta < 1) return alert('Meta inválida');
+    const e = metasEdit[vendedoraId] || {};
+    const body = {};
+    const leer = (campo, clave) => {
+      if (e[clave] === undefined || e[clave] === '') return;
+      const n = Number(e[clave]);
+      if (!Number.isFinite(n) || n < 0) throw new Error('Valor inválido');
+      body[campo] = n;
+    };
+    try {
+      leer('metaLlamadasDiarias', 'llamadas');
+      leer('metaOrdenesDiarias', 'ordenes');
+      leer('metaVentaDiaria', 'venta');
+    } catch (err) { return alert(err.message); }
+
+    if (!Object.keys(body).length) return alert('Escribí al menos una meta');
+
     const res = await fetch(`${API}/comercial/meta/${vendedoraId}`, {
-      method: 'PUT', headers: authHeaders(), body: JSON.stringify({ metaLlamadasDiarias: meta }),
+      method: 'PUT', headers: authHeaders(), body: JSON.stringify(body),
     });
-    if (res.ok) { alert('Meta guardada ✓'); cargar(); }
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) return alert(json.error || 'No se pudo guardar');
+    alert('Metas guardadas ✓');
+    setMetasEdit({ ...metasEdit, [vendedoraId]: {} });
+    cargar();
   };
 
   const inputStyle = { padding: '8px 10px', borderRadius: 8, border: '1px solid #d1d5db', fontSize: 12.5 };
@@ -1808,19 +2132,37 @@ function Metricas({ user }) {
         </div>
       )}
 
-      {/* Configuración de metas */}
-      <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #e5e7eb', padding: 16, maxWidth: 480 }}>
-        <div style={{ fontWeight: 800, fontSize: 13, color: '#1a1a2e', marginBottom: 4 }}>🎯 Meta diaria por vendedora</div>
-        <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 10 }}>La vendedora ve su progreso en vivo en "Mi Día"</div>
+      {/* Configuración de metas — ✅ COM-METAS-001 */}
+      <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #e5e7eb', padding: 16, maxWidth: 620 }}>
+        <div style={{ fontWeight: 800, fontSize: 13, color: '#1a1a2e', marginBottom: 4 }}>🎯 Metas diarias por vendedora</div>
+        <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 12 }}>
+          Las llamadas miden el esfuerzo; las órdenes y los pesos miden el resultado.
+          Se pueden dejar en blanco: la vendedora ve el dato igual, sin semáforo. Progreso en vivo en «Mi Día».
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, fontSize: 10.5, fontWeight: 800, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: 0.3 }}>
+          <div style={{ flex: 1 }} />
+          <div style={{ width: 88, textAlign: 'center' }}>☎️ Llamadas</div>
+          <div style={{ width: 88, textAlign: 'center' }}>🧾 Órdenes</div>
+          <div style={{ width: 110, textAlign: 'center' }}>💰 Pesos</div>
+          <div style={{ width: 72 }} />
+        </div>
         {vendedoras.map(v => {
           const id = v.id || v.uid;
+          const e = metasEdit[id] || {};
+          const set = (clave, val) => setMetasEdit({ ...metasEdit, [id]: { ...e, [clave]: val } });
           return (
             <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-              <div style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: '#374151' }}>{v.nombre || v.email}</div>
-              <input type="number" min="1" placeholder={v.metaLlamadasDiarias || 'ej: 200'}
-                value={metasEdit[id] ?? ''} onChange={e => setMetasEdit({ ...metasEdit, [id]: e.target.value })}
-                style={{ ...inputStyle, width: 90 }} />
-              <button onClick={() => guardarMeta(id)} style={{ background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 12px', fontWeight: 700, fontSize: 11, cursor: 'pointer' }}>Guardar</button>
+              <div style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: '#374151', minWidth: 0 }}>{v.nombre || v.email}</div>
+              <input type="number" min="0" placeholder={v.metaLlamadasDiarias || '200'}
+                value={e.llamadas ?? ''} onChange={ev => set('llamadas', ev.target.value)}
+                style={{ ...inputStyle, width: 88 }} />
+              <input type="number" min="0" placeholder={v.metaOrdenesDiarias || '10'}
+                value={e.ordenes ?? ''} onChange={ev => set('ordenes', ev.target.value)}
+                style={{ ...inputStyle, width: 88 }} />
+              <input type="number" min="0" step="10000" placeholder={v.metaVentaDiaria || '500000'}
+                value={e.venta ?? ''} onChange={ev => set('venta', ev.target.value)}
+                style={{ ...inputStyle, width: 110 }} />
+              <button onClick={() => guardarMeta(id)} style={{ background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 12px', fontWeight: 700, fontSize: 11, cursor: 'pointer', width: 72 }}>Guardar</button>
             </div>
           );
         })}

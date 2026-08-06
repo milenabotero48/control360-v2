@@ -184,6 +184,134 @@ const buscarClientePorIdentidad = async (adminId, { telefono, nit, nombre }) => 
 // GET /api/comercial/prospectos — Lista con filtros (admin ve todo;
 // vendedora ve los suyos + sin asignar)
 // ═════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ COM-BUSCAR-001 (2026-08-06) — GET /api/comercial/buscar?q=
+// ─────────────────────────────────────────────────────────────────────────────
+// EL PROBLEMA QUE RESUELVE
+// La asesora marca "no contestó". Al tercer intento el cliente sale de la cola
+// (telemercadeo.sinContacto). Al rato el cliente DEVUELVE la llamada — y no hay
+// forma de registrar nada, porque la tarjeta ya no está en pantalla. Lo mismo
+// pasa con los reprogramados a una fecha futura. La venta se atiende igual, pero
+// queda sin registrar: no cuenta para la meta, no cierra el vencimiento y el
+// cliente sigue apareciendo como pendiente.
+//
+// Filtrar la cola en el navegador NO alcanza: lo que se busca justamente no está
+// en la cola. Por eso esta ruta va contra la base completa, sin los filtros de
+// cola (Lucy, fecha, intentos agotados, agendados a futuro).
+//
+// Devuelve las dos cosas con la MISMA forma que usa `mi-dia`, para que los
+// modales de llamada y de WhatsApp funcionen sin cambios:
+//   · vencidos  — clientes con equipos vencidos o por vencer
+//   · prospectos— prospectos sueltos
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/buscar', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const q = String(req.query.q || '').trim();
+    if (q.length < 3) return res.json({ vencidos: [], prospectos: [], q });
+
+    // Se normaliza igual el término y los datos: sin tildes, sin puntuación.
+    // Para teléfono se comparan solo los dígitos, así "316 755 0410",
+    // "3167550410" y "+57 316 7550410" encuentran lo mismo.
+    const norm = (s) => String(s || '')
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase().replace(/\s+/g, ' ').trim();
+    const soloDigitos = (s) => String(s || '').replace(/\D/g, '');
+
+    const qN = norm(q);
+    const qD = soloDigitos(q);
+    const buscaTelefono = qD.length >= 6; // 6 dígitos ya es un fragmento útil
+
+    const coincide = (...campos) => {
+      if (buscaTelefono && campos.some(c => soloDigitos(c).includes(qD))) return true;
+      return campos.some(c => norm(c).includes(qN));
+    };
+
+    const hoy = hoyColombia();
+
+    // ─── Prospectos ───────────────────────────────────────────────────────────
+    const prospSnap = await db.collection('prospectos').where('adminId', '==', adminId).get();
+    const prospectos = prospSnap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(p => coincide(p.nombre, p.empresa, p.telefono, p.nit))
+      .slice(0, 30)
+      .map(p => ({ ...p, basePeriodo: periodoDeProspecto(p) }));
+
+    // ─── Clientes con vencimientos ────────────────────────────────────────────
+    // Se buscan primero los CLIENTES que coinciden y solo después sus
+    // vencimientos, para no recorrer la colección grande comparando texto.
+    const cliSnap = await db.collection('clients').where('adminId', '==', adminId).get();
+    const clientesHit = new Map();
+    cliSnap.docs.forEach(d => {
+      const c = d.data();
+      if (c.activo === false) return;
+      if (!coincide(c.nombre, c.empresa, c.celular, c.telefono, c.nit, c.contacto)) return;
+      if (clientesHit.size < 30) clientesHit.set(d.id, c);
+    });
+
+    let vencidos = [];
+    if (clientesHit.size) {
+      const vencSnap = await db.collection('vencimientos').where('adminId', '==', adminId).get();
+      const porCliente = new Map();
+      vencSnap.docs.forEach(d => {
+        const v = { id: d.id, ...d.data() };
+        if (!v.clienteId || !clientesHit.has(v.clienteId)) return;
+        if (v.gestionado) return; // ya cerrado: no hay nada que registrar
+        const g = porCliente.get(v.clienteId) || {
+          clienteId: v.clienteId, equipos: [], fechaMasAntigua: '9999-99-99',
+          totalLlamadas: 0, notasUltimaLlamada: null, escaladoPorLucy: false, compromiso: null,
+        };
+        g.equipos.push({
+          id: v.id,
+          descripcionEquipo: v.descripcionEquipo || 'Extintor',
+          cantidad: Number(v.cantidad) || 1,
+          sucursal: v.sucursal || null,
+          fechaVencimiento: v.fechaVencimiento,
+        });
+        if ((v.fechaVencimiento || '9999') < g.fechaMasAntigua) g.fechaMasAntigua = v.fechaVencimiento || '9999-99-99';
+        if (v.escaladoTelemercadeo) g.escaladoPorLucy = true;
+        const t = v.telemercadeo || {};
+        if ((t.totalLlamadas || 0) > g.totalLlamadas) g.totalLlamadas = t.totalLlamadas;
+        if (t.notas) g.notasUltimaLlamada = t.notas;
+        if (t.sinContacto) g.sinContacto = true;
+        if (t.proximaLlamada?.fecha) g.proximaLlamadaFecha = t.proximaLlamada.fecha;
+        if (t.compromiso?.desde && (!g.compromiso || t.compromiso.desde > g.compromiso.desde)) g.compromiso = t.compromiso;
+        porCliente.set(v.clienteId, g);
+      });
+
+      vencidos = [...porCliente.values()].map(g => {
+        const c = clientesHit.get(g.clienteId) || {};
+        return {
+          ...g,
+          id: 'venc-' + g.clienteId,
+          origen: 'vencimiento',
+          nombre: c.nombre || c.empresa || 'Sin nombre',
+          telefono: c.celular || c.telefono || '',
+          telefonoPorVerificar: !!c.telefonoPorVerificar,
+          nit: c.nit || '',
+          empresaId: c.empresaId || '',
+          empresaNombre: c.empresaNombre || '',
+          contacto: c.contacto || '',
+          basePeriodo: (g.fechaMasAntigua || '').slice(0, 7),
+          totalEquipos: g.equipos.reduce((a, e) => a + (e.cantidad || 1), 0),
+          // Por qué NO estaba en la cola de hoy — la asesora necesita saberlo
+          // antes de llamar, para no repetir un contacto que ya se hizo.
+          fueraDeCola: g.sinContacto
+            ? 'agotó los 3 intentos sin contacto'
+            : (g.proximaLlamadaFecha && g.proximaLlamadaFecha > hoy)
+              ? `reprogramado para ${g.proximaLlamadaFecha}`
+              : (g.fechaMasAntigua > hoy) ? 'todavía no vence' : null,
+        };
+      }).sort((a, b) => a.fechaMasAntigua.localeCompare(b.fechaMasAntigua));
+    }
+
+    return res.json({ q, vencidos, prospectos });
+  } catch (err) {
+    console.error('GET /comercial/buscar:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/prospectos', async (req, res) => {
   try {
     const adminId = getAdminId(req);
@@ -619,10 +747,79 @@ router.get('/mi-dia', async (req, res) => {
 
     // Meta configurada en el documento del usuario (users.metaLlamadasDiarias)
     let metaDiaria = 0;
+    let metaOrdenes = 0;
+    let metaVenta = 0;
     try {
       const userDoc = await db.collection('users').doc(uid).get();
-      if (userDoc.exists) metaDiaria = Number(userDoc.data().metaLlamadasDiarias) || 0;
+      if (userDoc.exists) {
+        const u = userDoc.data();
+        metaDiaria  = Number(u.metaLlamadasDiarias) || 0;
+        metaOrdenes = Number(u.metaOrdenesDiarias) || 0;   // ✅ COM-METAS-001
+        metaVenta   = Number(u.metaVentaDiaria) || 0;      // ✅ COM-METAS-001
+      }
     } catch (e) { /* sin meta configurada */ }
+
+    // ═══ ✅ COM-MARCADOR-001 (2026-08-06): venta del día, global y personal ═══
+    // Por qué existe: la meta de llamadas mide esfuerzo, no resultado. El equipo
+    // puede cerrar el día con las 200 llamadas hechas y cero pesos vendidos, y
+    // hasta hoy eso se veía como un día cumplido. Este marcador pone el
+    // resultado al lado del esfuerzo.
+    //
+    // Se separan dos cifras a propósito (decisión de negocio):
+    //   · `vendido`      — TODA orden creada por la persona (incluye mostrador).
+    //   · `deTelemercadeo` — solo lo que salió de una llamada suya de HOY.
+    // La segunda es la que mide el trabajo del módulo; la primera es lo que la
+    // persona facturó en total. Mezclarlas haría ver el telemercadeo mejor de lo
+    // que es, y ese autoengaño no sirve para decidir nada.
+    const marcador = {
+      global:  { vendido: 0, ordenes: 0 },
+      mio:     { vendido: 0, ordenes: 0, deTelemercadeo: 0, ordenesTelemercadeo: 0 },
+      meta:    { ordenes: metaOrdenes, venta: metaVenta },
+    };
+    try {
+      // Clientes a los que ESTA persona llamó hoy con desenlace positivo.
+      // Si la orden es de uno de ellos, la venta se atribuye al telemercadeo.
+      const clientesLlamadosHoy = new Set();
+      llamadasSnap.docs.forEach(d => {
+        const l = d.data();
+        if (['acepta', 'ya_recargo', 'convertido'].includes(l.resultado) && l.clienteId) {
+          clientesLlamadosHoy.add(l.clienteId);
+        }
+      });
+
+      const ordenesSnap = await db.collection('orders')
+        .where('adminId', '==', adminId)
+        .limit(5000)
+        .get();
+
+      ordenesSnap.docs.forEach(d => {
+        const o = d.data();
+        if (o.estado === 'anulada') return;
+        // Misma conversión de fecha que usa la alerta de servicios del mes:
+        // Railway corre en UTC y Colombia es UTC-5.
+        const s = o.createdAt?._seconds || o.createdAt?.seconds;
+        const f = s
+          ? new Date(s * 1000 - 5 * 3600 * 1000).toISOString().slice(0, 10)
+          : String(o.createdAt || '').slice(0, 10);
+        if (f !== hoy) return;
+
+        const total = Number(o.total) || 0;
+        marcador.global.vendido += total;
+        marcador.global.ordenes++;
+
+        if (o.creadoPorId === uid || o.creadoPor === uid) {
+          marcador.mio.vendido += total;
+          marcador.mio.ordenes++;
+          if (o.clienteId && clientesLlamadosHoy.has(o.clienteId)) {
+            marcador.mio.deTelemercadeo += total;
+            marcador.mio.ordenesTelemercadeo++;
+          }
+        }
+      });
+    } catch (eM) {
+      // El marcador NUNCA tumba Mi Día — si falla, la cola de llamadas sigue.
+      console.warn('COM-MARCADOR-001:', eM.message);
+    }
 
     return res.json({
       fecha: hoy,
@@ -648,6 +845,8 @@ router.get('/mi-dia', async (req, res) => {
         realizadas: llamadasHoy,
         porcentaje: metaDiaria > 0 ? Math.round((llamadasHoy / metaDiaria) * 100) : null,
       },
+      // ✅ COM-MARCADOR-001: venta del día, global y de esta persona
+      marcador,
     });
   } catch (err) {
     console.error('GET /comercial/mi-dia:', err);
@@ -1506,23 +1705,42 @@ router.put('/prospectos/:id', async (req, res) => {
 // PUT /api/comercial/meta/:vendedoraId — Configurar meta diaria (admin, R-COM-08)
 // Body: { metaLlamadasDiarias: 200 }
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ COM-METAS-001 (2026-08-06): además de llamadas, ahora hay meta de ÓRDENES
+// y de PESOS al día. Las llamadas miden actividad; las órdenes y los pesos miden
+// resultado. Un equipo puede cumplir 200 llamadas y no vender nada — con la meta
+// sola de llamadas eso se ve como un día perfecto, y no lo es.
+// Las tres son opcionales: se envía solo la que se quiere cambiar.
 router.put('/meta/:vendedoraId', async (req, res) => {
   try {
     if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Solo el administrador configura metas' });
-    const meta = Number(req.body?.metaLlamadasDiarias);
-    if (!meta || meta < 1) return res.status(400).json({ error: 'Meta inválida' });
 
-    await db.collection('users').doc(req.params.vendedoraId).update({ metaLlamadasDiarias: meta });
+    const cambios = {};
+    const leerMeta = (campo, min) => {
+      if (req.body?.[campo] === undefined) return;
+      const n = Number(req.body[campo]);
+      // 0 es válido y significa "sin meta": la tarjeta se muestra informativa.
+      if (!Number.isFinite(n) || n < 0) throw new Error(`${campo} inválida`);
+      if (n > 0 && n < min) throw new Error(`${campo} demasiado baja`);
+      cambios[campo] = Math.round(n);
+    };
+    leerMeta('metaLlamadasDiarias', 1);
+    leerMeta('metaOrdenesDiarias', 1);
+    leerMeta('metaVentaDiaria', 1000);
+
+    if (!Object.keys(cambios).length) return res.status(400).json({ error: 'No se envió ninguna meta' });
+
+    await db.collection('users').doc(req.params.vendedoraId).update(cambios);
 
     await auditar({
-      accion: 'configurar_meta', descripcion: `Meta diaria de ${meta} llamadas asignada`,
+      accion: 'configurar_meta',
+      descripcion: `Metas diarias actualizadas: ${Object.entries(cambios).map(([k, v]) => `${k}=${v}`).join(', ')}`,
       usuarioId: getAdminId(req), usuarioNombre: req.user?.nombre || req.user?.email,
-      datos: { vendedoraId: req.params.vendedoraId, meta }
+      datos: { vendedoraId: req.params.vendedoraId, ...cambios }
     });
 
-    return res.json({ ok: true });
+    return res.json({ ok: true, ...cambios });
   } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return res.status(400).json({ error: err.message });
   }
 });
 
