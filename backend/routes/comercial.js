@@ -419,15 +419,33 @@ router.get('/mi-dia', async (req, res) => {
       const modoTodos = req.query.todos === '1' || req.query.todos === 'true';
       if (modoTodos) lucyActiva = false;
 
+      // ✅ TELEVENC-TOPE-001 (2026-08-05) — EL MISMO TOPE QUE MENTÍA, OTRA VEZ
+      // ─────────────────────────────────────────────────────────────────────
+      // Acá había `.limit(2000)`. Es exactamente el bug que ya se corrigió en
+      // el módulo Vencimientos (VENC-TOPE-001) pero que quedó vivo en la cola
+      // de Telemercadeo. Firestore devuelve los primeros 2000 por ID interno,
+      // sin relación con la fecha: con Valle en 3.916 vencimientos y Sur en
+      // 8.048, la mitad de la base NUNCA entraba a la cola de llamadas y no
+      // había forma de notarlo — el panel de Vencimientos mostraba 103 del mes
+      // y Telemercadeo 9, y ambos números "se veían normales".
+      //
+      // Sin `limit`, Firestore entrega todos los documentos que cumplen el
+      // filtro por streaming; no hay tope. No se usa la caché de
+      // services/vencimientosCache.js a propósito: esa guarda las filas ya
+      // enriquecidas con datos del cliente, y acá el enriquecimiento se hace
+      // más abajo con getAll solo sobre los clientes que sobreviven al filtro
+      // — que son muchos menos.
       const vencSnap = await db.collection('vencimientos')
         .where('adminId', '==', adminId)
-        .limit(2000)
         .get();
 
-      // ✅ TELEVENC-DIAG-001: en modo "ver todos" también entran los que vencen
-      // ESTE MES aunque la fecha todavía no haya llegado — comercialmente es
-      // mejor llamar antes de que se venza, no después.
-      const limiteFecha = modoTodos ? (hoy.slice(0, 7) + '-32') : hoy;
+      // ✅ TELEVENC-MES-001 (2026-08-05): la cola cubre TODO el mes en curso,
+      // no solo lo ya vencido. Antes, un equipo que vencía el 20 de agosto no
+      // aparecía hasta el 21 — se llamaba al cliente cuando ya estaba fuera de
+      // norma. Comercialmente es al revés: se llama antes para que renueve a
+      // tiempo. `-32` es un centinela de comparación de cadenas: cualquier día
+      // real del mes ('...-31') queda por debajo.
+      const limiteFecha = hoy.slice(0, 7) + '-32';
 
       const candidatos = vencSnap.docs
         .map(d => ({ id: d.id, ...d.data() }))

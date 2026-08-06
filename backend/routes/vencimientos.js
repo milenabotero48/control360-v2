@@ -186,6 +186,57 @@ const partirEquipos = (equipoStr, cantidadFila) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ VENC-EQUIPO-NORM-001 (2026-08-05) — LOS NOMBRES GENÉRICOS QUE ESCAPABAN
+// ─────────────────────────────────────────────────────────────────────────────
+// Cuando el Excel trae la celda de equipo vacía, `partirEquipos` devuelve el
+// literal 'Extintor'. Si otra fila del MISMO cliente sí traía el nombre bueno
+// ("EXTINTOR ABC 5 LBS"), quedaban dos vencimientos que el ojo lee como
+// duplicados pero que ningún agrupador por cliente+equipo detectaba: son
+// cadenas distintas. En la tarjeta de Telemercadeo se ve como el mismo equipo
+// listado dos veces, una con nombre completo y otra sin él.
+//
+// `claveEquipo` reduce el nombre a su forma comparable — mayúsculas, sin
+// tildes, sin puntuación, con las unidades unificadas (LB/LBS/LIBRAS → LB) y
+// sin la palabra EXTINTOR, que está en casi todos y no distingue nada. Se usa
+// para AGRUPAR, nunca para mostrar: lo que ve el usuario sigue siendo el texto
+// original del Excel.
+//
+// `GENERICO` es el marcador de "no sé qué equipo es": una descripción que se
+// reduce a vacío. Un genérico NO crea un vencimiento nuevo si el cliente ya
+// tiene otro equipo en ese mismo ciclo — se asume que es la misma máquina mal
+// digitada, que es lo que pasa en la práctica.
+// ═════════════════════════════════════════════════════════════════════════════
+const GENERICO = '__GENERICO__';
+
+const claveEquipo = (desc) => {
+  let t = String(desc || '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // sin tildes: SENAL = SEÑAL
+    .toUpperCase();
+  t = t.replace(/[^A-Z0-9]+/g, ' ');                     // puntuacion fuera
+  // "5LBS" y "5 LBS" son lo mismo; "CO2" y "CO 2" tambien.
+  t = t.replace(/(\d)([A-Z])/g, '$1 $2').replace(/([A-Z])(\d)/g, '$1 $2');
+  t = t.replace(/\b(?:LIBRAS?|LBS)\b/g, 'LB').replace(/\b(?:KILOS?|KGS)\b/g, 'KG');
+  // Palabras que estan en casi todos los registros y no distinguen nada.
+  // OJO: EXTINTOR(?:ES)? — escribirlo "EXTINTORES?" haria que el ? aplique
+  // solo a la S final, o sea "EXTINTORE" + S opcional, y nunca casaria.
+  t = t.replace(/\b(?:EXTINTOR(?:ES)?|RECARGAS?|MANTENIMIENTOS?|DE|DEL|EL|LA)\b/g, ' ');
+  t = t.replace(/\b0+(\d)/g, '$1');                      // "05 LB" = "5 LB"
+  t = t.replace(/\b0\s*(?:LB|KG)\b/g, ' ');              // "0 LBS" es dato basura
+  t = t.replace(/\s+/g, ' ').trim();
+  return t || GENERICO;
+};
+
+// Clave de identidad de un vencimiento: mismo cliente, mismo equipo, mismo
+// ciclo. La sucursal entra porque dos sedes del mismo cliente sí son equipos
+// distintos. Es lo que hace que reimportar el mismo archivo no multiplique.
+const claveVencimiento = (clienteId, descEquipo, sucursal, fechaVencimiento) => [
+  clienteId,
+  claveEquipo(descEquipo),
+  String(sucursal || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/\s+/g, ' ').trim(),
+  String(fechaVencimiento || '').slice(0, 7), // el ciclo es el MES, no el día
+].join('|');
+
+// ═════════════════════════════════════════════════════════════════════════════
 // ✅ VENC-TOPE-001 (2026-07-29) — EL TOPE DE 2000 QUE MENTÍA
 // ─────────────────────────────────────────────────────────────────────────────
 // PROBLEMA: `GET /` hacía `.limit(2000)` SIN orderBy y agrupaba por mes DESPUÉS,
@@ -522,9 +573,50 @@ router.post('/importar', async (req, res) => {
     });
 
 
+    // ═══ ✅ VENC-IMPORT-DUP-001 (2026-08-05) — LA GUARDA QUE FALTABA ═══════════
+    // Hasta hoy cada fila hacía `db.collection('vencimientos').doc()` sin
+    // preguntar nada: un documento NUEVO siempre. Subir el mismo archivo dos
+    // veces multiplicaba la base. Así fue como Valle llegó a 7.961 vencimientos
+    // para 2.440 clientes con cuatro importaciones del mismo día, y por eso
+    // hubo que borrar 4.045 documentos a mano con un script.
+    //
+    // Ahora se carga UNA vez el índice de vencimientos ya existentes del tenant
+    // y cada fila se compara contra él por clave de identidad
+    // (cliente + equipo normalizado + sucursal + mes de vencimiento). Si ya
+    // existe, se OMITE — no se pisa, porque el documento viejo puede tener
+    // gestión encima (gestionado, telemercadeo, estadoCiclo) que se perdería.
+    //
+    // El índice también recibe las claves creadas durante ESTA importación, así
+    // que un archivo con la misma máquina repetida en dos filas tampoco duplica.
+    const vencExistentes = new Set();
+    // Índice auxiliar: qué equipos CON NOMBRE ya tiene cada cliente en cada
+    // ciclo. Sirve para el caso "genérico": una fila sin nombre de equipo no
+    // debe crear una máquina nueva si el cliente ya tiene otra en ese mes.
+    const equiposPorClienteCiclo = new Map();
+    // Vencimientos que va a crear ESTA importación: clave → { ref, data }.
+    // Se acumulan en memoria y se escriben al final, para poder sumar la
+    // cantidad cuando el mismo equipo aparece en varias filas del archivo.
+    const vencPendientes = new Map();
+    {
+      // Un solo escaneo alimenta los dos índices.
+      const snapV = await db.collection('vencimientos').where('adminId', '==', adminId).get();
+      snapV.docs.forEach(d => {
+        const v = d.data();
+        vencExistentes.add(claveVencimiento(v.clienteId, v.descripcionEquipo, v.sucursal, v.fechaVencimiento));
+        if (!v.clienteId || !v.fechaVencimiento) return;
+        const ce = claveEquipo(v.descripcionEquipo);
+        if (ce === GENERICO) return; // un genérico no "ocupa" el ciclo
+        const k = v.clienteId + '|' + String(v.fechaVencimiento).slice(0, 7);
+        if (!equiposPorClienteCiclo.has(k)) equiposPorClienteCiclo.set(k, new Set());
+        equiposPorClienteCiclo.get(k).add(ce);
+      });
+    }
+
     let resultadoExtra = { prospectosActualizados: 0 };
     // ✅ TELEFONO-UNIF-001: contador de teléfonos dudosos (bandera ☎️)
-    const resultado = { vencimientosCreados: 0, clientesNuevos: 0, prospectosCreados: 0, porVerificar: 0, errores: [] };
+    // ✅ VENC-IMPORT-DUP-001: `vencimientosOmitidos` es dato de gestión, no ruido:
+    // si subís un archivo y sale todo omitido, es que ya estaba cargado.
+    const resultado = { vencimientosCreados: 0, vencimientosOmitidos: 0, clientesNuevos: 0, prospectosCreados: 0, porVerificar: 0, errores: [] };
     let batch = db.batch();
     let ops = 0;
     const commitSiLleno = async () => {
@@ -653,23 +745,66 @@ router.post('/importar', async (req, res) => {
         // cada uno genera SU PROPIO vencimiento con su propia cantidad,
         // para que la gestión y las alertas sean individuales por equipo.
         const equiposFila = partirEquipos(f.equipo, f.cantidad);
+        const fVencimiento = sumarMeses(fRecarga, 12);
+        const cicloKey = clienteId + '|' + fVencimiento.slice(0, 7);
+        if (!equiposPorClienteCiclo.has(cicloKey)) equiposPorClienteCiclo.set(cicloKey, new Set());
+        const yaEnCiclo = equiposPorClienteCiclo.get(cicloKey);
+
         for (const eq of equiposFila) {
-          const refV = db.collection('vencimientos').doc();
-          batch.set(refV, {
-            adminId,
-            clienteId,
-            sucursal: f.sucursal || null,
-            descripcionEquipo: eq.descripcion || 'Extintor',
-            cantidad: eq.cantidad,
-            fechaUltimaRecarga: fRecarga,
-            fechaVencimiento: sumarMeses(fRecarga, 12),
-            gestionado: false,
-            origenDato: 'importacion',
-            ordenId: null,
-            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          const desc = eq.descripcion || 'Extintor';
+          const clave = claveVencimiento(clienteId, desc, f.sucursal, fVencimiento);
+
+          // ✅ VENC-IMPORT-DUP-001: este equipo, de este cliente, en este
+          // ciclo, YA ESTÁ en la base de una importación anterior → no se
+          // toca. Es lo que hace que reimportar el mismo archivo no multiplique.
+          if (vencExistentes.has(clave)) { resultado.vencimientosOmitidos++; continue; }
+
+          // ✅ VENC-IMPORT-DUP-001 — el caso que NO es duplicado:
+          // el mismo archivo puede traer el mismo equipo en varias filas porque
+          // el cliente tiene VARIOS idénticos ("3 extintores ABC 5 LBS" escritos
+          // como 3 renglones en vez de uno con cantidad 3). Eso es inventario
+          // real: no se descarta, se SUMA la cantidad al documento pendiente.
+          // La diferencia con el caso de arriba es de dónde viene la repetición:
+          // de otra importación (duplicado) o de este mismo archivo (inventario).
+          const pendiente = vencPendientes.get(clave);
+          if (pendiente) {
+            pendiente.data.cantidad += eq.cantidad;
+            continue;
+          }
+
+          // ✅ VENC-EQUIPO-NORM-001: fila sin nombre de equipo ("Extintor" a
+          // secas) cuando el cliente YA tiene equipos con nombre en este mismo
+          // ciclo. No es una máquina adicional: es la misma mal digitada. Antes
+          // creaba un vencimiento fantasma y la tarjeta de Telemercadeo
+          // mostraba "Extintor ABC 5 lbs" y "Extintor" como si fueran dos.
+          if (claveEquipo(desc) === GENERICO && yaEnCiclo.size > 0) {
+            resultado.vencimientosOmitidos++;
+            continue;
+          }
+
+          if (claveEquipo(desc) !== GENERICO) yaEnCiclo.add(claveEquipo(desc));
+
+          vencPendientes.set(clave, {
+            ref: db.collection('vencimientos').doc(),
+            data: {
+              adminId,
+              clienteId,
+              sucursal: f.sucursal || null,
+              descripcionEquipo: desc,
+              // ✅ VENC-EQUIPO-NORM-001: la forma comparable se guarda junto al
+              // texto original. El usuario sigue viendo lo que trajo su Excel;
+              // los agrupadores y la próxima limpieza usan esta.
+              equipoClave: claveEquipo(desc),
+              cantidad: eq.cantidad,
+              fechaUltimaRecarga: fRecarga,
+              fechaVencimiento: fVencimiento,
+              gestionado: false,
+              origenDato: 'importacion',
+              ordenId: null,
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
           });
-          ops++; resultado.vencimientosCreados++;
-          await commitSiLleno();
+          resultado.vencimientosCreados++;
         }
 
       } catch (errFila) {
@@ -679,9 +814,21 @@ router.post('/importar', async (req, res) => {
 
     if (ops > 0) await batch.commit();
 
+    // ✅ VENC-IMPORT-DUP-001: escritura final de los vencimientos, ya con las
+    // cantidades sumadas. Va después del bucle porque hasta que no se recorre
+    // todo el archivo no se sabe cuántas filas apuntan al mismo equipo.
+    {
+      const aEscribir = [...vencPendientes.values()];
+      for (let i = 0; i < aEscribir.length; i += 400) {
+        const loteBatch = db.batch();
+        aEscribir.slice(i, i + 400).forEach(v => loteBatch.set(v.ref, v.data));
+        await loteBatch.commit();
+      }
+    }
+
     await auditar({
       accion: 'importar',
-      descripcion: `Importación: ${resultado.vencimientosCreados} vencimientos, ${resultado.clientesNuevos} clientes nuevos, ${resultado.prospectosCreados} prospectos, ${resultadoExtra.prospectosActualizados} prospectos actualizados, ${resultado.porVerificar} teléfonos por verificar`,
+      descripcion: `Importación: ${resultado.vencimientosCreados} vencimientos, ${resultado.vencimientosOmitidos} omitidos por ya existir, ${resultado.clientesNuevos} clientes nuevos, ${resultado.prospectosCreados} prospectos, ${resultadoExtra.prospectosActualizados} prospectos actualizados, ${resultado.porVerificar} teléfonos por verificar`,
       usuarioId: adminId, usuarioNombre: req.user?.nombre || req.user?.email,
       datos: { totalFilas: filas.length, errores: resultado.errores.length }
     });

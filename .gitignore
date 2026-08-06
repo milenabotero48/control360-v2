@@ -15,6 +15,8 @@ backend/diagnostico-vencimientos-*.json
 backend/recuperacion-vencimientos-*.json
 backend/duplicados-vencimientos-*.json
 backend/respaldo-eliminados-*.json
+backend/respaldo-genericos-*.json
+backend/genericos-*.json
 
 # Mensaje de commit temporal
 commit-msg.txt
