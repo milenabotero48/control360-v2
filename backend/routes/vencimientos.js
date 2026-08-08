@@ -35,6 +35,9 @@ const express = require('express');
 const router = express.Router();
 const { db, admin } = require('../config/firebase');
 const { normalizarTelefono: normTelCiclo } = require('../services/vencimientosService');
+// ✅ VENC-EDICION-001 / VENC-IMPORT-LOTE-001: editar, borrar y revertir pasan
+// por la MISMA autorización por PIN que egresos y órdenes (FIX PIN-UNICO-001).
+const { verificarPin } = require('./_autorizacion');
 
 // ─── HELPER: auditoría (mismo patrón de clients.js) ─────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioNombre, datos = {} }) => {
@@ -439,6 +442,199 @@ router.get('/resumen', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// GET /api/vencimientos/estadisticas — Panel de inteligencia comercial
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ VENC-KPI-001 (2026-08-08)
+//
+// Hasta hoy la pantalla contestaba "¿cuántos registros hay?". Un gerente no
+// necesita eso: necesita saber CUÁNTA PLATA entra este mes y CUÁNTA se está
+// yendo. Este endpoint traduce la base a esas dos preguntas.
+//
+// Qué devuelve:
+//   · mesActual   — clientes esperados, equipos, venta proyectada, ya atendidos
+//   · retorno     — serie de 12 meses: esperados vs. regresados vs. % de retorno
+//   · proyeccion  — venta esperada de los próximos 6 meses
+//   · empresas    — el mismo corte por razón social facturadora
+//   · topEquipos  — qué se recarga más (para saber qué tener en inventario)
+//
+// ── CÓMO SE VALORIZA (regla de negocio) ──────────────────────────────────────
+// El precio NUNCA se inventa ni se quema en el código: sale de la lista de
+// productos del suscriptor (`products.precioVenta`, el precio al público). Cada
+// suscriptor tiene los suyos.
+//
+// La descripción del equipo se reduce con `claveEquipo` — la MISMA función que
+// usa el anti-duplicados — y se busca contra los productos reducidos igual.
+// Así "2 x ABC 10 LBS", "recarga abc 10 lb" y "EXTINTOR ABC 10 LIBRAS" caen
+// todos en el mismo producto. La cantidad del vencimiento multiplica el precio:
+// "2 ABC de 10 lbs" = 2 recargas.
+//
+// Si un equipo no casa con ningún producto, NO se estima con un promedio: se
+// cuenta aparte en `sinPrecio`. Una proyección con supuestos invisibles es peor
+// que una proyección incompleta — el gerente tiene que saber qué parte de su
+// base todavía no está valorizada.
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/estadisticas', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const filas = await cargarTodos(adminId);
+    const hoy = hoyColombia();
+    const mesHoy = hoy.slice(0, 7);
+
+    // ── 1. Lista de precios del suscriptor ──────────────────────────────────
+    const prodSnap = await db.collection('products').where('adminId', '==', adminId).get();
+    const preciosPorClave = new Map();
+    prodSnap.docs.forEach(d => {
+      const p = d.data();
+      const precio = Number(p.precioVenta) || 0;
+      if (!precio) return;
+      const clave = claveEquipo(p.nombre);
+      if (clave === GENERICO) return;
+      // Si dos productos comparten clave (ej. recarga y venta del mismo
+      // extintor), se conserva el de MENOR precio: proyectar recompra sobre el
+      // precio de venta de equipo nuevo infla la cifra y engaña al gerente.
+      const actual = preciosPorClave.get(clave);
+      if (!actual || precio < actual.precio) {
+        preciosPorClave.set(clave, { precio, nombre: p.nombre });
+      }
+    });
+
+    const valorizar = (v) => {
+      const clave = claveEquipo(v.descripcionEquipo);
+      const cant = Number(v.cantidad) || 1;
+      const hit = preciosPorClave.get(clave);
+      if (hit) return { valor: hit.precio * cant, conPrecio: true, cant };
+      // Coincidencia parcial: el producto puede llamarse "RECARGA ABC 10 LB
+      // POLVO QUIMICO" y el equipo venir como "ABC 10 LB".
+      if (clave !== GENERICO) {
+        for (const [k, item] of preciosPorClave) {
+          if (k.includes(clave) || clave.includes(k)) {
+            return { valor: item.precio * cant, conPrecio: true, cant };
+          }
+        }
+      }
+      return { valor: 0, conPrecio: false, cant };
+    };
+
+    // ── 2. Agregación por mes de vencimiento ────────────────────────────────
+    // "Regresó" = el ciclo se cerró con venta: RENOVADO, o gestionado, o con
+    // una orden asociada. Es el hecho comercial, no una marca manual suelta.
+    const regreso = (v) => v.estadoCiclo === 'RENOVADO' || !!v.ordenId || v.gestionado === true;
+    const perdido = (v) => v.estadoCiclo === 'PERDIDO';
+
+    const meses = new Map();
+    const tocarMes = (k) => {
+      if (!meses.has(k)) {
+        meses.set(k, {
+          mes: k, equipos: 0, cantidadEquipos: 0,
+          clientes: new Set(), clientesRegresaron: new Set(), clientesPerdidos: new Set(),
+          ventaProyectada: 0, ventaRealizada: 0, sinPrecio: 0,
+        });
+      }
+      return meses.get(k);
+    };
+
+    const porEmpresa = new Map();
+    const porEquipo = new Map();
+
+    filas.forEach(v => {
+      const k = (v.fechaVencimiento || '').slice(0, 7);
+      if (!k) return;
+      const m = tocarMes(k);
+      const val = valorizar(v);
+      const cli = v.clienteId || v.telefono || 'sin_cliente';
+
+      m.equipos += 1;
+      m.cantidadEquipos += val.cant;
+      m.clientes.add(cli);
+      m.ventaProyectada += val.valor;
+      if (!val.conPrecio) m.sinPrecio += 1;
+      if (regreso(v)) { m.clientesRegresaron.add(cli); m.ventaRealizada += val.valor; }
+      if (perdido(v)) m.clientesPerdidos.add(cli);
+
+      // Corte por empresa facturadora (solo del mes en curso hacia adelante)
+      if (k >= mesHoy) {
+        const emp = v.empresaNombre || 'Sin empresa asignada';
+        if (!porEmpresa.has(emp)) porEmpresa.set(emp, { empresa: emp, equipos: 0, clientes: new Set(), venta: 0 });
+        const e = porEmpresa.get(emp);
+        e.equipos += val.cant; e.clientes.add(cli); e.venta += val.valor;
+      }
+
+      // Qué se recarga más — sirve para planear inventario
+      if (k === mesHoy) {
+        const nombreEq = v.descripcionEquipo || 'Sin especificar';
+        if (!porEquipo.has(nombreEq)) porEquipo.set(nombreEq, { equipo: nombreEq, cantidad: 0, valor: 0 });
+        const pe = porEquipo.get(nombreEq);
+        pe.cantidad += val.cant; pe.valor += val.valor;
+      }
+    });
+
+    const serializarMes = (m) => ({
+      mes: m.mes,
+      clientesEsperados: m.clientes.size,
+      clientesRegresaron: m.clientesRegresaron.size,
+      clientesPerdidos: m.clientesPerdidos.size,
+      tasaRetorno: m.clientes.size ? Math.round((m.clientesRegresaron.size / m.clientes.size) * 1000) / 10 : 0,
+      equipos: m.equipos,
+      cantidadEquipos: m.cantidadEquipos,
+      ventaProyectada: Math.round(m.ventaProyectada),
+      ventaRealizada: Math.round(m.ventaRealizada),
+      equiposSinPrecio: m.sinPrecio,
+    });
+
+    const todosLosMeses = [...meses.values()].map(serializarMes).sort((a, b) => a.mes.localeCompare(b.mes));
+
+    // ── 3. Recortes que consume la pantalla ─────────────────────────────────
+    const idxHoy = todosLosMeses.findIndex(m => m.mes === mesHoy);
+    const mesActual = todosLosMeses.find(m => m.mes === mesHoy) || {
+      mes: mesHoy, clientesEsperados: 0, clientesRegresaron: 0, clientesPerdidos: 0,
+      tasaRetorno: 0, equipos: 0, cantidadEquipos: 0, ventaProyectada: 0, ventaRealizada: 0, equiposSinPrecio: 0,
+    };
+
+    // Historia de retorno: 12 meses cerrados hacia atrás (sin incluir el actual,
+    // que todavía está corriendo y siempre se vería artificialmente bajo).
+    const historico = todosLosMeses.filter(m => m.mes < mesHoy).slice(-12);
+    const proyeccion = todosLosMeses.filter(m => m.mes >= mesHoy).slice(0, 6);
+
+    // Vencidos sin atender: el dinero que se está yendo hoy.
+    const vencidosAbiertos = filas.filter(v => v.estado === 'VENCIDO');
+    const clientesVencidos = new Set(vencidosAbiertos.map(v => v.clienteId || v.telefono));
+    const valorVencido = vencidosAbiertos.reduce((s, v) => s + valorizar(v).valor, 0);
+
+    // Promedio de retorno de los últimos 6 meses cerrados — la referencia
+    // realista contra la cual comparar el mes en curso.
+    const ultimos6 = historico.slice(-6).filter(m => m.clientesEsperados > 0);
+    const retornoPromedio = ultimos6.length
+      ? Math.round((ultimos6.reduce((s, m) => s + m.tasaRetorno, 0) / ultimos6.length) * 10) / 10
+      : 0;
+
+    return res.json({
+      generadoEn: hoy,
+      mesActual,
+      mesAnterior: idxHoy > 0 ? todosLosMeses[idxHoy - 1] : null,
+      retornoPromedio6m: retornoPromedio,
+      historico,
+      proyeccion,
+      vencidos: {
+        equipos: vencidosAbiertos.length,
+        clientes: clientesVencidos.size,
+        valor: Math.round(valorVencido),
+      },
+      empresas: [...porEmpresa.values()]
+        .map(e => ({ empresa: e.empresa, equipos: e.equipos, clientes: e.clientes.size, venta: Math.round(e.venta) }))
+        .sort((a, b) => b.venta - a.venta),
+      topEquipos: [...porEquipo.values()].sort((a, b) => b.cantidad - a.cantidad).slice(0, 8),
+      cobertura: {
+        productosConPrecio: preciosPorClave.size,
+        equiposSinPrecioMes: mesActual.equiposSinPrecio,
+      },
+    });
+  } catch (err) {
+    console.error('GET /vencimientos/estadisticas:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 // POST /api/vencimientos — Crear registro manual (desde ficha cliente o llamada)
 // Body: { clienteId, sucursal?, descripcionEquipo, cantidad?,
 //         fechaUltimaRecarga? | fechaVencimiento?, origenDato? }
@@ -521,10 +717,12 @@ router.post('/importar', async (req, res) => {
     }
     const adminId = getAdminId(req);
     const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
-    // Ola 3: la importación pertenece a UNA empresa facturadora (selector en
-    // pantalla). Los clientes nuevos nacen con el esquema oficial completo.
+    // Empresa facturadora POR DEFECTO. Antes era obligatoria y venía de un
+    // selector en pantalla; hoy es solo el respaldo para las filas que no
+    // traen la suya (ver VENC-IMPORT-EMPRESA-001, justo abajo).
     const empresaId = req.body?.empresaId || '';
     const empresaNombre = req.body?.empresaNombre || '';
+    const archivoNombre = String(req.body?.archivoNombre || '').slice(0, 160) || 'importacion.csv';
     // ✅ COMERCIAL-BASE-001: mes de la base importada — lo heredan los
     // prospectos creados desde filas sin fecha, para que en Telemercadeo
     // no se mezclen bases de meses distintos.
@@ -533,7 +731,89 @@ router.post('/importar', async (req, res) => {
 
     if (!filas.length) return res.status(400).json({ error: 'No se recibieron filas para importar' });
     if (filas.length > 2000) return res.status(400).json({ error: 'Máximo 2000 filas por importación. Divide el archivo.' });
-    if (!empresaId) return res.status(400).json({ error: 'Selecciona la empresa que factura para esta importación' });
+
+    // ═══ ✅ VENC-IMPORT-EMPRESA-001 (2026-08-08) — LA EMPRESA VIAJA EN EL ARCHIVO
+    // ─────────────────────────────────────────────────────────────────────────
+    // Antes: el selector "¿qué empresa factura?" aplicaba a TODA la carga. Una
+    // suscriptora con dos razones sociales tenía que partir su base en dos
+    // archivos y hacer dos importaciones — con el riesgo de equivocarse de
+    // empresa en la segunda y no darse cuenta hasta facturar.
+    //
+    // Ahora cada fila puede traer su propia empresa facturadora en la columna
+    // `empresaFactura` y se resuelve contra la colección companies del tenant,
+    // emparejando por NIT o por nombre normalizado. Un solo archivo con toda
+    // la base, cada cliente a su razón social.
+    //
+    // ⚠️ NO se reutilizó la columna `empresa`: en esta plantilla esa columna ya
+    // significa "razón social DEL CLIENTE" y es alias de `nombre`. Cambiarle el
+    // sentido habría roto en silencio todos los archivos ya existentes.
+    const empresasSnap = await db.collection('companies').where('adminId', '==', adminId).get();
+    const normEmpresa = (s) => String(s || '')
+      .toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^A-Z0-9]/g, '');
+    const empresasPorNombre = new Map();
+    const empresasPorNit = new Map();
+    empresasSnap.docs.forEach(d => {
+      const c = d.data();
+      const item = { id: d.id, nombre: c.name || '' };
+      const n = normEmpresa(c.name);
+      if (n) empresasPorNombre.set(n, item);
+      const nit = String(c.nit || '').replace(/[^0-9]/g, '');
+      if (nit) empresasPorNit.set(nit, item);
+    });
+
+    // Empresa por defecto: la del body si vino, si no la única del tenant.
+    let empresaDefault = empresaId
+      ? { id: empresaId, nombre: empresaNombre }
+      : (empresasSnap.size === 1
+          ? { id: empresasSnap.docs[0].id, nombre: empresasSnap.docs[0].data().name || '' }
+          : null);
+
+    const resolverEmpresa = (valor) => {
+      const bruto = String(valor || '').trim();
+      if (!bruto) return { empresa: empresaDefault, resuelta: !!empresaDefault, pedida: '' };
+      const soloDigitos = bruto.replace(/[^0-9]/g, '');
+      if (soloDigitos.length >= 8 && empresasPorNit.has(soloDigitos)) {
+        return { empresa: empresasPorNit.get(soloDigitos), resuelta: true, pedida: bruto };
+      }
+      const n = normEmpresa(bruto);
+      if (n && empresasPorNombre.has(n)) {
+        return { empresa: empresasPorNombre.get(n), resuelta: true, pedida: bruto };
+      }
+      // Coincidencia parcial: "ALMAR" contra "EXTINTORES ALMAR SAS".
+      if (n.length >= 4) {
+        for (const [clave, item] of empresasPorNombre) {
+          if (clave.includes(n) || n.includes(clave)) {
+            return { empresa: item, resuelta: true, pedida: bruto };
+          }
+        }
+      }
+      return { empresa: empresaDefault, resuelta: false, pedida: bruto };
+    };
+
+    // Si el archivo no trae empresaFactura en ninguna fila y el tenant tiene
+    // varias empresas, sí hace falta decidir: se pide explícitamente.
+    const algunaFilaTraeEmpresa = filas.some(f => String(f.empresaFactura || '').trim());
+    if (!algunaFilaTraeEmpresa && !empresaDefault) {
+      return res.status(400).json({
+        error: 'Tu cuenta tiene varias empresas. Agrega la columna "empresaFactura" al archivo o selecciona una empresa por defecto.',
+        codigo: 'EMPRESA_REQUERIDA',
+        empresas: empresasSnap.docs.map(d => ({ id: d.id, name: d.data().name })),
+      });
+    }
+
+    // Empresas que el archivo nombró y no existen en el tenant: se avisa al
+    // final para que la suscriptora corrija el texto o cree la empresa.
+    const empresasNoReconocidas = new Map();
+
+    // ═══ ✅ VENC-IMPORT-LOTE-001 (2026-08-08) — TODA CARGA ES REVERSIBLE ══════
+    // Cada documento que nace en esta importación queda marcado con el mismo
+    // `loteId`. Eso convierte "me equivoqué de archivo" en un problema de un
+    // clic en vez de un script de limpieza a mano — que es exactamente lo que
+    // hubo que hacer cuando Valle terminó con 7.961 vencimientos duplicados.
+    const loteId = db.collection('importaciones').doc().id;
+    const loteRef = db.collection('importaciones').doc(loteId);
+    const loteIds = { vencimientos: [], clientes: [], prospectos: [] };
 
     // 1. Cargar clientes existentes del tenant UNA vez (mapa por teléfono)
     const clientesSnap = await db.collection('clients').where('adminId', '==', adminId).get();
@@ -634,6 +914,14 @@ router.post('/importar', async (req, res) => {
         const { tel: telefono, valido: telValido } = normalizarTelefonoInfo(f.telefono || f.celular);
         const nitFila = String(f.nit || '').replace(/[^0-9]/g, '') || null;
 
+        // ✅ VENC-IMPORT-EMPRESA-001: empresa facturadora de ESTA fila.
+        const rEmp = resolverEmpresa(f.empresaFactura);
+        if (!rEmp.resuelta && rEmp.pedida) {
+          empresasNoReconocidas.set(rEmp.pedida, (empresasNoReconocidas.get(rEmp.pedida) || 0) + 1);
+        }
+        const empresaFilaId = rEmp.empresa?.id || '';
+        const empresaFilaNombre = rEmp.empresa?.nombre || '';
+
         if (!nombre || !telefono) {
           resultado.errores.push({ fila, error: 'Falta nombre o teléfono' });
           continue;
@@ -674,6 +962,9 @@ router.post('/importar', async (req, res) => {
             sucursal: f.sucursal || null,
             equipoReportado: f.equipo || null,
             origen: 'importacion',
+            loteId, // ✅ VENC-IMPORT-LOTE-001
+            empresaFacturaId: empresaFilaId || null,
+            empresaFacturaNombre: empresaFilaNombre || null,
             basePeriodo, // ✅ COMERCIAL-BASE-001
             estado: 'NUEVO',
             asignadoA: null,
@@ -681,6 +972,7 @@ router.post('/importar', async (req, res) => {
             clienteId: porTelefono.get(telefono) || null,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
           });
+          loteIds.prospectos.push(refP.id);
           prospPorTel.set(telefono, { id: refP.id, nombre, telefono });
           ops++; resultado.prospectosCreados++;
           await commitSiLleno();
@@ -714,14 +1006,18 @@ router.post('/importar', async (req, res) => {
             direccionPrincipal: f.direccion || null,
             barrio: String(f.barrio || '').trim() || null,
             ciudad: f.ciudad || null,
-            empresaId,
-            empresaNombre,
+            // ✅ VENC-IMPORT-EMPRESA-001: la empresa que factura a ESTE cliente
+            // sale de su propia fila, no de un selector global.
+            empresaId: empresaFilaId,
+            empresaNombre: empresaFilaNombre,
             sucursales: [],
             notas: '',
             origen: 'importacion_vencimientos',
+            loteId, // ✅ VENC-IMPORT-LOTE-001
             activo: true,
             createdAt: admin.firestore.FieldValue.serverTimestamp(),
           });
+          loteIds.clientes.push(refC.id);
           clienteId = refC.id;
           porTelefono.set(telefono, clienteId); // evita duplicar en filas siguientes
           // ✅ CLIENTES-DUP-001: registrar en los tres mapas
@@ -800,6 +1096,12 @@ router.post('/importar', async (req, res) => {
               fechaVencimiento: fVencimiento,
               gestionado: false,
               origenDato: 'importacion',
+              loteId, // ✅ VENC-IMPORT-LOTE-001
+              // ✅ VENC-IMPORT-EMPRESA-001: se guarda en el vencimiento para
+              // poder filtrar y proyectar venta por razón social sin tener que
+              // leer el cliente en cada consulta.
+              empresaId: empresaFilaId || null,
+              empresaNombre: empresaFilaNombre || null,
               ordenId: null,
               createdAt: admin.firestore.FieldValue.serverTimestamp(),
             },
@@ -821,10 +1123,42 @@ router.post('/importar', async (req, res) => {
       const aEscribir = [...vencPendientes.values()];
       for (let i = 0; i < aEscribir.length; i += 400) {
         const loteBatch = db.batch();
-        aEscribir.slice(i, i + 400).forEach(v => loteBatch.set(v.ref, v.data));
+        aEscribir.slice(i, i + 400).forEach(v => { loteBatch.set(v.ref, v.data); loteIds.vencimientos.push(v.ref.id); });
         await loteBatch.commit();
       }
     }
+
+    // ✅ VENC-IMPORT-LOTE-001: ficha del lote. Guarda los ids creados para
+    // poder revertir exactamente lo que este archivo agregó — ni un documento
+    // más. Firestore admite 1 MiB por documento; con ~40 bytes por id eso da
+    // margen de sobra para el tope de 2.000 filas del importador.
+    const empresasResumen = {};
+    [...vencPendientes.values()].forEach(v => {
+      const n = v.data.empresaNombre || 'Sin empresa';
+      empresasResumen[n] = (empresasResumen[n] || 0) + 1;
+    });
+    await loteRef.set({
+      adminId,
+      archivo: archivoNombre,
+      fecha: new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
+      basePeriodo,
+      usuarioId: adminId,
+      usuarioNombre: req.user?.nombre || req.user?.email || '',
+      totalFilas: filas.length,
+      vencimientosCreados: resultado.vencimientosCreados,
+      vencimientosOmitidos: resultado.vencimientosOmitidos,
+      clientesNuevos: resultado.clientesNuevos,
+      prospectosCreados: resultado.prospectosCreados,
+      prospectosActualizados: resultadoExtra.prospectosActualizados,
+      porVerificar: resultado.porVerificar,
+      errores: resultado.errores.slice(0, 50),
+      totalErrores: resultado.errores.length,
+      empresas: empresasResumen,
+      empresasNoReconocidas: Object.fromEntries(empresasNoReconocidas),
+      ids: loteIds,
+      revertido: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 
     await auditar({
       accion: 'importar',
@@ -834,7 +1168,13 @@ router.post('/importar', async (req, res) => {
     });
 
     invalidarCache(adminId); // VENC-TOPE-001
-    return res.json({ ...resultado, ...resultadoExtra });
+    return res.json({
+      ...resultado,
+      ...resultadoExtra,
+      loteId,
+      empresas: empresasResumen,
+      empresasNoReconocidas: Object.fromEntries(empresasNoReconocidas),
+    });
   } catch (err) {
     console.error('POST /vencimientos/importar:', err);
     return res.status(500).json({ error: err.message });
@@ -985,8 +1325,25 @@ router.put('/:id', async (req, res) => {
     if (!doc.exists) return res.status(404).json({ error: 'Vencimiento no encontrado' });
     if (doc.data().adminId !== adminId) return res.status(403).json({ error: 'No autorizado' }); // aislamiento
 
-    const { sucursal, descripcionEquipo, cantidad, fechaUltimaRecarga, fechaVencimiento, gestionado, ordenId } = req.body;
+    const { sucursal, descripcionEquipo, cantidad, fechaUltimaRecarga, fechaVencimiento, gestionado, ordenId, pin, motivo } = req.body;
     const update = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+    // ═══ ✅ VENC-EDICION-001 — PIN SOLO PARA LO QUE MUEVE EL NEGOCIO ═════════
+    // Marcar "gestionado" es la operación del día a día: la hace la vendedora
+    // decenas de veces y pedirle PIN cada vez la volvería inutilizable.
+    // Cambiar la FECHA o el EQUIPO es distinto: corre el próximo vencimiento
+    // del cliente y con él la llamada, la alerta y la venta proyectada. Eso sí
+    // pasa por PIN, igual que anular un egreso.
+    const cambiaEstructura = descripcionEquipo !== undefined
+      || cantidad !== undefined
+      || sucursal !== undefined
+      || fechaUltimaRecarga !== undefined
+      || fechaVencimiento !== undefined;
+
+    if (cambiaEstructura) {
+      const auth = await verificarPin(req.user?.uid || req.user?.id, pin, 'editar_vencimiento');
+      if (!auth.ok) return res.status(403).json({ error: auth.error, codigo: auth.codigo });
+    }
 
     if (sucursal !== undefined) update.sucursal = sucursal;
     if (descripcionEquipo) update.descripcionEquipo = descripcionEquipo;
@@ -1004,12 +1361,220 @@ router.put('/:id', async (req, res) => {
     await auditar({
       accion: 'actualizar', descripcion: `Vencimiento ${req.params.id} actualizado`,
       usuarioId: adminId, usuarioNombre: req.user?.nombre || req.user?.email,
-      datos: { cambios: Object.keys(update) }
+      datos: { cambios: Object.keys(update), motivo: motivo || null, antes: doc.data() }
     });
 
     invalidarCache(adminId); // VENC-TOPE-001
     return res.json({ ok: true });
   } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DELETE /api/vencimientos/:id — Borrar un vencimiento (PIN + motivo)
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ VENC-EDICION-001. Borrar saca al cliente del radar comercial: no vuelve a
+// aparecer en Vencimientos, ni en Telemercadeo, ni en las alertas de Lucy.
+// Por eso: PIN de admin, motivo obligatorio y COPIA COMPLETA en auditoría —
+// si se borró por error, el documento se puede reconstruir desde el log.
+// ═════════════════════════════════════════════════════════════════════════════
+router.delete('/:id', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const { pin, motivo } = req.body || {};
+
+    const ref = db.collection('vencimientos').doc(req.params.id);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Vencimiento no encontrado' });
+    if (doc.data().adminId !== adminId) return res.status(403).json({ error: 'No autorizado' });
+
+    const auth = await verificarPin(req.user?.uid || req.user?.id, pin, 'borrar_vencimiento');
+    if (!auth.ok) return res.status(403).json({ error: auth.error, codigo: auth.codigo });
+
+    if (!motivo || String(motivo).trim().length < 5) {
+      return res.status(400).json({ error: 'Escribe el motivo del borrado (mínimo 5 caracteres)' });
+    }
+
+    const datosPrevios = doc.data();
+    await ref.delete();
+
+    await auditar({
+      accion: 'borrar',
+      descripcion: `Vencimiento borrado: ${datosPrevios.descripcionEquipo || 'equipo'} (vence ${datosPrevios.fechaVencimiento || 's/f'})`,
+      usuarioId: adminId, usuarioNombre: req.user?.nombre || req.user?.email,
+      datos: { vencimientoId: req.params.id, motivo: String(motivo).trim(), documento: datosPrevios },
+    });
+
+    invalidarCache(adminId);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('DELETE /vencimientos/:id:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GET /api/vencimientos/importaciones — Últimas N importaciones (default 5)
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ VENC-IMPORT-LOTE-001. Responde la pregunta que hoy nadie puede responder
+// mirando la pantalla: "¿qué subí, cuándo, y qué entró de verdad?".
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/importaciones', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const limite = Math.min(Number(req.query.limite) || 5, 20);
+
+    // Sin orderBy en la consulta: evita exigir un índice compuesto nuevo en
+    // Firestore. El volumen es de decenas de documentos, se ordena en memoria.
+    const snap = await db.collection('importaciones').where('adminId', '==', adminId).get();
+    const lista = snap.docs
+      .map(d => {
+        const v = d.data();
+        return {
+          id: d.id,
+          archivo: v.archivo,
+          fecha: v.fecha,
+          usuarioNombre: v.usuarioNombre,
+          basePeriodo: v.basePeriodo,
+          totalFilas: v.totalFilas,
+          vencimientosCreados: v.vencimientosCreados,
+          vencimientosOmitidos: v.vencimientosOmitidos,
+          clientesNuevos: v.clientesNuevos,
+          prospectosCreados: v.prospectosCreados,
+          prospectosActualizados: v.prospectosActualizados || 0,
+          porVerificar: v.porVerificar || 0,
+          totalErrores: v.totalErrores || 0,
+          errores: v.errores || [],
+          empresas: v.empresas || {},
+          empresasNoReconocidas: v.empresasNoReconocidas || {},
+          revertido: !!v.revertido,
+          revertidoEn: v.revertidoEn || null,
+          revertidoMotivo: v.revertidoMotivo || null,
+          // Cuánto se puede deshacer todavía (los ids siguen guardados)
+          reversible: !v.revertido && !!(v.ids?.vencimientos?.length || v.ids?.clientes?.length || v.ids?.prospectos?.length),
+        };
+      })
+      .sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)))
+      .slice(0, limite);
+
+    return res.json(lista);
+  } catch (err) {
+    console.error('GET /vencimientos/importaciones:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// POST /api/vencimientos/importaciones/:id/revertir — Deshacer una carga
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ VENC-IMPORT-LOTE-001. Borra SOLO los documentos que creó ese archivo,
+// identificados por id — no por fecha ni por filtro aproximado.
+//
+// SEGURIDAD, en capas:
+//   1. Por defecto es SIMULACIÓN: dice qué borraría sin tocar nada.
+//   2. Para aplicar: { aplicar: true } + PIN de admin + motivo escrito.
+//   3. NO borra lo que ya tiene gestión encima (gestionado, estadoCiclo,
+//      orden asociada). Deshacer una importación jamás puede borrar el
+//      trabajo comercial que se hizo después sobre esos registros.
+//   4. Los clientes solo se borran si nacieron en esta importación Y no
+//      quedaron con vencimientos ni órdenes vivas.
+// ═════════════════════════════════════════════════════════════════════════════
+router.post('/importaciones/:id/revertir', async (req, res) => {
+  try {
+    const adminId = getAdminId(req);
+    const { aplicar = false, pin, motivo } = req.body || {};
+
+    const loteRef = db.collection('importaciones').doc(req.params.id);
+    const loteDoc = await loteRef.get();
+    if (!loteDoc.exists) return res.status(404).json({ error: 'Importación no encontrada' });
+    const lote = loteDoc.data();
+    if (lote.adminId !== adminId) return res.status(403).json({ error: 'No autorizado' });
+    if (lote.revertido) return res.status(400).json({ error: 'Esta importación ya fue revertida' });
+
+    const ids = lote.ids || { vencimientos: [], clientes: [], prospectos: [] };
+
+    // ── Clasificar vencimientos: borrables vs protegidos por gestión ─────────
+    const leerEnBloques = async (coleccion, listaIds) => {
+      const docs = [];
+      for (let i = 0; i < listaIds.length; i += 30) {
+        const trozo = listaIds.slice(i, i + 30);
+        const snaps = await Promise.all(trozo.map(id => db.collection(coleccion).doc(id).get()));
+        snaps.forEach(s => { if (s.exists) docs.push({ id: s.id, ...s.data() }); });
+      }
+      return docs;
+    };
+
+    const vencs = await leerEnBloques('vencimientos', ids.vencimientos || []);
+    const tieneGestion = (v) => !!(v.gestionado || v.ordenId || (v.estadoCiclo && v.estadoCiclo !== 'ABIERTO'));
+    const vencBorrables = vencs.filter(v => !tieneGestion(v));
+    const vencProtegidos = vencs.filter(tieneGestion);
+
+    const prospectos = await leerEnBloques('prospectos', ids.prospectos || []);
+    const prospBorrables = prospectos.filter(p => (p.estado || 'NUEVO') === 'NUEVO' && !p.ultimaLlamada);
+    const prospProtegidos = prospectos.filter(p => !((p.estado || 'NUEVO') === 'NUEVO' && !p.ultimaLlamada));
+
+    // Clientes: solo los que nacieron aquí y quedan sin vencimientos vivos.
+    const idsVencBorrables = new Set(vencBorrables.map(v => v.id));
+    const clientesLote = await leerEnBloques('clients', ids.clientes || []);
+    const clienteBorrable = [];
+    const clienteProtegido = [];
+    for (const c of clientesLote) {
+      const vivos = vencs.filter(v => v.clienteId === c.id && !idsVencBorrables.has(v.id)).length;
+      const ordenSnap = await db.collection('orders').where('clienteId', '==', c.id).limit(1).get();
+      if (vivos === 0 && ordenSnap.empty) clienteBorrable.push(c);
+      else clienteProtegido.push(c);
+    }
+
+    const plan = {
+      loteId: req.params.id,
+      archivo: lote.archivo,
+      vencimientos: { borrar: vencBorrables.length, conservar: vencProtegidos.length },
+      prospectos:   { borrar: prospBorrables.length, conservar: prospProtegidos.length },
+      clientes:     { borrar: clienteBorrable.length, conservar: clienteProtegido.length },
+      motivoConservar: 'Se conservan los registros con gestión comercial encima (llamada registrada, orden asociada o ciclo cerrado).',
+    };
+
+    if (!aplicar) return res.json({ simulacion: true, ...plan });
+
+    // ── Aplicar: exige PIN + motivo ──────────────────────────────────────────
+    const auth = await verificarPin(req.user?.uid || req.user?.id, pin, 'revertir_importacion');
+    if (!auth.ok) return res.status(403).json({ error: auth.error, codigo: auth.codigo });
+    if (!motivo || String(motivo).trim().length < 10) {
+      return res.status(400).json({ error: 'Escribe el motivo de la reversión (mínimo 10 caracteres)' });
+    }
+
+    const borrarLote = async (coleccion, docs) => {
+      for (let i = 0; i < docs.length; i += 400) {
+        const b = db.batch();
+        docs.slice(i, i + 400).forEach(d => b.delete(db.collection(coleccion).doc(d.id)));
+        await b.commit();
+      }
+    };
+
+    await borrarLote('vencimientos', vencBorrables);
+    await borrarLote('prospectos', prospBorrables);
+    await borrarLote('clients', clienteBorrable);
+
+    await loteRef.update({
+      revertido: true,
+      revertidoEn: new Date(Date.now() - 5 * 3600 * 1000).toISOString(),
+      revertidoPor: req.user?.nombre || req.user?.email || adminId,
+      revertidoMotivo: String(motivo).trim(),
+      revertidoDetalle: plan,
+    });
+
+    await auditar({
+      accion: 'revertir_importacion',
+      descripcion: `Importación "${lote.archivo}" revertida: ${vencBorrables.length} vencimientos, ${prospBorrables.length} prospectos y ${clienteBorrable.length} clientes borrados`,
+      usuarioId: adminId, usuarioNombre: req.user?.nombre || req.user?.email,
+      datos: { loteId: req.params.id, motivo: String(motivo).trim(), plan },
+    });
+
+    invalidarCache(adminId);
+    return res.json({ simulacion: false, ok: true, ...plan });
+  } catch (err) {
+    console.error('POST /vencimientos/importaciones/:id/revertir:', err);
     return res.status(500).json({ error: err.message });
   }
 });

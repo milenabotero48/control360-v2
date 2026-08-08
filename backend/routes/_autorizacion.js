@@ -48,6 +48,18 @@ const MATRIZ_ACCIONES = {
   //    hoy Tesorería TAMBIÉN puede autorizar una venta a cliente bloqueado.
   //    Para dejarlo solo en manos del admin: roles: ['admin'].
   autorizar_cartera:    { roles: ['admin', 'tesoreria'], etiqueta: 'Autorizar cliente bloqueado por cartera' },
+
+  // ── Vencimientos ──────────────────────────────────────────────────────────
+  // ✅ VENC-EDICION-001: el vencimiento es el activo comercial del negocio —
+  // de él salen las llamadas de Lucy, las alertas y la proyección de venta.
+  // Editarlo cambia CUÁNDO se le vuelve a vender a ese cliente; borrarlo lo
+  // saca del radar para siempre. Por eso pasan por PIN igual que un egreso.
+  editar_vencimiento:   { roles: ['admin'], etiqueta: 'Editar vencimiento'  },
+  borrar_vencimiento:   { roles: ['admin'], etiqueta: 'Borrar vencimiento'  },
+
+  // Revertir una importación borra en bloque TODO lo que ese archivo creó.
+  // Es la acción más destructiva del módulo: solo admin, y con motivo escrito.
+  revertir_importacion: { roles: ['admin'], etiqueta: 'Revertir importación completa' },
 };
 
 // Códigos de error estables para que el frontend pueda reaccionar distinto

@@ -8,6 +8,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import LlamadasIA from './LlamadasIA';
 import ModuloAnny from './components/anny/ModuloAnny';
+// ✅ VENC-KPI-001 / VENC-IMPORT-LOTE-001 / VENC-EDICION-001
+import PanelVencimientos from './PanelVencimientos';
+import HistorialImportaciones from './HistorialImportaciones';
+import ModalPin from './ModalPin';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -103,6 +107,16 @@ export default function GestionVencimientos({ user, onNavegar }) {
   const [mostrarImportVenc, setMostrarImportVenc] = useState(false);
   const [empresaImportSel, setEmpresaImportSel] = useState('');
   const [archivoImportSel, setArchivoImportSel] = useState(null);
+
+  // ✅ VENC-KPI-001: contador que fuerza al panel a recalcular tras importar,
+  // editar o borrar — sin recargar la página entera.
+  const [refrescarPanel, setRefrescarPanel] = useState(0);
+  // ✅ VENC-IMPORT-LOTE-001
+  const [mostrarHistorial, setMostrarHistorial] = useState(false);
+  // ✅ VENC-EDICION-001: { venc, modo: 'editar'|'borrar' } y su paso de PIN
+  const [edicion, setEdicion] = useState(null);
+  const [pinEdicion, setPinEdicion] = useState(null);
+  const [msgEdicion, setMsgEdicion] = useState(null);
 
   // Trae el acordeón (agregado en backend sobre el 100% de la base) + tarjetas.
   // Los filtros de estado y búsqueda viajan al servidor: si se aplicaran acá
@@ -305,6 +319,11 @@ export default function GestionVencimientos({ user, onNavegar }) {
       'nit': 'nit', 'sucursal': 'sucursal', 'sede': 'sucursal',
       'equipo': 'equipo', 'descripcion equipo': 'equipo', 'descripcion': 'equipo',
       'cantidad': 'cantidad', 'cant': 'cantidad',
+      // ✅ VENC-IMPORT-EMPRESA-001: empresa FACTURADORA (no la del cliente).
+      'empresafactura': 'empresaFactura', 'empresa factura': 'empresaFactura',
+      'empresa que factura': 'empresaFactura', 'empresa facturadora': 'empresaFactura',
+      'razon social facturadora': 'empresaFactura', 'facturado por': 'empresaFactura',
+      'factura': 'empresaFactura', 'mi empresa': 'empresaFactura',
       'fecha ultima recarga': 'fechaUltimaRecarga', 'fechaultimarecarga': 'fechaUltimaRecarga',
       'ultima recarga': 'fechaUltimaRecarga', 'fecha recarga': 'fechaUltimaRecarga',
       'fecha': 'fechaUltimaRecarga', 'vencimiento': 'fechaUltimaRecarga',
@@ -322,10 +341,17 @@ export default function GestionVencimientos({ user, onNavegar }) {
   const descargarPlantilla = () => {
     // ✅ FIX IMPORT-VENC-001: plantilla oficial (volvió al modal).
     const hoy = new Date().toISOString().slice(0, 10);
+    // ✅ VENC-IMPORT-EMPRESA-001: `empresaFactura` es la columna NUEVA — la
+    // razón social que le factura a ese cliente. `empresa` sigue siendo la del
+    // cliente (no se le cambió el significado para no romper archivos viejos).
+    // Las dos filas de ejemplo van a propósito con empresas distintas: es la
+    // forma más rápida de mostrar que un solo archivo sirve para toda la base.
+    const empA = empresasDisponibles[0]?.name || 'MI EMPRESA SAS';
+    const empB = empresasDisponibles[1]?.name || empA;
     const filas = [
-      ['nombre', 'empresa', 'nit', 'telefono', 'sucursal', 'equipo', 'cantidad', 'fechaUltimaRecarga'],
-      ['INDUSTRIAS EJEMPLO SAS', 'INDUSTRIAS EJEMPLO SAS', '900123456', '3001234567', 'Sede Norte', 'Extintor ABC 10 lbs', '3', hoy],
-      ['CLIENTE SIN FECHA LTDA', 'CLIENTE SIN FECHA LTDA', '', '3109876543', '', 'Extintor CO2 15 lbs', '1', ''],
+      ['nombre', 'empresa', 'nit', 'telefono', 'sucursal', 'equipo', 'cantidad', 'fechaUltimaRecarga', 'empresaFactura'],
+      ['INDUSTRIAS EJEMPLO SAS', 'INDUSTRIAS EJEMPLO SAS', '900123456', '3001234567', 'Sede Norte', 'Extintor ABC 10 lbs', '3', hoy, empA],
+      ['CLIENTE SIN FECHA LTDA', 'CLIENTE SIN FECHA LTDA', '', '3109876543', '', 'Extintor CO2 15 lbs', '1', '', empB],
     ];
     const csv = filas.map(r => r.map(c => `"${c}"`).join(',')).join('\n');
     const link = document.createElement('a');
@@ -354,7 +380,9 @@ export default function GestionVencimientos({ user, onNavegar }) {
       const r = await fetch(`${API}/vencimientos/importar`, {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({ filas, empresaId, empresaNombre })
+        // ✅ VENC-IMPORT-EMPRESA-001: empresaId ahora es solo el RESPALDO para
+        // las filas que no traigan su propia columna `empresaFactura`.
+        body: JSON.stringify({ filas, empresaId, empresaNombre, archivoNombre: archivo.name })
       });
       const d = await r.json();
       if (!r.ok) { setMsgImport(`❌ ${d.error || 'Error al importar'}`); setImportando(false); return; }
@@ -363,12 +391,62 @@ export default function GestionVencimientos({ user, onNavegar }) {
       if (d.clientesNuevos)          partes.push(`${d.clientesNuevos} clientes nuevos`);
       if (d.prospectosCreados)       partes.push(`${d.prospectosCreados} prospectos (sin fecha → Telemercadeo)`);
       if (d.prospectosActualizados)  partes.push(`${d.prospectosActualizados} prospectos actualizados`);
+      if (d.vencimientosOmitidos)    partes.push(`${d.vencimientosOmitidos} omitidos (ya existían)`);
       if (d.porVerificar)            partes.push(`☎️ ${d.porVerificar} teléfonos por verificar`);
       if (d.errores?.length)         partes.push(`⚠️ ${d.errores.length} filas con error`);
-      setMsgImport(`${partes.join(' · ')} — ${empresaNombre}`);
-      setTimeout(() => { setMostrarImportVenc(false); setMsgImport(null); cargar(); }, 3500);
+
+      // ✅ VENC-IMPORT-EMPRESA-001: reparto real por empresa facturadora — es
+      // la confirmación de que cada cliente quedó donde debía.
+      const reparto = Object.entries(d.empresas || {});
+      const sufijo = reparto.length
+        ? ` — ${reparto.map(([n, c]) => `${n}: ${c}`).join(' · ')}`
+        : (empresaNombre ? ` — ${empresaNombre}` : '');
+      setMsgImport(`${partes.join(' · ')}${sufijo}`);
+
+      const sinReconocer = Object.keys(d.empresasNoReconocidas || {});
+      if (sinReconocer.length) {
+        setMsgImport(m => `${m}\n⚠️ Empresas no reconocidas: ${sinReconocer.join(', ')} — esas filas usaron la empresa por defecto.`);
+      }
+      setTimeout(() => { setMostrarImportVenc(false); setMsgImport(null); cargar(); setRefrescarPanel(n => n + 1); }, 4500);
     } catch(e) { setMsgImport(`❌ ${e.message}`); }
     setImportando(false);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // ✅ VENC-EDICION-001 — Editar y borrar un vencimiento
+  // ───────────────────────────────────────────────────────────────────────
+  // Ambas acciones envían el PIN al backend en el body: ModalPin lo valida
+  // primero solo para dar feedback inmediato, pero quien autoriza de verdad
+  // es el backend (contrato de FIX PIN-UNICO-001 — nunca una bandera local).
+  // ═══════════════════════════════════════════════════════════════════════
+  const guardarEdicion = async (pin, motivo) => {
+    const { venc, campos } = edicion;
+    const r = await fetch(`${API}/vencimientos/${venc.id}`, {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: JSON.stringify({ ...campos, cantidad: Number(campos.cantidad) || 1, pin, motivo }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'No se pudo actualizar');
+    setPinEdicion(null); setEdicion(null); setDetalle(null);
+    setMsgEdicion('✓ Vencimiento actualizado');
+    cargar(); setRefrescarPanel(n => n + 1);
+    setTimeout(() => setMsgEdicion(null), 4000);
+  };
+
+  const borrarVencimiento = async (pin, motivo) => {
+    const { venc } = edicion;
+    const r = await fetch(`${API}/vencimientos/${venc.id}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+      body: JSON.stringify({ pin, motivo }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'No se pudo borrar');
+    setPinEdicion(null); setEdicion(null); setDetalle(null);
+    setMsgEdicion('✓ Vencimiento borrado — queda copia en auditoría');
+    cargar(); setRefrescarPanel(n => n + 1);
+    setTimeout(() => setMsgEdicion(null), 4000);
   };
 
   // ✅ FIX VENC-MANUAL-001: crear un vencimiento a mano.
@@ -561,7 +639,9 @@ export default function GestionVencimientos({ user, onNavegar }) {
     setTimeout(() => setMsgImport(null), 12000);
   };
 
-  const inp = { width:'100%', padding:'8px 12px', border:'1px solid #d1d5db', borderRadius:8, fontSize:13 };
+  const inp = { width:'100%', padding:'8px 12px', border:'1px solid #d1d5db', borderRadius:8, fontSize:13, boxSizing:'border-box' };
+  // ✅ VENC-EDICION-001: etiqueta de campo del formulario de edición
+  const lbl = { fontSize:12, fontWeight:700, color:'#374151', marginBottom:5 };
 
   return (
     <div style={{ padding:20, background:'#fff' }}>
@@ -646,6 +726,21 @@ export default function GestionVencimientos({ user, onNavegar }) {
       {/* ===== VISTA: VENCIMIENTOS ===== */}
       {vista === 'vencimientos' && (
         <>
+          {/* ✅ VENC-KPI-001 — Panel de inteligencia comercial.
+              Va ARRIBA de la lista a propósito: quien abre este módulo primero
+              decide (¿cuánto entra, cuánto se va?) y después opera. */}
+          <PanelVencimientos
+            recargar={refrescarPanel}
+            onVerVencidos={() => { setFiltroEstado('VENCIDO'); window.scrollTo({ top: 320, behavior: 'smooth' }); }}
+          />
+
+          {msgEdicion && (
+            <div style={{
+              background:'#ecfdf5', border:'1px solid #a7f3d0', color:'#047857',
+              borderRadius:10, padding:'10px 14px', fontSize:13, fontWeight:600, marginBottom:12,
+            }}>{msgEdicion}</div>
+          )}
+
           {/* Búsqueda y filtros */}
           <div style={{ display:'flex', gap:8, marginBottom:20, flexWrap:'wrap' }}>
             <input
@@ -676,6 +771,14 @@ export default function GestionVencimientos({ user, onNavegar }) {
               onClick={() => setMostrarImportVenc(true)}
               style={{ padding:'8px 16px', border:'none', borderRadius:8, background:'#7c3aed', color:'#fff', fontWeight:700, fontSize:13, cursor:'pointer' }}>
               ⬆ Importar
+            </button>
+
+            {/* ✅ VENC-IMPORT-LOTE-001 — historial y deshacer */}
+            <button
+              onClick={() => setMostrarHistorial(true)}
+              title="Ver las últimas 5 importaciones y deshacer una si el archivo estaba mal"
+              style={{ padding:'8px 16px', border:'1px solid #ddd6fe', borderRadius:8, background:'#fff', color:'#6d28d9', fontWeight:700, fontSize:13, cursor:'pointer' }}>
+              🗂 Historial de cargas
             </button>
 
             <button
@@ -1000,20 +1103,23 @@ export default function GestionVencimientos({ user, onNavegar }) {
                     style={{ border:'none', background:'#f3f4f6', borderRadius:8, width:30, height:30, cursor:'pointer' }}>✕</button>
                 </div>
 
-                <div style={{ marginBottom:14 }}>
-                  <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Paso 1 — ¿Qué empresa factura estos vencimientos? *</div>
-                  <select value={empresaImportSel} onChange={e => setEmpresaImportSel(e.target.value)} style={inp}>
-                    <option value="">— Selecciona la empresa —</option>
-                    {empresasDisponibles.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-                  </select>
-                </div>
-
-                {/* ✅ FIX IMPORT-VENC-001: la plantilla volvió al modal */}
+                {/* ✅ VENC-IMPORT-EMPRESA-001 — La empresa viaja en el archivo.
+                    Antes este selector era obligatorio y obligaba a partir la
+                    base en un archivo por razón social. Ahora es opcional: solo
+                    se usa como respaldo para las filas sin columna
+                    `empresaFactura`. Un archivo, toda la base. */}
                 <div style={{ marginBottom:14, background:'#f5f3ff', border:'1px solid #ddd6fe', borderRadius:10, padding:'12px 14px' }}>
-                  <div style={{ fontSize:12, fontWeight:700, color:'#5b21b6', marginBottom:4 }}>¿Primera vez? Descarga la plantilla</div>
-                  <div style={{ fontSize:11, color:'#6d28d9', lineHeight:1.5, marginBottom:8 }}>
-                    Columnas: <strong>nombre</strong> y <strong>telefono</strong> son obligatorias · empresa, nit, sucursal, equipo, cantidad, fechaUltimaRecarga son opcionales.<br/>
-                    Con fecha de recarga → entra a Vencimientos (vence 12 meses después). Sin fecha → entra a Telemercadeo como prospecto.
+                  <div style={{ fontSize:12, fontWeight:700, color:'#5b21b6', marginBottom:4 }}>Plantilla y formato</div>
+                  <div style={{ fontSize:11, color:'#6d28d9', lineHeight:1.6, marginBottom:8 }}>
+                    Obligatorias: <strong>nombre</strong> y <strong>telefono</strong>.<br/>
+                    Opcionales: nit, sucursal, equipo, cantidad, fechaUltimaRecarga y{' '}
+                    <strong>empresaFactura</strong>.<br/>
+                    <span style={{ display:'inline-block', marginTop:5, background:'#ede9fe', borderRadius:6, padding:'5px 8px' }}>
+                      💡 Si pones la columna <strong>empresaFactura</strong>, cada cliente se asigna a su
+                      razón social automáticamente y puedes subir <strong>un solo archivo</strong> con toda
+                      la base, sin partirla por empresa.
+                    </span><br/>
+                    Con fecha de recarga → Vencimientos (vence 12 meses después). Sin fecha → Telemercadeo como prospecto.
                   </div>
                   <button onClick={descargarPlantilla}
                     style={{ padding:'7px 14px', border:'none', borderRadius:8, background:'#7c3aed', color:'#fff', fontWeight:700, fontSize:12, cursor:'pointer' }}>
@@ -1021,16 +1127,31 @@ export default function GestionVencimientos({ user, onNavegar }) {
                   </button>
                 </div>
 
+                {empresasDisponibles.length > 1 && (
+                  <div style={{ marginBottom:14 }}>
+                    <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>
+                      Empresa por defecto <span style={{ fontWeight:500, color:'#9ca3af' }}>(opcional)</span>
+                    </div>
+                    <select value={empresaImportSel} onChange={e => setEmpresaImportSel(e.target.value)} style={inp}>
+                      <option value="">— Usar la columna empresaFactura del archivo —</option>
+                      {empresasDisponibles.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                    </select>
+                    <div style={{ fontSize:11, color:'#6b7280', marginTop:5, lineHeight:1.5 }}>
+                      Solo se aplica a las filas que no traigan empresa propia en el archivo.
+                    </div>
+                  </div>
+                )}
+
                 <div style={{ marginBottom:6 }}>
-                  <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Paso 2 — Sube tu archivo CSV</div>
+                  <div style={{ fontSize:12, fontWeight:700, color:'#374151', marginBottom:6 }}>Sube tu archivo CSV</div>
                   <div style={{ background:'#f9fafb', border:'2px dashed #e5e7eb', borderRadius:10, padding:18, textAlign:'center' }}>
-                    <input type="file" accept=".csv" id="fileImportVenc" hidden disabled={!empresaImportSel || importando}
+                    <input type="file" accept=".csv" id="fileImportVenc" hidden disabled={importando}
                       onChange={e => { const f = e.target.files && e.target.files[0]; if (f) setArchivoImportSel(f); e.target.value=''; }} />
                     <label htmlFor="fileImportVenc" style={{
                       display:'inline-block', padding:'10px 20px', borderRadius:8, fontWeight:700, fontSize:13,
-                      background: empresaImportSel ? '#7c3aed' : '#e5e7eb',
-                      color: empresaImportSel ? '#fff' : '#9ca3af',
-                      cursor: empresaImportSel ? 'pointer' : 'not-allowed',
+                      background: importando ? '#e5e7eb' : '#7c3aed',
+                      color: importando ? '#9ca3af' : '#fff',
+                      cursor: importando ? 'not-allowed' : 'pointer',
                     }}>
                       📂 {archivoImportSel ? archivoImportSel.name : 'Seleccionar CSV'}
                     </label>
@@ -1038,21 +1159,27 @@ export default function GestionVencimientos({ user, onNavegar }) {
                 </div>
 
                 {msgImport && (
-                  <div style={{ marginTop:12, background:msgImport.startsWith('✓')?'#dcfce7':'#fee2e2', color:msgImport.startsWith('✓')?'#15803d':'#b91c1c', borderRadius:8, padding:'9px 12px', fontSize:12, fontWeight:600 }}>
+                  <div style={{ marginTop:12, whiteSpace:'pre-line', background:msgImport.startsWith('✓')?'#dcfce7':'#fee2e2', color:msgImport.startsWith('✓')?'#15803d':'#b91c1c', borderRadius:8, padding:'9px 12px', fontSize:12, fontWeight:600 }}>
                     {msgImport}
                   </div>
                 )}
 
                 <button
-                  onClick={() => archivoImportSel && empresaImportSel && importarCSV(archivoImportSel, empresaImportSel, empresasDisponibles.find(e => e.id===empresaImportSel)?.name || '')}
-                  disabled={!archivoImportSel || !empresaImportSel || importando}
+                  onClick={() => archivoImportSel && importarCSV(archivoImportSel, empresaImportSel, empresasDisponibles.find(e => e.id===empresaImportSel)?.name || '')}
+                  disabled={!archivoImportSel || importando}
                   style={{
                     width:'100%', marginTop:14, border:'none', borderRadius:10, padding:'12px 0', fontWeight:700, fontSize:13,
-                    background: (archivoImportSel && empresaImportSel && !importando) ? '#1a1a2e' : '#e5e7eb',
-                    color: (archivoImportSel && empresaImportSel && !importando) ? '#fff' : '#9ca3af',
-                    cursor: (archivoImportSel && empresaImportSel && !importando) ? 'pointer' : 'not-allowed',
+                    background: (archivoImportSel && !importando) ? '#1a1a2e' : '#e5e7eb',
+                    color: (archivoImportSel && !importando) ? '#fff' : '#9ca3af',
+                    cursor: (archivoImportSel && !importando) ? 'pointer' : 'not-allowed',
                   }}>
                   {importando ? 'Importando...' : 'Importar archivo'}
+                </button>
+
+                <button
+                  onClick={() => { setMostrarImportVenc(false); setMostrarHistorial(true); }}
+                  style={{ width:'100%', marginTop:8, background:'none', border:'none', color:'#6d28d9', fontSize:12, fontWeight:700, cursor:'pointer' }}>
+                  🗂 Ver historial de cargas anteriores
                 </button>
               </div>
             </div>
@@ -1093,8 +1220,27 @@ export default function GestionVencimientos({ user, onNavegar }) {
                           {eq.cantidad > 1 ? `${eq.cantidad}× ` : ''}{eq.descripcionEquipo}
                         </div>
                         {eq.sucursal && <div style={{ fontSize:11, color:'#9ca3af' }}>📍 {eq.sucursal}</div>}
+                        <div style={{ fontSize:11, color:'#9ca3af' }}>
+                          Vence {eq.fechaVencimiento || 's/f'}
+                          {eq.fechaUltimaRecarga ? ` · recargó ${eq.fechaUltimaRecarga}` : ''}
+                        </div>
                       </div>
-                      <span style={{ background:est.bg, color:est.color, fontSize:10, fontWeight:700, padding:'2px 8px', borderRadius:8 }}>{est.label}</span>
+                      <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                        <span style={{ background:est.bg, color:est.color, fontSize:10, fontWeight:700, padding:'2px 8px', borderRadius:8 }}>{est.label}</span>
+                        {/* ✅ VENC-EDICION-001: editar y borrar el equipo — ambos con PIN */}
+                        <button
+                          title="Editar este vencimiento (requiere PIN)"
+                          onClick={() => { setMsgEdicion(null); setEdicion({ modo:'editar', venc: eq, cli: detalle.cli, campos: { descripcionEquipo: eq.descripcionEquipo || '', cantidad: eq.cantidad || 1, sucursal: eq.sucursal || '', fechaUltimaRecarga: eq.fechaUltimaRecarga || '', fechaVencimiento: eq.fechaVencimiento || '' } }); }}
+                          style={{ border:'1px solid #e5e7eb', background:'#fff', borderRadius:7, padding:'4px 8px', fontSize:12, cursor:'pointer' }}>
+                          ✏️
+                        </button>
+                        <button
+                          title="Borrar este vencimiento (requiere PIN y motivo)"
+                          onClick={() => { setMsgEdicion(null); setEdicion({ modo:'borrar', venc: eq, cli: detalle.cli }); }}
+                          style={{ border:'1px solid #fecaca', background:'#fff', borderRadius:7, padding:'4px 8px', fontSize:12, cursor:'pointer', color:'#dc2626' }}>
+                          🗑
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -1129,6 +1275,121 @@ export default function GestionVencimientos({ user, onNavegar }) {
           aunque el backend sí los tenía listos. */}
       {vista === 'llamadas_ia' && (
         <LlamadasIA user={user} onNavegar={onNavegar} />
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════
+          ✅ VENC-IMPORT-LOTE-001 — Historial de importaciones
+          ═══════════════════════════════════════════════════════════════ */}
+      {mostrarHistorial && (
+        <HistorialImportaciones
+          onCerrar={() => setMostrarHistorial(false)}
+          onCambio={() => { cargar(); setRefrescarPanel(n => n + 1); }}
+        />
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════
+          ✅ VENC-EDICION-001 — Editar / borrar un vencimiento
+          El formulario se muestra primero y el PIN se pide AL FINAL, cuando
+          ya se sabe qué se va a cambiar. Pedir el PIN de entrada obliga a
+          autenticarse para algo que quizá se termina cancelando.
+          ═══════════════════════════════════════════════════════════════ */}
+      {edicion && edicion.modo === 'editar' && (
+        <div onClick={e => { if (e.target === e.currentTarget) setEdicion(null); }}
+          style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.55)', zIndex:900, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+          <div style={{ background:'#fff', borderRadius:16, width:'100%', maxWidth:440, padding:20, maxHeight:'92vh', overflowY:'auto' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:4 }}>
+              <div style={{ fontWeight:800, fontSize:15, color:'#1a1a2e' }}>✏️ Editar vencimiento</div>
+              <button onClick={() => setEdicion(null)} style={{ border:'none', background:'#f3f4f6', borderRadius:8, width:30, height:30, cursor:'pointer' }}>✕</button>
+            </div>
+            <div style={{ fontSize:12, color:'#6b7280', marginBottom:14 }}>{edicion.cli?.nombre}</div>
+
+            <div style={{ display:'flex', flexDirection:'column', gap:11 }}>
+              <div>
+                <div style={lbl}>Equipo</div>
+                <input style={inp} value={edicion.campos.descripcionEquipo}
+                  onChange={e => setEdicion(s => ({ ...s, campos:{ ...s.campos, descripcionEquipo:e.target.value } }))} />
+              </div>
+              <div style={{ display:'flex', gap:10 }}>
+                <div style={{ flex:1 }}>
+                  <div style={lbl}>Cantidad</div>
+                  <input style={inp} type="number" min="1" value={edicion.campos.cantidad}
+                    onChange={e => setEdicion(s => ({ ...s, campos:{ ...s.campos, cantidad:e.target.value } }))} />
+                </div>
+                <div style={{ flex:2 }}>
+                  <div style={lbl}>Sucursal</div>
+                  <input style={inp} value={edicion.campos.sucursal}
+                    onChange={e => setEdicion(s => ({ ...s, campos:{ ...s.campos, sucursal:e.target.value } }))} />
+                </div>
+              </div>
+              <div>
+                <div style={lbl}>Última recarga</div>
+                <input style={inp} type="date" value={edicion.campos.fechaUltimaRecarga}
+                  onChange={e => setEdicion(s => ({ ...s, campos:{ ...s.campos, fechaUltimaRecarga:e.target.value, fechaVencimiento:'' } }))} />
+                <div style={{ fontSize:11, color:'#6b7280', marginTop:4, lineHeight:1.5 }}>
+                  Al cambiar esta fecha, el vencimiento se recalcula solo a 12 meses después.
+                </div>
+              </div>
+              <div>
+                <div style={lbl}>O fija el vencimiento directamente</div>
+                <input style={inp} type="date" value={edicion.campos.fechaVencimiento}
+                  onChange={e => setEdicion(s => ({ ...s, campos:{ ...s.campos, fechaVencimiento:e.target.value } }))} />
+              </div>
+            </div>
+
+            <div style={{ background:'#fffbeb', border:'1px solid #fde68a', borderRadius:10, padding:'10px 12px', fontSize:11.5, color:'#92400e', lineHeight:1.55, marginTop:14 }}>
+              Cambiar la fecha mueve la próxima llamada, la alerta y la venta proyectada de este cliente.
+              Por eso se confirma con tu PIN.
+            </div>
+
+            <button onClick={() => setPinEdicion('editar')}
+              style={{ width:'100%', marginTop:14, border:'none', borderRadius:10, padding:'12px 0', fontWeight:700, fontSize:13, background:'#7c3aed', color:'#fff', cursor:'pointer' }}>
+              🔐 Guardar cambios
+            </button>
+          </div>
+        </div>
+      )}
+
+      {edicion && edicion.modo === 'borrar' && (
+        <div onClick={e => { if (e.target === e.currentTarget) setEdicion(null); }}
+          style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.55)', zIndex:900, display:'flex', alignItems:'center', justifyContent:'center', padding:20 }}>
+          <div style={{ background:'#fff', borderRadius:16, width:'100%', maxWidth:420, padding:20 }}>
+            <div style={{ fontWeight:800, fontSize:15, color:'#1a1a2e', marginBottom:10 }}>🗑 Borrar vencimiento</div>
+            <div style={{ background:'#f9fafb', borderRadius:10, padding:'11px 13px', fontSize:12.5, color:'#374151', lineHeight:1.6 }}>
+              <strong>{edicion.cli?.nombre}</strong><br/>
+              {edicion.venc.cantidad > 1 ? `${edicion.venc.cantidad}× ` : ''}{edicion.venc.descripcionEquipo}<br/>
+              Vence {edicion.venc.fechaVencimiento || 's/f'}
+            </div>
+            <div style={{ background:'#fef2f2', border:'1px solid #fca5a5', borderRadius:10, padding:'11px 13px', fontSize:12, color:'#991b1b', lineHeight:1.6, marginTop:12 }}>
+              Este equipo desaparece de Vencimientos, de Telemercadeo y de las alertas de Lucy.
+              Queda copia completa en auditoría por si hay que reconstruirlo.
+            </div>
+            <div style={{ display:'flex', gap:10, marginTop:16 }}>
+              <button onClick={() => setEdicion(null)}
+                style={{ flex:1, background:'#f3f4f6', border:'none', borderRadius:9, padding:'11px 0', fontWeight:600, fontSize:13, cursor:'pointer' }}>
+                Cancelar
+              </button>
+              <button onClick={() => setPinEdicion('borrar')}
+                style={{ flex:1, background:'#dc2626', color:'#fff', border:'none', borderRadius:9, padding:'11px 0', fontWeight:700, fontSize:13, cursor:'pointer' }}>
+                🔐 Continuar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pinEdicion && (
+        <ModalPin
+          accion={pinEdicion === 'borrar' ? 'borrar_vencimiento' : 'editar_vencimiento'}
+          titulo={pinEdicion === 'borrar' ? 'Borrar vencimiento' : 'Editar vencimiento'}
+          advertencia={pinEdicion === 'borrar'
+            ? 'El equipo se elimina del radar comercial. Queda copia en auditoría.'
+            : 'Cambiar la fecha corre el próximo ciclo de recarga de este cliente.'}
+          requiereMotivo={pinEdicion === 'borrar'}
+          minMotivo={5}
+          textoBoton={pinEdicion === 'borrar' ? '🗑 Borrar' : '💾 Guardar'}
+          onConfirmar={(pin, motivo) => (pinEdicion === 'borrar' ? borrarVencimiento(pin, motivo) : guardarEdicion(pin, motivo))}
+          onCancelar={() => setPinEdicion(null)}
+        />
       )}
     </div>
   );
