@@ -53,8 +53,12 @@ const TODOS_LOS_MODULOS = [
   { key: 'caja',        label: 'Caja',          icon: '💰', modulo: 'caja' },
   { key: 'egresos',     label: 'Egresos',       icon: '💸', modulo: 'egresos' },
   // ✅ EGRESO-VEHICULO-001 · NOMINA-PROVISIONES-001
-  { key: 'vehiculos',   label: 'Vehículos',     icon: '🚚', modulo: 'vehiculos' },
-  { key: 'empleados',   label: 'Empleados',     icon: '👥', modulo: 'empleados' },
+  // `nuevo: true` → el admin los ve aunque no estén en su lista guardada de
+  // módulos. Sin esto, cualquier módulo que se agregue después queda invisible
+  // para los usuarios que ya tienen módulos personalizados, hasta que alguien
+  // se acuerde de habilitarlo a mano en Usuarios.
+  { key: 'vehiculos',   label: 'Vehículos',     icon: '🚚', modulo: 'vehiculos', nuevo: true },
+  { key: 'empleados',   label: 'Empleados',     icon: '👥', modulo: 'empleados', nuevo: true },
   { key: 'compras',     label: 'Compras',       icon: '🛒', modulo: 'compras' },
   { key: 'cxc',         label: 'CxC',           icon: '💳', modulo: 'cxc' },
   { key: 'cxp',         label: 'CxP',           icon: '📋', modulo: 'cxp' },
@@ -118,6 +122,12 @@ const buildGrupos = (role, userModulos, esSuperAdmin = false) => {
         if (!item) return false;
         // Admin sin módulos definidos → ver todo
         if (role === 'admin' && !tieneModulosPersonalizados) return true;
+        // ✅ FIX MODULO-NUEVO-001: un módulo recién agregado no existe en las
+        // listas de módulos que los usuarios ya tienen guardadas, así que el
+        // filtro lo escondía y no había forma de llegar a él desde la interfaz.
+        // El admin siempre ve los módulos marcados como nuevos; para los demás
+        // roles se sigue respetando la lista.
+        if (item.nuevo === true && role === 'admin') return true;
         // Cualquier rol con módulos definidos → filtrar por lista
         if (tieneModulosPersonalizados) {
           return modulosActivos.includes(item.modulo) ||
