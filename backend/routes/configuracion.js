@@ -628,4 +628,117 @@ router.put('/numeracion', async (req, res) => {
   }
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ NOMINA-PROVISIONES-001 — PUT /api/configuracion/nomina
+// ─────────────────────────────────────────────────────────────────────────────
+// Guarda dos parámetros que afectan directamente el cálculo del costo laboral:
+//
+// 1. empresaExoneradaAportes (art. 114-1 E.T., modificado por Ley 1819 de 2016)
+//    Si la empresa está exonerada, NO aporta salud (8,5%), SENA (2%) ni
+//    ICBF (3%) por los empleados que ganen menos de 10 SMMLV. La diferencia
+//    en el costo patronal es de ~13 puntos porcentuales: enorme.
+//
+//    ⚠️ Es una decisión TRIBUTARIA, no una preferencia. El sistema no puede
+//    determinarla solo: depende de si la empresa es contribuyente declarante
+//    de renta, de su naturaleza jurídica y del número de empleados. Por eso
+//    la UI le pide al suscriptor que lo confirme con su contador.
+//
+// 2. claseRiesgoARLDefecto — la que se propone al crear un empleado nuevo.
+// ═════════════════════════════════════════════════════════════════════════════
+router.put('/nomina', async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user.uid || req.user.id;
+    const { empresaExoneradaAportes, claseRiesgoARLDefecto, confirmadoConContador } = req.body;
+
+    const update = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+    if (empresaExoneradaAportes !== undefined) {
+      update.empresaExoneradaAportes = empresaExoneradaAportes === true;
+      // Se registra quién y cuándo lo activó — es un dato con efecto tributario
+      update.exoneracionActualizadaPor = req.user.email;
+      update.exoneracionActualizadaEn = new Date().toISOString();
+      update.exoneracionConfirmadaConContador = confirmadoConContador === true;
+    }
+    if (claseRiesgoARLDefecto !== undefined) {
+      update.claseRiesgoARLDefecto = ['I', 'II', 'III', 'IV', 'V'].includes(claseRiesgoARLDefecto)
+        ? claseRiesgoARLDefecto : 'III';
+    }
+
+    await getConfigRef(adminId).set(update, { merge: true });
+
+    await db.collection('audit_logs').add({
+      accion: 'CONFIG_NOMINA_ACTUALIZADA',
+      modulo: 'configuracion',
+      descripcion: empresaExoneradaAportes !== undefined
+        ? `Exoneración de aportes (art. 114-1 E.T.) ${empresaExoneradaAportes ? 'ACTIVADA' : 'DESACTIVADA'}` +
+          (confirmadoConContador ? ' · confirmado con contador' : ' · SIN confirmar con contador')
+        : 'Parámetros de nómina actualizados',
+      usuarioId: adminId,
+      usuarioNombre: req.user.email,
+      datos: update,
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      fecha: new Date().toISOString()
+    });
+
+    res.json({ ok: true, ...update });
+  } catch (e) {
+    console.error('PUT configuracion/nomina:', e);
+    res.status(500).json({ error: 'Error al guardar los parámetros de nómina' });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ EGRESO-INTELIGENTE-001 — PUT /api/configuracion/periodo-cerrado
+// ─────────────────────────────────────────────────────────────────────────────
+// Marca hasta qué fecha la contabilidad está cerrada. A partir de ahí, el motor
+// de validación bloquea egresos con fecha anterior: no se puede alterar un
+// estado de resultados ya emitido sin dejar rastro.
+//
+// Nace de un hallazgo concreto: un CxP de "compra de nitrógeno" con fecha
+// 2026-08-02 aparecía dentro del informe de julio.
+// ═════════════════════════════════════════════════════════════════════════════
+router.put('/periodo-cerrado', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el admin puede cerrar períodos' });
+    }
+    const adminId = req.adminId || req.user.uid || req.user.id;
+    const { periodoCerradoHasta } = req.body;
+
+    // Permitir limpiar el cierre enviando cadena vacía o null
+    const valor = periodoCerradoHasta ? String(periodoCerradoHasta).slice(0, 10) : null;
+    if (valor && !/^\d{4}-\d{2}-\d{2}$/.test(valor)) {
+      return res.status(400).json({ error: 'La fecha debe tener formato YYYY-MM-DD' });
+    }
+
+    const doc = await getConfigRef(adminId).get();
+    const anterior = doc.exists ? (doc.data().periodoCerradoHasta || null) : null;
+
+    await getConfigRef(adminId).set({
+      periodoCerradoHasta: valor,
+      periodoCerradoPor: req.user.email,
+      periodoCerradoEn: new Date().toISOString(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    await db.collection('audit_logs').add({
+      accion: valor ? 'PERIODO_CERRADO' : 'PERIODO_REABIERTO',
+      modulo: 'configuracion',
+      descripcion: valor
+        ? `Contabilidad cerrada hasta ${valor}${anterior ? ` (antes: ${anterior})` : ''}`
+        : `Cierre de período eliminado (estaba en ${anterior || '—'})`,
+      usuarioId: adminId,
+      usuarioNombre: req.user.email,
+      datos: { anterior, nuevo: valor },
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      fecha: new Date().toISOString()
+    });
+
+    res.json({ ok: true, periodoCerradoHasta: valor, anterior });
+  } catch (e) {
+    console.error('PUT periodo-cerrado:', e);
+    res.status(500).json({ error: 'Error al guardar el cierre de período' });
+  }
+});
+
 module.exports = router;

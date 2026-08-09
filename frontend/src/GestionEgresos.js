@@ -1,6 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { exportarExcel } from './exportExcel';
+// ✅ EGRESO-VISUAL-001 · EGRESO-INTELIGENTE-001 · EGRESO-RECLASIFICAR-001
+import EgresosGraficas from './EgresosGraficas';
+import { validarEgreso, norm as normTxt } from './utils/validacionEgresos';
 
 // ─── HOOK RESPONSIVE ──────────────────────────────────────────────────────────
 const useIsMobile = () => {
@@ -448,7 +451,7 @@ const calcularTotales = (monto, ivaPct, retenPct) => {
 };
 
 // ─── Modal Nuevo / Editar ─────────────────────────────────────────────────────
-function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, categoriasList, provisionales, provisionalInicial, onSave, onClose }) {
+function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, categoriasList, provisionales, provisionalInicial, onSave, onClose, categoriasMeta = [], vehiculos = [], egresosRecientes = [], empleados = [] }) {
   const [form, setForm] = useState({
     concepto: '', proveedor: '', categoria: (categoriasList || CATEGORIAS_DEFAULT)[0],
     monto: '', ivaPct: 0, retenPct: 0, retenManual: '',
@@ -476,6 +479,77 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
   }, []);
 
   const esCompra = form.categoria === 'Compra de Mercancia';
+
+  // ✅ EGRESO-VEHICULO-001: el selector de placa solo aparece cuando la
+  // categoría corresponde a un gasto de vehículo. Se evalúa sobre el texto
+  // normalizado para que funcione con las categorías que el usuario creó a
+  // mano ("fletes", "gasolina", "Transporte / Combustible"...).
+  const esGastoDeVehiculo = useMemo(
+    () => /combustible|gasolina|acpm|diesel|transporte|vehiculo|peaje|parqueadero|flete|llanta|lavado|soat|tecnomecanic|mantenimiento/
+      .test(normTxt(form.categoria)),
+    [form.categoria]
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ NOMINA-PROVISIONES-001 — Detección de empleado en el tercero
+  // ─────────────────────────────────────────────────────────────────────────
+  // Si el proveedor o el concepto coinciden con un empleado registrado, el
+  // sistema lo detecta y ofrece marcar el egreso como ANTICIPO DE NÓMINA.
+  //
+  // Es la inteligencia que evita el problema de julio 2026: pagos al mismo
+  // empleado quedaban unos en "Nómina" y otros en "anticipos de nomina",
+  // y ninguno se cruzaba contra la liquidación. Al enlazarlo acá, el anticipo
+  // se descuenta automáticamente en el comprobante de nómina del período.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const empleadoDetectado = useMemo(() => {
+    if (form.esComprobanteNomina) return null;
+    const texto = `${normTxt(form.proveedor)} ${normTxt(form.concepto)}`;
+    if (texto.trim().length < 5) return null;
+    return (empleados || []).find(emp => {
+      const n = normTxt(emp.nombre);
+      return n.length >= 5 && texto.includes(n);
+    }) || null;
+  }, [form.proveedor, form.concepto, form.esComprobanteNomina, empleados]);
+
+  // Al detectar el empleado, se preselecciona para que el usuario solo tenga
+  // que confirmar si es o no un anticipo.
+  useEffect(() => {
+    if (empleadoDetectado && !form.empleadoId) {
+      setForm(f => ({
+        ...f,
+        empleadoId: empleadoDetectado.id,
+        empleadoNombre: empleadoDetectado.nombre,
+        empleadoDocumento: empleadoDetectado.documento
+      }));
+    }
+  }, [empleadoDetectado]);
+
+  // ✅ EGRESO-INTELIGENTE-001: validación en vivo, mientras se digita.
+  // Es la misma función que corre el backend al guardar, así que lo que la
+  // persona ve es exactamente lo que el sistema va a registrar.
+  const alertasDigitacion = useMemo(() => {
+    if (!form.categoria && !form.monto) return [];
+    const meta = categoriasMeta.find(c => normTxt(c.nombre) === normTxt(form.categoria)) || null;
+    const base = Number(form.monto) || 0;
+    const ivaCalc = Math.round(base * (Number(form.ivaPct) || 0) / 100);
+    const retenCalc = Math.round(base * (Number(form.retenPct) || 0) / 100);
+    return validarEgreso(
+      {
+        ...form,
+        monto: base,
+        ivaVal: ivaCalc,
+        retenVal: retenCalc,
+        totalPagar: base + ivaCalc - retenCalc,
+        productosCompra
+      },
+      {
+        categoriaMeta: meta,
+        categoriasValidas: categoriasList || [],
+        egresosRecientes,
+        empleados
+      }
+    ).alertas;
+  }, [form, categoriasMeta, categoriasList, egresosRecientes, productosCompra, empleados]);
 
   useEffect(() => {
     if (esCompra && productosDisponibles.length === 0) {
@@ -617,6 +691,141 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
               <input type="date" style={S.input} value={form.fecha} onChange={e => set('fecha', e.target.value)} />
             </div>
           </div>
+
+          {/* ═══════════════════════════════════════════════════════════════════
+              ✅ NOMINA-PROVISIONES-001 — ¿Es un anticipo de nómina?
+              ───────────────────────────────────────────────────────────────
+              Aparece cuando el tercero coincide con un empleado registrado.
+              La pregunta se hace UNA vez, en el momento correcto: cuando la
+              información todavía se puede clasificar bien.
+              ═════════════════════════════════════════════════════════════ */}
+          {empleadoDetectado && (
+            <div style={{
+              background: form.esAnticipoNomina ? '#f0fdf4' : '#fffbeb',
+              border: `2px solid ${form.esAnticipoNomina ? '#86efac' : '#fcd34d'}`,
+              borderRadius: 12, padding: 14, marginBottom: 14
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: form.esAnticipoNomina ? '#15803d' : '#92400e', marginBottom: 6 }}>
+                👤 {empleadoDetectado.nombre} es un empleado registrado
+              </div>
+              <div style={{ fontSize: 11.5, color: form.esAnticipoNomina ? '#166534' : '#a16207', lineHeight: 1.6, marginBottom: 12 }}>
+                ¿Este pago es un <strong>anticipo de nómina</strong> (un préstamo contra la quincena)?
+                <br />
+                Si lo es, <strong>no es un gasto</strong>: es una cuenta por cobrar que se descuenta
+                automáticamente al liquidar la nómina del período. Si lo registrás como gasto y después
+                pagás el salario completo, el gasto queda contado dos veces.
+              </div>
+
+              <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                <button type="button"
+                  onClick={() => {
+                    set('esAnticipoNomina', true);
+                    set('empleadoId', empleadoDetectado.id);
+                    set('empleadoNombre', empleadoDetectado.nombre);
+                    set('empleadoDocumento', empleadoDetectado.documento);
+                    // El anticipo pertenece a la familia de personal
+                    const catAnticipo = (categoriasList || []).find(c => /anticipo/i.test(c));
+                    if (catAnticipo) set('categoria', catAnticipo);
+                  }}
+                  style={{
+                    padding: '9px 17px', borderRadius: 9, cursor: 'pointer', fontSize: 12.5, fontWeight: 700,
+                    border: form.esAnticipoNomina ? '2px solid #16a34a' : '2px solid transparent',
+                    background: form.esAnticipoNomina ? '#16a34a' : '#fff',
+                    color: form.esAnticipoNomina ? '#fff' : '#374151'
+                  }}>
+                  ✓ Sí, es un anticipo de nómina
+                </button>
+                <button type="button"
+                  onClick={() => {
+                    set('esAnticipoNomina', false);
+                    set('empleadoId', '');
+                    set('empleadoNombre', '');
+                    set('empleadoDocumento', '');
+                  }}
+                  style={{
+                    padding: '9px 17px', borderRadius: 9, cursor: 'pointer', fontSize: 12.5, fontWeight: 700,
+                    border: form.esAnticipoNomina === false ? '2px solid #64748b' : '2px solid transparent',
+                    background: form.esAnticipoNomina === false ? '#475569' : '#fff',
+                    color: form.esAnticipoNomina === false ? '#fff' : '#374151'
+                  }}>
+                  No, es otro tipo de pago
+                </button>
+              </div>
+
+              {form.esAnticipoNomina && (
+                <div style={{
+                  background: '#fff', borderRadius: 9, padding: '10px 13px', marginTop: 11,
+                  fontSize: 11.5, color: '#166534', lineHeight: 1.55
+                }}>
+                  ✅ Quedará enlazado a <strong>{empleadoDetectado.nombre}</strong>. Cuando generes el
+                  comprobante de nómina del período desde <strong>Empleados → Nómina</strong>, este
+                  anticipo aparecerá automáticamente y se descontará del neto a pagar.
+                </div>
+              )}
+
+              {/* Permite corregir si detectó al empleado equivocado */}
+              {form.esAnticipoNomina && (empleados || []).length > 1 && (
+                <div style={{ ...S.field, marginTop: 11, marginBottom: 0 }}>
+                  <label style={{ ...S.label, fontSize: 11 }}>¿Otro empleado?</label>
+                  <select style={S.select} value={form.empleadoId || ''}
+                    onChange={e => {
+                      const emp = (empleados || []).find(x => x.id === e.target.value);
+                      set('empleadoId', e.target.value);
+                      set('empleadoNombre', emp ? emp.nombre : '');
+                      set('empleadoDocumento', emp ? emp.documento : '');
+                    }}>
+                    {(empleados || []).filter(e => e.activo !== false).map(e => (
+                      <option key={e.id} value={e.id}>{e.nombre} · {e.documento}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════════
+              ✅ EGRESO-VEHICULO-001 — Selector de vehículo
+              ───────────────────────────────────────────────────────────────
+              Aparece automáticamente cuando la categoría huele a gasto de
+              vehículo (combustible, mantenimiento, peajes, fletes...). No se
+              muestra siempre para no estorbar en los otros 25 tipos de egreso.
+              ═════════════════════════════════════════════════════════════ */}
+          {esGastoDeVehiculo && (
+            <div style={S.field}>
+              <label style={S.label}>
+                Vehículo / Placa
+                {(vehiculos || []).length === 0 && (
+                  <span style={{ fontWeight: 400, color: '#dc2626', marginLeft: 6 }}>
+                    · no tenés vehículos registrados todavía
+                  </span>
+                )}
+              </label>
+              {(vehiculos || []).length > 0 ? (
+                <select style={S.select} value={form.vehiculoId || ''}
+                  onChange={e => {
+                    const v = (vehiculos || []).find(x => x.id === e.target.value);
+                    set('vehiculoId', e.target.value);
+                    set('vehiculoPlaca', v ? v.placa : '');
+                  }}>
+                  <option value="">— Sin asignar —</option>
+                  {(vehiculos || []).filter(v => v.activo !== false).map(v => (
+                    <option key={v.id} value={v.id}>
+                      {v.placa} · {v.tipo}{v.conductorNombre ? ` · ${v.conductorNombre}` : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div style={{
+                  background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 8,
+                  padding: '9px 12px', fontSize: 12, color: '#92400e', lineHeight: 1.5
+                }}>
+                  Registrá tus vehículos en <strong>Configuración → Vehículos</strong> para poder saber
+                  cuánto consume cada placa. Sin eso, el gasto de combustible queda como un solo
+                  bloque que no se puede atribuir.
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Tabla productos — solo para compra de mercancía */}
           {esCompra && (
@@ -896,10 +1105,50 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
             <textarea style={{ ...S.input, height: 56, resize: 'vertical' }} value={form.notas}
               onChange={e => set('notas', e.target.value)} placeholder="Observaciones..." />
           </div>
+
+          {/* ═════════════════════════════════════════════════════════════════
+              ✅ EGRESO-INTELIGENTE-001 — Alertas de digitación
+              ───────────────────────────────────────────────────────────────
+              Se muestran justo antes del botón de guardar, donde la persona
+              todavía puede corregir sin esfuerzo. No bloquean: si la persona
+              sabe lo que hace, guarda igual y queda la marca.
+              ═════════════════════════════════════════════════════════════ */}
+          {alertasDigitacion.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{
+                fontSize: 11, fontWeight: 800, color: '#64748b', marginBottom: 8,
+                textTransform: 'uppercase', letterSpacing: '.05em'
+              }}>
+                Revisión automática
+              </div>
+              <PanelAlertas alertas={alertasDigitacion} />
+            </div>
+          )}
         </div>
         <div style={S.modalFooter}>
           <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
-          <button onClick={handleSubmit} disabled={saving} style={S.btnPrimary}>
+          <button
+            onClick={() => {
+              // Si hay errores graves, se pide una confirmación explícita.
+              // La persona puede seguir — pero de forma consciente, no por descuido.
+              const graves = alertasDigitacion.filter(a => a.severidad === 'grave');
+              if (graves.length > 0) {
+                const ok = window.confirm(
+                  `⚠️ Se detectaron ${graves.length} posible(s) error(es) contable(s):\n\n` +
+                  graves.map(g => `• ${g.titulo}`).join('\n') +
+                  `\n\n¿Guardar de todas formas?\nQuedará marcado para revisión posterior.`
+                );
+                if (!ok) return;
+              }
+              handleSubmit();
+            }}
+            disabled={saving}
+            style={{
+              ...S.btnPrimary,
+              background: alertasDigitacion.some(a => a.severidad === 'grave')
+                ? 'linear-gradient(135deg,#f59e0b,#d97706)'
+                : S.btnPrimary.background
+            }}>
             {saving ? 'Guardando...' : egreso ? 'Guardar cambios'
               : esLegalizar ? `💵 Legalizar ${provSel?.numero || ''}`
               : form.pagarAhora ? `✅ Crear y pagar ${fmt(totalPagar)}` : 'Crear egreso'}
@@ -1059,13 +1308,521 @@ function ModalAnularEgreso({ egreso, onAnular, onClose }) {
   );
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ EGRESO-INTELIGENTE-001 — PanelAlertas
+// ─────────────────────────────────────────────────────────────────────────────
+// Muestra las observaciones del motor de reglas mientras la persona digita.
+//
+// CRITERIO: advertir, no bloquear. Un digitador bloqueado no corrige el dato —
+// busca el atajo (registrar todo en "Otros") y el problema se vuelve invisible.
+// Explicamos QUÉ está mal y POR QUÉ importa; la persona decide.
+// ═════════════════════════════════════════════════════════════════════════════
+const ESTILO_SEVERIDAD = {
+  grave: { bg: '#fef2f2', bd: '#fecaca', tx: '#991b1b', ic: '🚨', et: 'Error probable' },
+  media: { bg: '#fffbeb', bd: '#fde68a', tx: '#92400e', ic: '⚠️', et: 'Revisar' },
+  leve:  { bg: '#f0f9ff', bd: '#bae6fd', tx: '#075985', ic: '💡', et: 'Sugerencia' }
+};
+
+function PanelAlertas({ alertas = [], compacto = false }) {
+  if (!alertas.length) return null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+      {alertas.map((a, i) => {
+        const s = ESTILO_SEVERIDAD[a.severidad] || ESTILO_SEVERIDAD.leve;
+        return (
+          <div key={a.id + i} style={{
+            background: s.bg, border: `1px solid ${s.bd}`, borderRadius: 10,
+            padding: compacto ? '9px 11px' : '11px 13px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+              <span style={{ fontSize: 14, lineHeight: 1.2 }}>{s.ic}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{
+                  fontSize: 12.5, fontWeight: 800, color: s.tx,
+                  display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap'
+                }}>
+                  {a.titulo}
+                  <span style={{
+                    fontSize: 9, fontWeight: 800, background: s.tx, color: s.bg,
+                    borderRadius: 20, padding: '2px 7px', textTransform: 'uppercase', letterSpacing: '.04em'
+                  }}>{s.et}</span>
+                </div>
+                {a.detalle && (
+                  <div style={{ fontSize: 11.5, color: s.tx, opacity: .88, marginTop: 4, lineHeight: 1.5 }}>
+                    {a.detalle}
+                  </div>
+                )}
+                {a.sugerencia && (
+                  <div style={{ fontSize: 11, color: s.tx, opacity: .75, marginTop: 4, fontStyle: 'italic' }}>
+                    → {a.sugerencia}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ EGRESO-EDICION-002 — ModalHistorial
+// ─────────────────────────────────────────────────────────────────────────────
+// Muestra el rastro completo de un egreso: quién lo tocó, cuándo, qué campo,
+// de qué valor a qué valor y por qué.
+//
+// Sin esto, la auditoría se guardaba pero nadie podía consultarla — que es casi
+// lo mismo que no tenerla. Una corrección solo es defendible ante una revisión
+// si se puede mostrar el antes y el después.
+// ═════════════════════════════════════════════════════════════════════════════
+const ETIQUETA_CAMPO = {
+  concepto: 'Concepto', proveedor: 'Proveedor', categoria: 'Categoría',
+  monto: 'Base', ivaVal: 'IVA', retenVal: 'Retención', totalPagar: 'Total pagado',
+  fecha: 'Fecha', formaPago: 'Forma de pago', cajaId: 'Caja', notas: 'Notas',
+  vehiculoPlaca: 'Vehículo', empleadoNombre: 'Empleado', esAnticipoNomina: 'Anticipo de nómina'
+};
+
+function ModalHistorial({ egreso, onClose }) {
+  const [datos, setDatos] = useState(null);
+  const [cargando, setCargando] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await axios.get(`${API}/egresos/${egreso.id}/historial`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+        });
+        setDatos(r.data);
+      } catch { setDatos({ eventos: [] }); }
+      setCargando(false);
+    })();
+  }, [egreso.id]);
+
+  const esMonetario = (k) => ['monto', 'ivaVal', 'retenVal', 'totalPagar'].includes(k);
+  const pinta = (k, v) => {
+    if (v === undefined || v === null || v === '') return '—';
+    if (esMonetario(k)) return fmt(v);
+    if (typeof v === 'boolean') return v ? 'Sí' : 'No';
+    return String(v);
+  };
+
+  return (
+    <div style={S.overlay}>
+      <div style={{ ...S.modal, maxWidth: 660 }}>
+        <div style={S.modalHeader}>
+          <h3 style={S.modalTitle}>📜 Historial · {egreso.numero}</h3>
+          <button onClick={onClose} style={S.closeBtn}>✕</button>
+        </div>
+        <div style={S.modalBody}>
+
+          <div style={{ background: '#f8fafc', borderRadius: 10, padding: '11px 14px', marginBottom: 16, fontSize: 12, color: '#475569', lineHeight: 1.6 }}>
+            <strong>{egreso.concepto}</strong> · {egreso.proveedor || 'sin tercero'} · {fmt(egreso.totalPagar || egreso.monto)}
+          </div>
+
+          {cargando ? (
+            <div style={{ padding: 30, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>⏳ Cargando historial...</div>
+          ) : (
+            <>
+              {/* Reclasificación en lote, si aplica */}
+              {datos?.reclasificacion && (
+                <div style={{
+                  background: datos.reclasificacion.revertido ? '#f1f5f9' : '#eef2ff',
+                  border: `1px solid ${datos.reclasificacion.revertido ? '#e2e8f0' : '#c7d2fe'}`,
+                  borderRadius: 10, padding: '12px 14px', marginBottom: 14, fontSize: 12, lineHeight: 1.6
+                }}>
+                  <strong style={{ color: '#4338ca' }}>🔀 Reclasificado en lote</strong>
+                  {datos.reclasificacion.revertido && <span style={{ color: '#94a3b8' }}> · revertido</span>}
+                  <div style={{ color: '#475569', marginTop: 4 }}>
+                    "{datos.reclasificacion.categoriaAnterior}" → "{datos.reclasificacion.categoriaNueva}"
+                    <br />Motivo: {datos.reclasificacion.motivo}
+                    <br /><span style={{ color: '#94a3b8' }}>
+                      {datos.reclasificacion.por} · {String(datos.reclasificacion.en).slice(0, 16).replace('T', ' ')}
+                      {' · '}Lote {datos.reclasificacion.loteId}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {(datos?.eventos || []).length === 0 ? (
+                <div style={{ padding: 26, textAlign: 'center', color: '#cbd5e1', fontSize: 12.5 }}>
+                  Este egreso no ha tenido modificaciones registradas.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {datos.eventos.map(ev => {
+                    const critico = /CRITICO|ANULAD/i.test(ev.accion);
+                    return (
+                      <div key={ev.id} style={{
+                        borderLeft: `3px solid ${critico ? '#dc2626' : '#cbd5e1'}`,
+                        paddingLeft: 13, paddingBottom: 4
+                      }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
+                          <strong style={{ fontSize: 12.5, color: critico ? '#991b1b' : '#334155' }}>
+                            {ev.accion.replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase())}
+                          </strong>
+                          <span style={{ fontSize: 11, color: '#94a3b8' }}>
+                            {String(ev.fecha).slice(0, 16).replace('T', ' ')}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 2 }}>{ev.usuario}</div>
+                        {ev.motivo && (
+                          <div style={{ fontSize: 11.5, color: '#92400e', background: '#fffbeb', borderRadius: 6, padding: '5px 9px', marginTop: 6 }}>
+                            Motivo: {ev.motivo}
+                          </div>
+                        )}
+
+                        {/* Antes y después, campo por campo */}
+                        {ev.camposCambiados?.length > 0 && ev.anterior && ev.nuevo && (
+                          <div style={{ marginTop: 8, background: '#f8fafc', borderRadius: 8, padding: '8px 11px' }}>
+                            {ev.camposCambiados
+                              .filter(k => ETIQUETA_CAMPO[k])
+                              .map(k => (
+                                <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 11.5, padding: '2px 0' }}>
+                                  <span style={{ color: '#64748b', minWidth: 92 }}>{ETIQUETA_CAMPO[k]}</span>
+                                  <span style={{ flex: 1, textAlign: 'right' }}>
+                                    <span style={{ color: '#dc2626', textDecoration: 'line-through' }}>{pinta(k, ev.anterior[k])}</span>
+                                    <span style={{ color: '#cbd5e1', margin: '0 6px' }}>→</span>
+                                    <strong style={{ color: '#16a34a' }}>{pinta(k, ev.nuevo[k])}</strong>
+                                  </span>
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          <div style={S.modalFooter}>
+            <button onClick={onClose} style={S.btnSecondary}>Cerrar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ EGRESO-RECLASIFICAR-001 — ModalLotes
+// ─────────────────────────────────────────────────────────────────────────────
+// Lista las reclasificaciones masivas hechas y permite revertir cualquiera.
+// Es la red de seguridad que hace que mover 200 registros no dé miedo.
+// ═════════════════════════════════════════════════════════════════════════════
+function ModalLotes({ onCerrar, onRevertido }) {
+  const [lotes, setLotes] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [revirtiendo, setRevirtiendo] = useState(null);
+  const [pin, setPin] = useState('');
+  const [motivo, setMotivo] = useState('');
+  const [error, setError] = useState('');
+
+  const headers = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}` });
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await axios.get(`${API}/egresos/lotes`, { headers: headers() });
+        setLotes(Array.isArray(r.data) ? r.data : []);
+      } catch { setLotes([]); }
+      setCargando(false);
+    })();
+  }, []);
+
+  const revertir = async (lote) => {
+    if (!/^\d{4}$/.test(pin)) { setError('El PIN es de 4 dígitos'); return; }
+    setError('');
+    try {
+      await axios.post(`${API}/egresos/reclasificar-lote/${lote.loteId}/revertir`,
+        { pin, motivo }, { headers: headers() });
+      setLotes(p => p.map(l => l.loteId === lote.loteId ? { ...l, revertido: true } : l));
+      setRevirtiendo(null); setPin(''); setMotivo('');
+      onRevertido && onRevertido();
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo revertir');
+    }
+  };
+
+  return (
+    <div style={S.overlay}>
+      <div style={{ ...S.modal, maxWidth: 700 }}>
+        <div style={S.modalHeader}>
+          <h3 style={S.modalTitle}>🔀 Reclasificaciones hechas</h3>
+          <button onClick={onCerrar} style={S.closeBtn}>✕</button>
+        </div>
+        <div style={S.modalBody}>
+          <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '11px 14px', marginBottom: 16, fontSize: 12, color: '#1e40af', lineHeight: 1.6 }}>
+            Cada reclasificación masiva queda como un lote reversible. Al revertir, cada egreso
+            vuelve a la categoría que tenía antes — no a una categoría genérica.
+          </div>
+
+          {cargando ? (
+            <div style={{ padding: 30, textAlign: 'center', color: '#94a3b8', fontSize: 13 }}>⏳ Cargando...</div>
+          ) : lotes.length === 0 ? (
+            <div style={{ padding: 30, textAlign: 'center', color: '#cbd5e1', fontSize: 12.5 }}>
+              Todavía no se ha hecho ninguna reclasificación masiva.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
+              {lotes.map(l => (
+                <div key={l.loteId} style={{
+                  background: l.revertido ? '#f8fafc' : '#fff',
+                  border: `1px solid ${l.revertido ? '#e2e8f0' : '#c7d2fe'}`,
+                  borderRadius: 11, padding: '13px 16px', opacity: l.revertido ? .65 : 1
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+                    <div style={{ flex: 1, minWidth: 230 }}>
+                      <div style={{ fontSize: 13, fontWeight: 800, color: '#0f172a' }}>
+                        → {l.categoriaNueva}
+                        {l.revertido && <span style={{ fontSize: 10, fontWeight: 700, background: '#f1f5f9', color: '#94a3b8', borderRadius: 20, padding: '2px 8px', marginLeft: 8 }}>REVERTIDO</span>}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: '#64748b', marginTop: 4 }}>
+                        Desde: {l.origenes.map(o => `${o.categoria} (${o.cantidad})`).join(' · ')}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>
+                        {l.por} · {String(l.en).slice(0, 16).replace('T', ' ')}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: '#92400e', background: '#fffbeb', borderRadius: 6, padding: '5px 9px', marginTop: 6 }}>
+                        {l.motivo}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 18, fontWeight: 900, color: '#4338ca' }}>{l.cantidad}</div>
+                      <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 700 }}>EGRESOS</div>
+                      <div style={{ fontSize: 12.5, fontWeight: 800, color: '#334155', marginTop: 3 }}>{fmt(l.valor)}</div>
+                    </div>
+                  </div>
+
+                  {!l.revertido && (
+                    revirtiendo === l.loteId ? (
+                      <div style={{ marginTop: 12, paddingTop: 11, borderTop: '1px dashed #e2e8f0' }}>
+                        <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                          <div style={{ flex: 1, minWidth: 160 }}>
+                            <label style={{ ...S.label, fontSize: 11 }}>Motivo de la reversión</label>
+                            <input style={{ ...S.input, width: '100%' }} value={motivo}
+                              onChange={e => setMotivo(e.target.value)} placeholder="Mínimo 10 caracteres" />
+                          </div>
+                          <div style={{ width: 110 }}>
+                            <label style={{ ...S.label, fontSize: 11 }}>PIN</label>
+                            <input type="password" inputMode="numeric" maxLength={4}
+                              style={{ ...S.input, width: '100%', textAlign: 'center', letterSpacing: 6, fontWeight: 800 }}
+                              value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="••••" />
+                          </div>
+                          <button onClick={() => revertir(l)}
+                            style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#dc2626,#b91c1c)', padding: '9px 16px', fontSize: 12 }}>
+                            Confirmar
+                          </button>
+                          <button onClick={() => { setRevirtiendo(null); setError(''); }} style={{ ...S.btnSecondary, padding: '9px 14px', fontSize: 12 }}>
+                            Cancelar
+                          </button>
+                        </div>
+                        {error && <div style={{ fontSize: 11.5, color: '#991b1b', marginTop: 7 }}>{error}</div>}
+                      </div>
+                    ) : (
+                      <button onClick={() => { setRevirtiendo(l.loteId); setError(''); }}
+                        style={{ ...S.btnSecondary, marginTop: 11, padding: '7px 14px', fontSize: 11.5, background: '#fef2f2', color: '#991b1b', border: '1px solid #fecaca' }}>
+                        ↩ Revertir este lote
+                      </button>
+                    )
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={S.modalFooter}>
+            <button onClick={onCerrar} style={S.btnSecondary}>Cerrar</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ EGRESO-RECLASIFICAR-001 — ModalReclasificar
+// ─────────────────────────────────────────────────────────────────────────────
+// Cambia la categoría de N egresos en una sola operación, con PIN, motivo y
+// auditoría. No toca valores: la plata que salió es la misma, cambia dónde se
+// clasifica. Por eso no requiere ajustar caja ni inventario.
+//
+// Nace de un hallazgo concreto: en julio 2026 había 56 egresos de personal mal
+// repartidos entre "Nómina" y "anticipos de nomina", cruzados en ambos
+// sentidos. Corregirlos de a uno son 56 PIN y 56 chances de equivocarse.
+// ═════════════════════════════════════════════════════════════════════════════
+function ModalReclasificar({ egresos, categoriasList, onConfirmar, onClose }) {
+  const [paso, setPaso]         = useState('revisar');
+  const [destino, setDestino]   = useState('');
+  const [motivo, setMotivo]     = useState('');
+  const [pin, setPin]           = useState('');
+  const [error, setError]       = useState('');
+  const [guardando, setGuardando] = useState(false);
+
+  const valorTotal = egresos.reduce((a, e) => a + (Number(e.totalPagar || e.monto) || 0), 0);
+
+  // Desglose de las categorías de origen — es lo que le da confianza al usuario
+  // de que está moviendo lo que cree que está moviendo.
+  const origenes = useMemo(() => {
+    const m = {};
+    for (const e of egresos) {
+      const c = e.categoria || 'Sin categoría';
+      if (!m[c]) m[c] = { categoria: c, cantidad: 0, valor: 0 };
+      m[c].cantidad += 1;
+      m[c].valor += Number(e.totalPagar || e.monto) || 0;
+    }
+    return Object.values(m).sort((a, b) => b.valor - a.valor);
+  }, [egresos]);
+
+  const yaEnDestino = egresos.filter(e => normTxt(e.categoria) === normTxt(destino)).length;
+  const aplicables  = egresos.length - yaEnDestino;
+
+  const continuar = () => {
+    if (!destino) { setError('Seleccioná la categoría destino'); return; }
+    if (aplicables === 0) { setError('Todos los egresos ya están en esa categoría'); return; }
+    setError(''); setPaso('confirmar');
+  };
+
+  const ejecutar = async () => {
+    if (!/^\d{4}$/.test(pin)) { setError('El PIN es de 4 dígitos'); return; }
+    if (motivo.trim().length < 10) { setError('Explicá la reclasificación (mínimo 10 caracteres)'); return; }
+    setGuardando(true); setError('');
+    try {
+      await onConfirmar({ ids: egresos.map(e => e.id), categoriaDestino: destino, motivo: motivo.trim(), pin });
+    } catch (e) {
+      setError(e.response?.data?.error || e.message || 'No se pudo reclasificar');
+      setGuardando(false);
+    }
+  };
+
+  return (
+    <div style={S.overlay}>
+      <div style={{ ...S.modal, maxWidth: 620 }}>
+        <div style={S.modalHeader}>
+          <h3 style={S.modalTitle}>🔀 Reclasificar {egresos.length} egreso(s)</h3>
+          <button onClick={onClose} style={S.closeBtn}>✕</button>
+        </div>
+        <div style={S.modalBody}>
+
+          {paso === 'revisar' ? (
+            <>
+              <div style={{
+                background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10,
+                padding: 12, marginBottom: 16, fontSize: 12, color: '#1e40af', lineHeight: 1.55
+              }}>
+                Esta operación cambia <strong>solo la categoría</strong>. No modifica valores, ni la caja,
+                ni el inventario. Queda registrada con un identificador de lote y se puede <strong>revertir completa</strong>.
+              </div>
+
+              {/* Resumen de lo seleccionado */}
+              <div style={{ background: '#f8fafc', borderRadius: 10, padding: 12, marginBottom: 16, border: '1px solid #e2e8f0' }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#475569', marginBottom: 9, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                  Categorías de origen
+                </div>
+                {origenes.map(o => (
+                  <div key={o.categoria} style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    fontSize: 12.5, padding: '5px 0', borderBottom: '1px solid #f1f5f9'
+                  }}>
+                    <span style={{ color: '#334155' }}>
+                      {o.categoria} <span style={{ color: '#94a3b8' }}>· {o.cantidad}</span>
+                    </span>
+                    <strong style={{ color: '#0f172a' }}>{fmt(o.valor)}</strong>
+                  </div>
+                ))}
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', paddingTop: 9, marginTop: 3,
+                  fontSize: 13, fontWeight: 800, color: '#0f172a'
+                }}>
+                  <span>Total seleccionado</span><span>{fmt(valorTotal)}</span>
+                </div>
+              </div>
+
+              <div style={S.field}>
+                <label style={S.label}>Mover todo a la categoría *</label>
+                <select style={S.select} value={destino} onChange={e => { setDestino(e.target.value); setError(''); }}>
+                  <option value="">— Seleccionar categoría destino —</option>
+                  {categoriasList.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 5 }}>
+                  Solo aparecen categorías del catálogo. Si necesitás una nueva, creála primero en Configuración.
+                </div>
+              </div>
+
+              {destino && (
+                <div style={{
+                  background: aplicables > 0 ? '#f0fdf4' : '#fef2f2',
+                  border: `1px solid ${aplicables > 0 ? '#dcfce7' : '#fee2e2'}`,
+                  borderRadius: 10, padding: '10px 13px', fontSize: 12,
+                  color: aplicables > 0 ? '#15803d' : '#991b1b', marginBottom: 14
+                }}>
+                  Se reclasificarán <strong>{aplicables}</strong> egreso(s) a <strong>{destino}</strong>.
+                  {yaEnDestino > 0 && <> {yaEnDestino} ya estaba(n) en esa categoría y se omitirá(n).</>}
+                </div>
+              )}
+
+              {error && <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '9px 13px', fontSize: 12.5, color: '#991b1b', marginBottom: 12 }}>{error}</div>}
+
+              <div style={S.modalFooter}>
+                <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
+                <button onClick={continuar} style={S.btnPrimary}>Continuar →</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{
+                background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10,
+                padding: 13, marginBottom: 16, fontSize: 12.5, color: '#991b1b', lineHeight: 1.55
+              }}>
+                🔐 Vas a reclasificar <strong>{aplicables} egreso(s)</strong> por <strong>{fmt(valorTotal)}</strong> a
+                la categoría <strong>{destino}</strong>. Requiere tu PIN y queda en auditoría.
+              </div>
+
+              <div style={S.field}>
+                <label style={S.label}>Motivo de la reclasificación *</label>
+                <textarea style={{ ...S.input, height: 72, resize: 'vertical' }} value={motivo}
+                  onChange={e => { setMotivo(e.target.value); setError(''); }}
+                  placeholder="Ej: Unificación de las categorías de personal según auditoría del ERI de julio" />
+                <div style={{ fontSize: 11, color: motivo.trim().length >= 10 ? '#16a34a' : '#94a3b8', marginTop: 4 }}>
+                  {motivo.trim().length}/10 caracteres mínimos
+                </div>
+              </div>
+
+              <div style={S.field}>
+                <label style={S.label}>PIN admin (4 dígitos) *</label>
+                <input type="password" inputMode="numeric" maxLength={4}
+                  style={{ ...S.input, textAlign: 'center', letterSpacing: 10, fontWeight: 800, fontSize: 20 }}
+                  value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, '').slice(0, 4)); setError(''); }}
+                  placeholder="••••" onKeyDown={e => e.key === 'Enter' && ejecutar()} />
+              </div>
+
+              {error && <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '9px 13px', fontSize: 12.5, color: '#991b1b', marginBottom: 12 }}>{error}</div>}
+
+              <div style={S.modalFooter}>
+                <button onClick={() => { setPaso('revisar'); setError(''); }} style={S.btnSecondary}>← Volver</button>
+                <button onClick={ejecutar} disabled={guardando}
+                  style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#dc2626,#b91c1c)' }}>
+                  {guardando ? 'Reclasificando...' : `🔐 Reclasificar ${aplicables}`}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Modal Editar Pagado ──────────────────────────────────────────────────────
 // FIX PIN-UNICO-001: este modal pedia la CONTRASENA de login y llamaba a
 // /users/verificar-password, mientras el backend /egresos/:id/editar-pagado
 // exigia `pin` en el body — y el frontend nunca lo enviaba. El flujo estaba
 // roto y ademas usaba una credencial distinta a la del resto del sistema.
 // Ahora usa el MISMO PIN de 4 digitos que anular, cuadrar y validar pago.
-function ModalEditarPagado({ egreso, onSave, onClose }) {
+function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categoriasMeta = [], vehiculos = [] }) {
   const [paso, setPaso]     = useState('auth');
   const [pin, setPin]       = useState('');
   const [motivo, setMotivo] = useState('');
@@ -1075,9 +1832,26 @@ function ModalEditarPagado({ egreso, onSave, onClose }) {
   const [verificando, setVerificando] = useState(false);
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
+  // ✅ EGRESO-EDICION-002: total recalculado en vivo — la persona ve el efecto
+  // de su corrección sobre la caja ANTES de confirmarla.
+  const totalOriginal = Number(egreso?.totalPagar || egreso?.monto) || 0;
+  const totalRecalculado = Math.round(
+    (Number(form.monto) || 0) + (Number(form.ivaVal) || 0) - (Number(form.retenVal) || 0)
+  );
+
+  // ✅ EGRESO-INTELIGENTE-001: validación en vivo sobre el egreso corregido
+  const alertasEdicion = useMemo(() => {
+    const meta = categoriasMeta.find(c => normTxt(c.nombre) === normTxt(form.categoria)) || null;
+    return validarEgreso(
+      { ...form, totalPagar: totalRecalculado },
+      { categoriaMeta: meta, categoriasValidas: categoriasList }
+    ).alertas;
+  }, [form, categoriasMeta, categoriasList, totalRecalculado]);
+
   const verificarPinAdmin = async () => {
     if (!/^\d{4}$/.test(pin)) { setErrorAuth('El PIN es de 4 digitos'); return; }
     if (!motivo.trim()) { setErrorAuth('El motivo es obligatorio'); return; }
+    if (motivo.trim().length < 10) { setErrorAuth('Explicá la corrección con un poco más de detalle (mínimo 10 caracteres)'); return; }
     setVerificando(true); setErrorAuth('');
     try {
       const token = localStorage.getItem('token');
@@ -1131,11 +1905,108 @@ function ModalEditarPagado({ egreso, onSave, onClose }) {
               <div style={{ background: '#fef3c7', borderRadius: 8, padding: 10, fontSize: 12, color: '#92400e', marginBottom: 14 }}>
                 ✏️ Motivo: <strong>{motivo}</strong>
               </div>
+
+              {/* ✅ EGRESO-EDICION-002: el formulario ahora expone TODOS los
+                  campos que el backend acepta. Antes solo mostraba concepto,
+                  monto y notas — por eso era imposible corregir una categoría
+                  mal asignada o sacar un IVA que no correspondía, aunque el
+                  endpoint sí lo permitiera. */}
+
               <div style={S.row2}>
-                <div style={S.field}><label style={S.label}>Concepto</label><input style={S.input} value={form.concepto || ''} onChange={e => set('concepto', e.target.value)} /></div>
-                <div style={S.field}><label style={S.label}>Monto</label><input type="number" style={S.input} value={form.monto || ''} onChange={e => set('monto', e.target.value)} /></div>
+                <div style={S.field}>
+                  <label style={S.label}>Concepto</label>
+                  <input style={S.input} value={form.concepto || ''} onChange={e => set('concepto', e.target.value)} />
+                </div>
+                <div style={S.field}>
+                  <label style={S.label}>Fecha</label>
+                  <input type="date" style={S.input} value={form.fecha || ''} onChange={e => set('fecha', e.target.value)} />
+                </div>
               </div>
-              <div style={S.field}><label style={S.label}>Notas</label><textarea style={{ ...S.input, height: 56, resize: 'vertical' }} value={form.notas || ''} onChange={e => set('notas', e.target.value)} /></div>
+
+              <div style={S.row2}>
+                <div style={S.field}>
+                  <label style={S.label}>Categoría</label>
+                  <select style={S.select} value={form.categoria || ''} onChange={e => set('categoria', e.target.value)}>
+                    <option value="">— Seleccionar —</option>
+                    {(categoriasList || []).map(c => <option key={c} value={c}>{c}</option>)}
+                    {/* Si la categoría actual no está en el catálogo la mostramos
+                        igual, para no perderla silenciosamente al editar. */}
+                    {form.categoria && !(categoriasList || []).includes(form.categoria) && (
+                      <option value={form.categoria}>⚠️ {form.categoria} (fuera del catálogo)</option>
+                    )}
+                  </select>
+                </div>
+                <div style={S.field}>
+                  <label style={S.label}>Proveedor / Tercero</label>
+                  <input style={S.input} value={form.proveedor || ''} onChange={e => set('proveedor', e.target.value)} />
+                </div>
+              </div>
+
+              {/* Valores — con recálculo del total en vivo */}
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: 12, marginBottom: 14 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#475569', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+                  Valores
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 10 }}>
+                  <div style={{ ...S.field, marginBottom: 0 }}>
+                    <label style={S.label}>Base</label>
+                    <input type="number" style={S.input} value={form.monto ?? ''} onChange={e => set('monto', e.target.value)} />
+                  </div>
+                  <div style={{ ...S.field, marginBottom: 0 }}>
+                    <label style={S.label}>IVA $</label>
+                    <input type="number" style={S.input} value={form.ivaVal ?? 0} onChange={e => set('ivaVal', e.target.value)} />
+                  </div>
+                  <div style={{ ...S.field, marginBottom: 0 }}>
+                    <label style={S.label}>Retención $</label>
+                    <input type="number" style={S.input} value={form.retenVal ?? 0} onChange={e => set('retenVal', e.target.value)} />
+                  </div>
+                </div>
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  borderTop: '1px dashed #cbd5e1', paddingTop: 9, fontSize: 13
+                }}>
+                  <span style={{ color: '#64748b', fontWeight: 600 }}>Total pagado (base + IVA − retención)</span>
+                  <strong style={{ color: '#0f172a', fontSize: 15 }}>{fmt(totalRecalculado)}</strong>
+                </div>
+                {totalRecalculado !== totalOriginal && (
+                  <div style={{ fontSize: 11, color: '#b45309', marginTop: 7, background: '#fffbeb', borderRadius: 6, padding: '6px 9px' }}>
+                    ⚠️ El total cambia de <strong>{fmt(totalOriginal)}</strong> a <strong>{fmt(totalRecalculado)}</strong>.
+                    El saldo de la caja se ajustará automáticamente en {fmt(Math.abs(totalOriginal - totalRecalculado))}.
+                  </div>
+                )}
+              </div>
+
+              {/* ✅ EGRESO-VEHICULO-001: permite asignar placa a gastos ya
+                  registrados — así se recupera la trazabilidad del histórico. */}
+              {(vehiculos || []).length > 0 && (
+                <div style={S.field}>
+                  <label style={S.label}>Vehículo (para gastos de combustible / mantenimiento)</label>
+                  <select style={S.select} value={form.vehiculoId || ''}
+                    onChange={e => {
+                      const v = (vehiculos || []).find(x => x.id === e.target.value);
+                      set('vehiculoId', e.target.value);
+                      set('vehiculoPlaca', v ? v.placa : '');
+                    }}>
+                    <option value="">— Sin vehículo —</option>
+                    {(vehiculos || []).filter(v => v.activo !== false).map(v => (
+                      <option key={v.id} value={v.id}>
+                        {v.placa} · {v.tipo}{v.conductorNombre ? ` · ${v.conductorNombre}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div style={S.field}>
+                <label style={S.label}>Notas</label>
+                <textarea style={{ ...S.input, height: 56, resize: 'vertical' }} value={form.notas || ''} onChange={e => set('notas', e.target.value)} />
+              </div>
+
+              {/* ✅ EGRESO-INTELIGENTE-001: las mismas reglas del alta corren
+                  al editar. Si la corrección arregla el problema, la alerta
+                  desaparece en vivo — el usuario ve que quedó bien. */}
+              <PanelAlertas alertas={alertasEdicion} compacto />
+
               <div style={S.modalFooter}>
                 <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
                 <button onClick={async () => { setSaving(true); await onSave(form, motivo, pin); setSaving(false); }} disabled={saving}
@@ -1231,12 +2102,28 @@ export default function GestionEgresos({ user }) {
   const [selected, setSelected]   = useState(null);
   const [modalProvisional, setModalProvisional] = useState(false);
   const [mensajeros, setMensajeros] = useState([]);
-  const [filtros, setFiltros]     = useState({ estado: 'todos', categoria: 'todos', busca: '', desde: '', hasta: '' });
+  // ✅ EGRESO-VEHICULO-001: se agrega `vehiculo` al filtro
+  const [filtros, setFiltros]     = useState({ estado: 'todos', categoria: 'todos', vehiculo: 'todos', busca: '', desde: '', hasta: '' });
   // Ola 2: pestañas + cuadre definitivo
   const [tab, setTab]                             = useState('todos');
   const [provisionalACuadrar, setProvisionalACuadrar] = useState(null);
   // ✅ EGRESO-PROV-001: anticipo preseleccionado al abrir "nuevo egreso"
   const [provisionalALegalizar, setProvisionalALegalizar] = useState(null);
+
+  // ✅ EGRESO-VISUAL-001 · EGRESO-RECLASIFICAR-001 · EGRESO-VEHICULO-001
+  const [vehiculos, setVehiculos]           = useState([]);
+  const [consumoVehiculos, setConsumoVehiculos] = useState(null);
+  const [ingresosPeriodo, setIngresosPeriodo]   = useState(0);
+  const [ingresosPorMes, setIngresosPorMes]     = useState({});
+  const [seleccionados, setSeleccionados]   = useState([]);   // ids para reclasificar en lote
+  const [modalReclasificar, setModalReclasificar] = useState(false);
+  const [ordenes, setOrdenes]               = useState([]);   // ventas, para Ingresos vs Gastos
+  // ✅ NOMINA-PROVISIONES-001: para detectar si el tercero es un empleado
+  const [empleados, setEmpleados]           = useState([]);
+  // ✅ EGRESO-EDICION-002 · EGRESO-RECLASIFICAR-001 · EGRESO-INTELIGENTE-001
+  const [modalHistorial, setModalHistorial] = useState(null);
+  const [modalLotes, setModalLotes]         = useState(false);
+  const [revisandoHistoricos, setRevisando] = useState(false);
 
   useEffect(() => { cargarDatos(); }, []);
 
@@ -1252,14 +2139,36 @@ export default function GestionEgresos({ user }) {
     setLoading(true);
     try {
       const h = getHeaders();
-      const [eRes, cRes, empRes, configRes, usersRes] = await Promise.all([
+      const [eRes, cRes, empRes, configRes, usersRes, vehRes, ordRes, emplRes] = await Promise.all([
         axios.get(`${API}/egresos`, { headers: h }).catch(() => ({ data: [] })),
         axios.get(`${API}/cajas`, { headers: h }).catch(() => ({ data: [] })),
         axios.get(`${API}/companies`, { headers: h }).catch(() => ({ data: [] })),
         axios.get(`${API}/configuracion`, { headers: h }).catch(() => ({ data: {} })),
         axios.get(`${API}/users`, { headers: h }).catch(() => ({ data: [] })),
+        // ✅ EGRESO-VEHICULO-001 · si el endpoint aún no existe, degrada a lista vacía
+        axios.get(`${API}/vehiculos`, { headers: h }).catch(() => ({ data: [] })),
+        // ✅ EGRESO-VISUAL-001 · órdenes para el comparativo Ingresos vs Gastos
+        axios.get(`${API}/orders`, { headers: h }).catch(() => ({ data: [] })),
+        // ✅ NOMINA-PROVISIONES-001 · empleados, para detectar anticipos
+        axios.get(`${API}/empleados`, { headers: h }).catch(() => ({ data: [] })),
       ]);
       setEgresos(Array.isArray(eRes.data) ? eRes.data : []);
+      setVehiculos(Array.isArray(vehRes.data) ? vehRes.data : []);
+      setEmpleados(Array.isArray(emplRes.data) ? emplRes.data : []);
+
+      // ✅ EGRESO-VISUAL-001: ingresos agrupados por mes para la gráfica de
+      // evolución. Se calcula acá y no en el backend para no agregar otra
+      // consulta: las órdenes ya se traen para el resto del módulo.
+      const listaOrdenes = Array.isArray(ordRes.data) ? ordRes.data : (ordRes.data?.orders || []);
+      setOrdenes(listaOrdenes);
+      const porMes = {};
+      for (const o of listaOrdenes) {
+        if (o.anulada === true || o.estado === 'ANULADA') continue;
+        const f = String(o.fecha || o.fechaCreacion || o.createdAt || '').slice(0, 7);
+        if (!/^\d{4}-\d{2}$/.test(f)) continue;
+        porMes[f] = (porMes[f] || 0) + (Number(o.total || o.totalOrden || o.valorTotal) || 0);
+      }
+      setIngresosPorMes(porMes);
       setCajas(Array.isArray(cRes.data) ? cRes.data : []);
       setEmpresas(Array.isArray(empRes.data) ? empRes.data : []);
       setMensajeros((Array.isArray(usersRes.data) ? usersRes.data : []).filter(u => u.role === 'mensajero' && u.activo !== false));
@@ -1365,15 +2274,44 @@ export default function GestionEgresos({ user }) {
   // FIX PIN-UNICO-001: el body ahora incluye `pin`. Antes el backend lo exigia
   // y el frontend no lo mandaba -> siempre respondia "PIN requerido".
   const editarPagado = async (form, motivo, pin) => {
-    const update = { ...form, monto: Number(form.monto), motivoEdicion: motivo, editadoPor: user?.email, pin };
+    // ✅ EGRESO-EDICION-002: se envían explícitamente los campos editables.
+    // Antes se hacía spread de todo el formulario, lo que mandaba también
+    // campos internos (numero, userId, createdAt, calidad...) que el backend
+    // ignora pero que ensucian el payload. Ahora es una lista cerrada.
+    const update = {
+      concepto:  form.concepto,
+      proveedor: form.proveedor,
+      categoria: form.categoria,
+      fecha:     form.fecha,
+      monto:     Number(form.monto) || 0,
+      ivaVal:    Number(form.ivaVal) || 0,
+      ivaPct:    Number(form.ivaPct) || 0,
+      retenVal:  Number(form.retenVal) || 0,
+      retenPct:  Number(form.retenPct) || 0,
+      formaPago: form.formaPago,
+      cajaId:    form.cajaId,
+      empresaId: form.empresaId,
+      notas:     form.notas,
+      vehiculoId:    form.vehiculoId || '',
+      vehiculoPlaca: form.vehiculoPlaca || '',
+      motivoEdicion: motivo,
+      editadoPor: user?.email,
+      pin
+    };
     // FIX: el backend define POST (no PUT) para /editar-pagado. Mismo bug
     // que pagarEgreso. Ahora espera respuesta, si falla muestra error.
     try {
-      await axios.post(`${API}/egresos/${selected.id}/editar-pagado`, update, { headers: getHeaders() });
+      const res = await axios.post(`${API}/egresos/${selected.id}/editar-pagado`, update, { headers: getHeaders() });
       // El PIN no debe quedar guardado en el estado de la lista.
       const { pin: _omitirPin, ...updateUI } = update;
-      setEgresos(p => p.map(e => e.id === selected.id ? { ...e, ...updateUI } : e));
+      // El backend devuelve el totalPagar recalculado y la marca de calidad:
+      // se toman de la respuesta para que la tabla quede igual que la BD.
+      setEgresos(p => p.map(e => e.id === selected.id
+        ? { ...e, ...updateUI, totalPagar: res.data?.totalPagar ?? e.totalPagar, calidad: res.data?.calidad ?? e.calidad }
+        : e));
       setModal(null); setSelected(null);
+      // Si la caja cambió de saldo, hay que refrescar para no mostrar un saldo viejo
+      await cargarDatos();
     } catch (e) {
       alert('No se pudo editar el egreso: ' + (e.response?.data?.error || e.message));
     }
@@ -1395,6 +2333,9 @@ export default function GestionEgresos({ user }) {
   const egresosFiltered = egresos.filter(e => {
     if (filtros.estado !== 'todos' && e.estado !== filtros.estado) return false;
     if (filtros.categoria !== 'todos' && e.categoria !== filtros.categoria) return false;
+    // ✅ EGRESO-VEHICULO-001: 'sin' aísla los gastos que todavía no tienen placa
+    if (filtros.vehiculo === 'sin' && e.vehiculoId) return false;
+    if (filtros.vehiculo !== 'todos' && filtros.vehiculo !== 'sin' && e.vehiculoId !== filtros.vehiculo) return false;
     if (filtros.busca && !e.concepto?.toLowerCase().includes(filtros.busca.toLowerCase()) && !e.proveedor?.toLowerCase().includes(filtros.busca.toLowerCase())) return false;
     if (filtros.desde && e.fecha && e.fecha < filtros.desde) return false;
     if (filtros.hasta && e.fecha && e.fecha > filtros.hasta) return false;
@@ -1412,6 +2353,129 @@ export default function GestionEgresos({ user }) {
 
   const setF = (k, v) => setFiltros(f => ({ ...f, [k]: v }));
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ EGRESO-VISUAL-001 — Datos derivados para el panel de análisis
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Ingresos del mismo período que los egresos filtrados. Se usa el rango de
+  // fechas del filtro; si no hay rango, se toma todo.
+  const ingresosDelPeriodo = useMemo(() => {
+    return ordenes.reduce((a, o) => {
+      if (o.anulada === true || o.estado === 'ANULADA') return a;
+      const f = String(o.fecha || o.fechaCreacion || o.createdAt || '').slice(0, 10);
+      if (filtros.desde && f && f < filtros.desde) return a;
+      if (filtros.hasta && f && f > filtros.hasta) return a;
+      return a + (Number(o.total || o.totalOrden || o.valorTotal) || 0);
+    }, 0);
+  }, [ordenes, filtros.desde, filtros.hasta]);
+
+  // Etiqueta legible del período — se usa en los títulos de las gráficas
+  const etiquetaPeriodo = useMemo(() => {
+    if (filtros.desde && filtros.hasta) {
+      const d = new Date(filtros.desde + 'T00:00:00');
+      const h = new Date(filtros.hasta + 'T00:00:00');
+      const MESES_L = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+      // Mismo mes completo → "de julio 2026"
+      if (d.getMonth() === h.getMonth() && d.getFullYear() === h.getFullYear()) {
+        return `de ${MESES_L[d.getMonth()]} ${d.getFullYear()}`;
+      }
+      return `del ${filtros.desde} al ${filtros.hasta}`;
+    }
+    if (filtros.desde) return `desde ${filtros.desde}`;
+    if (filtros.hasta) return `hasta ${filtros.hasta}`;
+    return 'del histórico';
+  }, [filtros.desde, filtros.hasta]);
+
+  // Consumo por vehículo — se recarga cuando cambia el rango de fechas
+  useEffect(() => {
+    let vivo = true;
+    (async () => {
+      try {
+        const params = new URLSearchParams();
+        if (filtros.desde) params.set('desde', filtros.desde);
+        if (filtros.hasta) params.set('hasta', filtros.hasta);
+        const res = await axios.get(`${API}/vehiculos/consumo?${params}`, { headers: getHeaders() });
+        if (vivo) setConsumoVehiculos(res.data);
+      } catch {
+        if (vivo) setConsumoVehiculos({ vehiculos: [], sinAsignar: { total: 0, cantidad: 0, detalle: [] }, trazabilidad: 100, totalGeneral: 0 });
+      }
+    })();
+    return () => { vivo = false; };
+  }, [filtros.desde, filtros.hasta]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ EGRESO-INTELIGENTE-001 — Auditoría de calidad del período (en cliente)
+  // ─────────────────────────────────────────────────────────────────────────
+  // Se corre localmente sobre los egresos ya cargados: no agrega una llamada
+  // más y responde al instante cuando cambia el filtro. El backend tiene el
+  // mismo cálculo en /api/egresos/calidad para usos server-side.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const auditoriaCalidad = useMemo(() => {
+    const validos = egresosFiltered.filter(e => e.anulado !== true);
+    const porRegla = {};
+    let conAlerta = 0, graves = 0;
+
+    for (const e of validos) {
+      const meta = categoriasMeta.find(c => normTxt(c.nombre) === normTxt(e.categoria)) || null;
+      const r = validarEgreso(e, {
+        categoriaMeta: meta,
+        categoriasValidas: categorias,
+        egresosRecientes: validos
+      });
+      if (!r.alertas.length) continue;
+      conAlerta += 1;
+      graves += r.conteo.graves;
+      for (const a of r.alertas) {
+        if (!porRegla[a.id]) porRegla[a.id] = { ...a, cantidad: 0, valor: 0, egresos: [] };
+        porRegla[a.id].cantidad += 1;
+        porRegla[a.id].valor += Number(e.totalPagar || e.monto) || 0;
+        if (porRegla[a.id].egresos.length < 50) porRegla[a.id].egresos.push(e);
+      }
+    }
+
+    const peso = { grave: 0, media: 1, leve: 2 };
+    return {
+      total: validos.length,
+      conAlerta,
+      graves,
+      puntaje: validos.length > 0 ? Math.round((validos.length - conAlerta) / validos.length * 100) : 100,
+      ranking: Object.values(porRegla).sort((a, b) =>
+        peso[a.severidad] - peso[b.severidad] || b.cantidad - a.cantidad)
+    };
+  }, [egresosFiltered, categoriasMeta, categorias]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ EGRESO-RECLASIFICAR-001 — Selección múltiple
+  // ═══════════════════════════════════════════════════════════════════════════
+  const toggleSeleccion = (id) =>
+    setSeleccionados(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id]);
+
+  const seleccionarTodos = () => {
+    const ids = egresosFiltered.filter(e => e.anulado !== true).map(e => e.id);
+    setSeleccionados(p => p.length === ids.length ? [] : ids);
+  };
+
+  const egresosSeleccionados = useMemo(
+    () => egresosFiltered.filter(e => seleccionados.includes(e.id)),
+    [egresosFiltered, seleccionados]
+  );
+
+  const reclasificarLote = async ({ ids, categoriaDestino, motivo, pin }) => {
+    const res = await axios.post(`${API}/egresos/reclasificar-lote`,
+      { ids, categoriaDestino, motivo, pin }, { headers: getHeaders() });
+    const d = res.data;
+    setEgresos(p => p.map(e => ids.includes(e.id) ? { ...e, categoria: d.categoriaDestino } : e));
+    setSeleccionados([]);
+    setModalReclasificar(false);
+    alert(
+      `✅ Reclasificación completa\n\n` +
+      `${d.reclasificados} egreso(s) por ${fmt(d.valorTotal)} → "${d.categoriaDestino}"\n` +
+      (d.omitidos?.length ? `${d.omitidos.length} omitido(s)\n` : '') +
+      `\nLote: ${d.loteId}\nSe puede revertir completo desde Auditoría.`
+    );
+    await cargarDatos();
+  };
+
   if (loading) return <div style={{ padding: 40, textAlign: 'center', color: '#64748b' }}>⏳ Cargando egresos...</div>;
 
   return (
@@ -1422,7 +2486,13 @@ export default function GestionEgresos({ user }) {
           <p style={S.pageSubtitle}>Gastos operativos · IVA descontable · Retenciones · Auditoría</p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
-          <button onClick={() => exportarExcel(egresosFiltered, [
+          <button onClick={() => exportarExcel(egresosFiltered.map(e => ({
+            ...e,
+            // Campos derivados para el Excel — se calculan acá porque el
+            // exportador solo lee propiedades planas del objeto.
+            _anticipo: e.esAnticipoNomina ? (e.cruzadoEnNomina ? 'Sí · cruzado' : 'Sí · pendiente') : '',
+            _calidad: e.calidad?.cantidad ? e.calidad.resumen : ''
+          })), [
             { key: 'numero', label: 'N°' }, { key: 'fecha', label: 'Fecha' },
             { key: 'concepto', label: 'Concepto' }, { key: 'proveedor', label: 'Proveedor' },
             { key: 'categoria', label: 'Categoría' }, { key: 'formaPago', label: 'Forma Pago' },
@@ -1430,6 +2500,13 @@ export default function GestionEgresos({ user }) {
             { key: 'ivaVal', label: 'IVA $' }, { key: 'retenPct', label: 'Ret %' },
             { key: 'retenVal', label: 'Ret $' }, { key: 'totalPagar', label: 'Total pagado' },
             { key: 'estado', label: 'Estado' },
+            // ✅ EGRESO-VEHICULO-001 · EGRESO-INTELIGENTE-001 · NOMINA-PROVISIONES-001
+            // El Excel es el soporte que se le entrega al contador: tiene que
+            // llevar la misma información que ve el usuario en pantalla.
+            { key: 'vehiculoPlaca', label: 'Placa' },
+            { key: 'empleadoNombre', label: 'Empleado' },
+            { key: '_anticipo', label: 'Anticipo nómina' },
+            { key: '_calidad', label: 'Observaciones' },
           ], 'egresos')} style={{ ...S.btnSecondary, fontSize: 12 }}>
             📥 Exportar Excel
           </button>
@@ -1454,6 +2531,42 @@ export default function GestionEgresos({ user }) {
           }}>
           📤 Todos los egresos
         </button>
+
+        {/* ✅ EGRESO-VISUAL-001: panel de análisis. Se pone SEGUNDO y no primero
+            a propósito — quien entra a Egresos suele venir a digitar, no a
+            analizar. El análisis está a un clic, no en el camino. */}
+        <button onClick={() => setTab('analisis')}
+          style={{
+            padding: '10px 24px', background: 'none', border: 'none', cursor: 'pointer',
+            fontSize: 14, fontWeight: 600,
+            color: tab === 'analisis' ? '#4f46e5' : '#6b7280',
+            borderBottom: tab === 'analisis' ? '2px solid #4f46e5' : '2px solid transparent',
+            marginBottom: -2
+          }}>
+          📊 Análisis
+        </button>
+
+        {/* ✅ EGRESO-INTELIGENTE-001: revisión de calidad. El badge muestra
+            cuántos egresos tienen observaciones — si está en rojo, el estado
+            de resultados de ese mes no es confiable todavía. */}
+        <button onClick={() => setTab('calidad')}
+          style={{
+            padding: '10px 24px', background: 'none', border: 'none', cursor: 'pointer',
+            fontSize: 14, fontWeight: 600,
+            color: tab === 'calidad' ? '#dc2626' : '#6b7280',
+            borderBottom: tab === 'calidad' ? '2px solid #dc2626' : '2px solid transparent',
+            marginBottom: -2,
+            display: 'flex', alignItems: 'center', gap: 6
+          }}>
+          🔍 Revisión
+          {auditoriaCalidad.conAlerta > 0 && (
+            <span style={{
+              background: auditoriaCalidad.graves > 0 ? '#dc2626' : '#d97706',
+              color: '#fff', borderRadius: 10, padding: '2px 8px', fontSize: 11, fontWeight: 700
+            }}>{auditoriaCalidad.conAlerta}</span>
+          )}
+        </button>
+
         <button onClick={() => setTab('provisionales')}
           style={{
             padding: '10px 24px', background: 'none', border: 'none', cursor: 'pointer',
@@ -1470,6 +2583,209 @@ export default function GestionEgresos({ user }) {
           })()}
         </button>
       </div>
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          ✅ EGRESO-VISUAL-001 — PESTAÑA ANÁLISIS
+          ─────────────────────────────────────────────────────────────────────
+          Responde de un vistazo "¿por dónde se me está yendo la plata?".
+          Usa el MISMO filtro de fechas de la tabla, para que lo que se ve en
+          la gráfica y lo que se ve en el listado sean siempre lo mismo.
+          ═══════════════════════════════════════════════════════════════════ */}
+      {tab === 'analisis' && (
+        <div>
+          {/* Selector de período rápido */}
+          <div style={{
+            display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
+            background: '#fff', borderRadius: 12, padding: '12px 16px', marginBottom: 16,
+            border: '1px solid #f1f5f9', boxShadow: '0 1px 3px rgba(15,23,42,0.06)'
+          }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: '#475569' }}>Período:</span>
+            <input type="date" style={{ ...S.input, padding: '7px 10px' }} value={filtros.desde} onChange={e => setF('desde', e.target.value)} />
+            <span style={{ color: '#cbd5e1' }}>→</span>
+            <input type="date" style={{ ...S.input, padding: '7px 10px' }} value={filtros.hasta} onChange={e => setF('hasta', e.target.value)} />
+            {[
+              { l: 'Este mes', d: 0 },
+              { l: 'Mes pasado', d: 1 },
+            ].map(op => (
+              <button key={op.l} onClick={() => {
+                const hoy = new Date();
+                const ini = new Date(hoy.getFullYear(), hoy.getMonth() - op.d, 1);
+                const fin = new Date(hoy.getFullYear(), hoy.getMonth() - op.d + 1, 0);
+                const iso = (x) => x.toLocaleDateString('en-CA');
+                setFiltros(f => ({ ...f, desde: iso(ini), hasta: iso(fin) }));
+              }} style={{ ...S.btnSecondary, padding: '7px 14px', fontSize: 12 }}>{op.l}</button>
+            ))}
+            <button onClick={() => setFiltros(f => ({ ...f, desde: '', hasta: '' }))}
+              style={{ ...S.btnSecondary, padding: '7px 14px', fontSize: 12 }}>Todo</button>
+          </div>
+
+          <EgresosGraficas
+            egresos={egresosFiltered}
+            egresosTodos={egresos}
+            ingresosPeriodo={ingresosDelPeriodo}
+            ingresosPorMes={ingresosPorMes}
+            categoriasMeta={categoriasMeta}
+            consumoVehiculos={consumoVehiculos}
+            etiquetaPeriodo={etiquetaPeriodo}
+            isMobile={isMobile}
+            onVerCategoria={(d) => { setF('categoria', d.label); setTab('todos'); }}
+          />
+        </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          ✅ EGRESO-INTELIGENTE-001 — PESTAÑA REVISIÓN DE CALIDAD
+          ─────────────────────────────────────────────────────────────────────
+          Antes de creerle al estado de resultados, esta pantalla responde
+          "¿qué tan confiable es la información de este mes?". Agrupa por tipo
+          de problema para poder corregir en lote, no de a uno.
+          ═══════════════════════════════════════════════════════════════════ */}
+      {tab === 'calidad' && (
+        <div>
+          {/* Puntaje */}
+          <div style={{
+            background: '#fff', borderRadius: 16, padding: '20px 24px', marginBottom: 16,
+            border: '1px solid #f1f5f9', boxShadow: '0 1px 3px rgba(15,23,42,0.06)',
+            display: 'flex', alignItems: 'center', gap: 22, flexWrap: 'wrap'
+          }}>
+            <div style={{ textAlign: 'center', minWidth: 108 }}>
+              <div style={{
+                fontSize: 46, fontWeight: 900, lineHeight: 1,
+                color: auditoriaCalidad.puntaje >= 90 ? '#16a34a'
+                     : auditoriaCalidad.puntaje >= 70 ? '#d97706' : '#dc2626'
+              }}>{auditoriaCalidad.puntaje}%</div>
+              <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.06em', marginTop: 4 }}>
+                Sin observaciones
+              </div>
+            </div>
+            <div style={{ flex: 1, minWidth: 260 }}>
+              <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a', marginBottom: 5 }}>
+                Confiabilidad de la información {etiquetaPeriodo}
+              </div>
+              <div style={{ fontSize: 12.5, color: '#64748b', lineHeight: 1.6 }}>
+                De <strong>{auditoriaCalidad.total}</strong> egresos revisados,{' '}
+                <strong style={{ color: auditoriaCalidad.conAlerta ? '#dc2626' : '#16a34a' }}>
+                  {auditoriaCalidad.conAlerta}
+                </strong>{' '}
+                tienen alguna observación
+                {auditoriaCalidad.graves > 0 && <>, de los cuales <strong style={{ color: '#dc2626' }}>{auditoriaCalidad.graves}</strong> son errores contables probables</>}.
+                {auditoriaCalidad.conAlerta === 0 && ' Toda la información del período está limpia.'}
+              </div>
+            </div>
+
+            {/* ✅ EGRESO-INTELIGENTE-001: revisión retroactiva.
+                Esta pantalla evalúa en vivo, pero los egresos anteriores al
+                motor de reglas no tienen la marca guardada, así que no muestran
+                el ícono de alerta en el listado. Este botón corre el motor sobre
+                el histórico y deja la marca. No modifica ningún valor. */}
+            {user?.role === 'admin' && (
+              <button
+                onClick={async () => {
+                  if (!window.confirm(
+                    'Revisar los egresos del período con el motor de reglas.\n\n' +
+                    'Esto NO modifica ningún valor: solo evalúa cada egreso y guarda las observaciones ' +
+                    'para que aparezcan marcadas en el listado.\n\n' +
+                    'Sirve para los egresos registrados antes de que existieran las validaciones.'
+                  )) return;
+                  setRevisando(true);
+                  try {
+                    const r = await axios.post(`${API}/egresos/calidad/marcar-historicos`,
+                      { desde: filtros.desde || undefined, hasta: filtros.hasta || undefined, soloFaltantes: false },
+                      { headers: getHeaders() });
+                    alert(`✅ ${r.data.mensaje}\n\nLimpios: ${r.data.limpios}\nCon observaciones: ${r.data.conAlerta}` +
+                          (r.data.graves ? `\nGraves: ${r.data.graves}` : ''));
+                    await cargarDatos();
+                  } catch (e) {
+                    alert('No se pudo completar la revisión: ' + (e.response?.data?.error || e.message));
+                  }
+                  setRevisando(false);
+                }}
+                disabled={revisandoHistoricos}
+                style={{ ...S.btnSecondary, padding: '9px 16px', fontSize: 12, whiteSpace: 'nowrap' }}>
+                {revisandoHistoricos ? 'Revisando...' : '🔄 Revisar el histórico'}
+              </button>
+            )}
+          </div>
+
+          {/* Ranking de problemas */}
+          {auditoriaCalidad.ranking.length === 0 ? (
+            <div style={{
+              background: '#f0fdf4', border: '1px solid #dcfce7', borderRadius: 16,
+              padding: 40, textAlign: 'center', color: '#15803d', fontSize: 14, fontWeight: 600
+            }}>
+              ✅ No se detectaron problemas de digitación en este período.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {auditoriaCalidad.ranking.map(r => {
+                const s = ESTILO_SEVERIDAD[r.severidad] || ESTILO_SEVERIDAD.leve;
+                return (
+                  <div key={r.id} style={{
+                    background: '#fff', borderRadius: 14, border: '1px solid #f1f5f9',
+                    borderLeft: `4px solid ${s.tx}`, padding: '15px 18px',
+                    boxShadow: '0 1px 3px rgba(15,23,42,0.06)'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, flexWrap: 'wrap' }}>
+                      <div style={{ flex: 1, minWidth: 240 }}>
+                        <div style={{ fontSize: 13.5, fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          {s.ic} {r.titulo}
+                          <span style={{
+                            fontSize: 9, fontWeight: 800, background: s.bg, color: s.tx,
+                            border: `1px solid ${s.bd}`, borderRadius: 20, padding: '2px 8px',
+                            textTransform: 'uppercase', letterSpacing: '.04em'
+                          }}>{s.et}</span>
+                        </div>
+                        <div style={{ fontSize: 12, color: '#64748b', marginTop: 6, lineHeight: 1.55 }}>{r.detalle}</div>
+                        {r.sugerencia && (
+                          <div style={{ fontSize: 11.5, color: '#94a3b8', marginTop: 4, fontStyle: 'italic' }}>→ {r.sugerencia}</div>
+                        )}
+                      </div>
+                      <div style={{ textAlign: 'right', minWidth: 130 }}>
+                        <div style={{ fontSize: 22, fontWeight: 900, color: s.tx }}>{r.cantidad}</div>
+                        <div style={{ fontSize: 10, color: '#94a3b8', fontWeight: 700, textTransform: 'uppercase' }}>egreso(s)</div>
+                        <div style={{ fontSize: 12.5, fontWeight: 800, color: '#334155', marginTop: 4 }}>{fmt(r.valor)}</div>
+                      </div>
+                    </div>
+
+                    {/* Acción directa: seleccionar todos los afectados y reclasificar */}
+                    <div style={{ marginTop: 12, paddingTop: 11, borderTop: '1px solid #f8fafc', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <button
+                        onClick={() => { setSeleccionados(r.egresos.map(e => e.id)); setTab('todos'); }}
+                        style={{ ...S.btnSecondary, padding: '6px 13px', fontSize: 11.5 }}>
+                        👁 Ver los {Math.min(r.cantidad, 50)} egresos
+                      </button>
+                      {r.egresos.length > 1 && (
+                        <button
+                          onClick={() => { setSeleccionados(r.egresos.map(e => e.id)); setModalReclasificar(true); }}
+                          style={{ ...S.btnSecondary, padding: '6px 13px', fontSize: 11.5, background: '#eef2ff', color: '#4338ca', border: '1px solid #c7d2fe' }}>
+                          🔀 Reclasificar en lote
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Muestra de los primeros afectados */}
+                    <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {r.egresos.slice(0, 8).map(e => (
+                        <span key={e.id} style={{
+                          fontSize: 10.5, background: '#f8fafc', border: '1px solid #f1f5f9',
+                          borderRadius: 6, padding: '3px 8px', color: '#64748b'
+                        }}>
+                          {e.numero} · {fmt(e.totalPagar || e.monto)}
+                        </span>
+                      ))}
+                      {r.cantidad > 8 && (
+                        <span style={{ fontSize: 10.5, color: '#cbd5e1', padding: '3px 4px' }}>
+                          +{r.cantidad - 8} más
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── VISTA PROVISIONALES (Ola 2) ──────────────────────────────────────── */}
       {tab === 'provisionales' && (() => {
@@ -1576,11 +2892,31 @@ export default function GestionEgresos({ user }) {
           <option value="todos">Todas las categorías</option>
           {categorias.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
+        {/* ✅ EGRESO-VEHICULO-001: filtro por placa. La opción "sin placa" es la
+            más útil: aísla de una vez los gastos que falta atribuir. */}
+        {vehiculos.length > 0 && (
+          <select style={{ ...S.select, maxWidth: 190 }} value={filtros.vehiculo} onChange={e => setF('vehiculo', e.target.value)}>
+            <option value="todos">Todos los vehículos</option>
+            <option value="sin">⚠️ Sin placa asignada</option>
+            {vehiculos.filter(v => v.activo !== false).map(v => (
+              <option key={v.id} value={v.id}>{v.placa} · {v.tipo}</option>
+            ))}
+          </select>
+        )}
         <input type="date" style={{ ...S.input, maxWidth: 150 }} value={filtros.desde} onChange={e => setF('desde', e.target.value)} title="Desde" />
         <input type="date" style={{ ...S.input, maxWidth: 150 }} value={filtros.hasta} onChange={e => setF('hasta', e.target.value)} title="Hasta" />
-        {(filtros.desde || filtros.hasta || filtros.busca || filtros.estado !== 'todos' || filtros.categoria !== 'todos') && (
-          <button onClick={() => setFiltros({ estado: 'todos', categoria: 'todos', busca: '', desde: '', hasta: '' })}
+        {(filtros.desde || filtros.hasta || filtros.busca || filtros.estado !== 'todos' || filtros.categoria !== 'todos' || filtros.vehiculo !== 'todos') && (
+          <button onClick={() => setFiltros({ estado: 'todos', categoria: 'todos', vehiculo: 'todos', busca: '', desde: '', hasta: '' })}
             style={{ padding: '8px 14px', background: '#fee2e2', color: '#991b1b', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>✕ Limpiar</button>
+        )}
+
+        {/* ✅ EGRESO-RECLASIFICAR-001: acceso al historial de lotes */}
+        {user?.role === 'admin' && (
+          <button onClick={() => setModalLotes(true)}
+            style={{ ...S.btnSecondary, padding: '8px 14px', fontSize: 12, marginLeft: 'auto' }}
+            title="Ver y revertir reclasificaciones masivas">
+            🔀 Reclasificaciones
+          </button>
         )}
       </div>
 
@@ -1594,10 +2930,31 @@ export default function GestionEgresos({ user }) {
           {egresosFiltered.map(eg => {
             const esPagado = eg.estado === 'PAGADO';
             return (
-              <div key={eg.id} style={{ background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 14, borderLeft: `4px solid ${esPagado ? '#22c55e' : '#f59e0b'}` }}>
+              <div key={eg.id} style={{
+                background: seleccionados.includes(eg.id) ? '#eef2ff' : '#fff',
+                borderRadius: 12,
+                border: seleccionados.includes(eg.id) ? '1px solid #c7d2fe' : '1px solid #e5e7eb',
+                padding: 14, borderLeft: `4px solid ${esPagado ? '#22c55e' : '#f59e0b'}`
+              }}>
                 {/* Cabecera: número + estado */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <span style={S.badge}>{eg.numero || 'EGR-?'}</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                    {/* ✅ EGRESO-RECLASIFICAR-001: selección múltiple también en
+                        móvil. Antes solo estaba en la tabla de escritorio, así
+                        que desde el celular no se podía reclasificar en lote. */}
+                    {user?.role === 'admin' && (
+                      <input type="checkbox"
+                        checked={seleccionados.includes(eg.id)}
+                        disabled={eg.anulado === true}
+                        onChange={() => toggleSeleccion(eg.id)}
+                        style={{ cursor: 'pointer', width: 17, height: 17, flexShrink: 0 }} />
+                    )}
+                    <span style={S.badge}>{eg.numero || 'EGR-?'}</span>
+                    {/* Marcas de calidad y reclasificación */}
+                    {eg.calidad?.graves > 0 && <span title={eg.calidad.resumen} style={{ fontSize: 12 }}>🚨</span>}
+                    {eg.calidad?.graves === 0 && eg.calidad?.cantidad > 0 && <span title={eg.calidad.resumen} style={{ fontSize: 12 }}>⚠️</span>}
+                    {eg.reclasificacion && eg.reclasificacion.revertido !== true && <span title="Reclasificado" style={{ fontSize: 11 }}>🔀</span>}
+                  </span>
                   {/* ✅ EGRESO-PROV-001: badge de anticipo también en móvil */}
                   {esAnticipoPendiente(eg) ? (
                     <span style={{ ...S.estadoBadge, background: '#ffedd5', color: '#9a3412', border: '1px solid #fdba74' }}>💵 ANTICIPO</span>
@@ -1648,6 +3005,9 @@ export default function GestionEgresos({ user }) {
                     <button onClick={() => { setSelected(eg); setModal('editarPagado'); }} style={{ ...S.actionBtn, background: '#fee2e2', color: '#991b1b' }}>🔐 Editar</button>
                   )}
                   <button onClick={() => imprimirEgreso(eg, empresaDeCaja(eg.cajaId))} style={S.actionBtn} title="Imprimir">🖨️</button>
+                    {/* ✅ EGRESO-EDICION-002: consultar el rastro de cambios.
+                        La auditoría ya se guardaba, pero no había cómo verla. */}
+                    <button onClick={() => setModalHistorial(eg)} style={S.actionBtn} title="Ver historial de cambios">📜</button>
                 </div>
               </div>
             );
@@ -1659,6 +3019,14 @@ export default function GestionEgresos({ user }) {
           <table style={S.table}>
             <thead>
               <tr style={S.thead}>
+                {/* ✅ EGRESO-RECLASIFICAR-001: selección múltiple */}
+                <th style={{ ...S.th, width: 34, paddingRight: 0 }}>
+                  <input type="checkbox"
+                    checked={seleccionados.length > 0 && seleccionados.length === egresosFiltered.filter(e => e.anulado !== true).length}
+                    onChange={seleccionarTodos}
+                    title="Seleccionar todos los filtrados"
+                    style={{ cursor: 'pointer', width: 15, height: 15 }} />
+                </th>
                 {['N°', 'Concepto', 'Proveedor', 'Categoría', 'Fecha', 'Base', 'IVA', 'Retención', 'Total', 'Estado', 'Acciones'].map(h => (
                   <th key={h} style={S.th}>{h}</th>
                 ))}
@@ -1666,11 +3034,36 @@ export default function GestionEgresos({ user }) {
             </thead>
             <tbody>
               {egresosFiltered.length === 0 && (
-                <tr><td colSpan={11} style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>No hay egresos con los filtros seleccionados</td></tr>
+                <tr><td colSpan={12} style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>No hay egresos con los filtros seleccionados</td></tr>
               )}
               {egresosFiltered.map(eg => (
-                <tr key={eg.id} style={S.tr}>
-                  <td style={S.td}><span style={S.badge}>{eg.numero || 'EGR-?'}</span></td>
+                <tr key={eg.id} style={{
+                  ...S.tr,
+                  background: seleccionados.includes(eg.id) ? '#eef2ff' : undefined
+                }}>
+                  <td style={{ ...S.td, paddingRight: 0 }}>
+                    <input type="checkbox"
+                      checked={seleccionados.includes(eg.id)}
+                      disabled={eg.anulado === true}
+                      onChange={() => toggleSeleccion(eg.id)}
+                      style={{ cursor: 'pointer', width: 15, height: 15 }} />
+                  </td>
+                  <td style={S.td}>
+                    <span style={S.badge}>{eg.numero || 'EGR-?'}</span>
+                    {/* ✅ EGRESO-INTELIGENTE-001: marca visible de que el egreso
+                        se guardó con observaciones sin abrir nada */}
+                    {eg.calidad?.graves > 0 && (
+                      <span title={eg.calidad.resumen} style={{ marginLeft: 5, fontSize: 12, cursor: 'help' }}>🚨</span>
+                    )}
+                    {eg.calidad?.graves === 0 && eg.calidad?.cantidad > 0 && (
+                      <span title={eg.calidad.resumen} style={{ marginLeft: 5, fontSize: 12, cursor: 'help' }}>⚠️</span>
+                    )}
+                    {/* ✅ EGRESO-RECLASIFICAR-001: marca de reclasificado */}
+                    {eg.reclasificacion && eg.reclasificacion.revertido !== true && (
+                      <span title={`Reclasificado desde "${eg.reclasificacion.categoriaAnterior}" · ${eg.reclasificacion.motivo}`}
+                        style={{ marginLeft: 5, fontSize: 11, cursor: 'help' }}>🔀</span>
+                    )}
+                  </td>
                   <td style={S.td}><div style={{ fontWeight: 600, fontSize: 13, color: '#1e293b' }}>{eg.concepto}</div></td>
                   <td style={S.td}><span style={{ fontSize: 13, color: '#475569' }}>{eg.proveedor || '—'}</span></td>
                   <td style={S.td}>
@@ -1728,6 +3121,9 @@ export default function GestionEgresos({ user }) {
                       </>
                     )}
                     <button onClick={() => imprimirEgreso(eg, empresaDeCaja(eg.cajaId))} style={S.actionBtn} title="Imprimir">🖨️</button>
+                    {/* ✅ EGRESO-EDICION-002: consultar el rastro de cambios.
+                        La auditoría ya se guardaba, pero no había cómo verla. */}
+                    <button onClick={() => setModalHistorial(eg)} style={S.actionBtn} title="Ver historial de cambios">📜</button>
                   </td>
                 </tr>
               ))}
@@ -1738,14 +3134,99 @@ export default function GestionEgresos({ user }) {
       </>}
       {/* ── Fin vista normal ─────────────────────────────────────────────── */}
 
+      {/* ✅ EGRESO-INTELIGENTE-001 · EGRESO-VEHICULO-001: el modal de alta ahora
+          recibe el mapa de tipoERI (para saber si una categoría es de personal),
+          los vehículos (para el selector de placa) y los egresos recientes
+          (para detectar pagos duplicados). */}
       {modal === 'nuevo' && <ModalEgreso empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias}
+        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados}
         provisionales={egresos.filter(esAnticipoPendiente)}
         provisionalInicial={provisionalALegalizar}
         onSave={crearEgreso} onClose={() => { setModal(null); setProvisionalALegalizar(null); }} />}
-      {modal === 'editar' && selected && <ModalEgreso egreso={{ ...selected, _categorias: categorias }} empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias} onSave={editarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
+      {modal === 'editar' && selected && <ModalEgreso egreso={{ ...selected, _categorias: categorias }} empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias}
+        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados}
+        onSave={editarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'pagar' && selected && <ModalPagar egreso={selected} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} onPagar={pagarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
-      {modal === 'editarPagado' && selected && <ModalEditarPagado egreso={selected} onSave={editarPagado} onClose={() => { setModal(null); setSelected(null); }} />}
+      {/* ✅ EGRESO-EDICION-002: se le pasan el catálogo de categorías, el mapa
+          de tipoERI (para validar en vivo) y los vehículos. Sin estos props el
+          modal no podía mostrar el selector de categoría — que era justamente
+          el campo que hacía falta para corregir los errores de julio. */}
+      {modal === 'editarPagado' && selected && (
+        <ModalEditarPagado
+          egreso={selected}
+          categoriasList={categorias}
+          categoriasMeta={categoriasMeta}
+          vehiculos={vehiculos}
+          onSave={editarPagado}
+          onClose={() => { setModal(null); setSelected(null); }} />
+      )}
       {modal === 'anular' && selected && <ModalAnularEgreso egreso={selected} onAnular={anularEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
+
+      {/* ✅ EGRESO-RECLASIFICAR-001 */}
+      {modalReclasificar && egresosSeleccionados.length > 0 && (
+        <ModalReclasificar
+          egresos={egresosSeleccionados}
+          categoriasList={categorias}
+          onConfirmar={reclasificarLote}
+          onClose={() => setModalReclasificar(false)} />
+      )}
+
+      {/* ✅ EGRESO-EDICION-002: historial de cambios de un egreso */}
+      {modalHistorial && (
+        <ModalHistorial egreso={modalHistorial} onClose={() => setModalHistorial(null)} />
+      )}
+
+      {/* ✅ EGRESO-RECLASIFICAR-001: lotes hechos, con opción de revertir */}
+      {modalLotes && (
+        <ModalLotes
+          onCerrar={() => setModalLotes(false)}
+          onRevertido={async () => { await cargarDatos(); }} />
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          ✅ EGRESO-RECLASIFICAR-001 — Barra flotante de selección
+          ─────────────────────────────────────────────────────────────────────
+          Aparece solo cuando hay egresos marcados. Muestra cuántos y por cuánto
+          antes de ofrecer la acción: nadie debería reclasificar 200 registros
+          sin ver primero el valor total que está moviendo.
+          ═══════════════════════════════════════════════════════════════════ */}
+      {seleccionados.length > 0 && tab === 'todos' && (
+        <div style={{
+          position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          background: '#0f172a', color: '#fff', borderRadius: 14, padding: '13px 20px',
+          boxShadow: '0 12px 40px rgba(15,23,42,0.35)', zIndex: 900,
+          display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
+          maxWidth: 'calc(100vw - 32px)'
+        }}>
+          <div>
+            <div style={{ fontSize: 13.5, fontWeight: 800 }}>
+              {seleccionados.length} egreso(s) seleccionado(s)
+            </div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+              Total {fmt(egresosSeleccionados.reduce((a, e) => a + (Number(e.totalPagar || e.monto) || 0), 0))}
+            </div>
+          </div>
+          <div style={{ width: 1, height: 30, background: '#334155' }} />
+          {user?.role === 'admin' && (
+            <button onClick={() => setModalReclasificar(true)}
+              style={{
+                padding: '9px 17px', background: 'linear-gradient(135deg,#6366f1,#4f46e5)',
+                color: '#fff', border: 'none', borderRadius: 9, fontSize: 12.5,
+                fontWeight: 700, cursor: 'pointer'
+              }}>
+              🔀 Reclasificar categoría
+            </button>
+          )}
+          <button onClick={() => setSeleccionados([])}
+            style={{
+              padding: '9px 15px', background: 'transparent', color: '#94a3b8',
+              border: '1px solid #334155', borderRadius: 9, fontSize: 12.5,
+              fontWeight: 600, cursor: 'pointer'
+            }}>
+            Limpiar
+          </button>
+        </div>
+      )}
       {modalProvisional && <EgresoProvisional mensajeros={mensajeros} cajas={cajas} formasPagoConfig={formasPagoConfig} onCrear={async (data) => { await crearEgreso(data); setModalProvisional(false); }} onCerrar={() => setModalProvisional(false)} />}
 
       {/* Ola 2: modal de cuadre provisional → definitivo */}

@@ -65,6 +65,10 @@ app.use('/api/companies', authenticate, require('./routes/companies'));
 app.use('/api/users',     authenticate, require('./routes/users'));
 app.use('/api/cajas',     authenticate, require('./routes/cajas'));
 app.use('/api/egresos',   authenticate, require('./routes/egresos'));
+// ✅ EGRESO-VEHICULO-001: maestro de vehículos + consumo por placa
+app.use('/api/vehiculos', authenticate, require('./routes/vehiculos'));
+// ✅ NOMINA-PROVISIONES-001: empleados, provisiones de prestaciones y nómina
+app.use('/api/empleados', authenticate, require('./routes/empleados'));
 app.use('/api/configuracion', authenticate, require('./routes/configuracion'));
 app.use('/api/cxc',       authenticate, require('./routes/cxc'));
 app.use('/api/cxp',       authenticate, require('./routes/cxp'));

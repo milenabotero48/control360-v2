@@ -252,6 +252,80 @@ const BarrasHorizontal = ({ items, etiqueta, valor, sufijo, color = C.violeta })
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ✅ VENC-KPI-002 (2026-08-08) — Balance comparativo de 6 meses
+// ───────────────────────────────────────────────────────────────────────────
+// Las tarjetas de arriba responden por el mes en curso, que todavía está
+// corriendo. Un mes cerrado se juzga distinto: ya no es proyección, es
+// resultado. Esta tabla pone los últimos 6 meses cerrados uno al lado del otro
+// para ver la tendencia sin navegar entre meses.
+//
+// La columna que importa es la última: DEJADO DE FACTURAR. Es la venta que
+// estaba disponible en ese mes y no se cerró — el costo real de no llamar.
+// Un gerente que ve esa columna en rojo entiende el problema sin que nadie se
+// lo explique.
+// ═══════════════════════════════════════════════════════════════════════════
+const TablaComparativa = ({ meses, mesActualKey }) => {
+  if (!meses?.length) return <p style={S.cardPie}>Todavía no hay meses para comparar.</p>;
+
+  const tdBase = { padding: '10px 10px', fontSize: 12.5, borderBottom: `1px solid ${C.borde}`, whiteSpace: 'nowrap' };
+  const th = { ...tdBase, fontSize: 11, fontWeight: 700, color: C.gris, textTransform: 'uppercase', letterSpacing: 0.3, borderBottom: `2px solid ${C.borde}` };
+
+  // Referencia para pintar el retorno: el mejor mes del periodo. Comparar
+  // contra el propio historial es más honesto que contra un número inventado.
+  const mejorRetorno = Math.max(...meses.map(m => m.tasaRetorno), 1);
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 640 }}>
+        <thead>
+          <tr>
+            <th style={{ ...th, textAlign: 'left' }}>Mes</th>
+            <th style={{ ...th, textAlign: 'right' }}>Vencían</th>
+            <th style={{ ...th, textAlign: 'right' }}>Volvieron</th>
+            <th style={{ ...th, textAlign: 'left', minWidth: 130 }}>Retorno</th>
+            <th style={{ ...th, textAlign: 'right' }}>Venta disponible</th>
+            <th style={{ ...th, textAlign: 'right' }}>Facturado</th>
+            <th style={{ ...th, textAlign: 'right' }}>Dejado de facturar</th>
+          </tr>
+        </thead>
+        <tbody>
+          {meses.map(m => {
+            const esActual = m.mes === mesActualKey;
+            const perdido = Math.max(m.ventaProyectada - m.ventaRealizada, 0);
+            return (
+              <tr key={m.mes} style={{ background: esActual ? 'rgba(124,58,237,0.045)' : 'transparent' }}>
+                <td style={{ ...tdBase, fontWeight: esActual ? 800 : 700, color: esActual ? C.violeta : C.tinta }}>
+                  {etiquetaMes(m.mes)}
+                  {esActual && <span style={{ ...S.chip(C.violetaSuave, C.violeta), marginLeft: 7, fontSize: 10 }}>en curso</span>}
+                </td>
+                <td style={{ ...tdBase, textAlign: 'right', color: C.tinta }}>{m.clientesEsperados.toLocaleString('es-CO')}</td>
+                <td style={{ ...tdBase, textAlign: 'right', fontWeight: 700, color: C.verde }}>{m.clientesRegresaron.toLocaleString('es-CO')}</td>
+                <td style={tdBase}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ flex: 1, height: 7, background: '#f4f2f9', borderRadius: 999, overflow: 'hidden', minWidth: 52 }}>
+                      <div style={{
+                        width: `${(m.tasaRetorno / mejorRetorno) * 100}%`, height: '100%', borderRadius: 999,
+                        background: m.tasaRetorno >= mejorRetorno * 0.7 ? C.verde : m.tasaRetorno >= mejorRetorno * 0.35 ? C.ambar : C.rojo,
+                      }} />
+                    </div>
+                    <span style={{ fontWeight: 800, color: C.tinta, minWidth: 42, textAlign: 'right' }}>{m.tasaRetorno}%</span>
+                  </div>
+                </td>
+                <td style={{ ...tdBase, textAlign: 'right', color: C.tinta }}>{fmtCorto(m.ventaProyectada)}</td>
+                <td style={{ ...tdBase, textAlign: 'right', fontWeight: 700, color: C.verde }}>{fmtCorto(m.ventaRealizada)}</td>
+                <td style={{ ...tdBase, textAlign: 'right', fontWeight: 800, color: perdido > 0 ? C.rojo : C.gris }}>
+                  {perdido > 0 ? `−${fmtCorto(perdido)}` : '—'}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
 export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
   const [datos, setDatos] = useState(null);
   const [cargando, setCargando] = useState(true);
@@ -384,6 +458,35 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
               lista de productos. Es la caja que deberías facturar si todos los clientes regresan.
             </p>
             <GraficaProyeccion datos={proyeccion} mesActual={mesActual.mes} />
+          </div>
+
+          {/* ✅ VENC-KPI-002 — Balance de los últimos 6 meses cerrados + el
+              mes en curso, para juzgar la tendencia sin navegar mes a mes. */}
+          <div style={S.panel}>
+            <h4 style={S.panelTitulo}>Balance de los últimos 6 meses</h4>
+            <p style={S.panelSub}>
+              Meses ya cerrados: no es proyección, es resultado. La última columna es la venta que estaba
+              disponible y no se cerró — el costo real de no alcanzar a llamar.
+            </p>
+            <TablaComparativa
+              meses={[...historico.slice(-6), mesActual]}
+              mesActualKey={mesActual.mes}
+            />
+            {(() => {
+              const cerrados = historico.slice(-6);
+              const perdidoTotal = cerrados.reduce((s, m) => s + Math.max(m.ventaProyectada - m.ventaRealizada, 0), 0);
+              if (!cerrados.length || perdidoTotal <= 0) return null;
+              return (
+                <div style={{ ...S.aviso, background: '#fef2f2', borderColor: '#fecaca', color: '#991b1b', marginTop: 14 }}>
+                  <span style={{ fontSize: 15 }}>💸</span>
+                  <span>
+                    En los últimos {cerrados.length} meses quedaron <strong>{fmtCorto(perdidoTotal)}</strong> sin
+                    facturar de clientes que ya tenías y a los que solo había que llamar. Recuperar aunque sea
+                    una parte cuesta menos que conseguir clientes nuevos por el mismo valor.
+                  </span>
+                </div>
+              );
+            })()}
           </div>
 
           <div style={S.panel}>

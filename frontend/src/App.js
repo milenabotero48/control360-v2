@@ -19,6 +19,9 @@ import ModuloReportes from './ModuloReportes'; // Ola 3 Bloque 2
 import CampanaAlertas from './CampanaAlertas'; // Ola 3 Bloque 3
 import GestionCaja from './GestionCaja';
 import GestionEgresos from './GestionEgresos';
+// ✅ EGRESO-VEHICULO-001 · NOMINA-PROVISIONES-001
+import GestionVehiculos from './GestionVehiculos';
+import GestionEmpleados from './GestionEmpleados';
 import GestionCxC from './GestionCxC';
 import GestionCxP from './GestionCxP';
 import GestionProveedores from './GestionProveedores';
@@ -49,6 +52,9 @@ const TODOS_LOS_MODULOS = [
      { key: 	'qr',          	label: 	'QR Activos',    	icon: 	'📲', modulo: 'qr' },
   { key: 'caja',        label: 'Caja',          icon: '💰', modulo: 'caja' },
   { key: 'egresos',     label: 'Egresos',       icon: '💸', modulo: 'egresos' },
+  // ✅ EGRESO-VEHICULO-001 · NOMINA-PROVISIONES-001
+  { key: 'vehiculos',   label: 'Vehículos',     icon: '🚚', modulo: 'vehiculos' },
+  { key: 'empleados',   label: 'Empleados',     icon: '👥', modulo: 'empleados' },
   { key: 'compras',     label: 'Compras',       icon: '🛒', modulo: 'compras' },
   { key: 'cxc',         label: 'CxC',           icon: '💳', modulo: 'cxc' },
   { key: 'cxp',         label: 'CxP',           icon: '📋', modulo: 'cxp' },
@@ -65,6 +71,9 @@ const NAV_GRUPOS = {
     { grupo: 'Operaciones',    modulos: ['ordenes', 'cotizaciones', 'clientes', 'comercial', 'vencimientos', 'productos', 'proveedores'] },
     { grupo: 'Ejecución',      modulos: ['logistica', 'taller', 'qr'] },
     { grupo: 'Finanzas',       modulos: ['caja', 'egresos', 'compras', 'cxc', 'cxp', 'eri', 'reportes'] },
+    // ✅ Recursos: lo que la empresa TIENE y con quién CUENTA. Se separa de
+    // Finanzas porque son maestros, no movimientos — pero alimentan el ERI.
+    { grupo: 'Recursos',       modulos: ['empleados', 'vehiculos'] },
     { grupo: 'Configuración',  modulos: ['config', 'usuarios'] },
   ],
   comercial: [
@@ -551,6 +560,10 @@ export default function AppRoot() {
           {currentPage === 'comercial'    && <ModuloComercial user={user} onNavegar={(k) => setCurrentPage(k)} />}
           {currentPage === 'vencimientos' && <GestionVencimientos user={user} onNavegar={(k) => setCurrentPage(k)} />}
           {currentPage === 'egresos'      && <GestionEgresos user={user} />}
+          {/* ✅ EGRESO-VEHICULO-001: maestro de placas para discriminar el gasto vehicular */}
+          {currentPage === 'vehiculos'    && <GestionVehiculos user={user} />}
+          {/* ✅ NOMINA-PROVISIONES-001: empleados, provisiones de prestaciones y nómina */}
+          {currentPage === 'empleados'    && user.role === 'admin' && <GestionEmpleados user={user} />}
           {currentPage === 'compras'      && <GestionCompras user={user} />}
           {currentPage === 'caja'         && <GestionCaja user={user} />}
           {currentPage === 'cxc'          && <GestionCxC user={user} />}
