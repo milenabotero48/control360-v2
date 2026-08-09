@@ -1,0 +1,42 @@
+═══════════════════════════════════════════════════════════
+VERSIÓN CORTA — para WhatsApp / grupo de suscriptores
+═══════════════════════════════════════════════════════════
+
+🚀 *Control 360 · Nueva actualización*
+
+Dos módulos nuevos y un cambio importante en la nómina.
+
+*👥 EMPLEADOS Y NÓMINA* (nuevo)
+Registrás tu personal con tipo de contrato y salario, y el sistema calcula automáticamente las provisiones de prestaciones sociales: cesantías, intereses, prima y vacaciones.
+
+¿Por qué importa? Si tu estado de resultados solo refleja lo que sale de caja, te está faltando el *21,83% del salario* en prestaciones ya causadas. Sobre una nómina de 15 millones, son unos *$2,5 millones al mes* que no aparecían.
+
+También genera el comprobante de nómina completo: salario por días trabajados, horas extras según la reforma laboral, auxilio de transporte y deducciones de ley.
+
+*🚚 VEHÍCULOS* (nuevo)
+Cargás las placas de la empresa y ya podés saber cuánto consume cada vehículo en combustible, mantenimiento y peajes. Antes era un solo bloque sin forma de atribuirlo.
+
+*⚠️ IMPORTANTE: la nómina cambió de lugar*
+Ya NO se registra en Egresos. Ahora es en *Empleados → Nómina*, y desde ahí el sistema crea el egreso solo.
+
+Los *anticipos* sí se siguen registrando en Egresos. La novedad: si el proveedor es un empleado registrado, el sistema te pregunta si es un anticipo de nómina y lo descuenta automáticamente en la quincena. Así el gasto no se cuenta dos veces.
+
+*🔍 EGRESOS MÁS INTELIGENTE*
+• Avisa cuando algo no cuadra al digitar (IVA en nómina, posibles duplicados, gastos de vehículo sin placa...)
+• Nueva pestaña *Análisis* con gráficas de en qué se va la plata
+• Nueva pestaña *Revisión* con un puntaje de confiabilidad del mes
+• Ya se puede corregir categoría, IVA y retención de egresos pagados, con PIN y auditoría
+• Reclasificación en lote, reversible
+
+*⚙️ REVISÁ ESTO CON TU CONTADOR*
+En Empleados → Ajustes está la opción de *exoneración de aportes* (art. 114-1 E.T.). Si aplica, tu empresa no paga salud, SENA ni ICBF por empleados que ganen menos de 10 salarios mínimos: son 13,5 puntos menos sobre la nómina.
+
+No lo actives sin confirmarlo con tu contador — depende de la naturaleza jurídica de tu empresa.
+
+*POR DÓNDE EMPEZAR*
+1️⃣ Empleados → Ajustes (definí la exoneración primero)
+2️⃣ Cargá tus empleados
+3️⃣ Cargá tus vehículos
+4️⃣ Empleados → Provisiones → causá el mes
+
+Cualquier duda nos escriben por acá 👇

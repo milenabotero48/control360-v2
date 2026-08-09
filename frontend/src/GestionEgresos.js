@@ -451,7 +451,7 @@ const calcularTotales = (monto, ivaPct, retenPct) => {
 };
 
 // ─── Modal Nuevo / Editar ─────────────────────────────────────────────────────
-function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, categoriasList, provisionales, provisionalInicial, onSave, onClose, categoriasMeta = [], vehiculos = [], egresosRecientes = [], empleados = [] }) {
+function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, categoriasList, provisionales, provisionalInicial, onSave, onClose, categoriasMeta = [], vehiculos = [], egresosRecientes = [], empleados = [], onNavegar }) {
   const [form, setForm] = useState({
     concepto: '', proveedor: '', categoria: (categoriasList || CATEGORIAS_DEFAULT)[0],
     monto: '', ivaPct: 0, retenPct: 0, retenManual: '',
@@ -489,6 +489,18 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
       .test(normTxt(form.categoria)),
     [form.categoria]
   );
+
+  // ✅ NOMINA-PROVISIONES-001: detecta si la categoría elegida es de personal,
+  // para avisar que la nómina se digita en su propio módulo. Se apoya en
+  // tipoERI (el dato bueno) y cae a heurística de nombre si la categoría fue
+  // creada a mano sin clasificación contable.
+  const esCategoriaDePersonal = useMemo(() => {
+    if (!form.categoria) return false;
+    const meta = categoriasMeta.find(c => normTxt(c.nombre) === normTxt(form.categoria));
+    if (meta?.tipoERI === 'gasto_personal') return true;
+    return /nomina|salario|sueldo|quincena|prestacion(?!es de servicio)|cesantia|prima|liquidacion/
+      .test(normTxt(form.categoria));
+  }, [form.categoria, categoriasMeta]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // ✅ NOMINA-PROVISIONES-001 — Detección de empleado en el tercero
@@ -691,6 +703,64 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
               <input type="date" style={S.input} value={form.fecha} onChange={e => set('fecha', e.target.value)} />
             </div>
           </div>
+
+          {/* ═══════════════════════════════════════════════════════════════════
+              ✅ NOMINA-PROVISIONES-001 — Desvío al módulo de nómina
+              ───────────────────────────────────────────────────────────────
+              PROBLEMA QUE RESUELVE
+              Un pago de nómina registrado como egreso simple pierde todo:
+              no calcula horas extras, no separa el auxilio de transporte, no
+              aplica las deducciones de ley, no cruza los anticipos del período
+              y no causa las prestaciones sociales. Es exactamente como se
+              venía haciendo, y es lo que dejó $2,2 millones mensuales fuera
+              del estado de resultados.
+
+              Como el digitador no tiene por qué saber que el flujo cambió, el
+              sistema se lo dice en el momento en que elige la categoría.
+              No bloquea: hay pagos de personal que SÍ van acá (PILA,
+              parafiscales, liquidaciones puntuales).
+              ═════════════════════════════════════════════════════════════ */}
+          {esCategoriaDePersonal && !form.esAnticipoNomina && !egreso && (
+            <div style={{
+              background: 'linear-gradient(135deg,#eef2ff,#faf5ff)',
+              border: '2px solid #c7d2fe', borderRadius: 12, padding: 15, marginBottom: 14
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#312e81', marginBottom: 7 }}>
+                🧾 La nómina se registra desde Empleados → Nómina
+              </div>
+              <div style={{ fontSize: 11.5, color: '#4338ca', lineHeight: 1.65, marginBottom: 12 }}>
+                Allá el sistema calcula el <strong>salario proporcional a los días trabajados</strong>,
+                las <strong>horas extras y recargos</strong> según la reforma laboral, el
+                <strong> auxilio de transporte</strong>, las <strong>deducciones de ley</strong> (salud y pensión),
+                y <strong>descuenta automáticamente los anticipos</strong> que el empleado pidió en el período.
+                Además causa las prestaciones sociales como pasivo.
+                <br /><br />
+                Si lo registrás acá como un egreso simple, se pierde todo ese desglose y las
+                prestaciones no se causan — que es justo lo que hacía que el ERI mostrara
+                la nómina por debajo de lo que cuesta.
+              </div>
+
+              {onNavegar && (
+                <button type="button" onClick={() => { onClose(); onNavegar('empleados'); }}
+                  style={{
+                    padding: '9px 18px', borderRadius: 9, border: 'none', cursor: 'pointer',
+                    fontSize: 12.5, fontWeight: 700, color: '#fff',
+                    background: 'linear-gradient(135deg,#6366f1,#4f46e5)'
+                  }}>
+                  Ir a Empleados → Nómina →
+                </button>
+              )}
+
+              <div style={{
+                background: '#fff', borderRadius: 9, padding: '10px 13px', marginTop: 11,
+                fontSize: 11, color: '#64748b', lineHeight: 1.6
+              }}>
+                <strong style={{ color: '#334155' }}>Sí registrá acá:</strong> pagos de seguridad social
+                (planilla PILA), parafiscales, aportes a la caja de compensación, liquidaciones
+                definitivas o cualquier pago de personal que no sea la nómina del período.
+              </div>
+            </div>
+          )}
 
           {/* ═══════════════════════════════════════════════════════════════════
               ✅ NOMINA-PROVISIONES-001 — ¿Es un anticipo de nómina?
@@ -2088,7 +2158,7 @@ const imprimirEgreso = (eg, empresa) => {
 };
 
 // ─── Principal ────────────────────────────────────────────────────────────────
-export default function GestionEgresos({ user }) {
+export default function GestionEgresos({ user, onNavegar }) {
   const isMobile = useIsMobile();
   const [egresos, setEgresos]     = useState([]);
   const [cajas, setCajas]         = useState([]);
@@ -3139,12 +3209,12 @@ export default function GestionEgresos({ user }) {
           los vehículos (para el selector de placa) y los egresos recientes
           (para detectar pagos duplicados). */}
       {modal === 'nuevo' && <ModalEgreso empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias}
-        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados}
+        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados} onNavegar={onNavegar}
         provisionales={egresos.filter(esAnticipoPendiente)}
         provisionalInicial={provisionalALegalizar}
         onSave={crearEgreso} onClose={() => { setModal(null); setProvisionalALegalizar(null); }} />}
       {modal === 'editar' && selected && <ModalEgreso egreso={{ ...selected, _categorias: categorias }} empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias}
-        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados}
+        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados} onNavegar={onNavegar}
         onSave={editarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'pagar' && selected && <ModalPagar egreso={selected} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} onPagar={pagarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {/* ✅ EGRESO-EDICION-002: se le pasan el catálogo de categorías, el mapa

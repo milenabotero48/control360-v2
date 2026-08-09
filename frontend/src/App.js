@@ -569,7 +569,7 @@ export default function AppRoot() {
           {currentPage === 'cotizaciones' && <GestionCotizaciones user={user} />}
           {currentPage === 'comercial'    && <ModuloComercial user={user} onNavegar={(k) => setCurrentPage(k)} />}
           {currentPage === 'vencimientos' && <GestionVencimientos user={user} onNavegar={(k) => setCurrentPage(k)} />}
-          {currentPage === 'egresos'      && <GestionEgresos user={user} />}
+          {currentPage === 'egresos'      && <GestionEgresos user={user} onNavegar={(k) => setCurrentPage(k)} />}
           {/* ✅ EGRESO-VEHICULO-001: maestro de placas para discriminar el gasto vehicular */}
           {currentPage === 'vehiculos'    && <GestionVehiculos user={user} />}
           {/* ✅ NOMINA-PROVISIONES-001: empleados, provisiones de prestaciones y nómina */}
