@@ -128,7 +128,11 @@ const ModuloERI = ({ user }) => {
 
     eri.porLinea.forEach(l => {
       filas.push({ s: `LÍNEA: ${l.nombre}`, d: 'Ingreso', v: l.ingresoServicio });
-      filas.push({ s: `LÍNEA: ${l.nombre}`, d: 'Costo', v: l.costoServicio });
+      filas.push({ s: `LÍNEA: ${l.nombre}`, d: 'Costo total', v: l.costoServicio });
+      // ✅ FIX ERI-LINEA-002: el desglose también va al Excel, si no el anexo
+      // no sirve para auditar de dónde sale el costo de cada línea.
+      if (l.costoInsumos > 0)   filas.push({ s: `LÍNEA: ${l.nombre}`, d: '  · Insumos de taller', v: l.costoInsumos });
+      if (l.costoProductos > 0) filas.push({ s: `LÍNEA: ${l.nombre}`, d: '  · Costo de productos vendidos', v: l.costoProductos });
       filas.push({ s: `LÍNEA: ${l.nombre}`, d: 'Utilidad bruta', v: l.utilidadBruta });
       filas.push({ s: `LÍNEA: ${l.nombre}`, d: 'Margen %', v: l.margenPct.toFixed(2) });
       filas.push({ s: '', d: '', v: '' });
@@ -626,9 +630,45 @@ const VistaLineas = ({ eri }) => {
               <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', fontWeight: 700 }}>Ingreso</div>
               <div style={{ fontSize: 20, fontWeight: 800, color: '#0284c7' }}>{fmtCop(l.ingresoServicio)}</div>
             </div>
+            {/* ✅ FIX ERI-LINEA-002: el costo de una línea suma dos cosas y
+                antes se mostraban juntas. Al comparar contra el desglose por
+                categoría del estado de resultados las cifras no coincidían y
+                parecía un error de cálculo, cuando en realidad son dos lentes
+                distintos sobre el mismo dinero. Ahora se ve el desglose. */}
             <div style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', fontWeight: 700 }}>Costo directo</div>
               <div style={{ fontSize: 18, fontWeight: 700, color: '#dc2626' }}>− {fmtCop(l.costoServicio)}</div>
+
+              {(l.costoInsumos > 0 || l.costoProductos > 0) && (
+                <div style={{ marginTop: 7, background: '#f8fafc', borderRadius: 8, padding: '8px 11px' }}>
+                  {l.costoInsumos > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: '#64748b', padding: '2px 0' }}>
+                      <span>Insumos de taller</span><span>{fmtCop(l.costoInsumos)}</span>
+                    </div>
+                  )}
+                  {l.costoProductos > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: '#64748b', padding: '2px 0' }}>
+                      <span>Costo de productos vendidos</span><span>{fmtCop(l.costoProductos)}</span>
+                    </div>
+                  )}
+                  <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 5, lineHeight: 1.5, borderTop: '1px dashed #e2e8f0', paddingTop: 5 }}>
+                    El costo de productos también aparece en el estado de resultados
+                    agrupado por su categoría, no por línea. Por eso las dos vistas
+                    no muestran la misma cifra: son lentes distintos sobre el mismo dinero.
+                  </div>
+                </div>
+              )}
+
+              {l.costoServicio === 0 && l.ingresoServicio > 0 && (
+                <div style={{
+                  marginTop: 7, background: '#fffbeb', border: '1px solid #fde68a',
+                  borderRadius: 8, padding: '8px 11px', fontSize: 11, color: '#92400e', lineHeight: 1.55
+                }}>
+                  ⚠️ Esta línea no tiene ningún costo asociado, por eso el margen sale
+                  del 100%. Revisá que los productos tengan costo parametrizado y que
+                  los insumos estén clasificados como costo de servicio.
+                </div>
+              )}
             </div>
             <div style={{ paddingTop: 12, borderTop: '2px solid #e5e7eb' }}>
               <div style={{ fontSize: 11, color: '#6b7280', textTransform: 'uppercase', fontWeight: 700 }}>Utilidad bruta</div>

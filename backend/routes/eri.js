@@ -166,7 +166,22 @@ router.get('/', async (req, res) => {
       if (e.tipo === 'provisional' || e.estado === 'ANTICIPO') return;
       // Excluir anulados (no se devengó nada)
       if (e.anulado === true) return;
-      const fechaRef = parseFecha(e.fechaPago || e.fecha || e.createdAt);
+      // ══════════════════════════════════════════════════════════════════════
+      // ✅ FIX CAUSACION-001 — el ERI usa la fecha de CAUSACIÓN, no la de pago
+      // ──────────────────────────────────────────────────────────────────────
+      // Antes se priorizaba `fechaPago`, que es exactamente al revés de lo que
+      // manda el principio de devengo. Un servicio prestado en julio y pagado
+      // en agosto quedaba como costo de agosto: julio salía con margen inflado
+      // y agosto con un costo que no le corresponde.
+      //
+      // Ahora manda `fechaCausacion` (a qué mes pertenece el gasto). Si el
+      // egreso no la tiene —los registrados antes de este cambio— se cae a
+      // `fecha`, que es el comportamiento que ya tenían.
+      //
+      // La fecha de pago sigue mandando en el Estado de Flujo de Efectivo,
+      // que es donde corresponde: ahí importa cuándo se movió la plata.
+      // ══════════════════════════════════════════════════════════════════════
+      const fechaRef = parseFecha(e.fechaCausacion || e.fecha || e.createdAt);
       if (!fechaRef) return;
       if (fechaRef < desdeDate || fechaRef > hastaDate) return;
       egresosEnRango.push({ id: d.id, ...e, _fechaRef: fechaRef });
@@ -185,6 +200,14 @@ router.get('/', async (req, res) => {
         color: l.color,
         ingresoServicio: 0,
         costoServicio: 0,
+        // ✅ FIX ERI-LINEA-002: el costo de una línea suma DOS cosas distintas.
+        // Mostrarlas juntas hacía imposible cuadrar la vista por línea contra
+        // el desglose por categoría del estado de resultados, porque miden
+        // cosas diferentes. Ahora se guardan separadas y la línea las explica.
+        //   costoInsumos  · egresos de insumos (categoría costo_servicio)
+        //   costoProductos· costo de los productos vendidos en esa línea
+        costoInsumos: 0,
+        costoProductos: 0,
         utilidadBruta: 0,
         margenPct: 0
       };
@@ -194,6 +217,7 @@ router.get('/', async (req, res) => {
       id: '_sin_clasificar', nombre: 'Sin clasificar',
       color: '#9ca3af',
       ingresoServicio: 0, costoServicio: 0,
+      costoInsumos: 0, costoProductos: 0,
       utilidadBruta: 0, margenPct: 0
     };
 
@@ -262,7 +286,7 @@ router.get('/', async (req, res) => {
           // Asignar a línea correspondiente
           const lineaId = cls.lineaId || '_sin_clasificar';
           if (!porLinea[lineaId]) {
-            porLinea[lineaId] = { id: lineaId, nombre: 'Sin clasificar', color: '#9ca3af', ingresoServicio: 0, costoServicio: 0, utilidadBruta: 0, margenPct: 0 };
+            porLinea[lineaId] = { id: lineaId, nombre: 'Sin clasificar', color: '#9ca3af', ingresoServicio: 0, costoServicio: 0, costoInsumos: 0, costoProductos: 0, utilidadBruta: 0, margenPct: 0 };
           }
           porLinea[lineaId].ingresoServicio += subtotal;
           // ✅ ERI-COSTO-002: si el SERVICIO tiene precioCosto definido (raro,
@@ -270,6 +294,7 @@ router.get('/', async (req, res) => {
           // de un servicio fabricado viene de los insumos (egresos costo_servicio).
           if (cls.precioCosto > 0) {
             porLinea[lineaId].costoServicio += cls.precioCosto * cantidad;
+            porLinea[lineaId].costoProductos += cls.precioCosto * cantidad;
           }
         } else {
           ingresoProductosOrden += subtotal;
@@ -285,10 +310,11 @@ router.get('/', async (req, res) => {
           const lineaIdProd = matchCategoriaConLinea(cls.categoria, lineasServicio);
           if (lineaIdProd) {
             if (!porLinea[lineaIdProd]) {
-              porLinea[lineaIdProd] = { id: lineaIdProd, nombre: 'Sin clasificar', color: '#9ca3af', ingresoServicio: 0, costoServicio: 0, utilidadBruta: 0, margenPct: 0 };
+              porLinea[lineaIdProd] = { id: lineaIdProd, nombre: 'Sin clasificar', color: '#9ca3af', ingresoServicio: 0, costoServicio: 0, costoInsumos: 0, costoProductos: 0, utilidadBruta: 0, margenPct: 0 };
             }
             porLinea[lineaIdProd].ingresoServicio += subtotal;
             porLinea[lineaIdProd].costoServicio += costo;
+            porLinea[lineaIdProd].costoProductos += costo;
           }
         }
       });
@@ -344,9 +370,10 @@ router.get('/', async (req, res) => {
         // Costo directo de una línea
         const lineaId = cls.lineaServicioId || '_sin_clasificar';
         if (!porLinea[lineaId]) {
-          porLinea[lineaId] = { id: lineaId, nombre: 'Sin clasificar', color: '#9ca3af', ingresoServicio: 0, costoServicio: 0, utilidadBruta: 0, margenPct: 0 };
+          porLinea[lineaId] = { id: lineaId, nombre: 'Sin clasificar', color: '#9ca3af', ingresoServicio: 0, costoServicio: 0, costoInsumos: 0, costoProductos: 0, utilidadBruta: 0, margenPct: 0 };
         }
         porLinea[lineaId].costoServicio += monto;
+        porLinea[lineaId].costoInsumos += monto;
         totalCostoServicios += monto;
       } else {
         // Gasto operativo/fijo/etc.

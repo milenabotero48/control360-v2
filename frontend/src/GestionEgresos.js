@@ -699,9 +699,65 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
               </select>
             </div>
             <div style={S.field}>
-              <label style={S.label}>Fecha *</label>
+              <label style={S.label}>Fecha del pago *</label>
               <input type="date" style={S.input} value={form.fecha} onChange={e => set('fecha', e.target.value)} />
             </div>
+          </div>
+
+          {/* ═══════════════════════════════════════════════════════════════════
+              ✅ CAUSACION-001 — ¿A qué mes corresponde este gasto?
+              ───────────────────────────────────────────────────────────────
+              Un gasto pertenece al mes en que ocurrió el hecho economico, no
+              al mes en que sale la plata. Si la mensajeria de julio se paga en
+              agosto, es costo de JULIO: si no, julio queda con margen inflado
+              y agosto carga un costo que no le toca.
+
+              Se muestra solo si el usuario lo pide, porque en la mayoria de
+              los casos las dos fechas son la misma.
+              ═════════════════════════════════════════════════════════════ */}
+          <div style={{ marginBottom: 14 }}>
+            {!form._otroPeriodo && (!form.fechaCausacion || form.fechaCausacion === form.fecha) ? (
+              <button type="button"
+                onClick={() => { set('_otroPeriodo', true); set('fechaCausacion', form.fecha); }}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                  fontSize: 12, color: '#6366f1', fontWeight: 600, textDecoration: 'underline'
+                }}>
+                Este gasto corresponde a otro mes
+              </button>
+            ) : (
+              <div style={{
+                background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 11, padding: 13
+              }}>
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: '#1e40af', marginBottom: 6 }}>
+                  📅 ¿A qué mes corresponde este gasto?
+                </div>
+                <div style={{ fontSize: 11.5, color: '#1e40af', lineHeight: 1.6, marginBottom: 10 }}>
+                  El <strong>estado de resultados</strong> lo va a contar en esta fecha, y el
+                  <strong> flujo de efectivo</strong> en la fecha del pago. Sirve para un servicio
+                  prestado en un mes y pagado al siguiente.
+                </div>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                  <div style={{ ...S.field, marginBottom: 0 }}>
+                    <label style={{ ...S.label, fontSize: 11 }}>Fecha de causación</label>
+                    <input type="date" style={S.input}
+                      value={form.fechaCausacion || form.fecha}
+                      onChange={e => set('fechaCausacion', e.target.value)} />
+                  </div>
+                  <button type="button"
+                    onClick={() => { set('_otroPeriodo', false); set('fechaCausacion', ''); }}
+                    style={{ ...S.btnSecondary, padding: '9px 14px', fontSize: 12 }}>
+                    Usar la misma fecha
+                  </button>
+                </div>
+                {form.fechaCausacion && form.fechaCausacion !== form.fecha && (
+                  <div style={{ fontSize: 11, color: '#1e40af', marginTop: 9, background: '#fff', borderRadius: 7, padding: '7px 10px' }}>
+                    Va al estado de resultados de <strong>{String(form.fechaCausacion).slice(0, 7)}</strong> y
+                    sale de caja en <strong>{String(form.fecha).slice(0, 7)}</strong>.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* ═══════════════════════════════════════════════════════════════════
@@ -1988,9 +2044,37 @@ function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categ
                   <input style={S.input} value={form.concepto || ''} onChange={e => set('concepto', e.target.value)} />
                 </div>
                 <div style={S.field}>
-                  <label style={S.label}>Fecha</label>
+                  <label style={S.label}>Fecha del pago</label>
                   <input type="date" style={S.input} value={form.fecha || ''} onChange={e => set('fecha', e.target.value)} />
                 </div>
+              </div>
+
+              {/* ✅ CAUSACION-001: reasignar un gasto ya pagado al mes que le
+                  corresponde, sin mover la salida de caja. Es lo que corrige
+                  el caso de un servicio prestado en un mes y pagado al siguiente. */}
+              <div style={{
+                background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 11,
+                padding: 13, marginBottom: 14
+              }}>
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: '#1e40af', marginBottom: 5 }}>
+                  📅 ¿A qué mes corresponde este gasto?
+                </div>
+                <div style={{ fontSize: 11.5, color: '#1e40af', lineHeight: 1.6, marginBottom: 10 }}>
+                  El estado de resultados lo cuenta en esta fecha; el flujo de efectivo,
+                  en la del pago. Cambiala si el gasto pertenece a otro período.
+                </div>
+                <div style={{ ...S.field, marginBottom: 0, maxWidth: 200 }}>
+                  <label style={{ ...S.label, fontSize: 11 }}>Fecha de causación</label>
+                  <input type="date" style={S.input}
+                    value={form.fechaCausacion || form.fecha || ''}
+                    onChange={e => set('fechaCausacion', e.target.value)} />
+                </div>
+                {form.fechaCausacion && form.fechaCausacion !== form.fecha && (
+                  <div style={{ fontSize: 11, color: '#1e40af', marginTop: 9, background: '#fff', borderRadius: 7, padding: '7px 10px' }}>
+                    Estado de resultados: <strong>{String(form.fechaCausacion).slice(0, 7)}</strong> ·
+                    Salida de caja: <strong>{String(form.fecha || '').slice(0, 7)}</strong>
+                  </div>
+                )}
               </div>
 
               <div style={S.row2}>
@@ -2353,6 +2437,8 @@ export default function GestionEgresos({ user, onNavegar }) {
       proveedor: form.proveedor,
       categoria: form.categoria,
       fecha:     form.fecha,
+      // ✅ CAUSACION-001: el mes al que pertenece el gasto, independiente del pago
+      fechaCausacion: form.fechaCausacion || form.fecha,
       monto:     Number(form.monto) || 0,
       ivaVal:    Number(form.ivaVal) || 0,
       ivaPct:    Number(form.ivaPct) || 0,

@@ -266,7 +266,7 @@ router.post('/', async (req, res) => {
   try {
     const {
       concepto, proveedor, categoria, monto, totalPagar, ivaVal, ivaPct, retenVal, retenPct,
-      formaPago, cajaId, empresaId, fecha, notas, pagarAhora, productosCompra,
+      formaPago, cajaId, empresaId, fecha, fechaCausacion, notas, pagarAhora, productosCompra,
       tipo, mensajeroId, mensajeroNombre, numeroOrdenInterna, cuadrado,
       // ✅ EGRESO-PROV-001: legalización de anticipo desde el egreso normal
       provisionalId, pin,
@@ -346,6 +346,20 @@ router.post('/', async (req, res) => {
       cajaId: cajaId || (esLegalizacion ? (prov.cajaId || '') : ''),
       empresaId: empresaId || (esLegalizacion ? (prov.empresaId || '') : ''),
       fecha: fecha || hoyEnCO(), // ✅ FIX FECHA-CO-001
+      // ══════════════════════════════════════════════════════════════════
+      // ✅ CAUSACION-001 — Cuándo OCURRIÓ el gasto vs cuándo se PAGÓ
+      // ──────────────────────────────────────────────────────────────────
+      // Bajo principio de devengo, un gasto pertenece al mes en que ocurre el
+      // hecho económico, no al mes en que sale la plata. Si la mensajería de
+      // julio se paga en agosto, es costo de JULIO: si no, julio queda sin
+      // costo (margen inflado) y agosto con costo de más.
+      //
+      //   fecha           → cuándo salió la plata  → Flujo de Efectivo
+      //   fechaCausacion  → a qué mes corresponde  → Estado de Resultados
+      //
+      // Vacío = las dos son la misma, que es el caso normal.
+      // ══════════════════════════════════════════════════════════════════
+      fechaCausacion: fechaCausacion ? String(fechaCausacion).slice(0, 10) : (fecha || hoyEnCO()),
       notas: notas || '',
       productosCompra: productosCompra || [],
       // Campos provisional / orden interna
@@ -779,7 +793,7 @@ router.post('/:id/editar-pagado', async (req, res) => {
     // ubicados dentro de la categoría Nómina en julio 2026.
     const {
       pin, motivoEdicion, concepto, proveedor, categoria, monto, formaPago, cajaId, notas,
-      ivaVal, ivaPct, retenVal, retenPct, fecha, vehiculoId, vehiculoPlaca, empresaId
+      ivaVal, ivaPct, retenVal, retenPct, fecha, fechaCausacion, vehiculoId, vehiculoPlaca, empresaId
     } = req.body;
     if (!motivoEdicion?.trim()) return res.status(400).json({ error: 'Motivo de edición requerido' });
     if (motivoEdicion.trim().length < 10) {
@@ -824,6 +838,10 @@ router.post('/:id/editar-pagado', async (req, res) => {
       retenPct: retenPctNuevo,
       totalPagar: totalPagarNuevo,
       fecha:     tomar(fecha,     egresoAnterior.fecha),
+      // ✅ CAUSACION-001: permite reasignar un gasto al mes que le corresponde
+      // sin mover la salida de caja. Es lo que arregla el caso de un servicio
+      // prestado en un mes y pagado al siguiente.
+      fechaCausacion: tomar(fechaCausacion, egresoAnterior.fechaCausacion || egresoAnterior.fecha),
       formaPago: tomar(formaPago, egresoAnterior.formaPago),
       cajaId:    tomar(cajaId,    egresoAnterior.cajaId),
       empresaId: tomar(empresaId, egresoAnterior.empresaId),
