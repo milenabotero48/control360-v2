@@ -377,9 +377,47 @@ export function PanelNovedades() {
         accion: form.accionTexto ? { texto: form.accionTexto, modulo: form.accionModulo } : null
       }, { headers: headers() });
 
-      setMensaje('✅ Publicada' + (r.data.correo ? ` · correo enviado a ${r.data.correo.ok} de ${r.data.correo.total}` : ''));
+      // ✅ NOVEDADES-DIAGNOSTICO-001: si el correo falla, la novedad igual se
+      // publica en la aplicación. Antes eso se informaba con un escueto
+      // "enviado a 0 de N" y no había forma de saber POR QUÉ no salió.
+      const c = r.data.correo;
+      if (!form.enviarCorreo) {
+        setMensaje('✅ Publicada en la aplicación (sin envío por correo)');
+      } else if (!c) {
+        setMensaje('✅ Publicada, pero no se recibió respuesta del envío de correo');
+      } else if (c.total === 0) {
+        setMensaje('⚠️ Publicada, pero no hay destinatarios: ningún suscriptor activo tiene correo registrado' +
+          (form.soloConEmpleados ? ', o ninguno tiene empleados cargados (quitá ese filtro y probá de nuevo)' : ''));
+      } else if (c.ok === 0) {
+        const detalle = (c.errores || []).map(e => e.error).filter(Boolean)[0] || 'sin detalle';
+        setMensaje(`⚠️ Publicada, pero NINGÚN correo salió (0 de ${c.total}). Motivo: ${detalle}`);
+      } else if (c.fallidos > 0) {
+        setMensaje(`✅ Publicada · correo enviado a ${c.ok} de ${c.total} · ${c.fallidos} fallido(s)`);
+      } else {
+        setMensaje(`✅ Publicada · correo enviado a los ${c.ok} suscriptores`);
+      }
       setForm({ tipo: 'nueva_funcion', titulo: '', cuerpo: '', critico: false, enviarCorreo: false, soloConEmpleados: false, accionTexto: '', accionModulo: '' });
       await cargar();
+    } catch (e) {
+      setMensaje('✖ ' + (e.response?.data?.error || e.message));
+    }
+    setPublicando(false);
+  };
+
+  // ✅ NOVEDADES-PRUEBA-001
+  const enviarPrueba = async () => {
+    if (!form.titulo.trim() || !form.cuerpo.trim()) {
+      setMensaje('✖ Completá el título y el contenido antes de mandar la prueba');
+      return;
+    }
+    setPublicando(true); setMensaje('');
+    try {
+      const r = await axios.post(`${API}/novedades`, {
+        modoPrueba: true,
+        tipo: form.tipo, titulo: form.titulo, cuerpo: form.cuerpo,
+        accion: form.accionTexto ? { texto: form.accionTexto, modulo: form.accionModulo } : null
+      }, { headers: headers() });
+      setMensaje('✅ ' + r.data.mensaje);
     } catch (e) {
       setMensaje('✖ ' + (e.response?.data?.error || e.message));
     }
@@ -524,9 +562,22 @@ export function PanelNovedades() {
               }}>{mensaje}</div>
             )}
 
-            <button onClick={publicar} disabled={publicando} style={S.btnPrimary}>
-              {publicando ? 'Publicando...' : form.enviarCorreo ? '📢 Publicar y enviar correo' : '📢 Publicar'}
-            </button>
+            {/* ✅ NOVEDADES-PRUEBA-001: un correo masivo no se deshace. La
+                prueba a la propia casilla es la única forma de ver cómo llega
+                de verdad antes de que lo reciban todos. */}
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button onClick={publicar} disabled={publicando} style={S.btnPrimary}>
+                {publicando ? 'Publicando...' : form.enviarCorreo ? '📢 Publicar y enviar correo' : '📢 Publicar'}
+              </button>
+
+              <button onClick={enviarPrueba} disabled={publicando} style={S.btnSecondary}>
+                ✉️ Enviarme una prueba
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 8, lineHeight: 1.55 }}>
+              La prueba te llega solo a vos, con <strong>[PRUEBA]</strong> en el asunto.
+              No publica nada ni le llega a ningún suscriptor.
+            </div>
           </div>
 
           {/* Vista previa */}

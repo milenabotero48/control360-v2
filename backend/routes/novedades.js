@@ -295,7 +295,52 @@ router.post('/leer-todas', async (req, res) => {
 // ═════════════════════════════════════════════════════════════════════════════
 router.post('/', soloSuperAdmin, async (req, res) => {
   try {
-    const { tipo, titulo, cuerpo, critico, enviarCorreo, accion, destinatarios, soloConEmpleados } = req.body;
+    const {
+      tipo, titulo, cuerpo, critico, enviarCorreo, accion, destinatarios, soloConEmpleados,
+      // ✅ NOVEDADES-PRUEBA-001: envío de prueba a la propia casilla del
+      // superadmin. Un correo masivo no se puede deshacer: mandarlo primero a
+      // uno mismo es la única forma de ver cómo llega de verdad —el formato,
+      // los acentos, el botón, cómo se ve en el celular— antes de que lo reciban
+      // todos. La novedad NO se publica en modo prueba.
+      modoPrueba
+    } = req.body;
+
+    // ─── Envío de prueba: no publica nada, solo manda el correo al superadmin ─
+    if (modoPrueba === true) {
+      const doc = await db.collection('users').doc(req.user.uid).get();
+      const miEmail = doc.exists ? doc.data().email : null;
+      if (!miEmail) return res.status(400).json({ error: 'Tu usuario no tiene correo registrado' });
+      if (!titulo?.trim() || !cuerpo?.trim()) {
+        return res.status(400).json({ error: 'Completá el título y el contenido antes de enviar la prueba' });
+      }
+
+      const borrador = {
+        tipo: TIPOS[tipo] ? tipo : 'mejora',
+        titulo: titulo.trim(),
+        cuerpo: cuerpo.trim(),
+        accion: accion?.texto ? { texto: accion.texto, modulo: accion.modulo || '' } : null
+      };
+      const t = TIPOS[borrador.tipo];
+
+      try {
+        const cliente = getResend();
+        await cliente.emails.send({
+          from: REMITENTE,
+          to: miEmail,
+          subject: `[PRUEBA] ${t.icono} ${borrador.titulo}`,
+          html: htmlNovedad(borrador, req.superAdminNombre)
+        });
+      } catch (err) {
+        return res.status(500).json({ error: `No se pudo enviar la prueba: ${err.message}` });
+      }
+
+      return res.json({
+        ok: true,
+        prueba: true,
+        enviadoA: miEmail,
+        mensaje: `Correo de prueba enviado a ${miEmail}. Revisá cómo llegó antes de publicarlo de verdad. La novedad NO se publicó.`
+      });
+    }
 
     if (!titulo?.trim()) return res.status(400).json({ error: 'El título es obligatorio' });
     if (!cuerpo?.trim())  return res.status(400).json({ error: 'El contenido es obligatorio' });
@@ -398,11 +443,22 @@ async function enviarNovedadPorCorreo(novedadId, novedad, opciones = {}) {
   }
 
   await db.collection('novedades').doc(novedadId).update({
-    correoEnviado: true,
+    correoEnviado: ok > 0,
     correosOk: ok,
     correosFallidos: fallidos,
-    correoEnviadoEn: new Date().toISOString()
+    correoEnviadoEn: new Date().toISOString(),
+    // ✅ NOVEDADES-DIAGNOSTICO-001: guardar el motivo del fallo. Sin esto, un
+    // envío fallido quedaba como "0 enviados" sin rastro de por qué.
+    correoError: fallidos > 0 ? (errores[0]?.error || 'error desconocido') : null
   });
+
+  if (destinos.length === 0) {
+    console.warn('[NOVEDADES] Sin destinatarios: no hay admins activos con correo' +
+      (opciones.soloConEmpleados ? ' que tengan empleados cargados' : ''));
+  }
+  if (fallidos > 0) {
+    console.error(`[NOVEDADES] ${fallidos} de ${destinos.length} correos fallaron. Primer error:`, errores[0]?.error);
+  }
 
   return { total: destinos.length, ok, fallidos, errores: errores.slice(0, 10) };
 }
