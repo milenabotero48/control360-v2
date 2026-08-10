@@ -616,17 +616,51 @@ router.get('/', async (req, res) => {
       ingresoPorCategoria['(Sin desglosar por categoría)'] =
         (ingresoPorCategoria['(Sin desglosar por categoría)'] || 0) + difIngreso;
     }
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ FIX ERI-COSTOSERVICIO-001 — Los insumos se muestran POR LÍNEA
+    // ──────────────────────────────────────────────────────────────────────
+    // EL PROBLEMA
+    // El costo de ventas mostraba, por ejemplo:
+    //     RECARGAS Y MANTENIMIENTO                          $31.500
+    //     (Costos de servicio sin categoría de producto)   $768.400
+    //
+    // Y esos $31.500 son solo el costo de los PRODUCTOS de esa categoría. El
+    // costo real de prestar el servicio de recarga —polvo químico, nitrógeno,
+    // válvulas, sellos— estaba dentro del bulto anónimo de $768.400.
+    //
+    // Leído así, parecía que una recarga cuesta $31.500 hacerla, que no tiene
+    // nada que ver con la realidad, y era imposible cuadrarlo contra la vista
+    // por línea de servicio.
+    //
+    // LA CORRECCIÓN
+    // Los insumos SÍ saben a qué línea pertenecen: la categoría del egreso
+    // trae su `lineaServicioId`. En vez de agruparlos en un bulto sin nombre,
+    // se muestran con el nombre de su línea. El total no cambia — cambia que
+    // ahora se puede leer.
+    // ══════════════════════════════════════════════════════════════════════
     if (Math.abs(difCosto) > 1) {
-      costoPorCategoria['(Costos de servicio sin categoría de producto)'] =
-        (costoPorCategoria['(Costos de servicio sin categoría de producto)'] || 0) + difCosto;
-      // El anexo también lo lleva: si el Excel no suma lo mismo que el informe,
-      // el anexo deja de servir como soporte. Era exactamente el problema que
-      // hacía imposible auditar de dónde salía cada cifra.
-      anexoCostos.push({
-        categoria: '(Costos de servicio sin categoría de producto)',
-        costo: difCosto,
-        ingreso: 0
-      });
+      const lineasConInsumos = Object.values(porLinea)
+        .filter(l => (l.costoInsumos || 0) > 0)
+        .sort((a, b) => b.costoInsumos - a.costoInsumos);
+
+      let repartido = 0;
+      for (const l of lineasConInsumos) {
+        const etiqueta = l.id === '_sin_clasificar'
+          ? 'Insumos de servicio · sin línea asignada'
+          : `Insumos de servicio · ${l.nombre}`;
+        costoPorCategoria[etiqueta] = (costoPorCategoria[etiqueta] || 0) + l.costoInsumos;
+        anexoCostos.push({ categoria: etiqueta, costo: l.costoInsumos, ingreso: 0 });
+        repartido += l.costoInsumos;
+      }
+
+      // Si quedara un residuo sin línea (no debería, pero el informe nunca
+      // debe esconder plata), se muestra explícitamente.
+      const residuo = Math.round(difCosto - repartido);
+      if (Math.abs(residuo) > 1) {
+        costoPorCategoria['(Costos de servicio sin clasificar)'] =
+          (costoPorCategoria['(Costos de servicio sin clasificar)'] || 0) + residuo;
+        anexoCostos.push({ categoria: '(Costos de servicio sin clasificar)', costo: residuo, ingreso: 0 });
+      }
     }
     if (Math.abs(difIngreso) > 1) {
       anexoCostos.push({
