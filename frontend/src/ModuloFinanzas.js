@@ -439,6 +439,18 @@ export default function ModuloFinanzas({ user, onNavegar }) {
         </div>
       )}
 
+      {/* ✅ FIX FINANZAS-MAPEO-001: si las cifras base llegan incompletas, los
+          indicadores salen calculados sobre ceros y parecen válidos. Mejor
+          decirlo que mostrar un 100% de margen que no significa nada. */}
+      {(analisis?.avisos || []).map((a, i) => (
+        <div key={i} style={{
+          background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 11,
+          padding: '13px 17px', fontSize: 12.5, color: '#92400e', marginBottom: 12, lineHeight: 1.6
+        }}>
+          ⚠️ {a}
+        </div>
+      ))}
+
       {cargando ? (
         <div style={{ padding: 60, textAlign: 'center', color: '#94a3b8', fontSize: 14 }}>
           ⏳ Calculando el período de {etiquetaPeriodo}...

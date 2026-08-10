@@ -333,49 +333,94 @@ router.post('/analisis', async (req, res) => {
     let empleadosActivos = 0;
     empSnap.docs.forEach(d => { if (d.data().activo !== false) empleadosActivos += 1; });
 
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ FIX FINANZAS-MAPEO-001
+    // ──────────────────────────────────────────────────────────────────────
+    // La estructura de la respuesta del ERI se había asumido en vez de
+    // verificarse, y casi ningún campo coincidía. El resultado era silencioso
+    // y engañoso: el costo de ventas caía a 0 (margen bruto 100%), la utilidad
+    // operativa y la neta llegaban como OBJETO en vez de número (Number({}) es
+    // NaN, que caía a 0 → márgenes en 0%), y el inventario, la cartera y las
+    // categorías quedaban vacíos, dejando sin calcular los días de inventario
+    // y el ciclo de efectivo.
+    //
+    // La forma REAL de la respuesta (routes/eri.js):
+    //   eri.ingresos.total
+    //   eri.costoVentas.total
+    //   eri.utilidadBruta.total
+    //   eri.utilidadOperativa.valor        ← objeto { valor, margen }
+    //   eri.utilidadNeta.valor             ← objeto { valor, margen }
+    //   eri.gastos.{personal,operativos,fijos,...}
+    //   eri.meta.cantidadOrdenes
+    //   eri.informe.inventario.{alCosto,comprasDelPeriodo}
+    //   eri.informe.cartera.{cxc,cxp}.total
+    //   eri.informe.anexos.{costos,ventas}
+    //   eri.informe.prestaciones.causadasEnPeriodo
+    //
+    // Los números se pasan por Number() a propósito: si mañana cambia la forma
+    // otra vez, es preferible un 0 explícito a un NaN propagándose por todos
+    // los indicadores.
+    // ══════════════════════════════════════════════════════════════════════
+    const num = (v) => {
+      const n = Number(v);
+      return isFinite(n) ? n : 0;
+    };
+
     const g = eri.gastos || {};
+    const inf = eri.informe || {};
+
     const datos = {
-      ingresos: eri.ingresos?.total ?? eri.totalIngresos ?? 0,
-      costoVentas: eri.costos?.total ?? eri.totalCostos ?? 0,
-      utilidadBruta: eri.utilidad?.bruta ?? eri.utilidadBrutaTotal ?? 0,
-      utilidadOperativa: eri.resultado?.operativa ?? eri.utilidadOperativa ?? 0,
-      utilidadNeta: eri.resultado?.neta ?? eri.utilidadNeta ?? 0,
+      ingresos:          num(eri.ingresos?.total),
+      costoVentas:       num(eri.costoVentas?.total),
+      utilidadBruta:     num(eri.utilidadBruta?.total),
+      utilidadOperativa: num(eri.utilidadOperativa?.valor),
+      utilidadNeta:      num(eri.utilidadNeta?.valor),
 
-      gastosPersonal: g.personal ?? g.gasto_personal ?? 0,
-      gastosOperativos: g.operativos ?? g.gasto_operativo ?? 0,
-      gastosFijos: g.fijos ?? g.gasto_fijo ?? 0,
-      gastosAdministrativos: g.administrativos ?? g.gasto_administrativo ?? 0,
-      gastosFinancieros: g.financieros ?? g.gasto_financiero ?? 0,
-      gastosFiscales: g.fiscales ?? g.gasto_fiscal ?? 0,
+      gastosPersonal:        num(g.personal),
+      gastosOperativos:      num(g.operativos),
+      gastosFijos:           num(g.fijos),
+      gastosAdministrativos: num(g.administrativos),
+      gastosFinancieros:     num(g.financieros),
+      gastosFiscales:        num(g.fiscales),
 
-      inventarioAlCosto: eri.inventario?.alCosto ?? 0,
-      comprasPeriodo: eri.inventario?.comprasDelPeriodo ?? 0,
-      cxc: eri.cartera?.cxc?.total ?? 0,
-      cxp: eri.cartera?.cxp?.total ?? 0,
-      provisionesPrestaciones: eri.prestaciones?.causadasEnPeriodo ?? 0,
+      inventarioAlCosto: num(inf.inventario?.alCosto),
+      comprasPeriodo:    num(inf.inventario?.comprasDelPeriodo),
+      cxc:               num(inf.cartera?.cxc?.total),
+      cxp:               num(inf.cartera?.cxp?.total),
+      provisionesPrestaciones: num(inf.prestaciones?.causadasEnPeriodo),
 
       saldoCajas,
       empleados: empleadosActivos,
-      ordenes: eri.totalOrdenes ?? (eri.anexos?.ventas || []).length,
+      ordenes: num(eri.meta?.cantidadOrdenes) || (inf.anexos?.ventas || []).length,
       diasPeriodo: diasEntre(desde, hasta),
 
       // Para el diagnóstico de líneas con margen negativo
-      categorias: (eri.anexos?.costos || []).map(c => ({
-        nombre: c.categoria, ingreso: Number(c.ingreso) || 0, costo: Number(c.costo) || 0
+      categorias: (inf.anexos?.costos || []).map(c => ({
+        nombre: c.categoria, ingreso: num(c.ingreso), costo: num(c.costo)
       })),
 
       // Concentración de clientes
       clientes: (() => {
         const m = {};
-        for (const v of (eri.anexos?.ventas || [])) {
+        for (const v of (inf.anexos?.ventas || [])) {
           const n = v.clienteNombre || 'Sin cliente';
-          m[n] = (m[n] || 0) + (Number(v.total) || 0);
+          m[n] = (m[n] || 0) + num(v.total);
         }
         return Object.entries(m).map(([nombre, total]) => ({ nombre, total }));
       })(),
 
       periodoAnterior: periodoAnterior || null
     };
+
+    // Aviso si el ERI llegó sin las cifras principales: es preferible decirlo
+    // a mostrar indicadores calculados sobre ceros.
+    const avisos = [];
+    if (datos.ingresos === 0) {
+      avisos.push('El ERI del período no trae ingresos. Verificá el rango de fechas y que haya órdenes registradas.');
+    }
+    if (datos.ingresos > 0 && datos.costoVentas === 0) {
+      avisos.push('El costo de ventas del período es cero, lo que da un margen bruto del 100%. Revisá que los productos vendidos tengan costo parametrizado y que los insumos de servicio estén clasificados como costo.');
+    }
 
     const indicadores = A.calcularIndicadores(datos);
     const diagnostico = A.diagnosticar(datos, indicadores);
@@ -386,10 +431,24 @@ router.post('/analisis', async (req, res) => {
       base: indicadores.base,
       pendientes: indicadores.pendientes,
       diagnostico,
+      avisos,
       contexto: {
         empleadosActivos,
         saldoCajas: Math.round(saldoCajas),
-        referencias: A.REFERENCIA
+        referencias: A.REFERENCIA,
+        // Se devuelven las cifras usadas para poder auditar el mapeo desde la
+        // interfaz sin tener que leer el código.
+        cifrasUsadas: {
+          ingresos: datos.ingresos,
+          costoVentas: datos.costoVentas,
+          utilidadBruta: datos.utilidadBruta,
+          utilidadOperativa: datos.utilidadOperativa,
+          utilidadNeta: datos.utilidadNeta,
+          gastosTotales: indicadores.base.gastosTotales,
+          inventario: datos.inventarioAlCosto,
+          cxc: datos.cxc,
+          cxp: datos.cxp
+        }
       }
     });
   } catch (e) {
