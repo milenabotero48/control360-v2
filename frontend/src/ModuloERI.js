@@ -618,8 +618,50 @@ const VistaLineas = ({ eri }) => {
       Sin movimientos por línea en este período
     </div>;
   }
+  // ✅ FIX ERI-LINEA-003: la vista por línea NO cubre todos los ingresos —
+  // solo los servicios y los productos cuya categoría hace match con alguna
+  // línea. Si alguien suma las tarjetas y lo compara con el total de ingresos,
+  // le va a faltar plata y va a pensar que el informe está mal. Decirlo evita
+  // esa confusión y además señala cuánto del negocio está sin clasificar.
+  const totalIngresosERI = eri.ingresos?.total || 0;
+  const sumaLineas = lineas.reduce((a, l) => a + (l.ingresoServicio || 0), 0);
+  const cobertura = totalIngresosERI > 0 ? (sumaLineas / totalIngresosERI) * 100 : 0;
+  const sinLinea = totalIngresosERI - sumaLineas;
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
+    <div>
+      {totalIngresosERI > 0 && (
+        <div style={{
+          background: cobertura >= 80 ? '#f0fdf4' : cobertura >= 50 ? '#fffbeb' : '#fef2f2',
+          border: `1px solid ${cobertura >= 80 ? '#bbf7d0' : cobertura >= 50 ? '#fde68a' : '#fecaca'}`,
+          borderRadius: 12, padding: '14px 18px', marginBottom: 16,
+          display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap'
+        }}>
+          <div style={{ textAlign: 'center', minWidth: 78 }}>
+            <div style={{
+              fontSize: 26, fontWeight: 900, lineHeight: 1,
+              color: cobertura >= 80 ? '#16a34a' : cobertura >= 50 ? '#d97706' : '#dc2626'
+            }}>{cobertura.toFixed(0)}%</div>
+            <div style={{ fontSize: 9.5, color: '#94a3b8', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '.05em', marginTop: 3 }}>
+              Cobertura
+            </div>
+          </div>
+          <div style={{ flex: 1, minWidth: 260, fontSize: 12.5, color: '#475569', lineHeight: 1.6 }}>
+            Estas líneas explican <strong>{fmtCop(sumaLineas)}</strong> de tus{' '}
+            <strong>{fmtCop(totalIngresosERI)}</strong> en ingresos.
+            {sinLinea > 1 && (
+              <> Los otros <strong>{fmtCop(sinLinea)}</strong> son ventas de productos cuya categoría
+              no está asociada a ninguna línea de servicio, por eso no aparecen acá.</>
+            )}
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 5 }}>
+              Si querés que un producto cuente dentro de una línea, asociá su categoría a esa línea
+              en Configuración → Líneas de servicio.
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
       {lineas.map(l => (
         <div key={l.id} style={{ ...s.card, padding: 0, overflow: 'hidden' }}>
           <div style={{ background: l.color, color: '#fff', padding: '14px 18px', fontWeight: 700 }}>
@@ -684,6 +726,7 @@ const VistaLineas = ({ eri }) => {
           </div>
         </div>
       ))}
+      </div>
     </div>
   );
 };

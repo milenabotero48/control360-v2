@@ -292,9 +292,25 @@ router.get('/', async (req, res) => {
           // ✅ ERI-COSTO-002: si el SERVICIO tiene precioCosto definido (raro,
           // pero posible), también suma a su costo de línea. El costo principal
           // de un servicio fabricado viene de los insumos (egresos costo_servicio).
+          // ══════════════════════════════════════════════════════════════════
+          // ✅ FIX ERI-COSTOSERVICIO-002 — costo unitario de un servicio
+          // ──────────────────────────────────────────────────────────────────
+          // EL BUG: este costo se sumaba al desglose por categoría y a la línea,
+          // pero NUNCA al total del costo de ventas. Resultado: aparecía en la
+          // lista sin contarse, la utilidad bruta quedaba sobrestimada por ese
+          // valor, y el desglose no cuadraba con el total. En Extintores del
+          // Valle eran $433.000 que se veían pero no sumaban — el síntoma fue
+          // una fila de "costos sin clasificar" en NEGATIVO.
+          //
+          // Un servicio con costo unitario definido SÍ es costo de ventas: es
+          // lo que cuesta prestarlo. Va al total de costos de servicio, que es
+          // donde corresponde por naturaleza.
+          // ══════════════════════════════════════════════════════════════════
           if (cls.precioCosto > 0) {
-            porLinea[lineaId].costoServicio += cls.precioCosto * cantidad;
-            porLinea[lineaId].costoProductos += cls.precioCosto * cantidad;
+            const costoServicioItem = cls.precioCosto * cantidad;
+            porLinea[lineaId].costoServicio += costoServicioItem;
+            porLinea[lineaId].costoProductos += costoServicioItem;
+            totalCostoServicios += costoServicioItem;
           }
         } else {
           ingresoProductosOrden += subtotal;

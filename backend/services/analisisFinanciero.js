@@ -590,7 +590,37 @@ function diagnosticar(datos = {}, indicadores = {}) {
     }
   }
 
-  // ─── D11 · Todo bien ───────────────────────────────────────────────────────
+  // ─── D11 · Productos vendidos sin costo parametrizado ──────────────────────
+  // Un producto sin costo da 100% de margen y contamina el margen bruto de todo
+  // el negocio. Es el error de datos que más distorsiona el informe, y es
+  // invisible: nada se ve roto, solo salen números demasiado buenos.
+  const sinCosto = (datos.categorias || []).filter(c =>
+    (Number(c.ingreso) || 0) > 0 && (Number(c.costo) || 0) === 0
+  );
+  if (sinCosto.length > 0) {
+    const ingresoSinCosto = sinCosto.reduce((a, c) => a + (Number(c.ingreso) || 0), 0);
+    const pctSinCosto = ingresos > 0 ? (ingresoSinCosto / ingresos) * 100 : 0;
+    if (pctSinCosto > 5) {
+      hallazgos.push({
+        id: 'productos_sin_costo',
+        severidad: pctSinCosto > 25 ? 'alto' : 'medio',
+        titulo: 'Hay ventas registradas sin ningún costo asociado',
+        que: `${sinCosto.length} categoría(s) vendieron ${money(ingresoSinCosto)} (${pct(pctSinCosto)} de tus ingresos) con costo en cero: ` +
+             sinCosto.slice(0, 5).map(c => c.nombre).join(', ') +
+             (sinCosto.length > 5 ? `, y ${sinCosto.length - 5} más.` : '.'),
+        porque: 'Un producto sin costo parametrizado muestra 100% de margen. Eso infla el margen bruto de todo el negocio y hace que el informe se vea mejor de lo que está. Es el error de datos que más distorsiona el estado de resultados, y es difícil de notar: nada se ve roto, solo salen números demasiado buenos.',
+        hacer: [
+          'Entrá a Productos y cargá el costo unitario de esos ítems.',
+          'Si es un servicio, el costo viene de los insumos: revisá que esos egresos estén clasificados como costo de servicio y asociados a la línea correcta.',
+          'Si de verdad no tiene costo (por ejemplo, mano de obra ya incluida en la nómina), está bien que quede en cero — pero conviene saberlo para no leer mal el margen.'
+        ],
+        valor: ingresoSinCosto,
+        modulo: 'productos'
+      });
+    }
+  }
+
+  // ─── D12 · Todo bien ───────────────────────────────────────────────────────
   if (hallazgos.length === 0) {
     hallazgos.push({
       id: 'sin_hallazgos',

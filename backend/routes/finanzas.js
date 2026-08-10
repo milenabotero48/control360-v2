@@ -148,6 +148,7 @@ router.get('/flujo-efectivo', async (req, res) => {
     // ─── SALIDAS DE EFECTIVO ─────────────────────────────────────────────────
     const salidas = {
       proveedores: 0,      // compra de mercancía
+      insumos: 0,          // insumos de taller (costo de servicio)
       personal: 0,         // nómina y anticipos
       operativos: 0,       // transporte, papelería, mantenimiento
       fijos: 0,            // arriendo, servicios públicos
@@ -188,6 +189,10 @@ router.get('/flujo-efectivo', async (req, res) => {
       if (esFinanciacion(cat, e.concepto))      bucket = 'financiacion';
       else if (esInversion(cat))                bucket = 'inversion';
       else if (tipoERI === 'compra_inventario') bucket = 'proveedores';
+      // ✅ Los insumos de taller son COSTO de servicio, no gasto operativo.
+      // Mezclarlos con papelería y transporte escondía cuánta plata se va en
+      // materia prima, que en un negocio de servicios es la cifra clave.
+      else if (tipoERI === 'costo_servicio')    bucket = 'insumos';
       else if (tipoERI === 'gasto_personal')    bucket = 'personal';
       else if (tipoERI === 'gasto_fijo')        bucket = 'fijos';
       else if (tipoERI === 'gasto_administrativo') bucket = 'administrativos';
@@ -204,7 +209,7 @@ router.get('/flujo-efectivo', async (req, res) => {
 
     // ─── ARMADO DEL ESTADO ───────────────────────────────────────────────────
     const salidasOperacion =
-      salidas.proveedores + salidas.personal + salidas.operativos +
+      salidas.proveedores + salidas.insumos + salidas.personal + salidas.operativos +
       salidas.fijos + salidas.administrativos + salidas.financieros + salidas.impuestos;
 
     const flujoOperacion = cobrosClientes - salidasOperacion;
@@ -282,6 +287,7 @@ router.get('/flujo-efectivo', async (req, res) => {
         totalEntradas: Math.round(cobrosClientes),
         salidas: [
           { concepto: 'Pago a proveedores (mercancía)', valor: Math.round(salidas.proveedores) },
+          { concepto: 'Insumos de taller',              valor: Math.round(salidas.insumos) },
           { concepto: 'Pago de personal',               valor: Math.round(salidas.personal) },
           { concepto: 'Gastos operativos',              valor: Math.round(salidas.operativos) },
           { concepto: 'Gastos fijos',                   valor: Math.round(salidas.fijos) },
