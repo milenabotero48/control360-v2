@@ -15,6 +15,8 @@ import GestionProductos from './GestionProductos';
 import GestionOrdenes from './GestionOrdenes';
 import GestionCotizaciones from './GestionCotizaciones';
 import ModuloERI from './ModuloERI';   // Ola 3
+// ✅ FINANZAS-ANALISIS-001: el ERI pasa a ser una pestaña dentro de Finanzas
+import ModuloFinanzas from './ModuloFinanzas';
 import ModuloReportes from './ModuloReportes'; // Ola 3 Bloque 2
 import CampanaAlertas from './CampanaAlertas'; // Ola 3 Bloque 3
 import GestionCaja from './GestionCaja';
@@ -33,6 +35,8 @@ import Registro from './Registro'; // Registro público de suscriptores
 import BannerSuscripcion from './BannerSuscripcion'; // Alerta de vencimiento
 import BtnWhatsApp from './BtnWhatsApp'; // Botón flotante de soporte
 import GestionVencimientos from './GestionVencimientos'; // Módulo vencimientos
+// ✅ NOVEDADES-001: canal de anuncios a suscriptores + calendario laboral
+import { CampanaNovedades, BannerNovedad, PanelNovedades } from './Novedades';
 import Onboarding from './Onboarding'; // Bienvenida nuevos suscriptores
 
 // ─── NAV POR GRUPOS Y ROL ────────────────────────────────────────────────────
@@ -62,7 +66,7 @@ const TODOS_LOS_MODULOS = [
   { key: 'compras',     label: 'Compras',       icon: '🛒', modulo: 'compras' },
   { key: 'cxc',         label: 'CxC',           icon: '💳', modulo: 'cxc' },
   { key: 'cxp',         label: 'CxP',           icon: '📋', modulo: 'cxp' },
-  { key: 'eri',         label: 'ERI',           icon: '📈', modulo: 'eri' },
+  { key: 'eri',         label: 'Finanzas',      icon: '📈', modulo: 'eri' },
   { key: 'reportes',    label: 'Reportes',      icon: '📉', modulo: 'reportes' },
   { key: 'config',      label: 'Mi Empresa',    icon: '🏢', modulo: 'mi_empresa' },
   { key: 'usuarios',    label: 'Usuarios',      icon: '👤', modulo: 'usuarios' },
@@ -146,7 +150,11 @@ const buildGrupos = (role, userModulos, esSuperAdmin = false) => {
   if (esSuperAdmin === true) {
     resultado.push({
       grupo: 'Plataforma',
-      items: [{ key: 'suscriptores', label: 'Suscriptores', icon: '🛰️', modulo: 'suscriptores' }]
+      items: [
+        { key: 'suscriptores', label: 'Suscriptores', icon: '🛰️', modulo: 'suscriptores' },
+        // ✅ NOVEDADES-001
+        { key: 'novedades',    label: 'Novedades',    icon: '📢', modulo: 'novedades' }
+      ]
     });
   }
 
@@ -499,6 +507,7 @@ export default function AppRoot() {
           </div>
           {/* Ola 3 Bloque 3: campana de alertas en móvil */}
           {['admin', 'taller', 'tesoreria', 'comercial'].includes(user.role) && <CampanaAlertas />}
+          <CampanaNovedades onNavegar={(k) => setCurrentPage(k)} />
           <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(167,139,250,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: '#c4b5fd' }}>
             {iniciales}
           </div>
@@ -538,6 +547,7 @@ export default function AppRoot() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             {/* Campana de alertas — solo admin, taller, tesoreria, comercial */}
             {['admin', 'taller', 'tesoreria', 'comercial'].includes(user.role) && <CampanaAlertas />}
+          <CampanaNovedades onNavegar={(k) => setCurrentPage(k)} />
             <button onClick={handleLogout} title="Cerrar sesión" style={{
               background: '#f3f4f6', color: '#374151',
               border: '1px solid #e5e7eb', borderRadius: 8,
@@ -552,6 +562,8 @@ export default function AppRoot() {
 
         {/* Módulo activo */}
         <BannerSuscripcion user={user} />
+        {/* ✅ NOVEDADES-001: solo aparece si hay una novedad crítica sin leer */}
+        <BannerNovedad onNavegar={(k) => setCurrentPage(k)} />
         <main style={{ flex: 1 }}>
           {currentPage === 'admin' && user?.role === 'admin'      && <Dashboard user={user} />}
           {currentPage === 'admin' && user?.role === 'comercial'  && <DashboardComercial user={user} />}
@@ -580,9 +592,21 @@ export default function AppRoot() {
           {currentPage === 'cxp'          && <GestionCxP user={user} />}
           {currentPage === 'proveedores'  && <GestionProveedores user={user} />}
           {currentPage === 'qr'           && <GestionQR user={user} />}
-          {currentPage === 'eri'          && user.role === 'admin' && <ModuloERI user={user} />}
+          {currentPage === 'eri'          && user.role === 'admin' && <ModuloFinanzas user={user} onNavegar={(k) => setCurrentPage(k)} />}
           {currentPage === 'reportes'     && user.role === 'admin' && <ModuloReportes user={user} />}
           {currentPage === 'suscriptores' && user?.superAdmin === true && <PanelSuscriptores user={user} />}
+          {/* ✅ NOVEDADES-001 */}
+          {currentPage === 'novedades' && user?.superAdmin === true && (
+            <div style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+              <div style={{ marginBottom: 24 }}>
+                <h2 style={{ margin: 0, fontSize: 26, fontWeight: 800, color: '#1e293b' }}>📢 Novedades</h2>
+                <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748b' }}>
+                  Anuncios a suscriptores · Calendario laboral automático
+                </p>
+              </div>
+              <PanelNovedades />
+            </div>
+          )}
         </main>
 
         {/* Bottom nav móvil (oculto en desktop por CSS) */}

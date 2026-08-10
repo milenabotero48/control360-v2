@@ -377,6 +377,64 @@ router.get('/', async (req, res) => {
       l.margenPct = l.ingresoServicio > 0 ? (l.utilidadBruta / l.ingresoServicio) * 100 : 0;
     });
 
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ ERI-PRESTACIONES-001 — Provisiones de prestaciones sociales
+    // ──────────────────────────────────────────────────────────────────────
+    // ESTO ES LO QUE FALTABA EN EL INFORME DE JULIO 2026.
+    //
+    // Las cesantías, los intereses, la prima y las vacaciones se CAUSAN mes a
+    // mes aunque se paguen después. Bajo principio de devengo, el gasto se
+    // reconoce cuando el empleado trabaja, no cuando sale la plata.
+    //
+    // Sin esto, la nómina del ERI mostraba solo lo que salió de caja y
+    // subestimaba el costo real del personal en un 21,83% del salario base
+    // — entre $2,5 y $2,8 millones mensuales en el caso auditado.
+    //
+    // Las provisiones NO son egresos: viven en su propia colección y se suman
+    // acá como gasto de personal, con su contrapartida en el pasivo.
+    // ══════════════════════════════════════════════════════════════════════
+    let provisionesPrestaciones = 0;
+    const anexoProvisiones = [];
+    try {
+      const provSnap = await db.collection('provisiones_prestaciones')
+        .where('userId', '==', adminId).get();
+
+      provSnap.docs.forEach(d => {
+        const p = d.data();
+        if (p.revertida === true) return;
+        // El período de la provisión es año-mes; se compara contra el rango
+        const periodo = p.periodo || `${p.anio}-${String(p.mes).padStart(2, '0')}`;
+        const primerDia = `${periodo}-01`;
+        const ultimoDia = `${periodo}-31`;
+        if (desde && ultimoDia < desde) return;
+        if (hasta && primerDia > hasta) return;
+
+        const valor = Number(p.totalPrestaciones) || 0;
+        provisionesPrestaciones += valor;
+        anexoProvisiones.push({
+          periodo,
+          empleado: p.empleadoNombre || '',
+          documento: p.empleadoDocumento || '',
+          diasTrabajados: p.diasTrabajados || 30,
+          cesantias: Number(p.prestaciones?.cesantias?.valor) || 0,
+          intereses: Number(p.prestaciones?.interesesCesantias?.valor) || 0,
+          prima: Number(p.prestaciones?.prima?.valor) || 0,
+          vacaciones: Number(p.prestaciones?.vacaciones?.valor) || 0,
+          total: valor
+        });
+      });
+
+      // Suma al gasto de personal: es gasto del período, aunque no mueva caja
+      gastosPorTipo.gasto_personal += provisionesPrestaciones;
+      if (provisionesPrestaciones > 0) {
+        gastosDetallePorCategoria['Provisión de prestaciones sociales'] =
+          (gastosDetallePorCategoria['Provisión de prestaciones sociales'] || 0) + provisionesPrestaciones;
+      }
+    } catch (e) {
+      // Si la colección no existe todavía, el ERI sigue funcionando sin ellas
+      console.error('ERI provisiones:', e.message);
+    }
+
     // ── Totales ─────────────────────────────────────────────────────────────
     const totalIngresos = totalServicios + totalProductos;
     const utilidadBrutaServicios = totalServicios - totalCostoServicios;
@@ -485,7 +543,9 @@ router.get('/', async (req, res) => {
     Object.entries(costoPorCategoria).forEach(([categoria, costo]) => {
       anexoCostos.push({ categoria, costo, ingreso: ingresoPorCategoria[categoria] || 0 });
     });
-    anexoCostos.sort((a, b) => b.costo - a.costo);
+    // El orden y las filas de diferencia se aplican MÁS ABAJO, después de
+    // ajustar el desglose contra los totales (ver FIX ERI-CUADRE-001). Si se
+    // ordenara acá, el anexo quedaría desalineado con el cuerpo del informe.
 
     // ✅ ERI-COSTO-001: INFORME P&G — ingresos y costos por CATEGORÍA de producto,
     // gastos por categoría de egreso. Regla: los valores en $0 se filtran (un
@@ -495,9 +555,60 @@ router.get('/', async (req, res) => {
       .map(([nombre, valor]) => ({ nombre, valor }))
       .sort((a, b) => b.valor - a.valor);
 
-    const totalIngresosInforme = Object.values(ingresoPorCategoria).reduce((s, v) => s + v, 0);
-    const totalCostoInforme = Object.values(costoPorCategoria).reduce((s, v) => s + v, 0);
-    const utilidadBrutaInforme = totalIngresosInforme - totalCostoInforme;
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ FIX ERI-CUADRE-001 — UNA SOLA FUENTE DE VERDAD
+    // ──────────────────────────────────────────────────────────────────────
+    // EL BUG QUE ESTO CORRIGE
+    // El informe calculaba la utilidad por su cuenta, sumando las categorías
+    // de producto, mientras las tarjetas KPI la calculaban por otro camino
+    // (costo de servicios + costo de productos). Los dos números salían
+    // distintos y el usuario veía dos utilidades netas diferentes en la misma
+    // pantalla: -$3.181.607 arriba y -$1.968.303 abajo.
+    //
+    // La diferencia eran $1.213.304 de costo de servicios que la agrupación
+    // por categoría de producto no alcanzaba a capturar.
+    //
+    // LA REGLA AHORA
+    // Los totales SIEMPRE vienen del cálculo principal. El desglose por
+    // categoría es eso: un DESGLOSE, no un cálculo paralelo. Si el desglose no
+    // suma el total, se agrega una fila explícita con la diferencia en vez de
+    // mostrar en silencio un número distinto.
+    // ══════════════════════════════════════════════════════════════════════
+    const totalIngresosInforme = totalIngresos;
+    const totalCostoInforme = totalCostoServicios + totalCostoProductos;
+    const utilidadBrutaInforme = utilidadBrutaTotal;
+
+    // Cuánto del total NO quedó explicado por el desglose de categorías
+    const sumaCategoriasIngreso = Object.values(ingresoPorCategoria).reduce((s, v) => s + v, 0);
+    const sumaCategoriasCosto = Object.values(costoPorCategoria).reduce((s, v) => s + v, 0);
+    const difIngreso = Math.round(totalIngresosInforme - sumaCategoriasIngreso);
+    const difCosto = Math.round(totalCostoInforme - sumaCategoriasCosto);
+
+    // Si sobra o falta, se muestra. Nunca se esconde.
+    if (Math.abs(difIngreso) > 1) {
+      ingresoPorCategoria['(Sin desglosar por categoría)'] =
+        (ingresoPorCategoria['(Sin desglosar por categoría)'] || 0) + difIngreso;
+    }
+    if (Math.abs(difCosto) > 1) {
+      costoPorCategoria['(Costos de servicio sin categoría de producto)'] =
+        (costoPorCategoria['(Costos de servicio sin categoría de producto)'] || 0) + difCosto;
+      // El anexo también lo lleva: si el Excel no suma lo mismo que el informe,
+      // el anexo deja de servir como soporte. Era exactamente el problema que
+      // hacía imposible auditar de dónde salía cada cifra.
+      anexoCostos.push({
+        categoria: '(Costos de servicio sin categoría de producto)',
+        costo: difCosto,
+        ingreso: 0
+      });
+    }
+    if (Math.abs(difIngreso) > 1) {
+      anexoCostos.push({
+        categoria: '(Ingresos sin desglosar por categoría)',
+        costo: 0,
+        ingreso: difIngreso
+      });
+    }
+    anexoCostos.sort((a, b) => b.costo - a.costo);
 
     // ── ✅ ERI-CARTERA-001: cartera informativa (NO afecta el resultado) ──────
     // Bajo causación, el ingreso ya se reconoció al prestar el servicio. La
@@ -569,7 +680,27 @@ router.get('/', async (req, res) => {
           .sort((a, b) => b.valor - a.valor),
         total: totalGastos
       },
-      utilidadNeta: utilidadBrutaInforme - totalGastos,
+      // ✅ FIX ERI-CUADRE-001: la utilidad neta del cuerpo es LA MISMA que la
+      // de las tarjetas. Antes se recalculaba acá y daba distinto.
+      utilidadNeta,
+      utilidadOperativa,
+      // Validación de cuadre: si algún día vuelven a divergir, el informe lo
+      // dice en vez de mostrar dos números y dejar que el usuario lo descubra.
+      cuadre: (() => {
+        const porCadena = Math.round(utilidadBrutaTotal - totalGastos);
+        const ok = Math.abs(porCadena - Math.round(utilidadNeta)) <= 1;
+        return {
+          ok,
+          utilidadPorCadena: porCadena,
+          utilidadReportada: Math.round(utilidadNeta),
+          diferencia: porCadena - Math.round(utilidadNeta),
+          desgloseIngresoCuadra: Math.abs(difIngreso) <= 1,
+          desgloseCostoCuadra: Math.abs(difCosto) <= 1,
+          mensaje: ok
+            ? 'Las cifras del informe cuadran con el detalle.'
+            : 'ATENCIÓN: la utilidad calculada por la cadena no coincide con la reportada. Revisá el detalle antes de usar este informe.'
+        };
+      })(),
       // ✅ Sección inventario (informativa, NO afecta utilidad)
       inventario: {
         comprasDelPeriodo: totalComprasInventario,
@@ -609,7 +740,20 @@ router.get('/', async (req, res) => {
             monto: e.monto,
             tipoERI: e.tipoERI || ''
           }))
-          .sort((a, b) => String(a.numero || '').localeCompare(String(b.numero || ''), undefined, { numeric: true }))
+          .sort((a, b) => String(a.numero || '').localeCompare(String(b.numero || ''), undefined, { numeric: true })),
+        // ✅ ERI-PRESTACIONES-001: soporte de la provisión causada
+        provisiones: anexoProvisiones.sort((a, b) =>
+          String(a.periodo).localeCompare(String(b.periodo)) ||
+          String(a.empleado).localeCompare(String(b.empleado)))
+      },
+      // ✅ ERI-PRESTACIONES-001: se expone aparte para que el análisis
+      // financiero pueda usarlo como pasivo corriente sin recalcularlo.
+      prestaciones: {
+        causadasEnPeriodo: Math.round(provisionesPrestaciones),
+        empleadosConProvision: new Set(anexoProvisiones.map(p => p.documento)).size,
+        nota: provisionesPrestaciones > 0
+          ? 'Gasto causado del período. No mueve caja: se acumula como obligación con los empleados.'
+          : 'No hay provisiones causadas en este período. Causalas en Empleados → Provisiones para que el informe refleje el costo real de la nómina.'
       }
     };
 

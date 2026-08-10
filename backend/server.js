@@ -69,6 +69,8 @@ app.use('/api/egresos',   authenticate, require('./routes/egresos'));
 app.use('/api/vehiculos', authenticate, require('./routes/vehiculos'));
 // ✅ NOMINA-PROVISIONES-001: empleados, provisiones de prestaciones y nómina
 app.use('/api/empleados', authenticate, require('./routes/empleados'));
+// ✅ NOVEDADES-001: anuncios a suscriptores y calendario laboral
+app.use('/api/novedades', authenticate, require('./routes/novedades'));
 app.use('/api/configuracion', authenticate, require('./routes/configuracion'));
 app.use('/api/cxc',       authenticate, require('./routes/cxc'));
 app.use('/api/cxp',       authenticate, require('./routes/cxp'));
@@ -76,6 +78,8 @@ app.use('/api/proveedores', authenticate, require('./routes/proveedores'));
 app.use('/api/logistica', authenticate, require('./routes/logistics'));
 app.use('/api/dashboards', authenticate, require('./routes/dashboards'));
 app.use('/api/eri',       authenticate, require('./routes/eri'));
+// ✅ FINANZAS-ANALISIS-001: flujo de efectivo, indicadores y diagnóstico
+app.use('/api/finanzas',  authenticate, require('./routes/finanzas'));
 app.use('/api/reportes',  authenticate, require('./routes/reportes'));
 app.use('/api/alertas',   authenticate, require('./routes/alertas'));
 app.use('/api/auditoria', authenticate, require('./routes/auditoria'));
@@ -118,6 +122,9 @@ app.listen(PORT, () => {
   iniciarCronWhatsapp();
   const { iniciarCronLlamadasIA } = require('./services/llamadasIAService');
   iniciarCronLlamadasIA();
+  // ✅ NOVEDADES-001: avisos del calendario laboral colombiano
+  const { iniciarCronNovedades } = require('./services/novedadesCron');
+  iniciarCronNovedades();
   // ✅ VENC-CICLO-004: archiva vencimientos con más de 6 meses sin servicio
   const { iniciarCronArchivado } = require('./services/vencimientosService');
   iniciarCronArchivado();

@@ -171,6 +171,25 @@ const ModuloERI = ({ user }) => {
         inf.anexos.compras.forEach(c => filas.push({ s: 'ANEXO COMPRAS', d: `${c.fecha} · ${c.proveedor} · ${c.concepto}`, v: c.monto }));
       }
 
+      // ✅ ERI-ANEXO-EGRESOS-001: el detalle de egresos SÍ venía del backend,
+      // pero la exportación se lo saltaba. Sin él, el Excel mostraba los gastos
+      // agrupados por categoría y no había forma de auditar comprobante por
+      // comprobante ni de encontrar un egreso puntual mal clasificado.
+      if ((inf.anexos?.egresos || []).length) {
+        filas.push({ s: '', d: '', v: '' });
+        filas.push({ s: 'ANEXO 5 · EGRESOS', d: '── Detalle de egresos del período ──', v: '' });
+        inf.anexos.egresos.forEach(e => filas.push({
+          s: 'ANEXO EGRESOS',
+          d: `${e.numero} · ${e.fecha} · ${e.categoria} · ${e.concepto}`,
+          v: e.monto
+        }));
+        filas.push({
+          s: 'ANEXO EGRESOS',
+          d: '── TOTAL EGRESOS DEL PERÍODO ──',
+          v: inf.anexos.egresos.reduce((a, e) => a + (Number(e.monto) || 0), 0)
+        });
+      }
+
       if (inf.cartera) {
         filas.push({ s: '', d: '', v: '' });
         filas.push({ s: 'CARTERA CxC', d: '── Por cobrar (informativo) ──', v: inf.cartera.cxc.total });
@@ -323,6 +342,32 @@ const KPI = ({ icon, label, value, sub, color, grande }) => (
 const VistaInforme = ({ eri }) => {
   const inf = eri.informe;
   if (!inf) return <div style={s.card}>El informe no está disponible.</div>;
+
+  // ✅ FIX ERI-CUADRE-001: si las cifras del cuerpo y las tarjetas volvieran a
+  // divergir, el informe lo dice acá arriba en vez de mostrar dos números
+  // distintos y dejar que el usuario lo descubra por su cuenta.
+  const Alerta = () => {
+    const c = inf.cuadre;
+    if (!c || c.ok) return null;
+    return (
+      <div style={{
+        background: '#fef2f2', border: '2px solid #fecaca', borderRadius: 12,
+        padding: '14px 18px', marginBottom: 16
+      }}>
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: '#991b1b', marginBottom: 5 }}>
+          ⚠️ Las cifras de este informe no cuadran
+        </div>
+        <div style={{ fontSize: 12.5, color: '#b91c1c', lineHeight: 1.6 }}>
+          {c.mensaje}
+          <br />
+          Utilidad por la cadena: <strong>{fmtCop(c.utilidadPorCadena)}</strong> ·
+          reportada: <strong>{fmtCop(c.utilidadReportada)}</strong> ·
+          diferencia: <strong>{fmtCop(c.diferencia)}</strong>
+        </div>
+      </div>
+    );
+  };
+
   const Linea = ({ nombre, valor, indent, bold, color }) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', paddingLeft: indent ? 20 : 0, fontWeight: bold ? 800 : 500, fontSize: bold ? 15 : 13, color: color || '#334155', borderTop: bold ? '1px solid #e2e8f0' : 'none' }}>
       <span>{nombre}</span><span>{fmtCop(valor)}</span>
@@ -330,6 +375,7 @@ const VistaInforme = ({ eri }) => {
   );
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Alerta />
       <div style={s.card}>
         {/* INGRESOS por categoría */}
         <div style={{ fontSize: 12, fontWeight: 800, color: '#0284c7', letterSpacing: 0.5, marginBottom: 4 }}>INGRESOS</div>
