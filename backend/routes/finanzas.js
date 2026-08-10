@@ -34,6 +34,30 @@ const A = require('../services/analisisFinanciero');
 
 const resolverAdminId = (req) => req.adminId || req.user?.uid || req.user?.id || null;
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ FIX FLUJO-FECHAS-001 — Normalizador de fechas
+// ─────────────────────────────────────────────────────────────────────────────
+// Las órdenes guardan las fechas como Timestamp de Firestore (objeto), no como
+// texto. Hacerles String() devolvía "[object Object]", así que ninguna orden
+// caía dentro del rango y los cobros salían siempre en cero.
+//
+// Es el mismo helper que usa routes/eri.js. Acepta Timestamp vivo, Timestamp
+// serializado ({_seconds}), Date y texto ISO. Devuelve 'YYYY-MM-DD' o ''.
+// ═════════════════════════════════════════════════════════════════════════════
+const aFechaISO = (raw) => {
+  if (!raw) return '';
+  if (typeof raw === 'string') return raw.slice(0, 10);
+  let d = null;
+  if (raw._seconds) d = new Date(raw._seconds * 1000);
+  else if (raw.seconds) d = new Date(raw.seconds * 1000);
+  else if (typeof raw.toDate === 'function') d = raw.toDate();
+  else if (raw instanceof Date) d = raw;
+  else d = new Date(raw);
+  if (!d || isNaN(d.getTime())) return '';
+  // 'en-CA' produce YYYY-MM-DD; la zona evita el corrimiento de día por UTC
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+};
+
 const diasEntre = (desde, hasta) => {
   const a = new Date(String(desde) + 'T00:00:00');
   const b = new Date(String(hasta) + 'T00:00:00');
@@ -70,10 +94,13 @@ router.get('/flujo-efectivo', async (req, res) => {
     const { desde, hasta } = req.query;
     if (!desde || !hasta) return res.status(400).json({ error: 'Se requiere el rango de fechas' });
 
-    const [ordSnap, egrSnap, movSnap, cajaSnap] = await Promise.all([
-      db.collection('orders').where('userId', '==', adminId).get().catch(() => ({ docs: [] })),
+    // ✅ FIX FLUJO-ADMINID-001: las ÓRDENES se guardan con `adminId`, no con
+    // `userId` como los egresos. La consulta estaba mal y devolvía cero
+    // órdenes siempre, así que los cobros a clientes salían en $0 aunque
+    // hubiera millones facturados. El .catch() lo ocultaba en silencio.
+    const [ordSnap, egrSnap, cajaSnap] = await Promise.all([
+      db.collection('orders').where('adminId', '==', adminId).get(),
       db.collection('egresos').where('userId', '==', adminId).get(),
-      db.collection('movimientos').where('userId', '==', adminId).get().catch(() => ({ docs: [] })),
       db.collection('cajas').where('userId', '==', adminId).get().catch(() => ({ docs: [] })),
     ]);
 
@@ -88,16 +115,24 @@ router.get('/flujo-efectivo', async (req, res) => {
 
     ordSnap.docs.forEach(d => {
       const o = d.data();
-      if (o.anulada === true || o.estado === 'ANULADA') return;
+      // Mismos criterios de exclusión que el ERI, para que los dos estados
+      // hablen del mismo universo de órdenes.
+      if (o.anulada === true || o.estado === 'anulada' || o.estado === 'ANULADA') return;
+      if (o.tipoOrden === 'interna' || o.tipoOrden === 'produccion') return;
+
       const total = Number(o.total || o.totalOrden || o.valorTotal) || 0;
       if (total <= 0) return;
 
-      const fechaOrden = String(o.fecha || o.fechaCreacion || '').slice(0, 10);
+      // ✅ FIX FLUJO-FECHAS-001: las fechas vienen como Timestamp, no como
+      // texto. Se normalizan con el mismo criterio que usa el ERI.
+      const fechaOrden = aFechaISO(o.fechaCreacion || o.createdAt || o.fechaFactura || o.fecha);
       if (enRango(fechaOrden, desde, hasta)) ventasCausadas += total;
 
-      // Cobrado: si está pagada y la fecha de pago cae en el rango
-      const pagada = o.pagado === true || o.estado === 'PAGADA' || o.estado === 'pagado';
-      const fechaCobro = String(o.fechaPago || o.fecha || '').slice(0, 10);
+      // Una orden está cobrada si `pagado` es true. El campo `estado` describe
+      // el flujo operativo (entregada, en taller...), no el estado de cobro,
+      // salvo 'cxc' que sí marca crédito pendiente.
+      const pagada = o.pagado === true && o.estado !== 'cxc';
+      const fechaCobro = aFechaISO(o.fechaPago || o.fechaCobro || o.fechaCreacion || o.createdAt);
 
       if (pagada && enRango(fechaCobro, desde, hasta)) {
         cobrosClientes += total;
@@ -138,7 +173,9 @@ router.get('/flujo-efectivo', async (req, res) => {
       if (e.tipo === 'provisional' || e.estado === 'ANTICIPO') return;
       if (e.tipo === 'retencion') return;
 
-      const fecha = String(e.fechaPago || e.fecha || '').slice(0, 10);
+      // ✅ El flujo de efectivo usa la fecha del PAGO, no la de causación:
+      // acá importa cuándo se movió la plata. Es lo opuesto al ERI.
+      const fecha = aFechaISO(e.fechaPago || e.fecha || e.createdAt);
       if (!enRango(fecha, desde, hasta)) return;
 
       const valor = Number(e.totalPagar || e.monto) || 0;
@@ -220,8 +257,23 @@ router.get('/flujo-efectivo', async (req, res) => {
       });
     }
 
+    // ✅ FIX FLUJO-ADMINID-001: verificación de sanidad. Si hay ventas en el
+    // período pero cero cobros, casi siempre es un problema de datos o de
+    // consulta, no la realidad del negocio. Antes esto pasaba desapercibido.
+    const avisos = [];
+    if (ordSnap.docs.length === 0) {
+      avisos.push('No se encontró ninguna orden. Verificá que existan órdenes registradas para esta empresa.');
+    } else if (ventasCausadas > 0 && cobrosClientes === 0) {
+      avisos.push(
+        `Se facturaron ${A.money(ventasCausadas)} en el período pero no se registró ningún cobro. ` +
+        `Revisá que las órdenes pagadas tengan marcada la fecha de pago; si todo quedó a crédito, ` +
+        `el saldo debería aparecer en Cuentas por Cobrar.`
+      );
+    }
+
     res.json({
       periodo: { desde, hasta, dias: diasEntre(desde, hasta) },
+      avisos,
 
       operacion: {
         entradas: [

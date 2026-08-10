@@ -222,6 +222,17 @@ function FlujoEfectivo({ datos }) {
 
   return (
     <div>
+      {/* ✅ FIX FLUJO-ADMINID-001: si los cobros salen en cero habiendo ventas,
+          se dice en vez de mostrar un flujo negativo que parece real. */}
+      {(datos.avisos || []).map((a, i) => (
+        <div key={i} style={{
+          background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 11,
+          padding: '13px 17px', fontSize: 12.5, color: '#92400e', marginBottom: 14, lineHeight: 1.6
+        }}>
+          ⚠️ {a}
+        </div>
+      ))}
+
       {/* Lectura de fondo */}
       <div style={{
         background: positivo ? 'linear-gradient(135deg,#059669,#047857)' : 'linear-gradient(135deg,#dc2626,#991b1b)',
