@@ -88,6 +88,91 @@ const pinValido = (v) => typeof v === 'string' && /^\d{4}$/.test(v);
 // ─── HELPER: hashear contraseña con bcrypt ────────────────────────────────────
 const hashearPassword = async (raw) => bcrypt.hash(String(raw), SALT_ROUNDS);
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ FIX MULTIADMIN-001 (2026-08-20) — PROPIEDAD ≠ ROL
+// ─────────────────────────────────────────────────────────────────────────────
+//   role          → permisos dentro de la empresa (puede haber N admins)
+//   esPropietario → dueño de la suscripción (siempre exactamente 1 por tenant)
+//
+// Reglas: solo el propietario crea, promueve, degrada o desactiva
+// administradores; al propietario nadie lo edita salvo él mismo, nadie lo
+// desactiva, y la marca `esPropietario` jamás se acepta desde el body.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Id del tenant (empresa) de quien hace la petición.
+// El adminId del JWT es la fuente autorizada porque lo calcula el login con
+// resolverTenant(). req.adminId (middleware compartido) queda como respaldo, y
+// el uid propio como último recurso para tokens emitidos antes de este cambio.
+const tenantDeReq = (req) => req.user?.adminId || req.adminId || req.user?.uid || req.user?.id || null;
+
+const uidDeReq = (req) => req.user?.uid || req.user?.id || null;
+
+// ¿Quien llama es el PROPIETARIO del tenant?
+// Se verifica contra Firestore, no contra el JWT: un token viejo o manipulado
+// no debe poder otorgar propiedad. Mismo criterio que usa superadmin.js.
+const esPropietarioDelTenant = async (req) => {
+  const uid = uidDeReq(req);
+  if (!uid) return false;
+  const doc = await db.collection('users').doc(uid).get();
+  if (!doc.exists) return false;
+  const u = doc.data();
+  if (typeof u.esPropietario === 'boolean') return u.esPropietario === true;
+  return u.role === 'admin'; // documento sin migrar → regla legacy
+};
+
+// Carga un usuario verificando que pertenece al MISMO tenant de quien llama.
+// Antes, PUT / DELETE / GET :id/pin cargaban por id sin verificar la empresa.
+// Con un solo admin por tenant el hueco era teórico; con varios administradores
+// es un riesgo real de cruce entre suscriptores.
+const cargarUsuarioDelTenant = async (id, adminId) => {
+  const ref = db.collection('users').doc(id);
+  const doc = await ref.get();
+  if (!doc.exists) return null;
+  const datos = doc.data();
+  const tenantDelUsuario = datos.adminId || datos.creadoPor || doc.id;
+  if (tenantDelUsuario !== adminId && doc.id !== adminId) return null;
+  return { ref, datos, id: doc.id };
+};
+
+// ¿Este documento corresponde al propietario del tenant?
+const marcaPropietario = (datos, id, adminId) =>
+  (typeof datos.esPropietario === 'boolean' ? datos.esPropietario === true : id === adminId);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// LÍMITE DE ADMINISTRADORES POR PLAN — palanca comercial
+// ─────────────────────────────────────────────────────────────────────────────
+// El propietario cuenta dentro del límite. Ajustar esta tabla cuando se defina
+// el precio del "administrador adicional". null = sin límite.
+// ═════════════════════════════════════════════════════════════════════════════
+const LIMITE_ADMINS_POR_PLAN = {
+  punto_venta:   1,   // dueño operando solo
+  independiente: 2,   // dueño + una mano derecha
+  empresa:       4,   // gerencia + jefes de área
+  super_pro:     null,
+};
+const LIMITE_ADMINS_DEFECTO = 2; // tenant sin suscripción registrada
+
+const limiteAdminsDelTenant = async (adminId) => {
+  try {
+    const sus = await db.collection('suscripciones').doc(adminId).get();
+    if (!sus.exists) return LIMITE_ADMINS_DEFECTO;
+    const lim = LIMITE_ADMINS_POR_PLAN[sus.data().plan];
+    return lim === undefined ? LIMITE_ADMINS_DEFECTO : lim;
+  } catch {
+    return LIMITE_ADMINS_DEFECTO;
+  }
+};
+
+const contarAdminsActivos = async (adminId) => {
+  const snap = await db.collection('users').where('creadoPor', '==', adminId).get();
+  let n = 1; // el propietario siempre cuenta
+  snap.forEach(d => {
+    const u = d.data();
+    if (d.id !== adminId && u.role === 'admin' && u.activo !== false) n++;
+  });
+  return n;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 // GET /api/users/mensajeros — Lista de mensajeros para asignación de rutas
@@ -97,7 +182,7 @@ const hashearPassword = async (raw) => bcrypt.hash(String(raw), SALT_ROUNDS);
 // Logística lo necesita para el selector de mensajeros en la asignación.
 router.get('/mensajeros', authenticate, async (req, res) => {
   try {
-    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const adminId = tenantDeReq(req);
     const snap = await db.collection('users')
       .where('creadoPor', '==', adminId)
       .where('role', '==', 'mensajero')
@@ -117,28 +202,65 @@ router.get('/mensajeros', authenticate, async (req, res) => {
 
 // GET /api/users — Listar todos los usuarios (solo admin)
 // ─────────────────────────────────────────────────────────────────────────────
+// ✅ FIX MULTIADMIN-001: el listado ahora incluye también al PROPIETARIO. Antes
+// solo salían los sub-usuarios (creadoPor == adminId), así que el titular nunca
+// se veía a sí mismo en su propio equipo y no había forma de distinguirlo.
 router.get('/', authenticate, soloAdmin, async (req, res) => {
   try {
-    const adminId = req.adminId || req.user?.uid || req.user?.id;
-    // AISLAMIENTO SAAS: cada admin ve solo sus propios usuarios
+    const adminId = tenantDeReq(req);
+    // AISLAMIENTO SAAS: cada tenant ve solo sus propios usuarios
     const snapshot = await db.collection('users')
       .where('creadoPor', '==', adminId)
       .get();
+
     const usuarios = [];
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      // No devolver contraseña ni PIN al frontend en el listado.
-      const { password, password_hash, pin, ...usuarioSeguro } = data;
+    const vistos = new Set();
+
+    const empujar = (id, data) => {
+      if (vistos.has(id)) return;
+      vistos.add(id);
+      // No devolver contraseña, PIN ni sessionToken al frontend.
+      const { password, password_hash, pin, sessionToken, ...usuarioSeguro } = data;
       usuarios.push({
-        id: doc.id,
+        id,
         ...usuarioSeguro,
+        esPropietario: marcaPropietario(data, id, adminId),
         tienePin: !!pin // bandera informativa, sin exponer el valor
       });
-    });
+    };
+
+    snapshot.forEach(doc => empujar(doc.id, doc.data()));
+
+    // El propietario del tenant
+    const propietarioDoc = await db.collection('users').doc(adminId).get();
+    if (propietarioDoc.exists) empujar(propietarioDoc.id, propietarioDoc.data());
+
     res.json(usuarios);
   } catch (error) {
     console.error('Error listando usuarios:', error);
     res.status(500).json({ error: 'Error al obtener usuarios' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/users/limites — Cupo de administradores del plan (solo admin)
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ MULTIADMIN-001. Lo usa el frontend para avisar del tope ANTES de que el
+// usuario llene el formulario, y para mostrar "X de Y administradores".
+router.get('/limites', authenticate, soloAdmin, async (req, res) => {
+  try {
+    const adminId = tenantDeReq(req);
+    const [limite, usados] = await Promise.all([
+      limiteAdminsDelTenant(adminId),
+      contarAdminsActivos(adminId),
+    ]);
+    res.json({
+      adminsUsados: usados,
+      adminsLimite: limite,          // null = ilimitado
+      puedeCrearAdmin: limite === null || usados < limite,
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Error consultando límites del plan' });
   }
 });
 
@@ -150,15 +272,18 @@ router.get('/', authenticate, soloAdmin, async (req, res) => {
 router.get('/:id/pin', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-    const yo = req.user.uid || req.user.id;
+    const yo = uidDeReq(req);
+    const adminId = tenantDeReq(req);
 
     if (req.user.role !== 'admin' && yo !== id) {
       return res.status(403).json({ error: 'Solo puedes ver tu propio PIN' });
     }
 
-    const doc = await db.collection('users').doc(id).get();
-    if (!doc.exists) return res.status(404).json({ error: 'Usuario no encontrado' });
-    res.json({ pin: doc.data().pin || '' });
+    // ✅ FIX MULTIADMIN-001: aislamiento — no se puede leer el PIN de un usuario
+    // de otro suscriptor aunque se conozca su id.
+    const encontrado = await cargarUsuarioDelTenant(id, adminId);
+    if (!encontrado) return res.status(404).json({ error: 'Usuario no encontrado' });
+    res.json({ pin: encontrado.datos.pin || '' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -171,7 +296,7 @@ router.post('/', authenticate, soloAdmin, async (req, res) => {
   try {
     const { nombre, email, codigo, password, pin, role, modulos, activo = true } = req.body;
     // AISLAMIENTO SAAS: obtener adminId del token
-    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const adminId = tenantDeReq(req);
 
     if (!nombre || !email || !codigo || !password || !role) {
       return res.status(400).json({ error: 'Campos obligatorios: nombre, email, código, contraseña, rol' });
@@ -179,6 +304,28 @@ router.post('/', authenticate, soloAdmin, async (req, res) => {
 
     if (pin && !pinValido(pin)) {
       return res.status(400).json({ error: 'El PIN debe ser de 4 dígitos numéricos' });
+    }
+
+    // ✅ FIX MULTIADMIN-001: solo el PROPIETARIO puede crear administradores.
+    // Un administrador secundario administra la operación, no la cuenta.
+    if (role === 'admin') {
+      const soyPropietario = await esPropietarioDelTenant(req);
+      if (!soyPropietario) {
+        return res.status(403).json({
+          error: 'Solo el propietario de la cuenta puede crear administradores.'
+        });
+      }
+
+      const [limite, usados] = await Promise.all([
+        limiteAdminsDelTenant(adminId),
+        contarAdminsActivos(adminId),
+      ]);
+      if (limite !== null && usados >= limite) {
+        return res.status(403).json({
+          error: `Tu plan permite ${limite} administrador(es) y ya tienes ${usados}. `
+               + 'Puedes crear el usuario con otro rol, o ampliar el plan para sumar administradores.'
+        });
+      }
     }
 
     // Email duplicado (solo dentro del mismo tenant)
@@ -234,8 +381,18 @@ router.post('/', authenticate, soloAdmin, async (req, res) => {
       modulos: modulosFinales,
       activo,
       password_hash: passHash,
-      adminId,           // ✅ FIX: necesario para aislamiento SaaS
-      creadoPor: req.user.uid || req.user.id,
+      // ✅ FIX MULTIADMIN-001 — identidad de tenant explícita, sin depender del rol
+      adminId,                 // empresa a la que pertenece
+      creadoPor: adminId,      // ⚠️ el TENANT, no el creador. Todos los listados
+                               //    del sistema filtran por este campo: si aquí
+                               //    quedara el uid de un admin secundario, los
+                               //    usuarios que él cree desaparecerían del
+                               //    listado del propietario (tenant partido).
+                               //    Hoy es un no-op: el creador ES el dueño.
+      esPropietario: false,    // un usuario creado nunca es dueño de la cuenta
+
+      // Trazabilidad de quién lo creó (antes esto ocupaba `creadoPor`)
+      creadoPorUid: uidDeReq(req),
       creadoPorNombre: req.user.nombre || req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -246,8 +403,8 @@ router.post('/', authenticate, soloAdmin, async (req, res) => {
     await registrarAuditoria({
       accion: 'CREAR_USUARIO',
       modulo: 'usuarios',
-      descripcion: `Admin creó usuario ${nombre} (${emailNorm}) con rol ${role}`,
-      usuarioId: req.user.uid || req.user.id,
+      descripcion: `${req.user.nombre || req.user.email} creó usuario ${nombre} (${emailNorm}) con rol ${role}`,
+      usuarioId: uidDeReq(req),
       usuarioNombre: req.user.nombre || req.user.email,
       datos: { nombre, email: emailNorm, codigo, role, modulos: modulosFinales, tienePin: !!pin }
     });
@@ -272,15 +429,65 @@ router.put('/:id', authenticate, soloAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, email, codigo, password, pin, role, modulos, activo } = req.body;
+    const adminId = tenantDeReq(req);
+    const yo = uidDeReq(req);
 
-    const userRef = db.collection('users').doc(id);
-    const userDoc = await userRef.get();
-
-    if (!userDoc.exists) {
+    // ✅ FIX MULTIADMIN-001: aislamiento por tenant ANTES de tocar nada.
+    const encontrado = await cargarUsuarioDelTenant(id, adminId);
+    if (!encontrado) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
-    const datosActuales = userDoc.data();
+    const userRef = encontrado.ref;
+    const datosActuales = encontrado.datos;
+
+    // ── ✅ MULTIADMIN-001: protecciones de propiedad ─────────────────────────
+    const objetivoEsPropietario = marcaPropietario(datosActuales, id, adminId);
+    const soyPropietario = await esPropietarioDelTenant(req);
+
+    // 1. Al propietario solo lo edita él mismo.
+    if (objetivoEsPropietario && yo !== id) {
+      return res.status(403).json({
+        error: 'No puedes editar la cuenta del propietario. Solo el titular puede modificar sus propios datos.'
+      });
+    }
+
+    // 2. Al propietario nadie le cambia el rol ni lo desactiva (ni él mismo:
+    //    dejaría la empresa sin titular y sin acceso a la suscripción).
+    if (objetivoEsPropietario) {
+      if (role && role !== datosActuales.role) {
+        return res.status(400).json({ error: 'El propietario de la cuenta debe conservar el rol Administrador.' });
+      }
+      if (activo === false) {
+        return res.status(400).json({ error: 'La cuenta del propietario no se puede desactivar.' });
+      }
+    }
+
+    // 3. Asignar o retirar el rol Administrador es potestad del propietario.
+    const promoviendoAAdmin = role === 'admin' && datosActuales.role !== 'admin';
+    const degradandoAdmin   = datosActuales.role === 'admin' && role && role !== 'admin';
+    if ((promoviendoAAdmin || degradandoAdmin) && !soyPropietario) {
+      return res.status(403).json({
+        error: 'Solo el propietario de la cuenta puede asignar o retirar el rol Administrador.'
+      });
+    }
+
+    // 4. Cupo del plan al promover.
+    if (promoviendoAAdmin) {
+      const [limite, usados] = await Promise.all([
+        limiteAdminsDelTenant(adminId),
+        contarAdminsActivos(adminId),
+      ]);
+      if (limite !== null && usados >= limite) {
+        return res.status(403).json({
+          error: `Tu plan permite ${limite} administrador(es) y ya tienes ${usados}.`
+        });
+      }
+    }
+
+    // 5. La marca `esPropietario` nunca se acepta desde el body: no está en la
+    //    lista de campos que se aplican abajo, así que se ignora en silencio.
+
     const cambios = {};
 
     if (nombre) cambios.nombre = nombre;
@@ -300,7 +507,10 @@ router.put('/:id', authenticate, soloAdmin, async (req, res) => {
     // Si cambia email
     if (email && email !== datosActuales.email) {
       const emailNorm = String(email).trim().toLowerCase();
-      const emailExiste = await db.collection('users').where('email', '==', emailNorm).get();
+      // ✅ MULTIADMIN-001: el duplicado se busca dentro del tenant, no global.
+      const emailExiste = await db.collection('users')
+        .where('creadoPor', '==', adminId)
+        .where('email', '==', emailNorm).get();
       if (!emailExiste.empty && emailExiste.docs[0].id !== id) {
         return res.status(400).json({ error: 'Ya existe un usuario con ese email' });
       }
@@ -310,9 +520,8 @@ router.put('/:id', authenticate, soloAdmin, async (req, res) => {
 
     // Si cambia código — verificar duplicado solo en el mismo tenant
     if (codigo && codigo !== datosActuales.codigo) {
-      const adminIdPut = req.adminId || req.user?.uid || req.user?.id;
       const codigoExiste = await db.collection('users')
-        .where('creadoPor', '==', adminIdPut)
+        .where('creadoPor', '==', adminId)
         .where('codigo', '==', codigo).get();
       if (!codigoExiste.empty && codigoExiste.docs[0].id !== id) {
         return res.status(400).json({ error: 'Ya existe un usuario con ese código' });
@@ -320,7 +529,10 @@ router.put('/:id', authenticate, soloAdmin, async (req, res) => {
       cambios.codigo = codigo;
     }
 
-    // Si cambia contraseña: actualiza Firebase Auth + bcrypt en Firestore
+    // Si cambia contraseña: actualiza Firebase Auth + bcrypt en Firestore.
+    // ⚠️ Cambiar la contraseña NO cierra la sesión activa del usuario (su
+    // sessionToken sigue siendo válido hasta el próximo login). Para expulsarlo
+    // de inmediato, desactívelo y vuélvalo a activar.
     if (password) {
       try { await admin.auth().updateUser(id, { password }); } catch (e) { console.warn('Auth update password:', e.message); }
       cambios.password_hash = await hashearPassword(password);
@@ -331,8 +543,8 @@ router.put('/:id', authenticate, soloAdmin, async (req, res) => {
     await registrarAuditoria({
       accion: 'EDITAR_USUARIO',
       modulo: 'usuarios',
-      descripcion: `Admin editó usuario ${datosActuales.nombre} (${datosActuales.email})`,
-      usuarioId: req.user.uid || req.user.id,
+      descripcion: `${req.user.nombre || req.user.email} editó usuario ${datosActuales.nombre} (${datosActuales.email})`,
+      usuarioId: yo,
       usuarioNombre: req.user.nombre || req.user.email,
       datos: { id, campos: Object.keys(cambios).filter(k => k !== 'password_hash' && k !== 'pin') }
     });
@@ -351,22 +563,45 @@ router.put('/:id', authenticate, soloAdmin, async (req, res) => {
 router.delete('/:id', authenticate, soloAdmin, async (req, res) => {
   try {
     const { id } = req.params;
+    const adminId = tenantDeReq(req);
+    const yo = uidDeReq(req);
 
-    if (id === (req.user.uid || req.user.id)) {
+    if (id === yo) {
       return res.status(400).json({ error: 'No puedes desactivar tu propio usuario' });
     }
 
-    const userRef = db.collection('users').doc(id);
-    const userDoc = await userRef.get();
-
-    if (!userDoc.exists) {
+    // ✅ FIX MULTIADMIN-001: aislamiento por tenant.
+    const encontrado = await cargarUsuarioDelTenant(id, adminId);
+    if (!encontrado) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
-    const datosUsuario = userDoc.data();
+    const userRef = encontrado.ref;
+    const datosUsuario = encontrado.datos;
+
+    // El propietario es intocable: es el titular de la suscripción.
+    if (marcaPropietario(datosUsuario, id, adminId)) {
+      return res.status(403).json({
+        error: 'La cuenta del propietario no se puede desactivar.'
+      });
+    }
+
+    // Retirar a un administrador es potestad del propietario.
+    if (datosUsuario.role === 'admin') {
+      const soyPropietario = await esPropietarioDelTenant(req);
+      if (!soyPropietario) {
+        return res.status(403).json({
+          error: 'Solo el propietario de la cuenta puede desactivar a otro administrador.'
+        });
+      }
+    }
 
     await userRef.update({
       activo: false,
+      // ✅ MULTIADMIN-001: invalida la sesión activa. El sessionToken del JWT
+      // deja de coincidir y el usuario queda fuera de inmediato, sin esperar a
+      // que expire el token.
+      sessionToken: admin.firestore.FieldValue.delete(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -375,10 +610,10 @@ router.delete('/:id', authenticate, soloAdmin, async (req, res) => {
     await registrarAuditoria({
       accion: 'DESACTIVAR_USUARIO',
       modulo: 'usuarios',
-      descripcion: `Admin desactivó usuario ${datosUsuario.nombre} (${datosUsuario.email})`,
-      usuarioId: req.user.uid || req.user.id,
+      descripcion: `${req.user.nombre || req.user.email} desactivó usuario ${datosUsuario.nombre} (${datosUsuario.email})`,
+      usuarioId: yo,
       usuarioNombre: req.user.nombre || req.user.email,
-      datos: { id, nombre: datosUsuario.nombre, email: datosUsuario.email }
+      datos: { id, nombre: datosUsuario.nombre, email: datosUsuario.email, role: datosUsuario.role }
     });
 
     res.json({ message: 'Usuario desactivado correctamente' });
@@ -460,7 +695,7 @@ router.get('/auditoria/log', authenticate, soloAdmin, async (req, res) => {
   try {
     const { modulo, documento, usuarioId, desde, hasta, limite = 200 } = req.query;
     const lim = Math.min(parseInt(limite) || 200, 1000);
-    const adminId = req.adminId || req.user?.uid || req.user?.id;
+    const adminId = tenantDeReq(req);
 
     const { desdeISO, hastaISO } = rangoFechasCO(desde, hasta);
 

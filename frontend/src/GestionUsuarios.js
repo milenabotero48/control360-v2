@@ -118,8 +118,30 @@ const GestionUsuarios = ({ user }) => {
   const [filtros, setFiltros]           = useState(FILTROS_VACIOS);
   const [modulosFiltro, setModulosFiltro] = useState([]);
 
+  // ✅ MULTIADMIN-001: cupo de administradores del plan + aviso de sesión única
+  const [limites, setLimites]           = useState(null);
+  const [avisoVisible, setAvisoVisible] = useState(true);
+
   const token = localStorage.getItem('token');
   const headers = { Authorization: `Bearer ${token}` };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ MULTIADMIN-001 — PROPIEDAD ≠ ROL
+  // Puede haber varios usuarios con rol Administrador, pero un solo PROPIETARIO
+  // (el titular de la suscripción). El propietario es el único que crea o
+  // retira administradores, y su cuenta no se puede editar ni desactivar desde
+  // otra sesión. El backend aplica las mismas reglas; esto es la capa visual.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const soyPropietario = typeof user?.esPropietario === 'boolean'
+    ? user.esPropietario
+    // Respaldo para sesiones abiertas con un token emitido antes de este cambio:
+    // el propietario se reconoce porque su id coincide con el del tenant.
+    : (user?.id && user?.adminId ? user.id === user.adminId : user?.role === 'admin');
+
+  const esPropietarioDe = (u) => (typeof u.esPropietario === 'boolean' ? u.esPropietario : false);
+
+  // Solo el propietario puede asignar el rol Administrador.
+  const rolesDisponibles = soyPropietario ? ROLES : ROLES.filter(r => r.value !== 'admin');
 
   // ─── CARGAR USUARIOS ────────────────────────────────────────────────────────
   const cargarUsuarios = async () => {
@@ -132,6 +154,14 @@ const GestionUsuarios = ({ user }) => {
     } finally {
       setLoading(false);
     }
+  };
+
+  // ─── CARGAR CUPO DE ADMINISTRADORES DEL PLAN ────────────────────────────────
+  const cargarLimites = async () => {
+    try {
+      const res = await axios.get(`${API}/users/limites`, { headers });
+      setLimites(res.data || null);
+    } catch { setLimites(null); }
   };
 
   // ─── CARGAR LISTA DE MÓDULOS PARA EL DROPDOWN DE AUDITORÍA ──────────────────
@@ -163,7 +193,7 @@ const GestionUsuarios = ({ user }) => {
     }
   };
 
-  useEffect(() => { cargarUsuarios(); cargarModulosFiltro(); }, []);
+  useEffect(() => { cargarUsuarios(); cargarModulosFiltro(); cargarLimites(); }, []);
 
   useEffect(() => {
     if (tabActiva === 'auditoria') cargarAuditoria();
@@ -243,6 +273,12 @@ const GestionUsuarios = ({ user }) => {
       setError('El PIN debe ser de 4 dígitos numéricos');
       return;
     }
+    // ✅ MULTIADMIN-001: avisar del cupo antes de que el backend lo rechace.
+    if (!editando && form.role === 'admin' && limites && limites.puedeCrearAdmin === false) {
+      setError(`Tu plan permite ${limites.adminsLimite} administrador(es) y ya tienes ${limites.adminsUsados}. `
+             + 'Puedes crear el usuario con otro rol o ampliar el plan.');
+      return;
+    }
     try {
       setGuardando(true);
       if (editando) {
@@ -253,6 +289,7 @@ const GestionUsuarios = ({ user }) => {
         setExito('Usuario creado correctamente ✓');
       }
       await cargarUsuarios();
+      await cargarLimites();
       setTimeout(() => { setMostrarForm(false); setExito(''); }, 1500);
     } catch (err) {
       setError(err.response?.data?.error || 'Error al guardar usuario');
@@ -268,6 +305,7 @@ const GestionUsuarios = ({ user }) => {
       await axios.delete(`${API}/users/${id}`, { headers });
       setExito(`Usuario ${nombre} desactivado`);
       await cargarUsuarios();
+      await cargarLimites();
       setTimeout(() => setExito(''), 3000);
     } catch (err) {
       setError(err.response?.data?.error || 'Error al desactivar');
@@ -333,6 +371,30 @@ const GestionUsuarios = ({ user }) => {
       {error  && <div style={s.alertError}>{error}</div>}
       {exito  && <div style={s.alertExito}>{exito}</div>}
 
+      {/* ══════════════════════════════════════════════════════════════════════
+          ✅ MULTIADMIN-001 — AVISO DE SESIÓN ÚNICA
+          Explica por qué dos personas no pueden compartir la misma cuenta.
+      ══════════════════════════════════════════════════════════════════════ */}
+      {avisoVisible && tabActiva === 'usuarios' && (
+        <div style={s.avisoSesion}>
+          <div style={s.avisoIcono}>🔒</div>
+          <div style={{ flex: 1 }}>
+            <div style={s.avisoTitulo}>Cada persona necesita su propio usuario</div>
+            <div style={s.avisoTexto}>
+              Control360 mantiene <strong>una sola sesión activa por usuario</strong>. Si dos personas
+              entran con la misma cuenta, la segunda desconecta a la primera. Crea un usuario para
+              cada integrante del equipo: así trabajan al mismo tiempo y cada acción queda registrada
+              con su nombre en la auditoría.
+              {soyPropietario && (
+                <> El rol <strong>Administrador</strong> da acceso completo a la operación; la
+                titularidad de la cuenta (plan y facturación) sigue siendo tuya.</>
+              )}
+            </div>
+          </div>
+          <button onClick={() => setAvisoVisible(false)} style={s.avisoCerrar}>✕</button>
+        </div>
+      )}
+
       {/* ── TABS ── */}
       <div style={s.tabs}>
         <button onClick={() => setTabActiva('usuarios')}
@@ -357,6 +419,22 @@ const GestionUsuarios = ({ user }) => {
 
             return (
               <>
+                {/* ✅ MULTIADMIN-001: cupo de administradores del plan.
+                    Siempre visible — es la señal de cuándo conviene ampliar. */}
+                {limites && (
+                  <div style={s.barraCupo}>
+                    <span>
+                      👑 <strong>{limites.adminsUsados}</strong>
+                      {limites.adminsLimite === null ? '' : ` de ${limites.adminsLimite}`} administrador(es) en uso
+                    </span>
+                    {limites.puedeCrearAdmin === false && (
+                      <span style={s.cupoLleno}>
+                        Llegaste al tope de tu plan — amplía para sumar administradores
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {/* Toggle para mostrar inactivos */}
                 {inactivosCount > 0 && (
                   <div style={{
@@ -394,13 +472,35 @@ const GestionUsuarios = ({ user }) => {
                   {usuariosVisibles.map(u => {
                     const rol = getRol(u.role);
                     const usaPin = ROLES_CON_PIN.includes(u.role);
+
+                    // ✅ MULTIADMIN-001 — reglas visuales (el backend las repite):
+                    //   · Al propietario solo lo edita él mismo.
+                    //   · Al propietario nadie lo desactiva.
+                    //   · Nadie se desactiva a sí mismo.
+                    //   · Retirar a otro administrador es potestad del propietario.
+                    const esDueno = esPropietarioDe(u);
+                    const soyYo   = u.id === user?.id;
+                    const puedeEditar     = !esDueno || soyYo;
+                    const puedeDesactivar = !esDueno && !soyYo && u.activo !== false
+                                            && (u.role !== 'admin' || soyPropietario);
+
                     return (
-                      <div key={u.id} style={{ ...s.card, opacity: u.activo === false ? 0.5 : 1 }}>
+                      <div key={u.id} style={{
+                        ...s.card,
+                        opacity: u.activo === false ? 0.5 : 1,
+                        border: esDueno ? '2px solid #7c3aed' : '2px solid transparent',
+                      }}>
                     <div style={s.cardHeader}>
                       <div style={{ ...s.avatar, background: rol.color }}>{rol.emoji}</div>
                       <div style={s.cardInfo}>
-                        <h3 style={s.cardNombre}>{u.nombre}</h3>
-                        <span style={{ ...s.badge, background: rol.color }}>{rol.label}</span>
+                        <h3 style={s.cardNombre}>
+                          {u.nombre}
+                          {soyYo && <span style={s.badgeYo}>tú</span>}
+                        </h3>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <span style={{ ...s.badge, background: rol.color }}>{rol.label}</span>
+                          {esDueno && <span style={s.badgePropietario}>★ PROPIETARIO</span>}
+                        </div>
                       </div>
                       {u.activo === false && <span style={s.badgeInactivo}>INACTIVO</span>}
                     </div>
@@ -428,8 +528,12 @@ const GestionUsuarios = ({ user }) => {
                       )}
                     </div>
                     <div style={s.cardAcciones}>
-                      <button onClick={() => abrirEditar(u)} style={s.btnEditar}>✏️ Editar</button>
-                      {u.activo !== false && u.role !== 'admin' && (
+                      {puedeEditar ? (
+                        <button onClick={() => abrirEditar(u)} style={s.btnEditar}>✏️ Editar</button>
+                      ) : (
+                        <span style={s.notaProtegido}>🔒 Cuenta del propietario</span>
+                      )}
+                      {puedeDesactivar && (
                         <button onClick={() => desactivar(u.id, u.nombre)} style={s.btnDesactivar}>🚫 Desactivar</button>
                       )}
                     </div>
@@ -687,7 +791,8 @@ const GestionUsuarios = ({ user }) => {
               <div style={s.campo}>
                 <label style={s.label}>Rol *</label>
                 <div style={s.rolesGrid}>
-                  {ROLES.map(r => (
+                  {/* ✅ MULTIADMIN-001: el rol Administrador solo lo ofrece el propietario */}
+                  {rolesDisponibles.map(r => (
                     <button key={r.value} type="button"
                       onClick={() => handleRolChange(r.value)}
                       style={{
@@ -701,6 +806,21 @@ const GestionUsuarios = ({ user }) => {
                     </button>
                   ))}
                 </div>
+                {/* ✅ MULTIADMIN-001: contexto del rol Administrador */}
+                {form.role === 'admin' && (
+                  <small style={{ ...s.hint, color: '#7c3aed', fontWeight: 600 }}>
+                    👑 Acceso completo a la operación de la empresa. La titularidad de la cuenta
+                    (plan, facturación y gestión de administradores) sigue siendo del propietario.
+                    {limites && limites.adminsLimite !== null && (
+                      <> · Cupo del plan: {limites.adminsUsados} de {limites.adminsLimite}.</>
+                    )}
+                  </small>
+                )}
+                {!soyPropietario && (
+                  <small style={s.hint}>
+                    Solo el propietario de la cuenta puede asignar el rol Administrador.
+                  </small>
+                )}
                 <small style={s.hint}>Al seleccionar un rol se precargan los módulos recomendados. Puedes ajustarlos abajo.</small>
               </div>
 
@@ -785,6 +905,18 @@ const s = {
   cardNombre:   { margin: '0 0 6px', fontSize: '16px', fontWeight: 700, color: '#111' },
   badge:        { padding: '3px 10px', borderRadius: '20px', color: '#fff', fontSize: '11px', fontWeight: 700 },
   badgeInactivo:{ background: '#ef4444', color: '#fff', padding: '3px 10px', borderRadius: '20px', fontSize: '11px', fontWeight: 700 },
+
+  // ✅ MULTIADMIN-001
+  badgePropietario: { padding: '3px 10px', borderRadius: '20px', background: '#1a1a2e', color: '#fbbf24', fontSize: '10px', fontWeight: 800, letterSpacing: '0.04em' },
+  badgeYo:      { padding: '2px 8px', borderRadius: '20px', background: '#e0f2fe', color: '#0369a1', fontSize: '10px', fontWeight: 700 },
+  notaProtegido:{ flex: 1, padding: '8px', textAlign: 'center', color: '#9ca3af', fontSize: '12px', fontWeight: 600 },
+  avisoSesion:  { display: 'flex', alignItems: 'flex-start', gap: '14px', background: 'linear-gradient(135deg,#faf5ff,#f5f3ff)', border: '1px solid #ddd6fe', borderRadius: '12px', padding: '16px 18px', marginBottom: '20px' },
+  avisoIcono:   { fontSize: '22px', lineHeight: 1.2 },
+  avisoTitulo:  { fontSize: '14px', fontWeight: 800, color: '#5b21b6', marginBottom: '4px' },
+  avisoTexto:   { fontSize: '13px', color: '#4c1d95', lineHeight: 1.6 },
+  avisoCerrar:  { background: 'none', border: 'none', color: '#a78bfa', cursor: 'pointer', fontSize: '15px', padding: '0 4px', lineHeight: 1 },
+  barraCupo:    { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap', background: '#faf5ff', border: '1px solid #ede9fe', borderRadius: 10, padding: '10px 14px', marginBottom: 14, fontSize: 13, color: '#5b21b6' },
+  cupoLleno:    { background: '#fff8e6', border: '1px solid #f3d98a', color: '#8a6d1a', borderRadius: 8, padding: '4px 12px', fontSize: 12, fontWeight: 700 },
   cardDatos:    { padding: '0 20px 12px', display: 'flex', flexDirection: 'column', gap: '6px' },
   dato:         { display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#374151' },
   datoLabel:    { color: '#9ca3af', fontWeight: 600 },

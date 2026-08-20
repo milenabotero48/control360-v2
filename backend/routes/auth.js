@@ -71,6 +71,38 @@ const obtenerIP = (req) => {
   return req.socket?.remoteAddress || req.ip || 'desconocida';
 };
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ FIX MULTIADMIN-001 (2026-08-20) — RESOLUCIÓN DE TENANT
+// ─────────────────────────────────────────────────────────────────────────────
+// Antes el tenant se deducía del ROL:
+//     adminId = (role === 'admin') ? uid : (creadoPor || uid)
+// Con esa regla CUALQUIER usuario con rol Administrador se convertía al entrar
+// en dueño de su propio tenant → aterrizaba en una empresa vacía. Por eso un
+// suscriptor no podía tener dos administradores.
+//
+// Ahora la propiedad es un dato EXPLÍCITO del documento, independiente del rol:
+//     role          → QUÉ PUEDE HACER dentro de la empresa (permisos)
+//     esPropietario → DE QUIÉN ES la empresa (suscripción, plan, facturación)
+//
+// El caso "sin marca" aplica la regla legacy idéntica a la anterior: mientras
+// la migración no haya corrido, cada cuenta existente se comporta EXACTAMENTE
+// como hoy. El orden de despliegue no puede romper nada.
+// Ver scripts/migrar-propietarios.js
+// ═════════════════════════════════════════════════════════════════════════════
+const resolverTenant = (user, uid) => {
+  if (typeof user.esPropietario === 'boolean') {
+    if (user.esPropietario === true) {
+      return { adminId: uid, esPropietario: true };
+    }
+    return { adminId: user.adminId || user.creadoPor || uid, esPropietario: false };
+  }
+  // Documento aún no migrado → regla legacy, comportamiento idéntico al previo.
+  if (user.role === 'admin') {
+    return { adminId: uid, esPropietario: true };
+  }
+  return { adminId: user.creadoPor || uid, esPropietario: false };
+};
+
 // ── Helper: registrar huella en audit_logs ───────────────────────────────────
 const registrarHuella = async ({ usuarioId, usuarioNombre, email, ip, userAgent, resultado, alertas, adminId }) => {
   try {
@@ -133,6 +165,11 @@ router.post('/login', async (req, res) => {
     const uid     = userDoc.id;
     const passHash = user.password_hash;
 
+    // ✅ FIX MULTIADMIN-001: tenant resuelto UNA sola vez, aquí arriba, y
+    // reutilizado en todo el endpoint (antes se recalculaba con la regla del
+    // rol en cuatro sitios distintos).
+    const { adminId, esPropietario } = resolverTenant(user, uid);
+
     // ── CAPA 1: ¿Cuenta bloqueada por intentos? ──────────────────────────────
     if (user.bloqueadoHasta) {
       const bloqueadoHasta = user.bloqueadoHasta?.toDate
@@ -146,7 +183,7 @@ router.post('/login', async (req, res) => {
           email, ip, userAgent,
           resultado: 'LOGIN_BLOQUEADO',
           alertas: ['CUENTA_BLOQUEADA'],
-          adminId: user.role === 'admin' ? uid : (user.creadoPor || uid),
+          adminId,
         });
         return res.status(429).json({
           error: `Cuenta bloqueada por múltiples intentos fallidos. Intenta de nuevo en ${minutosRestantes} minuto(s).`,
@@ -172,7 +209,7 @@ router.post('/login', async (req, res) => {
         email, ip, userAgent,
         resultado: 'LOGIN_FALLIDO_USUARIO_INACTIVO',
         alertas: [],
-        adminId: user.role === 'admin' ? uid : (user.creadoPor || uid),
+        adminId,
       });
       return res.status(403).json({ error: 'Usuario desactivado. Contacta al administrador.' });
     }
@@ -205,7 +242,7 @@ router.post('/login', async (req, res) => {
         email, ip, userAgent,
         resultado: `LOGIN_FALLIDO (intento ${intentosActuales}/${MAX_INTENTOS})`,
         alertas,
-        adminId: user.role === 'admin' ? uid : (user.creadoPor || uid),
+        adminId,
       });
 
       if (intentosActuales >= MAX_INTENTOS) {
@@ -220,16 +257,36 @@ router.post('/login', async (req, res) => {
     }
 
     // ── Login exitoso → resetear contador ────────────────────────────────────
-    // Generar sessionToken único para esta sesión.
-    // Cualquier login posterior sobreescribe este token → sesión anterior invalidada.
+    // ⚠️ SESIÓN ÚNICA POR USUARIO — comportamiento intencional, NO es un bug.
+    // Cada login exitoso genera un sessionToken nuevo, lo guarda en el documento
+    // y lo incrusta en el JWT. El middleware compara ambos en cada petición, así
+    // que un segundo login con la MISMA cuenta expulsa a la sesión anterior.
+    //
+    // Protege el modelo de negocio (impide repartir una licencia entre todo el
+    // equipo) y la trazabilidad de la auditoría (cada acción con nombre propio).
+    // La forma correcta de que dos personas trabajen a la vez NO es relajar esta
+    // regla, sino darle a cada una su propio usuario — que es justo lo que
+    // habilita MULTIADMIN-001.
     const sessionToken = crypto.randomBytes(32).toString('hex');
     const resetCampos = { intentosFallidos: 0, sessionToken };
     if (user.bloqueadoHasta) resetCampos.bloqueadoHasta = admin.firestore.FieldValue.delete();
+
+    // ✅ FIX MULTIADMIN-001 — autocuración: si el documento no traía la marca de
+    // propiedad, se estampa con el valor que la regla legacy ya le daba. El
+    // sistema se migra solo con el uso normal, sin cambiarle el comportamiento
+    // a nadie, aunque el script de migración no se haya ejecutado.
+    if (typeof user.esPropietario !== 'boolean') {
+      resetCampos.esPropietario = esPropietario;
+      resetCampos.adminId       = adminId;
+    }
+
     await userDoc.ref.update(resetCampos);
 
     // ── CAPA 2: Detectar alertas de sesión (solo no-admin) ───────────────────
+    // Se mantiene el criterio original: los usuarios con rol Administrador no
+    // generan alertas de horario/IP. Ahora aplica a TODOS los administradores
+    // del tenant, no solo al propietario.
     const esAdmin  = user.role === 'admin';
-    const adminId  = esAdmin ? uid : (user.creadoPor || uid);
     const alertas  = [];
 
     if (!esAdmin) {
@@ -267,9 +324,12 @@ router.post('/login', async (req, res) => {
       adminId,
     });
 
-    // ── modulosTenant (lógica original intacta) ───────────────────────────────
+    // ── modulosTenant ─────────────────────────────────────────────────────────
+    // ✅ FIX MULTIADMIN-001: la condición ya no mira el rol sino la propiedad.
+    // Antes (`!esAdmin && ...`) un segundo administrador NO heredaba el plan del
+    // suscriptor y quedaba con los módulos sueltos de su propio documento.
     let modulosTenant = user.modulos || [];
-    if (!esAdmin && adminId && adminId !== uid) {
+    if (!esPropietario && adminId && adminId !== uid) {
       try {
         const adminDoc = await db.collection('users').doc(adminId).get();
         if (adminDoc.exists) {
@@ -287,7 +347,8 @@ router.post('/login', async (req, res) => {
         email: user.email,
         role:  user.role,
         nombre: user.nombre || user.email,
-        adminId,
+        adminId,          // id del TENANT — mismo significado que antes
+        esPropietario,    // ✅ MULTIADMIN-001: dato nuevo, no reemplaza nada
         sessionToken, // incluido en JWT para verificación en middleware
       },
       process.env.JWT_SECRET || 'control360secret',
@@ -305,6 +366,8 @@ router.post('/login', async (req, res) => {
         modulosTenant,
         codigo:       user.codigo || '',
         adminId,
+        esPropietario, // ✅ MULTIADMIN-001: el frontend lo usa para el badge y
+                       // para saber quién puede crear administradores.
         // superAdmin: SOLO para mostrar Panel de Suscriptores en el frontend.
         // La seguridad real verifica en Firestore en cada endpoint /superadmin.
         superAdmin:   user.superAdmin === true,
@@ -373,10 +436,16 @@ router.post('/registro', async (req, res) => {
       role: 'admin', modulos: MODULOS_POR_PLAN[plan],
       activo: true, nit: nit||null, telefono: telefono||null,
       ciudad: ciudad||null, superAdmin: false,
+      // ✅ FIX MULTIADMIN-001: quien se registra ES el dueño de la suscripción.
+      // Se marca desde el nacimiento para no depender nunca del rol.
+      esPropietario: true,
       intentosFallidos: 0, origenRegistro: 'web_publica',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     const adminId = userRef.id;
+
+    // El id solo se conoce después del add() → se estampa el autorreferente.
+    await userRef.update({ adminId });
 
     await db.collection('suscripciones').doc(adminId).set({
       plan, estado: 'trial', fechaInicio: hoy,
@@ -426,14 +495,14 @@ router.post('/registro', async (req, res) => {
     } catch(e) { console.error('Email bienvenida:', e.message); }
 
     const token = jwt.sign(
-      { uid:adminId, email:emailLimpio, role:'admin', nombre:String(nombre).trim(), adminId },
+      { uid:adminId, email:emailLimpio, role:'admin', nombre:String(nombre).trim(), adminId, esPropietario:true },
       process.env.JWT_SECRET||'control360secret',
       { expiresIn:'24h' }
     );
     const userData = {
       id:adminId, email:emailLimpio, nombre:String(nombre).trim(),
       role:'admin', modulos:MODULOS_POR_PLAN[plan],
-      modulosTenant:MODULOS_POR_PLAN[plan], adminId, superAdmin:false,
+      modulosTenant:MODULOS_POR_PLAN[plan], adminId, esPropietario:true, superAdmin:false,
     };
     return res.status(201).json({ token, user:userData,
       suscripcion:{ plan, estado:'trial', fechaVencimiento:vencimiento } });
