@@ -887,6 +887,50 @@ export default function GestionEmpleados({ user }) {
     setCausando(false);
   };
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ NOMINA-REVERTIR-UI-001 — deshacer la causación de un mes
+  // ───────────────────────────────────────────────────────────────────────────
+  // El endpoint existía desde el principio pero nunca tuvo botón: una provisión
+  // mal causada quedaba mal para siempre. Y se necesita más de lo que parece —
+  // para corregir un cálculo, para rehacer un mes con el salario bien, o para
+  // volver a causarlo con la causación de aportes ya activa.
+  //
+  // No borra: marca las provisiones como revertidas y deja el rastro con motivo
+  // y usuario. Después se puede volver a causar el mismo mes.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const [revirtiendo, setRevirtiendo] = useState(false);
+
+  const revertirProvisiones = async () => {
+    const motivo = window.prompt(
+      `Revertir la provisión de ${MESES[periodo.mes - 1]} ${periodo.anio}\n\n` +
+      `Las provisiones de ese mes quedan anuladas y el pasivo baja. Después podés volver a causarlo.\n\n` +
+      `¿Por qué se revierte? (mínimo 10 caracteres, queda en auditoría)`
+    );
+    if (motivo === null) return;
+    if (motivo.trim().length < 10) {
+      alert('Explicá el motivo con un poco más de detalle. Queda registrado en la auditoría.');
+      return;
+    }
+    const pin = window.prompt('PIN de administrador (4 dígitos)');
+    if (!pin) return;
+
+    setRevirtiendo(true);
+    try {
+      const r = await axios.post(
+        `${API}/empleados/provisiones/${periodo.anio}/${periodo.mes}/revertir`,
+        { pin, motivo }, { headers: headers() });
+      alert(
+        `✅ Revertidas ${r.data.revertidas} provisión(es) por ${fmt(r.data.total)}.\n\n` +
+        `Ya podés volver a causar ${MESES[periodo.mes - 1]} con los valores corregidos.`
+      );
+      const p = await axios.get(`${API}/empleados/provisiones?anio=${periodo.anio}&mes=${periodo.mes}`, { headers: headers() });
+      setProvisiones(p.data);
+    } catch (e) {
+      alert('No se pudo revertir: ' + (e.response?.data?.error || e.message));
+    }
+    setRevirtiendo(false);
+  };
+
   const visibles = useMemo(
     () => empleados.filter(e => verInactivos ? true : e.activo !== false),
     [empleados, verInactivos]
@@ -1101,10 +1145,25 @@ export default function GestionEmpleados({ user }) {
                   </div>
                 </div>
                 {user?.role === 'admin' && (
-                  <button onClick={causarProvisiones} disabled={causando}
-                    style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#7c3aed,#6d28d9)', padding: '11px 22px' }}>
-                    {causando ? 'Causando...' : `📊 Causar ${fmt(provisiones.totales.prestaciones)}`}
-                  </button>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    {/* ✅ NOMINA-REVERTIR-UI-001: solo aparece si hay algo que
+                        revertir. Deshacer un mes ya causado es la única forma de
+                        corregir un cálculo o de rehacerlo con otros parámetros. */}
+                    {provisiones.yaCausadoEsteMes > 0 && (
+                      <button onClick={revertirProvisiones} disabled={revirtiendo || causando}
+                        style={{
+                          padding: '11px 18px', borderRadius: 8, cursor: 'pointer',
+                          fontSize: 13, fontWeight: 700, background: '#fef2f2',
+                          color: '#b91c1c', border: '1px solid #fecaca',
+                        }}>
+                        {revirtiendo ? 'Revirtiendo...' : '↩ Revertir el mes'}
+                      </button>
+                    )}
+                    <button onClick={causarProvisiones} disabled={causando || revirtiendo}
+                      style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#7c3aed,#6d28d9)', padding: '11px 22px' }}>
+                      {causando ? 'Causando...' : `📊 Causar ${fmt(provisiones.totales.prestaciones)}`}
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -1117,14 +1176,28 @@ export default function GestionEmpleados({ user }) {
                   {Object.entries(config?.prestaciones || {}).map(([k, cfg]) => (
                     <div key={k} style={{ marginBottom: 10 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, marginBottom: 3 }}>
-                        <span style={{ color: '#475569' }}>{cfg.etiqueta} <span style={{ color: '#cbd5e1' }}>{pct(cfg.pct)}</span></span>
+                        {/* ✅ NOMINA-INTERESES-001: los intereses ya NO son un
+                            1% plano. Se calculan sobre las cesantías acumuladas
+                            del año (12% anual proporcional), así que mostrar
+                            "1%" al lado del valor confundía: el número no
+                            cuadraba con el porcentaje. */}
+                        <span style={{ color: '#475569' }}>
+                          {cfg.etiqueta}{' '}
+                          <span style={{ color: '#cbd5e1' }}>
+                            {k === 'interesesCesantias' ? '12% anual' : pct(cfg.pct)}
+                          </span>
+                        </span>
                         <strong style={{ color: '#0f172a' }}>{fmt(provisiones.porConcepto[k])}</strong>
                       </div>
-                      <div style={{ fontSize: 10, color: '#94a3b8' }}>{cfg.base}</div>
+                      <div style={{ fontSize: 10, color: '#94a3b8' }}>
+                        {k === 'interesesCesantias'
+                          ? 'Sobre las cesantías acumuladas del año. Arranca bajo en enero y crece cada mes.'
+                          : cfg.base}
+                      </div>
                     </div>
                   ))}
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, fontWeight: 900, color: '#7c3aed', borderTop: '2px solid #f1f5f9', paddingTop: 10, marginTop: 6 }}>
-                    <span>Total 21,83%</span><span>{fmt(provisiones.totales.prestaciones)}</span>
+                    <span>Total del mes</span><span>{fmt(provisiones.totales.prestaciones)}</span>
                   </div>
                 </div>
 
