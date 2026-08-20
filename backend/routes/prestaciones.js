@@ -513,6 +513,13 @@ router.post('/liquidacion/:empleadoId/preview', async (req, res) => {
     const pasivo = PL.consolidarPasivo(provisiones, { empleadoId: empleado.id });
     const montos = {};
     for (const c of PL.CONCEPTOS) montos[c] = num(liq.prestaciones?.[c]?.valor);
+    // ✅ FIX NOMINA-PRIMA-BOLSA-001
+    // La prima del semestre anterior se descarga contra la MISMA bolsa de prima.
+    // Sí estaba provisionada — se causó en su mes; lo único distinto es que
+    // pertenece a un semestre ya cerrado. Al no sumarla acá, el sistema la
+    // trataba como "defecto de provisión" y la mostraba como gasto nuevo,
+    // cuando en realidad ya estaba cubierta por el pasivo acumulado.
+    montos.prima += num(liq.prestaciones?.primaSemestreAnterior?.valor);
     const plan = PL.planificarAplicacionMultiple(provisiones, montos, { empleadoId: empleado.id });
 
     const brecha = liq.totalPrestaciones - plan.totalAplicado;
@@ -630,6 +637,13 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
     const provisiones = await cargarProvisiones(adminId);
     const montos = {};
     for (const c of PL.CONCEPTOS) montos[c] = num(liq.prestaciones?.[c]?.valor);
+    // ✅ FIX NOMINA-PRIMA-BOLSA-001
+    // La prima del semestre anterior se descarga contra la MISMA bolsa de prima.
+    // Sí estaba provisionada — se causó en su mes; lo único distinto es que
+    // pertenece a un semestre ya cerrado. Al no sumarla acá, el sistema la
+    // trataba como "defecto de provisión" y la mostraba como gasto nuevo,
+    // cuando en realidad ya estaba cubierta por el pasivo acumulado.
+    montos.prima += num(liq.prestaciones?.primaSemestreAnterior?.valor);
     const plan = PL.planificarAplicacionMultiple(provisiones, montos, { empleadoId: empleado.id });
 
     // El gasto NUEVO del período: indemnización, salario pendiente, otros
@@ -942,6 +956,168 @@ router.get('/liquidaciones', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// POST /api/prestaciones/liquidacion/:id/anular
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ NOMINA-ANULAR-LIQUIDACION-001
+//
+// EL PROBLEMA: una liquidación no se podía deshacer. Y se equivoca uno — en el
+// caso que lo destapó, la fecha de ingreso del trabajador estaba mal por cinco
+// días y la liquidación quedó corta, sin forma de arreglarla.
+//
+// POR QUÉ ANULAR Y REHACER, Y NO "EDITAR"
+// ---------------------------------------
+// Una liquidación es un documento que el trabajador firma. Editarla en silencio
+// dejaría el papel firmado diciendo una cosa y el sistema otra, sin rastro de
+// cuál cambió ni por qué. Anular deja el registro anulado con motivo y usuario,
+// y la nueva liquidación nace con su propio número. La historia queda completa.
+//
+// QUÉ DESHACE, EN ORDEN INVERSO A COMO SE HIZO
+//   · Devuelve las provisiones a su estado anterior (aplicado y liberada)
+//   · Descruza los anticipos, que vuelven a quedar pendientes
+//   · Anula el egreso de la CxP
+//   · Reactiva al empleado
+// ═════════════════════════════════════════════════════════════════════════════
+router.post('/liquidacion/:id/anular', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Solo el admin puede anular una liquidación' });
+    }
+    const adminId = resolverAdminId(req);
+    const { pin, motivo } = req.body;
+
+    const verif = await verificarPin(req.user.uid || req.user.id, pin, 'editar_egreso_pagado');
+    if (!verif.ok) return res.status(403).json({ error: verif.error, codigo: verif.codigo });
+    if (!motivo?.trim() || motivo.trim().length < 10) {
+      return res.status(400).json({ error: 'Explicá por qué se anula la liquidación (mínimo 10 caracteres)' });
+    }
+
+    const liqRef = db.collection('liquidaciones_contrato').doc(req.params.id);
+    const liqDoc = await liqRef.get();
+    if (!liqDoc.exists) return res.status(404).json({ error: 'Liquidación no encontrada' });
+    const L = liqDoc.data();
+    if (L.userId !== adminId) return res.status(403).json({ error: 'Liquidación de otra empresa' });
+    if (L.anulada === true) return res.status(400).json({ error: 'Esta liquidación ya fue anulada' });
+
+    // ⚠️ Si la CxP ya se pagó, anular descuadraría la caja. Hay que revertir el
+    // pago primero desde el módulo CxP.
+    const egRef = db.collection('egresos').doc(L.egresoId || '_');
+    const egDoc = await egRef.get();
+    if (egDoc.exists && egDoc.data().estado === 'PAGADO') {
+      return res.status(409).json({
+        codigo: 'CXP_YA_PAGADA',
+        error: `La cuenta por pagar ${L.numero} ya fue pagada y el dinero salió de caja. ` +
+               `Revertí primero ese pago desde el módulo CxP y volvé a intentar; ` +
+               `si no, la caja quedaría descuadrada.`
+      });
+    }
+
+    const batch = db.batch();
+
+    // ─── 1. Devolver las provisiones a su estado anterior ────────────────────
+    const provSnap = await db.collection('provisiones_prestaciones')
+      .where('userId', '==', adminId).where('empleadoId', '==', L.empleadoId).get();
+
+    // Lo que esta liquidación aplicó a cada provisión, para restarlo.
+    const pagoSnap = await db.collection('pagos_prestaciones')
+      .where('userId', '==', adminId).where('liquidacionId', '==', req.params.id).get();
+
+    const aplicadoPorProvision = {};
+    pagoSnap.forEach(d => {
+      for (const a of (d.data().aplicaciones || [])) {
+        const k = a.provisionId;
+        if (!k) continue;
+        (aplicadoPorProvision[k] = aplicadoPorProvision[k] || {});
+        aplicadoPorProvision[k][a.concepto] =
+          (aplicadoPorProvision[k][a.concepto] || 0) + num(a.aplicar);
+      }
+      batch.update(d.ref, {
+        anulado: true, anuladoPor: req.user.email,
+        anuladoEn: new Date().toISOString(), motivoAnulacion: motivo.trim()
+      });
+    });
+
+    let provisionesRestauradas = 0;
+    provSnap.forEach(d => {
+      const p = d.data();
+      if (p.liberadaEnLiquidacion !== req.params.id && !aplicadoPorProvision[d.id]) return;
+      const aplicadoAnterior = { ...PL.CONCEPTOS.reduce((a, c) => (a[c] = 0, a), {}), ...(p.aplicado || {}) };
+      for (const [c, v] of Object.entries(aplicadoPorProvision[d.id] || {})) {
+        aplicadoAnterior[c] = Math.max(0, num(aplicadoAnterior[c]) - num(v));
+      }
+      batch.update(d.ref, {
+        aplicado: aplicadoAnterior,
+        liberada: false,
+        liberadaEnLiquidacion: null,
+        liquidadaEn: null,
+        pagada: false,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      provisionesRestauradas += 1;
+    });
+
+    // ─── 2. Descruzar los anticipos ──────────────────────────────────────────
+    const antSnap = await db.collection('egresos')
+      .where('userId', '==', adminId).where('cruzadoEnLiquidacion', '==', req.params.id).get();
+    let anticiposLiberados = 0;
+    antSnap.forEach(d => {
+      batch.update(d.ref, {
+        cruzadoEnNomina: false,
+        cruzadoEnLiquidacion: null,
+        cruzadoEnEgresoNumero: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      anticiposLiberados += 1;
+    });
+
+    // ─── 3. Anular la CxP ────────────────────────────────────────────────────
+    if (egDoc.exists) {
+      batch.update(egRef, {
+        anulado: true, estado: 'ANULADO',
+        motivoAnulacion: `Liquidación anulada: ${motivo.trim()}`,
+        anuladoPor: req.user.email, anuladoEn: new Date().toISOString(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+
+    // ─── 4. Reactivar al empleado ────────────────────────────────────────────
+    batch.update(db.collection('empleados').doc(L.empleadoId), {
+      activo: true, liquidado: false, liquidacionId: null, motivoRetiro: null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // ─── 5. Marcar la liquidación ────────────────────────────────────────────
+    batch.update(liqRef, {
+      anulada: true, anuladaPor: req.user.email,
+      anuladaEn: new Date().toISOString(), motivoAnulacion: motivo.trim()
+    });
+
+    await batch.commit();
+
+    await registrarAuditoria({
+      accion: 'LIQUIDACION_ANULADA', modulo: 'prestaciones',
+      descripcion: `Liquidación ${L.numero} de ${L.empleadoNombre} anulada por ${fmt(L.netoAPagar)}. ` +
+                   `Motivo: ${motivo.trim()}`,
+      usuarioId: adminId, usuarioNombre: req.user.email, documento: L.numero,
+      datos: {
+        liquidacionId: req.params.id, egresoId: L.egresoId, empleadoId: L.empleadoId,
+        netoAnulado: num(L.netoAPagar), provisionesRestauradas, anticiposLiberados, motivo: motivo.trim()
+      }
+    });
+
+    res.json({
+      ok: true,
+      provisionesRestauradas, anticiposLiberados,
+      mensaje: `Liquidación ${L.numero} anulada. ${L.empleadoNombre} volvió a quedar activo, ` +
+               `su pasivo se restauró y los anticipos quedaron pendientes otra vez. ` +
+               `Corregí lo que haga falta en la ficha del empleado y volvé a liquidar.`
+    });
+  } catch (e) {
+    console.error('POST anular liquidacion:', e);
+    res.status(500).json({ error: e.message || 'Error al anular la liquidación' });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 // POST /api/prestaciones/retroactivas
 // ─────────────────────────────────────────────────────────────────────────────
 // Causa las provisiones de un empleado para un RANGO de meses de una sola vez.
@@ -1000,7 +1176,16 @@ router.post('/retroactivas', async (req, res) => {
           .filter(t => t.desde && t.salario > 0)
           .sort((a, b) => a.desde.localeCompare(b.desde))
       : [];
+    // ✅ NOMINA-SALARIO-HISTORICO-001
+    // Si no se pasan tramos a mano, se usa el historial guardado en la ficha
+    // del empleado — que el sistema arma solo cada vez que cambia el salario.
+    const usaHistorialFicha = tramos.length === 0
+      && Array.isArray(empleado.historialSalarios) && empleado.historialSalarios.length > 0;
     const salarioDelPeriodo = (clave) => {
+      if (usaHistorialFicha) {
+        // Se toma el salario vigente al último día del mes causado.
+        return N.salarioEnFecha(empleado, `${clave}-28`);
+      }
       let s = num(empleado.salario);
       for (const t of tramos) { if (t.desde <= clave) s = t.salario; }
       return s;
@@ -1087,10 +1272,11 @@ router.post('/retroactivas', async (req, res) => {
       mesesCausados: creadas.length,
       totalPrestaciones,
       creadas, omitidos,
-      avisos: tramos.length === 0 ? [{
+      avisos: (tramos.length === 0 && !usaHistorialFicha) ? [{
         nivel: 'media',
         texto: 'Se usó el salario ACTUAL para todos los meses. Si el empleado tuvo aumentos, ' +
-               'cargá los salarios históricos para que cada mes se provisione con el suyo.'
+               'registrá el cambio en su ficha (el sistema guarda el historial solo) o cargá ' +
+               'los tramos acá abajo.'
       }] : [],
       mensaje: `Se causaron ${creadas.length} mes(es) por ${fmt(totalPrestaciones)}.`
     });

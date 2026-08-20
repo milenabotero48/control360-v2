@@ -40,6 +40,23 @@ const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: '
 const norm = (s) => String(s || '')
   .normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 
+
+// ✅ NOMINA-INTERESES-001
+// Cesantías ya causadas en el año por empleado, hasta el mes anterior al que se
+// está calculando. Con ese dato los intereses salen EXACTOS aunque el salario
+// haya cambiado; sin él se estiman con la base del mes.
+const cesantiasAcumuladasPorEmpleado = (provisiones, anio, mes) => {
+  const acum = {};
+  for (const p of provisiones) {
+    if (p.revertida === true) continue;
+    if (Number(p.anio) !== anio) continue;
+    if (Number(p.mes) >= mes) continue;   // solo meses ANTERIORES
+    const v = Number(p.prestaciones?.cesantias?.valor) || 0;
+    acum[p.empleadoId] = (acum[p.empleadoId] || 0) + v;
+  }
+  return acum;
+};
+
 const registrarAuditoria = async (datos) => {
   try {
     await db.collection('audit_logs').add({
@@ -215,7 +232,58 @@ router.put('/:id', async (req, res) => {
     if (b.documento !== undefined) update.documento = String(b.documento).trim();
     if (b.tipoDocumento !== undefined) update.tipoDocumento = b.tipoDocumento;
     if (b.cargo !== undefined)     update.cargo = String(b.cargo).trim();
-    if (b.salario !== undefined)   update.salario = Number(b.salario) || 0;
+    // ═══════════════════════════════════════════════════════════════════════
+    // ✅ NOMINA-SALARIO-HISTORICO-001 — el historial se arma solo
+    // ───────────────────────────────────────────────────────────────────────
+    // Cuando se cambia el salario, el sistema guarda desde cuándo rige el nuevo
+    // y desde cuándo regía el anterior. Nadie tiene que acordarse de registrarlo.
+    //
+    // Sirve para dos cosas que antes salían mal:
+    //   · Causar provisiones retroactivas con el salario de cada mes
+    //   · Liquidar con el promedio cuando el art. 253 lo exige
+    //
+    // `vigenciaSalarioDesde` permite fechar el aumento hacia atrás si se
+    // registra tarde. Si no viene, rige desde hoy.
+    // ═══════════════════════════════════════════════════════════════════════
+    if (b.salario !== undefined) {
+      const salarioNuevo = Number(b.salario) || 0;
+      const salarioAnterior = Number(doc.data().salario) || 0;
+      update.salario = salarioNuevo;
+
+      if (salarioNuevo !== salarioAnterior && salarioAnterior > 0) {
+        const desde = String(b.vigenciaSalarioDesde || hoyCO()).slice(0, 10);
+        const hist = Array.isArray(doc.data().historialSalarios) ? [...doc.data().historialSalarios] : [];
+
+        // Si es el primer cambio, el salario viejo rigió desde el ingreso.
+        if (hist.length === 0) {
+          hist.push({
+            desde: String(doc.data().fechaInicio || '').slice(0, 10),
+            salario: salarioAnterior,
+            registradoEn: new Date().toISOString(),
+            automatico: true
+          });
+        }
+        // Reemplazar si ya hay un tramo en esa misma fecha
+        const idx = hist.findIndex(x => String(x.desde).slice(0, 10) === desde);
+        const tramo = {
+          desde, salario: salarioNuevo,
+          salarioAnterior,
+          registradoPor: req.user?.email || '',
+          registradoEn: new Date().toISOString()
+        };
+        if (idx >= 0) hist[idx] = tramo; else hist.push(tramo);
+
+        hist.sort((x, y) => String(x.desde).localeCompare(String(y.desde)));
+        update.historialSalarios = hist;
+      }
+    }
+    // Permite corregir el historial a mano desde la ficha
+    if (Array.isArray(b.historialSalarios)) {
+      update.historialSalarios = b.historialSalarios
+        .map(t => ({ desde: String(t.desde || '').slice(0, 10), salario: Number(t.salario) || 0 }))
+        .filter(t => t.desde && t.salario > 0)
+        .sort((x, y) => x.desde.localeCompare(y.desde));
+    }
     if (b.fechaInicio !== undefined) update.fechaInicio = String(b.fechaInicio).slice(0, 10);
     if (b.fechaFin !== undefined)  update.fechaFin = b.fechaFin ? String(b.fechaFin).slice(0, 10) : '';
     if (b.claseRiesgoARL !== undefined) update.claseRiesgoARL = N.CLASES_RIESGO_ARL[b.claseRiesgoARL] ? b.claseRiesgoARL : 'III';
@@ -424,6 +492,8 @@ router.get('/provisiones', async (req, res) => {
       .filter(e => e.esComprobanteNomina === true && e.anulado !== true)
       .filter(e => Number(e.periodoNomina?.anio) === anio && Number(e.periodoNomina?.mes) === mes);
 
+    const cesAcum = cesantiasAcumuladasPorEmpleado(causadas, anio, mes);
+
     const detalle = [];
     let totalPrestaciones = 0, totalSS = 0, totalDevengado = 0, totalCosto = 0;
     let totalDevengadoAdicional = 0;
@@ -441,7 +511,10 @@ router.get('/provisiones', async (req, res) => {
 
       const p = N.calcularProvisionMensual(emp, {
         anio, mes, diasTrabajados: dias, empresaExonerada,
-        devengadoAdicional: extras.total
+        devengadoAdicional: extras.total,
+        // ✅ NOMINA-INTERESES-001: intereses exactos sobre el saldo real
+        cesantiasAcumuladasAnio: cesAcum[emp.id] || 0,
+        hastaCorte: hoyCO()
       });
       p.devengadoAdicional = extras.total;
       p.devengadoAdicionalDetalle = extras.detalle;
@@ -561,6 +634,11 @@ router.post('/provisiones/causar', async (req, res) => {
     const empleados = [];
     empSnap.forEach(d => empleados.push({ id: d.id, ...d.data() }));
 
+    const todasProvSnap = await db.collection('provisiones_prestaciones')
+      .where('userId', '==', adminId).get();
+    const cesAcum = cesantiasAcumuladasPorEmpleado(
+      todasProvSnap.docs.map(d => d.data()), anio, mes);
+
     const creadas = [];
     const omitidos = [];
     const batch = db.batch();
@@ -581,7 +659,10 @@ router.post('/provisiones/causar', async (req, res) => {
       );
       const p = N.calcularProvisionMensual(emp, {
         anio, mes, diasTrabajados: dias, empresaExonerada,
-        devengadoAdicional: extras.total
+        devengadoAdicional: extras.total,
+        // ✅ NOMINA-INTERESES-001: intereses exactos sobre el saldo real
+        cesantiasAcumuladasAnio: cesAcum[emp.id] || 0,
+        hastaCorte: hoyCO()
       });
 
       if (!p.aplicaProvision) {

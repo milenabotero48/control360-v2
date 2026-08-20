@@ -407,6 +407,47 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
           {/* ── Resultado ────────────────────────────────────────────────── */}
           {L && !cargando && (
             <>
+              {/* ═══════════════════════════════════════════════════════════
+                  ✅ NOMINA-SALARIO-HISTORICO-001 — bases distintas por concepto
+                  ───────────────────────────────────────────────────────────
+                  Solo aparece si el salario cambió. Es la pregunta que iba a
+                  hacer cualquiera: "¿por qué las cesantías salen sobre un
+                  salario y las vacaciones sobre otro?". Mejor explicarlo antes
+                  de que la duda aparezca.
+                  ═══════════════════════════════════════════════════════════ */}
+              {L.basesSalariales && (L.basesSalariales.varioEnTrimestre || L.basesSalariales.varioEnSemestre) && (
+                <div style={{ ...S.card, marginBottom: 14, background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                  <h4 style={{ ...S.cardTitle, marginBottom: 3, color: '#1e40af' }}>
+                    El salario cambió — cada prestación usa su propia base
+                  </h4>
+                  <p style={{ ...S.cardSub, marginBottom: 11, color: '#1e40af' }}>
+                    No es un error del sistema: la ley da una regla distinta a cada concepto.
+                  </p>
+                  {[
+                    { k: 'cesantias', l: 'Cesantías e intereses' },
+                    { k: 'prima', l: 'Prima de servicios' },
+                    { k: 'vacaciones', l: 'Vacaciones' },
+                  ].map(({ k, l }) => (
+                    <div key={k} style={{
+                      padding: '8px 12px', background: '#fff', borderRadius: 8, marginBottom: 5,
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12.5, fontWeight: 700, color: '#0f172a' }}>
+                        <span>{l}</span>
+                        <span style={{ whiteSpace: 'nowrap' }}>{fmt(L.basesSalariales[k].valor)}</span>
+                      </div>
+                      <div style={{ fontSize: 10.5, color: '#64748b', marginTop: 3, lineHeight: 1.5 }}>
+                        {L.basesSalariales[k].fundamento}
+                      </div>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 11, color: '#1e40af', marginTop: 8, lineHeight: 1.55 }}>
+                    Último salario {fmt(L.basesSalariales.ultimoSalario)} ·
+                    promedio del año {fmt(L.basesSalariales.promedioAnio)} ·
+                    promedio del semestre {fmt(L.basesSalariales.promedioSemestre)}
+                  </div>
+                </div>
+              )}
+
               <div style={{ ...S.card, marginBottom: 14 }}>
                 <h4 style={{ ...S.cardTitle, marginBottom: 3 }}>Prestaciones causadas</h4>
                 <p style={{ ...S.cardSub, marginBottom: 10 }}>

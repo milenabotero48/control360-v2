@@ -168,8 +168,10 @@ seccion('9 · Horas extras SÍ entran en la base de la provisión');
 const sinExtras = N.calcularProvisionMensual(empMin, { anio: 2026, mes: 3, diasTrabajados: 30 });
 const conExtras = N.calcularProvisionMensual(empMin, { anio: 2026, mes: 3, diasTrabajados: 30, devengadoAdicional: 500000 });
 check('sin extras < con extras', conExtras.totalPrestaciones > sinExtras.totalPrestaciones, true);
-check('diferencia ≈ 21,83% de las extras',
-  conExtras.totalPrestaciones - sinExtras.totalPrestaciones, 500000 * 0.2183, 500);
+// Cesantías + prima + vacaciones dan el 20,83%; los intereses ya no son un 1%
+// plano sino la porción proporcional al tiempo acumulado del año.
+check('cesantías, prima y vacaciones = 20,83% de las extras',
+  conExtras.totalPrestaciones - sinExtras.totalPrestaciones, 500000 * 0.2083, 3500);
 
 // El extractor que alimenta la causación
 const comprobante = {
@@ -370,6 +372,125 @@ const trasPago = comprobantes.map(c => {
 });
 check('tras el pago parcial el saldo baja a 40.072',
   PL.consolidarRetencionEmpleado(trasPago).saldo, 40072);
+
+// ═════════════════════════════════════════════════════════════════════════════
+seccion('16 · Intereses a las cesantías proporcionales al tiempo');
+// ═════════════════════════════════════════════════════════════════════════════
+// El 1% mensual del factor prestacional es el 12% ANUAL: solo cuadra si el
+// trabajador completó el año. Antes sobreprovisionaba 12 veces en el primer
+// mes y 4 veces a los tres meses.
+const empInt = {
+  id: 'i', nombre: 'Test', tipoContrato: 'indefinido',
+  salario: 1261413, fechaInicio: '2026-01-01', auxilioTransporteManual: 249095
+};
+const acumular = (emp, desdeMes, hastaMes) => {
+  let ces = 0, int = 0;
+  for (let m = desdeMes; m <= hastaMes; m++) {
+    const d = N.diasTrabajadosEnMes(emp, 2026, m);
+    if (d <= 0) continue;
+    const p = N.calcularProvisionMensual(emp, { anio: 2026, mes: m, diasTrabajados: d });
+    ces += p.prestaciones.cesantias.valor;
+    int += p.prestaciones.interesesCesantias.valor;
+  }
+  return { ces, int };
+};
+
+// Un mes: los intereses deben ser mínimos, no el 1% de la base
+const m1 = acumular(empInt, 1, 1);
+check('1 mes · intereses = cesantías × 30 × 12%/360', m1.int, m1.ces * 30 * 0.12 / 360, 5);
+check('1 mes · NO es el 1% de la base (viejo error)', m1.int < m1.ces * 0.12 / 4, true);
+
+// Tres meses
+const m3 = acumular(empInt, 1, 3);
+check('3 meses · coincide con la fórmula legal', m3.int, m3.ces * 90 * 0.12 / 360, 20);
+
+// Seis meses
+const m6 = acumular(empInt, 1, 6);
+check('6 meses · coincide con la fórmula legal', m6.int, m6.ces * 180 * 0.12 / 360, 40);
+
+// Año completo: acá SÍ debe dar el 12% de las cesantías (y el 1% mensual)
+const m12 = acumular(empInt, 1, 12);
+check('12 meses · intereses = 12% de las cesantías', m12.int, m12.ces * 0.12, 100);
+check('12 meses · converge al 1% mensual del factor',
+  m12.int, (1261413 + 249095) * 0.01 * 12, 200);
+
+// Ingreso a mitad de año: cuenta desde el ingreso, no desde enero
+const empMedio = { ...empInt, id: 'i2', fechaInicio: '2026-06-01' };
+const j3 = acumular(empMedio, 6, 8);
+check('ingreso en junio · 3 meses trabajados', j3.int, j3.ces * 90 * 0.12 / 360, 20);
+check('ingreso en junio · da lo mismo que 3 meses desde enero', j3.int, m3.int, 20);
+
+// Los intereses crecen mes a mes, no son planos
+const jun = N.calcularProvisionMensual(empMedio, { anio: 2026, mes: 6, diasTrabajados: 30 });
+const ago = N.calcularProvisionMensual(empMedio, { anio: 2026, mes: 8, diasTrabajados: 30 });
+check('los intereses crecen con el saldo acumulado',
+  ago.prestaciones.interesesCesantias.valor > jun.prestaciones.interesesCesantias.valor, true);
+// El acumulado de intereses es cuadrático (las cesantías también crecen), así
+// que las cuotas mensuales van 1×, 3×, 5×… no 1×, 2×, 3×.
+check('agosto = 5× junio (la curva es cuadrática)',
+  ago.prestaciones.interesesCesantias.valor, jun.prestaciones.interesesCesantias.valor * 5, 20);
+
+// ═════════════════════════════════════════════════════════════════════════════
+seccion('17 · Historial de salario y base de liquidación — art. 253 CST');
+// ═════════════════════════════════════════════════════════════════════════════
+const empSube = {
+  id: 's1', nombre: 'Kellys', tipoContrato: 'indefinido',
+  salario: 1361413, fechaInicio: '2026-06-01',
+  historialSalarios: [
+    { desde: '2026-06-01', salario: 1261413 },
+    { desde: '2026-08-01', salario: 1361413 },
+  ]
+};
+
+check('salario en junio', N.salarioEnFecha(empSube, '2026-06-15'), 1261413);
+check('salario en agosto', N.salarioEnFecha(empSube, '2026-08-15'), 1361413);
+check('salario antes del ingreso usa el primer tramo', N.salarioEnFecha(empSube, '2020-01-01'), 1261413);
+
+// Aumento el 1-ago, retiro el 30-sep → varió dentro de los últimos 3 meses
+const bSube = N.basesLiquidacion(empSube, '2026-09-30');
+check('detecta variación en el trimestre', bSube.varioEnTrimestre, true);
+check('cesantías van al promedio del año', bSube.cesantias.metodo, 'promedio_anio');
+check('prima va al promedio del semestre', bSube.prima.metodo, 'promedio_semestre');
+check('vacaciones van con el último salario', bSube.vacaciones.metodo, 'ultimo_salario');
+check('el promedio queda entre los dos salarios',
+  bSube.promedioAnio > 1261413 && bSube.promedioAnio < 1361413, true);
+
+// Sin cambios recientes → último salario en todo
+const empEstable = { ...empSube, id: 's2', historialSalarios: [{ desde: '2026-06-01', salario: 1361413 }] };
+const bEst = N.basesLiquidacion(empEstable, '2026-09-30');
+check('sin variación → último salario en cesantías', bEst.cesantias.metodo, 'ultimo_salario');
+check('sin variación → último salario en prima', bEst.prima.metodo, 'ultimo_salario');
+
+// Sin historial: se comporta como antes (nada se rompe)
+const empSinHist = { id: 's3', tipoContrato: 'indefinido', salario: 2000000, fechaInicio: '2025-01-01' };
+const bSin = N.basesLiquidacion(empSinHist, '2026-09-30');
+check('sin historial → último salario', bSin.cesantias.valor, 2000000);
+check('sin historial → no detecta variación', bSin.varioEnTrimestre, false);
+
+// El aumento se refleja en la liquidación
+const LSube = N.liquidarContrato(empSube, {
+  fechaRetiro: '2026-09-30', motivo: 'renuncia', anio: 2026, diasSalarioPendiente: 30
+});
+const LEst = N.liquidarContrato(empEstable, {
+  fechaRetiro: '2026-09-30', motivo: 'renuncia', anio: 2026, diasSalarioPendiente: 30
+});
+check('cesantías con promedio < cesantías con salario final',
+  LSube.prestaciones.cesantias.valor < LEst.prestaciones.cesantias.valor, true);
+check('vacaciones iguales (ambas usan el salario final)',
+  LSube.prestaciones.vacaciones.valor, LEst.prestaciones.vacaciones.valor, 2);
+check('avisa del cambio de salario',
+  LSube.avisos.some(a => /salario.*cambió|promedio/i.test(a.texto)), true);
+
+// Promedio ponderado por días, no aritmético
+const emp5050 = {
+  id: 's4', tipoContrato: 'indefinido', salario: 2000000, fechaInicio: '2025-10-01',
+  historialSalarios: [
+    { desde: '2025-10-01', salario: 1000000 },
+    { desde: '2026-04-01', salario: 2000000 },
+  ]
+};
+// Del 1-oct-2025 al 30-sep-2026: 180 días a 1M y 180 días a 2M → 1,5M
+check('promedio ponderado por días', N.promedioSalario(emp5050, '2025-10-01', '2026-09-30'), 1500000, 15000);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // RESULTADOS

@@ -423,17 +423,81 @@ function calcularProvisionMensual(empleado, opciones = {}) {
 
   // ─── Prestaciones sociales ────────────────────────────────────────────────
   if (tipo.generaPrestaciones) {
+    // ═══════════════════════════════════════════════════════════════════════
+    // ✅ FIX NOMINA-INTERESES-001 — intereses proporcionales al tiempo
+    // ───────────────────────────────────────────────────────────────────────
+    // El 1% mensual del factor prestacional (8,33 + 1 + 8,33 + 4,17 = 21,83)
+    // representa el 12% ANUAL sobre las cesantías. Solo es exacto si el
+    // trabajador completó el año: antes de eso sobreprovisiona, porque el
+    // saldo real de cesantías todavía es pequeño.
+    //
+    //     mes 1 → 12 veces de más     mes 6 → 2 veces
+    //     mes 3 →  4 veces de más     mes 12 → exacto
+    //
+    // La Ley 52 de 1975 lo liquida así:
+    //     intereses = cesantías × días trabajados × 12% / 360
+    //
+    // Como las cesantías también crecen con los días, la curva es cuadrática,
+    // no lineal. Se causa la diferencia entre el acumulado a fin de este mes y
+    // el acumulado a fin del mes anterior. Así el total del año coincide
+    // exacto con la liquidación legal, y cada mes lleva lo que le toca.
+    // ═══════════════════════════════════════════════════════════════════════
+    const auxilioMensualCompleto = resultado.auxilioTransporte > 0 && diasTrabajados > 0
+      ? Math.round(resultado.auxilioTransporte * 30 / diasTrabajados)
+      : 0;
+    const baseMensualCompleta = salario + auxilioMensualCompleto + devengadoAdicional;
+
+    // Días trabajados en el año hasta el cierre de este mes y del anterior.
+    const diasHasta = Number(opciones.diasAcumuladosAnio);
+    const mesActual = Number(opciones.mes) || 0;
+    const acumHasta = isFinite(diasHasta) && diasHasta > 0
+      ? diasHasta
+      : diasAcumuladosEnAnio(empleado, anio, mesActual, opciones.hastaCorte);
+    const acumAntes = Math.max(0, acumHasta - diasTrabajados);
+
+    // Si el llamador conoce las cesantías realmente causadas en el año, el
+    // cálculo es EXACTO. Sin ese dato se estima con la base del mes, que es
+    // correcto mientras el salario no haya cambiado.
+    const cesantiasMes = Math.round(resultado.baseConAuxilio * PRESTACIONES.cesantias.pct / 100);
+    const cesAcumAntes = Number(opciones.cesantiasAcumuladasAnio);
+    const usaReal = isFinite(cesAcumAntes) && cesAcumAntes >= 0;
+
+    const interesesAcumulados = (d, cesantiasAcum) => {
+      if (d <= 0) return 0;
+      const ces = cesantiasAcum !== undefined
+        ? cesantiasAcum
+        : baseMensualCompleta * d / 360;
+      return ces * d * 0.12 / 360;
+    };
+    const interesesDelMes = usaReal
+      ? interesesAcumulados(acumHasta, cesAcumAntes + cesantiasMes) - interesesAcumulados(acumAntes, cesAcumAntes)
+      : interesesAcumulados(acumHasta) - interesesAcumulados(acumAntes);
+
     let total = 0;
     for (const [clave, cfg] of Object.entries(PRESTACIONES)) {
       const base = cfg.incluyeAuxilio ? resultado.baseConAuxilio : resultado.baseSinAuxilio;
-      const valor = Math.round(base * cfg.pct / 100);
+      let valor;
+      let nota = null;
+
+      if (clave === 'interesesCesantias') {
+        valor = Math.max(0, Math.round(interesesDelMes));
+        nota = `12% anual sobre las cesantías acumuladas (${acumHasta} días en el año). ` +
+               `El 1% mensual del factor prestacional solo es exacto al completar el año.`;
+      } else {
+        valor = Math.round(base * cfg.pct / 100);
+      }
+
       resultado.prestaciones[clave] = {
         etiqueta: cfg.etiqueta, pct: cfg.pct, base, valor,
-        cuentaPUC: cfg.cuenta, explicacionBase: cfg.base
+        cuentaPUC: cfg.cuenta, explicacionBase: nota || cfg.base,
+        ...(clave === 'interesesCesantias'
+          ? { diasAcumuladosAnio: acumHasta, proporcionalAlTiempo: true }
+          : {})
       };
       total += valor;
     }
     resultado.totalPrestaciones = total;
+    resultado.diasAcumuladosAnio = acumHasta;
   }
 
   // ─── Seguridad social y parafiscales patronales ───────────────────────────
@@ -1033,22 +1097,45 @@ function liquidarContrato(empleado, datos = {}) {
     : dias360(desdeVacaciones, fechaRetiro);
 
   if (tipo.generaPrestaciones) {
-    // Cesantías: salario + auxilio, proporcional a 360 días
-    const cesantias = Math.round(baseConAuxilio * diasCesantias / 360);
+    // ✅ NOMINA-SALARIO-HISTORICO-001: cada prestación tiene su propia regla
+    // de base. Un aumento reciente obliga a promediar en cesantías (art. 253)
+    // y en prima (art. 306), pero no en vacaciones (art. 192).
+    const bases = basesLiquidacion(empleado, fechaRetiro, {
+      forzarPromedio: datos.forzarPromedioSalario === true
+    });
+    r.basesSalariales = bases;
+
+    const baseCes = bases.cesantias.valor + auxilioMensual;
+    const basePri = bases.prima.valor + auxilioMensual;
+    const baseVac = bases.vacaciones.valor;
+
+    // Cesantías: salario base + auxilio, proporcional a 360 días
+    const cesantias = Math.round(baseCes * diasCesantias / 360);
     // Intereses: 12% anual sobre las cesantías, proporcional al tiempo
     const intereses = Math.round(cesantias * diasCesantias * 0.12 / 360);
-    // Prima: salario + auxilio, proporcional al semestre
-    const prima = Math.round(baseConAuxilio * diasPrima / 360);
+    // Prima: salario base + auxilio, proporcional al semestre
+    const prima = Math.round(basePri * diasPrima / 360);
     // Vacaciones: SIN auxilio, 15 días hábiles por año → días/720
     const vacaciones = diasVacaciones !== null
-      ? Math.round(salario * diasVacaciones / 720)
-      : Math.round((salario / 30) * Number(datos.diasVacacionesPendientes || 0));
+      ? Math.round(baseVac * diasVacaciones / 720)
+      : Math.round((baseVac / 30) * Number(datos.diasVacacionesPendientes || 0));
+
+    if (bases.varioEnTrimestre || bases.varioEnSemestre) {
+      r.avisos.push({
+        nivel: 'media',
+        texto: `El salario de este trabajador cambió recientemente. Por eso las cesantías se ` +
+               `liquidan sobre ${bases.cesantias.metodo === 'promedio_anio' ? 'el promedio del último año' : 'el último salario'} ` +
+               `y la prima sobre ${bases.prima.metodo === 'promedio_semestre' ? 'el promedio del semestre' : 'el último salario'}. ` +
+               `Las vacaciones siempre van con el salario final. No es un error: cada prestación tiene su regla.`
+      });
+    }
 
     r.prestaciones = {
       cesantias: {
         etiqueta: 'Cesantías', valor: cesantias, dias: diasCesantias, cuentaPUC: '2510',
-        base: baseConAuxilio, desde: desdeCesantias, hasta: fechaRetiro,
-        explica: 'Solo el año en curso. Lo del año anterior ya se consignó al fondo el 14 de febrero.'
+        base: baseCes, desde: desdeCesantias, hasta: fechaRetiro,
+        metodoBase: bases.cesantias.metodo,
+        explica: 'Solo el año en curso. Lo del año anterior ya se consignó al fondo el 14 de febrero. ' + bases.cesantias.fundamento
       },
       interesesCesantias: {
         etiqueta: 'Intereses a las cesantías', valor: intereses, dias: diasCesantias, cuentaPUC: '2515',
@@ -1056,13 +1143,15 @@ function liquidarContrato(empleado, datos = {}) {
       },
       prima: {
         etiqueta: 'Prima de servicios', valor: prima, dias: diasPrima, cuentaPUC: '2610',
-        base: baseConAuxilio, desde: desdePrima, hasta: fechaRetiro,
-        explica: `Proporcional al semestre en curso (${mesRetiro <= 6 ? 'enero–junio' : 'julio–diciembre'}).`
+        base: basePri, desde: desdePrima, hasta: fechaRetiro,
+        metodoBase: bases.prima.metodo,
+        explica: `Proporcional al semestre en curso (${mesRetiro <= 6 ? 'enero–junio' : 'julio–diciembre'}). ` + bases.prima.fundamento
       },
       vacaciones: {
         etiqueta: 'Vacaciones compensadas', valor: vacaciones,
-        dias: diasVacaciones, cuentaPUC: '2525', base: salario,
-        explica: 'Sin auxilio de transporte. 15 días hábiles por año trabajado (días / 720).'
+        dias: diasVacaciones, cuentaPUC: '2525', base: baseVac,
+        metodoBase: bases.vacaciones.metodo,
+        explica: 'Sin auxilio de transporte. 15 días hábiles por año trabajado (días / 720). ' + bases.vacaciones.fundamento
       }
     };
     r.totalPrestaciones = cesantias + intereses + prima + vacaciones;
@@ -1369,6 +1458,160 @@ const diasTrabajadosEnMes = (empleado, anio, mes, hastaISO = null) => {
   return Math.max(0, hasta - desde + 1);
 };
 
+// ═════════════════════════════════════════════════════════════════════════════
+// HISTORIAL DE SALARIO Y BASE DE LIQUIDACIÓN — art. 253 CST
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ NOMINA-SALARIO-HISTORICO-001
+//
+// EL PROBLEMA: el sistema usaba siempre el salario ACTUAL. Eso está bien casi
+// siempre, pero no cuando hubo un aumento reciente.
+//
+// Art. 253 CST: la base de las cesantías es el último salario mensual,
+// «siempre que no haya tenido variación en los tres (3) últimos meses». Si
+// varió — o si el salario es variable — la base es el PROMEDIO del último año
+// de servicios, o de todo el tiempo servido si fue menor.
+//
+// Un aumento en los últimos tres meses obliga al promedio. Liquidar con el
+// salario nuevo paga de más; con el viejo, de menos.
+//
+// El empleado guarda `historialSalarios: [{ desde, salario }]`. Si está vacío,
+// se asume que el salario actual rigió siempre — que es el comportamiento de
+// antes, así que nada se rompe.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** Tramos de salario ordenados, con el salario actual como último tramo. */
+const tramosSalario = (empleado) => {
+  const ini = String(empleado?.fechaInicio || '').slice(0, 10);
+  const hist = Array.isArray(empleado?.historialSalarios) ? empleado.historialSalarios : [];
+  const tramos = hist
+    .map(t => ({ desde: String(t.desde || '').slice(0, 10), salario: Number(t.salario) || 0 }))
+    .filter(t => t.desde && t.salario > 0)
+    .sort((a, b) => a.desde.localeCompare(b.desde));
+
+  // Sin historial: el salario actual rigió desde el ingreso.
+  if (tramos.length === 0) {
+    return [{ desde: ini || '1900-01-01', salario: Number(empleado?.salario) || 0 }];
+  }
+  // El primer tramo cubre desde el ingreso, aunque se haya registrado después.
+  if (ini && tramos[0].desde > ini) tramos[0] = { ...tramos[0], desde: ini };
+  return tramos;
+};
+
+/** Salario vigente en una fecha. */
+const salarioEnFecha = (empleado, fechaISO) => {
+  const f = String(fechaISO || '').slice(0, 10);
+  const tramos = tramosSalario(empleado);
+  let s = tramos[0].salario;
+  for (const t of tramos) { if (t.desde <= f) s = t.salario; }
+  return s;
+};
+
+/**
+ * Promedio ponderado por días entre dos fechas, respetando los tramos.
+ * Es el «promedio de lo devengado» del art. 253.
+ */
+const promedioSalario = (empleado, desdeISO, hastaISO) => {
+  const desde = String(desdeISO || '').slice(0, 10);
+  const hasta = String(hastaISO || '').slice(0, 10);
+  const totalDias = dias360(desde, hasta);
+  if (totalDias <= 0) return Number(empleado?.salario) || 0;
+
+  const tramos = tramosSalario(empleado);
+  let acumulado = 0, diasContados = 0;
+
+  for (let i = 0; i < tramos.length; i++) {
+    const ini = tramos[i].desde > desde ? tramos[i].desde : desde;
+    const finTramo = i + 1 < tramos.length ? sumarDias(tramos[i + 1].desde, -1) : hasta;
+    const fin = finTramo < hasta ? finTramo : hasta;
+    if (fin < ini) continue;
+    const d = dias360(ini, fin);
+    if (d <= 0) continue;
+    acumulado += tramos[i].salario * d;
+    diasContados += d;
+  }
+  return diasContados > 0 ? Math.round(acumulado / diasContados) : (Number(empleado?.salario) || 0);
+};
+
+/** ¿Varió el salario en los últimos N días antes del retiro? */
+const salarioVarioEnUltimos = (empleado, fechaRetiro, dias = 90) => {
+  const hasta = String(fechaRetiro || '').slice(0, 10);
+  const desde = sumarDias(hasta, -dias);
+  const ini = String(empleado?.fechaInicio || '').slice(0, 10);
+  const inicioVentana = ini && ini > desde ? ini : desde;
+  return tramosSalario(empleado).some(t => t.desde > inicioVentana && t.desde <= hasta);
+};
+
+/**
+ * Bases de liquidación por concepto, con el criterio legal de cada uno.
+ *
+ *   Cesantías e intereses · art. 253 — último salario, o promedio del último
+ *                                      año si varió en los 3 últimos meses
+ *   Prima de servicios    · art. 306 — promedio del semestre si varió en él
+ *   Vacaciones            · art. 192 — el salario que devenga al terminar
+ */
+function basesLiquidacion(empleado, fechaRetiro, opciones = {}) {
+  const hasta = String(fechaRetiro || '').slice(0, 10);
+  const ini = String(empleado?.fechaInicio || '').slice(0, 10);
+  const ultimo = salarioEnFecha(empleado, hasta);
+
+  // Ventana del último año de servicios (o el tiempo servido si es menor)
+  const hace360 = sumarDias(hasta, -359);
+  const desdeAnio = ini && ini > hace360 ? ini : hace360;
+
+  // Semestre en curso
+  const mes = Number(hasta.slice(5, 7));
+  const anio = Number(hasta.slice(0, 4));
+  const inicioSem = mes <= 6 ? `${anio}-01-01` : `${anio}-07-01`;
+  const desdeSem = ini && ini > inicioSem ? ini : inicioSem;
+
+  const varioTrimestre = salarioVarioEnUltimos(empleado, hasta, 90);
+  const varioSemestre = tramosSalario(empleado).some(t => t.desde > desdeSem && t.desde <= hasta);
+  const forzarPromedio = opciones.forzarPromedio === true;
+
+  const usaPromedioCesantias = forzarPromedio || varioTrimestre;
+  const usaPromedioPrima = forzarPromedio || varioSemestre;
+
+  return {
+    ultimoSalario: ultimo,
+    promedioAnio: promedioSalario(empleado, desdeAnio, hasta),
+    promedioSemestre: promedioSalario(empleado, desdeSem, hasta),
+    varioEnTrimestre: varioTrimestre,
+    varioEnSemestre: varioSemestre,
+    cesantias: {
+      valor: usaPromedioCesantias ? promedioSalario(empleado, desdeAnio, hasta) : ultimo,
+      metodo: usaPromedioCesantias ? 'promedio_anio' : 'ultimo_salario',
+      fundamento: usaPromedioCesantias
+        ? `Art. 253 CST: el salario varió en los últimos 3 meses, así que la base es el promedio del último año de servicios (${desdeAnio} a ${hasta}).`
+        : 'Art. 253 CST: el salario no varió en los últimos 3 meses, así que la base es el último salario.'
+    },
+    prima: {
+      valor: usaPromedioPrima ? promedioSalario(empleado, desdeSem, hasta) : ultimo,
+      metodo: usaPromedioPrima ? 'promedio_semestre' : 'ultimo_salario',
+      fundamento: usaPromedioPrima
+        ? `Art. 306 CST: el salario varió dentro del semestre, así que se toma el promedio del semestre (${desdeSem} a ${hasta}).`
+        : 'Art. 306 CST: el salario no varió en el semestre, así que la base es el último salario.'
+    },
+    vacaciones: {
+      valor: ultimo,
+      metodo: 'ultimo_salario',
+      fundamento: 'Art. 192 CST: las vacaciones se liquidan con el salario que el trabajador devenga al terminar.'
+    }
+  };
+}
+
+/**
+ * ✅ NOMINA-INTERESES-001
+ * Días trabajados en el año hasta el cierre del mes indicado.
+ * Los intereses a las cesantías dependen del acumulado del año, no del mes
+ * suelto — por eso la provisión mensual necesita saber cuánto lleva.
+ */
+const diasAcumuladosEnAnio = (empleado, anio, mes, hastaISO = null) => {
+  let total = 0;
+  const m = Math.min(12, Math.max(0, Number(mes) || 0));
+  for (let i = 1; i <= m; i++) total += diasTrabajadosEnMes(empleado, anio, i, hastaISO);
+  return total;
+};
+
 /**
  * ¿Se puede causar ese mes ya? Un mes se causa cuando terminó, no antes.
  * En nómina colombiana el mes comercial cierra el día 30.
@@ -1398,6 +1641,12 @@ module.exports = {
   mesesEntre,
   vigenteEnMes,
   diasTrabajadosEnMes,
+  diasAcumuladosEnAnio,
+  tramosSalario,
+  salarioEnFecha,
+  promedioSalario,
+  salarioVarioEnUltimos,
+  basesLiquidacion,
   mesCerrado,
   // ── NOMINA-LIQUIDACION-001 ──
   MOTIVOS_TERMINACION,

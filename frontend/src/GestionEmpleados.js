@@ -199,6 +199,56 @@ function ModalEmpleado({ empleado, config, onGuardar, onCerrar }) {
                   {Number(form.salario) > 0 && ` · equivale a ${(Number(form.salario) / P.smmlv).toFixed(2)} SMMLV`}
                 </div>
               )}
+
+              {/* ═══════════════════════════════════════════════════════════
+                  ✅ NOMINA-SALARIO-HISTORICO-001 — desde cuándo rige
+                  ───────────────────────────────────────────────────────────
+                  Aparece solo si el salario cambió respecto al guardado. El
+                  historial se arma solo: nadie tiene que acordarse de anotarlo.
+                  Importa para dos cosas — causar provisiones retroactivas con
+                  el salario de cada mes, y liquidar con el promedio cuando el
+                  art. 253 lo exige.
+                  ═══════════════════════════════════════════════════════════ */}
+              {empleado && Number(form.salario) > 0
+                && Number(form.salario) !== Number(empleado.salario) && (
+                <div style={{
+                  background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 9,
+                  padding: '10px 12px', marginTop: 9,
+                }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 800, color: '#1e40af', marginBottom: 6 }}>
+                    {Number(form.salario) > Number(empleado.salario) ? 'Aumento' : 'Cambio'} de {fmt(Math.abs(Number(form.salario) - Number(empleado.salario)))}
+                  </div>
+                  <label style={{ ...S.label, fontSize: 11 }}>¿Desde qué fecha rige?</label>
+                  <input type="date" style={{ ...S.input, marginTop: 3 }}
+                    value={form.vigenciaSalarioDesde || new Date().toLocaleDateString('en-CA')}
+                    onChange={e => set('vigenciaSalarioDesde', e.target.value)} />
+                  <div style={{ fontSize: 10.5, color: '#1e40af', marginTop: 6, lineHeight: 1.5 }}>
+                    Queda registrado que antes ganaba {fmt(empleado.salario)}. Un aumento en los
+                    últimos 3 meses obliga a liquidar las cesantías sobre el promedio del año
+                    (art. 253 CST) — el sistema lo aplica solo.
+                  </div>
+                </div>
+              )}
+
+              {/* Historial ya registrado */}
+              {empleado?.historialSalarios?.length > 0 && (
+                <details style={{ marginTop: 9 }}>
+                  <summary style={{ cursor: 'pointer', fontSize: 11.5, fontWeight: 700, color: '#4f46e5' }}>
+                    Historial de salario ({empleado.historialSalarios.length} tramo(s))
+                  </summary>
+                  <div style={{ marginTop: 7 }}>
+                    {empleado.historialSalarios.map((h, i) => (
+                      <div key={i} style={{
+                        display: 'flex', justifyContent: 'space-between', fontSize: 11.5,
+                        padding: '5px 10px', background: '#f8fafc', borderRadius: 6, marginBottom: 3, color: '#475569',
+                      }}>
+                        <span>Desde {h.desde}</span>
+                        <strong>{fmt(h.salario)}</strong>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </div>
             <div style={S.field}>
               <label style={S.label}>Fecha de inicio *</label>
@@ -1022,7 +1072,7 @@ export default function GestionEmpleados({ user }) {
                   { l: 'Devengado del mes', v: provisiones.totales.devengado, c: '#0284c7', s: `${provisiones.empleadosVigentes} empleado(s)` },
                   { l: 'Prestaciones a causar', v: provisiones.totales.prestaciones, c: '#7c3aed', s: 'Gasto + pasivo' },
                   { l: 'Aportes patronales', v: provisiones.totales.seguridadSocial, c: '#d97706', s: provisiones.empresaExonerada ? 'Con exoneración' : 'Sin exoneración' },
-                  { l: 'Costo total del mes', v: provisiones.totales.costoTotal, c: '#dc2626', s: `Factor ${provisiones.totales.factorPromedio.toFixed(2)}x` },
+                  { l: 'Costo total del mes', v: provisiones.totales.costoTotal, c: '#dc2626', s: `Factor ${provisiones.totales.factorPromedio.toFixed(2)}x · salario + prestaciones + aportes` },
                 ].map(k => (
                   <div key={k.l} style={{ background: '#fff', borderRadius: 12, padding: '15px 18px', borderLeft: `4px solid ${k.c}`, boxShadow: '0 1px 3px rgba(15,23,42,0.06)' }}>
                     <div style={{ fontSize: 11, color: '#64748b', fontWeight: 700, marginBottom: 5 }}>{k.l}</div>
@@ -1079,8 +1129,11 @@ export default function GestionEmpleados({ user }) {
                 </div>
 
                 <div style={{ background: '#fff', borderRadius: 14, padding: '16px 20px', border: '1px solid #f1f5f9' }}>
+                  {/* ✅ CLARIDAD: en esta pantalla conviven dos números que se
+                      confunden todo el tiempo — lo que se causa ESTE MES y lo
+                      acumulado de TODOS los meses. Vale la pena decirlo. */}
                   <div style={{ fontSize: 12.5, fontWeight: 800, color: '#0f172a', marginBottom: 4 }}>
-                    Pasivo pendiente
+                    Pasivo pendiente <span style={{ fontWeight: 600, color: '#94a3b8' }}>· acumulado de todos los meses</span>
                   </div>
                   {/* ✅ FIX NOMINA-PASIVO-001: este número ahora es NETO —
                       causado menos pagado. Antes solo sumaba lo causado y nunca

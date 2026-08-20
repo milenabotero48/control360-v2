@@ -23,6 +23,7 @@ import ModalPagoPILA from './ModalPagoPILA';
 // ✅ NOMINA-ACTA-REIMPRESION-001: el acta se puede volver a imprimir cuando
 // haga falta — copia para el trabajador, para el contador, o si se perdió.
 import { imprimirActaLiquidacion } from './actaLiquidacion';
+import ModalAnularLiquidacion from './ModalAnularLiquidacion';
 
 const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambio }) => {
   const [saldo, setSaldo] = useState(null);
@@ -73,6 +74,42 @@ const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambi
   return (
     <div>
       {exito && <Aviso nivel="info" style={{ marginBottom: 16 }}>✅ {exito}</Aviso>}
+
+      {/* ═══════════════════════════════════════════════════════════════════
+          ✅ CLARIDAD — cómo leer esta pantalla
+          ───────────────────────────────────────────────────────────────────
+          Acá conviven cuatro números que se parecen y significan cosas
+          distintas. Decirlo una vez arriba evita la duda cada vez.
+          ═══════════════════════════════════════════════════════════════ */}
+      <details style={{ marginBottom: 16 }}>
+        <summary style={{
+          cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: '#4f46e5',
+          padding: '9px 14px', background: '#eef2ff', borderRadius: 9,
+          border: '1px solid #c7d2fe', listStyle: 'none',
+        }}>
+          Cómo leer esta pantalla
+        </summary>
+        <div style={{
+          ...S.card, marginTop: 9, background: '#f8fafc', fontSize: 12.5,
+          color: '#475569', lineHeight: 1.7,
+        }}>
+          {[
+            ['Causado', 'Lo que se acumuló mes a mes como gasto y como deuda. Nunca baja: es la historia.'],
+            ['Pagado', 'Lo que ya se entregó — consignaciones al fondo, primas, liquidaciones.'],
+            ['Saldo', 'Causado menos pagado. Es lo que realmente le debés hoy a tus empleados.'],
+            ['Costo de liquidar', 'Otra cosa. Lo calcula el botón Liquidar y casi nunca coincide con el saldo, porque el mes se causa completo aunque el retiro sea a mitad.'],
+          ].map(([t, d]) => (
+            <div key={t} style={{ marginBottom: 7 }}>
+              <strong style={{ color: '#0f172a' }}>{t}.</strong> {d}
+            </div>
+          ))}
+          <div style={{ marginTop: 11, paddingTop: 10, borderTop: '1px solid #e2e8f0', fontSize: 12 }}>
+            <strong style={{ color: '#0f172a' }}>Los intereses a las cesantías</strong> son el 12% <em>anual</em>.
+            En los primeros meses del año se ven pequeños comparados con las cesantías — eso es
+            correcto: crecen con el saldo y llegan al 12% al completar el año.
+          </div>
+        </div>
+      </details>
 
       {/* ── 1 · ALERTAS ─────────────────────────────────────────────────── */}
       {alertas?.alertas?.length > 0 && (
@@ -355,8 +392,8 @@ const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambi
                     <td style={S.td}>{l.fechaRetiro}</td>
                     <td style={S.td}>{l.acta.motivoEtiqueta}</td>
                     <td style={S.tdNum}>{fmt(l.netoAPagar)}</td>
-                    <td style={{ ...S.td, textAlign: 'right' }}>
-                      <button style={S.btnMini}
+                    <td style={{ ...S.td, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      <button style={{ ...S.btnMini, marginRight: 5 }}
                         onClick={() => imprimirActaLiquidacion({
                           liquidacion: l.acta,
                           empleado: {
@@ -367,6 +404,13 @@ const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambi
                           numero: l.numero,
                         })}>
                         Imprimir
+                      </button>
+                      {/* ✅ NOMINA-ANULAR-LIQUIDACION-001: no es "editar" — se
+                          anula con motivo y se rehace. El acta que el trabajador
+                          firmó no puede cambiar en silencio. */}
+                      <button style={{ ...S.btnMini, color: '#b91c1c', borderColor: '#fecaca', background: '#fef2f2' }}
+                        onClick={() => setModal({ tipo: 'anular', liquidacion: l })}>
+                        Corregir
                       </button>
                     </td>
                   </tr>
@@ -430,6 +474,11 @@ const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambi
       {modal?.tipo === 'retroactivas' && modal.empleado && (
         <ModalRetroactivas
           empleado={modal.empleado}
+          onListo={(r) => tras(r.mensaje)} onCerrar={() => setModal(null)} />
+      )}
+      {modal?.tipo === 'anular' && modal.liquidacion && (
+        <ModalAnularLiquidacion
+          liquidacion={modal.liquidacion}
           onListo={(r) => tras(r.mensaje)} onCerrar={() => setModal(null)} />
       )}
       {modal?.tipo === 'pila' && (
