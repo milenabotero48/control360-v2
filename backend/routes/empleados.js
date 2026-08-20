@@ -73,9 +73,24 @@ const registrarAuditoria = async (datos) => {
 // Se expone el motor de cálculo al frontend para que la pantalla explique los
 // porcentajes en vez de mostrarlos como números mágicos.
 // ═════════════════════════════════════════════════════════════════════════════
-router.get('/config', (req, res) => {
+router.get('/config', async (req, res) => {
   const anio = Number(req.query.anio) || new Date().getFullYear();
+
+  // ✅ FIX NOMINA-EXONERACION-PREVIEW-001
+  // El catálogo no incluía el criterio de exoneración de la empresa, así que la
+  // pantalla que muestra "lo que este empleado cuesta de verdad" lo decidía
+  // sola: daba por exonerado a todo el que ganara menos de 10 SMMLV, sin mirar
+  // si la empresa tiene derecho. En una empresa NO exonerada eso escondía el
+  // 13,5% de la nómina — justo en el número que dice ser el costo real.
+  let empresaExonerada = true;
+  try {
+    const adminId = resolverAdminId(req);
+    const cfgDoc = await db.collection('configuracion').doc(adminId || '_').get();
+    empresaExonerada = cfgDoc.exists ? (cfgDoc.data().empresaExoneradaAportes !== false) : true;
+  } catch (e) { console.error('GET empleados/config exoneración:', e.message); }
+
   res.json({
+    empresaExonerada,
     parametros: N.parametrosAnio(anio),
     tiposContrato: Object.values(N.TIPOS_CONTRATO),
     prestaciones: N.PRESTACIONES,

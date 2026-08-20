@@ -89,7 +89,14 @@ function ModalEmpleado({ empleado, config, onGuardar, onCerrar }) {
     if (tipo.generaSeguridadSocialPatronal && config?.seguridadSocial) {
       let baseAportes = tipo.baseSeguridadSocialPct ? Math.round(sal * tipo.baseSeguridadSocialPct / 100) : sal;
       baseAportes = Math.max(baseAportes, P.smmlv);
-      const exonera = sal < P.smmlv * (config.seguridadSocial.topeExoneracionSMMLV || 10);
+      // ✅ FIX NOMINA-EXONERACION-PREVIEW-001
+      // Antes solo se miraba el tope de 10 SMMLV y se daba por exonerada a
+      // toda empresa. Son DOS condiciones: la empresa tiene que tener derecho
+      // (art. 114-1 ET) Y el salario tiene que estar bajo el tope. Sin la
+      // primera, este panel mostraba un costo 13,5% menor al real.
+      const empresaExonerada = config.empresaExonerada !== false;
+      const bajoTope = sal < P.smmlv * (config.seguridadSocial.topeExoneracionSMMLV || 10);
+      const exonera = empresaExonerada && bajoTope;
       for (const [k, cfg] of Object.entries(config.seguridadSocial.patronal || {})) {
         const ex = exonera && cfg.exonerable;
         const v = ex ? 0 : Math.round(baseAportes * cfg.pct / 100);
