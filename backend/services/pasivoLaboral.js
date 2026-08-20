@@ -145,7 +145,12 @@ function consolidarPasivo(provisiones = [], filtro = {}) {
 
     for (const c of CONCEPTOS) {
       const cau = valorCausado(p, c);
-      const apl = Math.min(valorAplicado(p, c), cau); // nunca más de lo causado
+      // ✅ NOMINA-LIBERACION-001: una provisión LIBERADA ya no es deuda. Se
+      // libera al liquidar el contrato: el trabajador se fue y el sobrante
+      // (mes causado completo pero trabajado a medias, intereses
+      // sobreprovisionados) no se le debe a nadie. Se conserva el causado para
+      // no perder la historia, pero el saldo queda en cero.
+      const apl = p.liberada === true ? cau : Math.min(valorAplicado(p, c), cau);
       causado[c] += cau; pagado[c] += apl; saldo[c] += (cau - apl);
       e.causado[c] += cau; e.pagado[c] += apl; e.saldo[c] += (cau - apl);
     }

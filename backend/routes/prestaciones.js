@@ -81,6 +81,69 @@ const cargarProvisiones = async (adminId) => {
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 };
 
+/**
+ * ✅ NOMINA-ANTICIPOS-LIQUIDACION-001
+ *
+ * Anticipos pendientes de cruce de un empleado, y los egresos SOSPECHOSOS:
+ * pagos hechos a nombre de esa persona que nadie marcó como anticipo.
+ *
+ * EL CASO QUE LO DESTAPÓ: un técnico tenía dos anticipos, de $20.000 y
+ * $100.000. El de $20.000 estaba marcado y aparecía; el de $100.000 se registró
+ * solo con la categoría "ANTICIPO DE NÓMINA" pero sin marcar la casilla, así
+ * que no figuraba en ninguna parte. El sistema lo señalaba con una alerta en
+ * Egresos (regla R16), pero esa alerta no llegaba a la pantalla de nómina.
+ *
+ * Al liquidar un contrato eso es plata perdida: se le paga la liquidación
+ * completa sin descontar lo que ya se le había entregado.
+ */
+const norm = (s) => String(s || '')
+  .normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+
+const cargarAnticipos = async (adminId, empleado) => {
+  const snap = await db.collection('egresos').where('userId', '==', adminId)
+    .select('esAnticipoNomina', 'cruzadoEnNomina', 'anulado', 'empleadoId', 'numero',
+            'fecha', 'concepto', 'proveedor', 'categoria', 'totalPagar', 'monto',
+            'esComprobanteNomina').get();
+
+  const pendientes = [];
+  const sospechosos = [];
+  const nombreEmp = norm(empleado.nombre);
+
+  snap.docs.forEach(d => {
+    const e = d.data();
+    if (e.anulado === true) return;
+    if (e.esComprobanteNomina === true) return;
+    const valor = num(e.totalPagar || e.monto);
+    if (valor <= 0) return;
+
+    const item = {
+      egresoId: d.id, numero: e.numero || '', fecha: e.fecha || '',
+      concepto: e.concepto || '', categoria: e.categoria || '', valor
+    };
+
+    if (e.esAnticipoNomina === true && e.empleadoId === empleado.id) {
+      if (e.cruzadoEnNomina === true) return;
+      pendientes.push(item);
+      return;
+    }
+
+    // Regla R16 en el contexto de la liquidación: el tercero se llama como el
+    // empleado pero el egreso no está marcado ni enlazado.
+    if (nombreEmp.length >= 5) {
+      const texto = `${norm(e.proveedor)} ${norm(e.concepto)}`;
+      if (texto.includes(nombreEmp)) sospechosos.push(item);
+    }
+  });
+
+  const cmp = (a, b) => String(a.fecha).localeCompare(String(b.fecha));
+  return {
+    pendientes: pendientes.sort(cmp),
+    sospechosos: sospechosos.sort(cmp),
+    totalPendientes: pendientes.reduce((a, x) => a + x.valor, 0),
+    totalSospechosos: sospechosos.reduce((a, x) => a + x.valor, 0),
+  };
+};
+
 const cargarEmpleado = async (empleadoId, adminId) => {
   const doc = await db.collection('empleados').doc(empleadoId || '_').get();
   if (!doc.exists) return { error: 'Empleado no encontrado', status: 404 };
@@ -372,6 +435,7 @@ router.post('/liquidacion/:empleadoId/preview', async (req, res) => {
     if (r.error) return res.status(r.status).json({ error: r.error });
     const empleado = r.empleado;
 
+    const anticipos = await cargarAnticipos(adminId, empleado);
     const liq = N.liquidarContrato(empleado, {
       fechaRetiro: req.body.fechaRetiro || hoyCO(),
       motivo: req.body.motivo || 'sin_justa_causa',
@@ -382,6 +446,10 @@ router.post('/liquidacion/:empleadoId/preview', async (req, res) => {
       otrosDevengados: req.body.otrosDevengados,
       otrasDeducciones: req.body.otrasDeducciones,
       fechaFinObra: req.body.fechaFinObra,
+      // ✅ NOMINA-PRIMA-SEMESTRE-001
+      incluirPrimaSemestreAnterior: req.body.incluirPrimaSemestreAnterior === true,
+      // ✅ NOMINA-ANTICIPOS-LIQUIDACION-001
+      anticipos: req.body.cruzarAnticipos === false ? [] : anticipos.pendientes,
     });
 
     // Contraste con el pasivo realmente causado: acá se ve si la empresa
@@ -417,10 +485,23 @@ router.post('/liquidacion/:empleadoId/preview', async (req, res) => {
       });
     }
 
+    // ✅ NOMINA-ANTICIPOS-LIQUIDACION-001: plata que ya se le entregó y hay
+    // que recuperar antes de pagarle la liquidación.
+    if (anticipos.totalSospechosos > 0) {
+      liq.avisos.push({
+        nivel: 'grave',
+        texto: `Hay ${anticipos.sospechosos.length} egreso(s) a nombre de ${empleado.nombre} por ` +
+               `${fmt(anticipos.totalSospechosos)} que NO están marcados como anticipo de nómina, ` +
+               `así que no se están descontando. Si eran plata que se le entregó, andá a Egresos, ` +
+               `editalos, marcalos como anticipo y enlazalos al empleado — o descontalos a mano acá. ` +
+               `Si no los recuperás ahora, se pierden: el contrato termina hoy.`
+      });
+    }
+
     // Preaviso de término fijo — el aviso que evita una renovación por descuido
     const preaviso = N.estadoPreavisoFijo(empleado, hoyCO());
 
-    res.json({ liquidacion: liq, comparacion, preaviso, pasivoEmpleado: pasivo });
+    res.json({ liquidacion: liq, comparacion, preaviso, pasivoEmpleado: pasivo, anticipos });
   } catch (e) {
     console.error('POST prestaciones/liquidacion/preview:', e);
     res.status(500).json({ error: e.message || 'Error al calcular la liquidación' });
@@ -458,6 +539,7 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
     }
 
     const fechaRetiro = String(req.body.fechaRetiro || hoyCO()).slice(0, 10);
+    const anticipos = await cargarAnticipos(adminId, empleado);
     const liq = N.liquidarContrato(empleado, {
       fechaRetiro,
       motivo: req.body.motivo || 'sin_justa_causa',
@@ -468,6 +550,10 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
       otrosDevengados: req.body.otrosDevengados,
       otrasDeducciones: req.body.otrasDeducciones,
       fechaFinObra: req.body.fechaFinObra,
+      // ✅ NOMINA-PRIMA-SEMESTRE-001
+      incluirPrimaSemestreAnterior: req.body.incluirPrimaSemestreAnterior === true,
+      // ✅ NOMINA-ANTICIPOS-LIQUIDACION-001
+      anticipos: req.body.cruzarAnticipos === false ? [] : anticipos.pendientes,
     });
 
     if (liq.avisos.some(a => a.nivel === 'grave' && /fecha de ingreso|fecha de retiro|anterior a la de ingreso/i.test(a.texto))) {
@@ -488,7 +574,30 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
     // El gasto NUEVO del período: indemnización, salario pendiente, otros
     // devengados y la parte de prestaciones que no alcanzó a estar provisionada.
     const defectoProvision = Math.max(0, liq.totalPrestaciones - plan.totalAplicado);
-    const gastoNuevoTotal = num(liq.contabilidad?.gastoNuevo) + defectoProvision;
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ✅ FIX NOMINA-LIBERACION-001 · liberar la provisión que sobra
+    // ───────────────────────────────────────────────────────────────────────
+    // Casi siempre sobra provisión al liquidar, y por dos razones legítimas:
+    //
+    //   · Se causó el mes completo pero el trabajador salió a mitad de mes.
+    //   · Los intereses se provisionan al 1% mensual de la base — una
+    //     aproximación estándar que sobreprovisiona el primer año, porque el
+    //     saldo real de cesantías todavía era pequeño.
+    //
+    // Ese sobrante YA NO ES UNA DEUDA: el contrato terminó y no hay a quién
+    // pagárselo. Si se deja vivo, el balance queda con un pasivo fantasma —
+    // exactamente el problema que este módulo vino a resolver, pero al revés.
+    //
+    // Liberarlo es una RECUPERACIÓN: reduce el gasto de personal del período
+    // en que se liquida, porque en su momento se registró de más.
+    // ═══════════════════════════════════════════════════════════════════════
+    const pasivoEmpleado = PL.consolidarPasivo(provisiones, { empleadoId: empleado.id });
+    const provisionLiberada = Math.max(0, pasivoEmpleado.total - plan.totalAplicado);
+
+    // Puede quedar negativo si la indemnización o el salario pendiente no
+    // alcanzan a compensar la liberación. Es correcto: es una recuperación neta.
+    const gastoNuevoTotal = num(liq.contabilidad?.gastoNuevo) + defectoProvision - provisionLiberada;
 
     const numero = await siguienteNumeroEgreso(adminId);
 
@@ -542,25 +651,38 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
     const egresoRef = await db.collection('egresos').add(egreso);
 
     const batch = db.batch();
+    // Se crea la referencia antes del descargue: las provisiones liberadas
+    // apuntan a la liquidación que las cerró.
+    const liqRef = db.collection('liquidaciones_contrato').doc();
+    const liqRefId = liqRef.id;
 
     // ─── 2. Descargue del pasivo ──────────────────────────────────────────────
     const porProvision = {};
     for (const a of plan.aplicaciones) {
       (porProvision[a.provisionId] = porProvision[a.provisionId] || []).push(a);
     }
-    for (const [provisionId, aplicaciones] of Object.entries(porProvision)) {
-      const prov = provisiones.find(p => p.id === provisionId);
+    // ✅ FIX NOMINA-LIBERACION-001: TODAS las provisiones del empleado se
+    // cierran, no solo las que el pago alcanzó a tocar. Lo aplicado se registra;
+    // lo que sobra se marca como liberado. Después de liquidar, este empleado
+    // no puede seguir apareciendo en el pasivo.
+    const provisionesEmpleado = provisiones.filter(
+      p => p.empleadoId === empleado.id && p.revertida !== true
+    );
+    for (const prov of provisionesEmpleado) {
+      const aplicaciones = porProvision[prov.id] || [];
       const aplicadoNuevo = PL.mezclarAplicado(prov, aplicaciones);
-      batch.update(db.collection('provisiones_prestaciones').doc(provisionId), {
+      batch.update(db.collection('provisiones_prestaciones').doc(prov.id), {
         aplicado: aplicadoNuevo,
-        pagada: PL.estaSaldada(prov, aplicadoNuevo),
+        pagada: true,
+        // El saldo que no se pagó deja de ser deuda: el contrato terminó.
+        liberada: true,
+        liberadaEnLiquidacion: liqRefId,
         liquidadaEn: egresoRef.id,
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
     }
 
     // ─── 3. La liquidación: su `gastoNuevo` es lo que el ERI debe causar ──────
-    const liqRef = db.collection('liquidaciones_contrato').doc();
     batch.set(liqRef, {
       userId: adminId,
       egresoId: egresoRef.id,
@@ -580,6 +702,9 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
       totalPrestaciones: liq.totalPrestaciones,
       descargadoDelPasivo: plan.totalAplicado,
       defectoProvision,
+      // ✅ NOMINA-LIBERACION-001: sobreprovisión que deja de ser deuda al
+      // terminar el contrato. Reduce el gasto del período (recuperación).
+      provisionLiberada,
       indemnizacion: liq.indemnizacion || null,
       valorIndemnizacion: num(liq.indemnizacion?.valor),
       salarioPendiente: liq.salarioPendiente,
@@ -622,6 +747,20 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
+    // ─── 4b. Marcar los anticipos como cruzados ───────────────────────────────
+    // ✅ NOMINA-ANTICIPOS-LIQUIDACION-001: si se descontaron en la liquidación,
+    // dejan de estar pendientes. Sin esto reaparecerían como deuda viva de
+    // alguien que ya no trabaja acá.
+    for (const a of (liq.anticipos || [])) {
+      batch.update(db.collection('egresos').doc(a.egresoId), {
+        cruzadoEnNomina: true,
+        cruzadoEnLiquidacion: liqRefId,
+        cruzadoEnEgresoNumero: numero,
+        cruzadoEn: new Date().toISOString(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    }
+
     // ─── 5. Retirar al empleado ───────────────────────────────────────────────
     batch.update(db.collection('empleados').doc(empleado.id), {
       activo: false,
@@ -659,6 +798,7 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
       liquidacion: liq,
       descargadoDelPasivo: plan.totalAplicado,
       defectoProvision,
+      provisionLiberada,
       gastoNuevoTotal,
       mensaje: `Liquidación ${numero} generada por ${fmt(liq.netoAPagar)}. ` +
                `Quedó como Cuenta por Pagar a nombre de ${empleado.nombre}: pagala desde el módulo CxP. ` +

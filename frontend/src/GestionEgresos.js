@@ -1948,7 +1948,7 @@ function ModalReclasificar({ egresos, categoriasList, onConfirmar, onClose }) {
 // exigia `pin` en el body — y el frontend nunca lo enviaba. El flujo estaba
 // roto y ademas usaba una credencial distinta a la del resto del sistema.
 // Ahora usa el MISMO PIN de 4 digitos que anular, cuadrar y validar pago.
-function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categoriasMeta = [], vehiculos = [] }) {
+function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categoriasMeta = [], vehiculos = [], empleados = [] }) {
   const [paso, setPaso]     = useState('auth');
   const [pin, setPin]       = useState('');
   const [motivo, setMotivo] = useState('');
@@ -1964,6 +1964,19 @@ function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categ
   const totalRecalculado = Math.round(
     (Number(form.monto) || 0) + (Number(form.ivaVal) || 0) - (Number(form.retenVal) || 0)
   );
+
+  // ✅ FIX NOMINA-ANTICIPO-EDICION-001: misma detección que en el alta —
+  // si el tercero coincide con un empleado registrado, se puede marcar el
+  // egreso como anticipo también desde la edición.
+  const empleadoDetectado = useMemo(() => {
+    if (form.esComprobanteNomina) return null;
+    const texto = `${normTxt(form.proveedor)} ${normTxt(form.concepto)}`;
+    if (texto.trim().length < 5) return null;
+    return (empleados || []).find(emp => {
+      const n = normTxt(emp.nombre);
+      return n.length >= 5 && texto.includes(n);
+    }) || null;
+  }, [form.proveedor, form.concepto, form.esComprobanteNomina, empleados]);
 
   // ✅ EGRESO-INTELIGENTE-001: validación en vivo sobre el egreso corregido
   const alertasEdicion = useMemo(() => {
@@ -2095,6 +2108,100 @@ function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categ
                   <input style={S.input} value={form.proveedor || ''} onChange={e => set('proveedor', e.target.value)} />
                 </div>
               </div>
+
+              {/* ═══════════════════════════════════════════════════════════════
+                  ✅ FIX NOMINA-ANTICIPO-EDICION-001 — marcar como anticipo
+                  ───────────────────────────────────────────────────────────
+                  Este bloque existía solo al CREAR el egreso. Si el digitador
+                  no marcaba la casilla en ese momento, el egreso quedaba como
+                  gasto suelto para siempre: al editarlo no había forma de
+                  corregirlo, aunque el backend sí aceptaba el campo.
+                  Se vio en un caso real: dos anticipos al mismo técnico, uno
+                  marcado y otro no. El de $100.000 nunca se cruzó y estuvo a
+                  punto de perderse al liquidarle el contrato.
+                  ═══════════════════════════════════════════════════════════ */}
+              {empleadoDetectado && (
+                <div style={{
+                  background: form.esAnticipoNomina ? '#f0fdf4' : '#fffbeb',
+                  border: `2px solid ${form.esAnticipoNomina ? '#86efac' : '#fcd34d'}`,
+                  borderRadius: 12, padding: 14, marginBottom: 14
+                }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: form.esAnticipoNomina ? '#15803d' : '#92400e', marginBottom: 6 }}>
+                    👤 {empleadoDetectado.nombre} es un empleado registrado
+                  </div>
+                  <div style={{ fontSize: 11.5, color: form.esAnticipoNomina ? '#166534' : '#a16207', lineHeight: 1.6, marginBottom: 12 }}>
+                    ¿Este pago es un <strong>anticipo de nómina</strong>?
+                    <br />
+                    Si lo es, <strong>no es gasto</strong>: es plata que se le prestó y se descuenta
+                    sola de la quincena o de la liquidación. Sin marcarlo, no se cruza con nada
+                    y hay que acordarse de descontarlo a mano.
+                  </div>
+
+                  {egreso?.cruzadoEnNomina === true ? (
+                    <div style={{ background: '#fff', borderRadius: 9, padding: '10px 13px', fontSize: 11.5, color: '#166534', lineHeight: 1.55 }}>
+                      🔒 Este anticipo <strong>ya fue cruzado</strong> en un comprobante o liquidación.
+                      No se puede desmarcar desde acá.
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: 'flex', gap: 9, flexWrap: 'wrap' }}>
+                        <button type="button"
+                          onClick={() => {
+                            set('esAnticipoNomina', true);
+                            set('empleadoId', empleadoDetectado.id);
+                            set('empleadoNombre', empleadoDetectado.nombre);
+                            set('empleadoDocumento', empleadoDetectado.documento);
+                          }}
+                          style={{
+                            padding: '9px 17px', borderRadius: 9, cursor: 'pointer', fontSize: 12.5, fontWeight: 700,
+                            border: form.esAnticipoNomina ? '2px solid #16a34a' : '2px solid transparent',
+                            background: form.esAnticipoNomina ? '#16a34a' : '#fff',
+                            color: form.esAnticipoNomina ? '#fff' : '#374151'
+                          }}>
+                          ✓ Sí, es un anticipo de nómina
+                        </button>
+                        <button type="button"
+                          onClick={() => {
+                            set('esAnticipoNomina', false);
+                            set('empleadoId', ''); set('empleadoNombre', ''); set('empleadoDocumento', '');
+                          }}
+                          style={{
+                            padding: '9px 17px', borderRadius: 9, cursor: 'pointer', fontSize: 12.5, fontWeight: 700,
+                            border: form.esAnticipoNomina === false ? '2px solid #64748b' : '2px solid transparent',
+                            background: form.esAnticipoNomina === false ? '#475569' : '#fff',
+                            color: form.esAnticipoNomina === false ? '#fff' : '#374151'
+                          }}>
+                          No, es otro tipo de pago
+                        </button>
+                      </div>
+
+                      {form.esAnticipoNomina && (
+                        <div style={{ background: '#fff', borderRadius: 9, padding: '10px 13px', marginTop: 11, fontSize: 11.5, color: '#166534', lineHeight: 1.55 }}>
+                          ✅ Queda enlazado a <strong>{form.empleadoNombre || empleadoDetectado.nombre}</strong>.
+                          Se descontará solo en el próximo comprobante de nómina o en la liquidación.
+                        </div>
+                      )}
+
+                      {form.esAnticipoNomina && (empleados || []).length > 1 && (
+                        <div style={{ ...S.field, marginTop: 11, marginBottom: 0 }}>
+                          <label style={{ ...S.label, fontSize: 11 }}>¿Otro empleado?</label>
+                          <select style={S.select} value={form.empleadoId || ''}
+                            onChange={e => {
+                              const emp = (empleados || []).find(x => x.id === e.target.value);
+                              set('empleadoId', e.target.value);
+                              set('empleadoNombre', emp ? emp.nombre : '');
+                              set('empleadoDocumento', emp ? emp.documento : '');
+                            }}>
+                            {(empleados || []).map(e => (
+                              <option key={e.id} value={e.id}>{e.nombre} · {e.documento}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* Valores — con recálculo del total en vivo */}
               <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: 12, marginBottom: 14 }}>
@@ -2450,6 +2557,13 @@ export default function GestionEgresos({ user, onNavegar }) {
       notas:     form.notas,
       vehiculoId:    form.vehiculoId || '',
       vehiculoPlaca: form.vehiculoPlaca || '',
+      // ✅ FIX NOMINA-ANTICIPO-EDICION-001: el backend siempre aceptó estos
+      // campos, pero la lista cerrada del payload no los incluía. Un anticipo
+      // mal registrado no se podía corregir nunca.
+      esAnticipoNomina:  form.esAnticipoNomina === true,
+      empleadoId:        form.empleadoId || '',
+      empleadoNombre:    form.empleadoNombre || '',
+      empleadoDocumento: form.empleadoDocumento || '',
       motivoEdicion: motivo,
       editadoPor: user?.email,
       pin
@@ -3313,6 +3427,7 @@ export default function GestionEgresos({ user, onNavegar }) {
           categoriasList={categorias}
           categoriasMeta={categoriasMeta}
           vehiculos={vehiculos}
+          empleados={empleados}
           onSave={editarPagado}
           onClose={() => { setModal(null); setSelected(null); }} />
       )}

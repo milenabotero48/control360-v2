@@ -976,9 +976,23 @@ function liquidarContrato(empleado, datos = {}) {
   }
 
   // ─── Auxilio de transporte del período ────────────────────────────────────
-  const tieneAuxilio = tipo.aplicaAuxilioTransporte && salario <= P.smmlv * 2;
-  const auxilioMensual = tieneAuxilio ? P.auxilioTransporte : 0;
+  // ✅ FIX NOMINA-AUXILIO-001: respetar el valor forzado por el suscriptor,
+  // igual que hacen calcularProvisionMensual y liquidarNomina. Antes esta
+  // función usaba siempre el valor legal, así que una liquidación no coincidía
+  // con las provisiones del mismo empleado — y peor: a quien tiene el auxilio
+  // en cero (vive en el sitio de trabajo) se lo liquidaba igual.
+  let auxilioMensual = 0;
+  let tieneDerechoAuxilio = false;
+  if (tipo.aplicaAuxilioTransporte) {
+    tieneDerechoAuxilio = salario <= P.smmlv * 2;
+    const forzado = empleado?.auxilioTransporteManual;
+    auxilioMensual = (forzado !== undefined && forzado !== null && forzado !== '')
+      ? Number(forzado)
+      : (tieneDerechoAuxilio ? P.auxilioTransporte : 0);
+  }
   const baseConAuxilio = salario + auxilioMensual;
+  r.auxilioMensualUsado = auxilioMensual;
+  r.auxilioForzado = auxilioMensual !== (tieneDerechoAuxilio ? P.auxilioTransporte : 0);
 
   // ─── Períodos de causación ────────────────────────────────────────────────
   // Cesantías e intereses: desde el 1-ene del año de retiro (o el ingreso si
@@ -992,6 +1006,25 @@ function liquidarContrato(empleado, datos = {}) {
   const inicioSemestre = mesRetiro <= 6 ? `${anio}-01-01` : `${anio}-07-01`;
   const desdePrima = fechaInicio > inicioSemestre ? fechaInicio : inicioSemestre;
   const diasPrima = dias360(desdePrima, fechaRetiro);
+
+  // ✅ FIX NOMINA-PRIMA-SEMESTRE-001
+  // La prima del semestre ANTERIOR, si quedó sin pagar.
+  //
+  // EL CASO QUE LO DESTAPÓ: un técnico entró el 18 de junio y salió el 18 de
+  // agosto. La liquidación solo calculaba el semestre en curso (julio–diciembre)
+  // y se saltaba los 13 días de junio, que pertenecen al semestre enero–junio y
+  // se pagaban el 30 de junio. Si la empresa no los pagó, se los sigue debiendo
+  // y la liquidación no los mostraba por ningún lado.
+  //
+  // No se incluye automáticamente porque el sistema no sabe si ya se pagó: se
+  // calcula, se avisa, y el usuario decide.
+  const anioPrev = mesRetiro <= 6 ? anio - 1 : anio;
+  const semAntDesde = mesRetiro <= 6 ? `${anioPrev}-07-01` : `${anio}-01-01`;
+  const semAntHasta = mesRetiro <= 6 ? `${anioPrev}-12-30` : `${anio}-06-30`;
+  const desdeSemAnt = fechaInicio > semAntDesde ? fechaInicio : semAntDesde;
+  const diasSemAnt = fechaInicio > semAntHasta ? 0 : dias360(desdeSemAnt, semAntHasta);
+  const primaSemestreAnterior = tipo.generaPrestaciones && diasSemAnt > 0
+    ? Math.round(baseConAuxilio * diasSemAnt / 360) : 0;
 
   // Vacaciones: desde las últimas disfrutadas (o el ingreso).
   const desdeVacaciones = String(datos.fechaUltimasVacaciones || '').slice(0, 10) || fechaInicio;
@@ -1033,6 +1066,31 @@ function liquidarContrato(empleado, datos = {}) {
       }
     };
     r.totalPrestaciones = cesantias + intereses + prima + vacaciones;
+
+    // ✅ FIX NOMINA-PRIMA-SEMESTRE-001 — prima del semestre anterior
+    if (primaSemestreAnterior > 0) {
+      r.primaSemestreAnterior = {
+        etiqueta: `Prima del semestre anterior (${desdeSemAnt} a ${semAntHasta})`,
+        valor: primaSemestreAnterior, dias: diasSemAnt, cuentaPUC: '2610',
+        base: baseConAuxilio,
+        vencio: mesRetiro <= 6 ? `${anioPrev}-12-20` : `${anio}-06-30`,
+        incluida: datos.incluirPrimaSemestreAnterior === true,
+        explica: 'Corresponde a un semestre ya cerrado. Se paga aparte en su fecha; si no se pagó, se debe.'
+      };
+      if (datos.incluirPrimaSemestreAnterior === true) {
+        r.prestaciones.primaSemestreAnterior = r.primaSemestreAnterior;
+        r.totalPrestaciones += primaSemestreAnterior;
+      } else {
+        r.avisos.push({
+          nivel: 'grave',
+          texto: `Este trabajador alcanzó a causar ${diasSemAnt} día(s) de prima del semestre anterior ` +
+                 `(${Math.round(primaSemestreAnterior).toLocaleString('es-CO')}), que vencía el ` +
+                 `${mesRetiro <= 6 ? `20 de diciembre de ${anioPrev}` : '30 de junio'}. ` +
+                 `Verificá si ya se la pagaste. Si no, márcala para incluirla: se la seguís debiendo ` +
+                 `y no aparece en el resto de la liquidación.`
+        });
+      }
+    }
   } else {
     r.avisos.push({
       nivel: 'media',
@@ -1114,7 +1172,29 @@ function liquidarContrato(empleado, datos = {}) {
     }
   }
 
-  // Anticipos y otras deducciones libres (préstamos, embargos, dotación)
+  // ✅ FIX NOMINA-ANTICIPOS-LIQUIDACION-001
+  // Los anticipos que el trabajador pidió y no alcanzó a pagar se descuentan
+  // de la liquidación. `liquidarNomina` los cruzaba desde el principio; la
+  // liquidación de contrato no los miraba, así que al terminar un contrato la
+  // plata prestada se perdía: quedaba como gasto y nunca se recuperaba.
+  const anticipos = datos.anticipos || [];
+  const totalAnticipos = anticipos.reduce((a, x) => a + (Number(x.valor) || 0), 0);
+  if (totalAnticipos > 0) {
+    r.deducciones.push({
+      clave: 'anticipos',
+      etiqueta: `Anticipos pendientes de cruce (${anticipos.length})`,
+      valor: totalAnticipos,
+      esCruceAnticipo: true,
+      detalle: anticipos.map(a => ({
+        egresoId: a.egresoId || a.id, numero: a.numero,
+        fecha: a.fecha, valor: Number(a.valor) || 0, concepto: a.concepto
+      }))
+    });
+  }
+  r.totalAnticipos = totalAnticipos;
+  r.anticipos = anticipos;
+
+  // Otras deducciones libres (préstamos externos, embargos, dotación)
   for (const o of (datos.otrasDeducciones || [])) {
     const v = Number(o.valor) || 0;
     if (v === 0) continue;
@@ -1254,19 +1334,48 @@ const vigenteEnMes = (empleado, anio, mes) => {
   return true;
 };
 
-/** Días trabajados en un mes, respetando ingreso y retiro a mitad de mes. */
-const diasTrabajadosEnMes = (empleado, anio, mes) => {
+/**
+ * Días trabajados en un mes, respetando ingreso y retiro a mitad de mes.
+ *
+ * ✅ FIX NOMINA-CAUSACION-ANTICIPADA-001
+ * `hastaISO` corta los días que todavía no han transcurrido. Sin ese tope, causar
+ * el mes en curso provisionaba los 30 días aunque estuviéramos a día 5: se
+ * reconocía como pasivo un trabajo que el empleado todavía no había hecho.
+ *
+ * Se vio en un caso real: un técnico con agosto ya causado por 30 días salió el
+ * 18. La provisión quedó con 12 días de más que no se le debían a nadie.
+ *
+ * La provisión se causa por lo DEVENGADO, y sólo se devenga lo trabajado.
+ */
+const diasTrabajadosEnMes = (empleado, anio, mes, hastaISO = null) => {
   if (!vigenteEnMes(empleado, anio, mes)) return 0;
   const ini = String(empleado?.fechaInicio || '').slice(0, 10);
   const fin = String(empleado?.fechaFin || '').slice(0, 10);
-  const primerDia = `${anio}-${String(mes).padStart(2, '0')}-01`;
+  const mm = String(mes).padStart(2, '0');
+  const primerDia = `${anio}-${mm}-01`;
   // Mes comercial de 30 días (norma laboral colombiana)
-  const ultimoDia = `${anio}-${String(mes).padStart(2, '0')}-30`;
+  const ultimoDia = `${anio}-${mm}-30`;
 
   let desde = 1, hasta = 30;
   if (ini && ini > primerDia && ini <= ultimoDia) desde = Math.min(30, Number(ini.slice(8, 10)));
   if (fin && fin >= primerDia && fin < ultimoDia)  hasta = Math.min(30, Number(fin.slice(8, 10)));
+
+  // Tope por fecha de corte: no se provisionan días futuros.
+  const corte = String(hastaISO || '').slice(0, 10);
+  if (corte && corte >= primerDia && corte < ultimoDia) {
+    hasta = Math.min(hasta, Math.max(0, Number(corte.slice(8, 10))));
+  }
+
   return Math.max(0, hasta - desde + 1);
+};
+
+/**
+ * ¿Se puede causar ese mes ya? Un mes se causa cuando terminó, no antes.
+ * En nómina colombiana el mes comercial cierra el día 30.
+ */
+const mesCerrado = (anio, mes, hoyISO) => {
+  const fin = `${anio}-${String(mes).padStart(2, '0')}-30`;
+  return String(hoyISO || '').slice(0, 10) >= fin;
 };
 
 module.exports = {
@@ -1289,6 +1398,7 @@ module.exports = {
   mesesEntre,
   vigenteEnMes,
   diasTrabajadosEnMes,
+  mesCerrado,
   // ── NOMINA-LIQUIDACION-001 ──
   MOTIVOS_TERMINACION,
   dias360,

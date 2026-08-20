@@ -29,10 +29,16 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
     salarioBaseIndemnizacion: '',
     diasSalarioPendiente: '',
     fechaFinObra: '',
+    incluirPrimaSemestreAnterior: false,
     empresaId: empresas[0]?.id || '',
     notas: '',
     pin: '',
   });
+  // ✅ NOMINA-DEDUCCIONES-001 · el motor siempre aceptó estas listas, pero el
+  // modal no tenía dónde escribirlas. Sin ellas no se podía descontar un
+  // préstamo de nómina ni sumar una bonificación de retiro.
+  const [otrasDeducciones, setOtrasDeducciones] = useState([]);
+  const [otrosDevengados, setOtrosDevengados] = useState([]);
   const [data, setData] = useState(null);
   const [cargando, setCargando] = useState(false);
   const [guardando, setGuardando] = useState(false);
@@ -56,13 +62,17 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
         salarioBaseIndemnizacion: form.salarioBaseIndemnizacion || undefined,
         diasSalarioPendiente: form.diasSalarioPendiente || undefined,
         fechaFinObra: form.fechaFinObra || undefined,
+        incluirPrimaSemestreAnterior: form.incluirPrimaSemestreAnterior,
+        otrasDeducciones: otrasDeducciones.filter(d => d.concepto && Number(d.valor) > 0),
+        otrosDevengados: otrosDevengados.filter(d => d.concepto && Number(d.valor) > 0),
       });
       setData(r.data);
     } catch (e) { setError(errorDe(e, 'No se pudo calcular la liquidación')); setData(null); }
     setCargando(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [empleado.id, form.fechaRetiro, form.motivo, form.diasVacacionesPendientes,
-      form.fechaUltimasVacaciones, form.salarioBaseIndemnizacion, form.diasSalarioPendiente, form.fechaFinObra]);
+      form.fechaUltimasVacaciones, form.salarioBaseIndemnizacion, form.diasSalarioPendiente,
+      form.fechaFinObra, form.incluirPrimaSemestreAnterior, otrasDeducciones, otrosDevengados]);
 
   useEffect(() => {
     const t = setTimeout(cargarPreview, 400);
@@ -81,6 +91,9 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
         salarioBaseIndemnizacion: form.salarioBaseIndemnizacion || undefined,
         diasSalarioPendiente: form.diasSalarioPendiente || undefined,
         fechaFinObra: form.fechaFinObra || undefined,
+        incluirPrimaSemestreAnterior: form.incluirPrimaSemestreAnterior,
+        otrasDeducciones: otrasDeducciones.filter(d => d.concepto && Number(d.valor) > 0),
+        otrosDevengados: otrosDevengados.filter(d => d.concepto && Number(d.valor) > 0),
       });
       onListo(r.data);
     } catch (e) { setError(errorDe(e, 'No se pudo liquidar el contrato')); }
@@ -205,6 +218,99 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
             </div>
           </details>
 
+          {/* ✅ NOMINA-ANTICIPOS-LIQUIDACION-001 — plata ya entregada */}
+          {data?.anticipos && (data.anticipos.pendientes.length > 0 || data.anticipos.sospechosos.length > 0) && (
+            <div style={{ ...S.card, marginBottom: 14, borderLeft: '4px solid #d97706' }}>
+              <h4 style={{ ...S.cardTitle, marginBottom: 3 }}>Plata que ya se le entregó</h4>
+              <p style={{ ...S.cardSub, marginBottom: 11 }}>
+                Última oportunidad de recuperarla: el contrato termina hoy.
+              </p>
+
+              {data.anticipos.pendientes.length > 0 && (
+                <div style={{ marginBottom: 11 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: '#15803d', marginBottom: 6 }}>
+                    ✓ Se descuentan automáticamente · {fmt(data.anticipos.totalPendientes)}
+                  </div>
+                  {data.anticipos.pendientes.map(a => (
+                    <div key={a.egresoId} style={{
+                      display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12,
+                      padding: '6px 11px', background: '#f0fdf4', borderRadius: 7, marginBottom: 4, color: '#166534',
+                    }}>
+                      <span>{a.numero} · {a.fecha} · {a.concepto}</span>
+                      <strong style={{ whiteSpace: 'nowrap' }}>{fmt(a.valor)}</strong>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {data.anticipos.sospechosos.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: '#991b1b', marginBottom: 6 }}>
+                    ⚠️ NO se descuentan · {fmt(data.anticipos.totalSospechosos)}
+                  </div>
+                  {data.anticipos.sospechosos.map(a => (
+                    <div key={a.egresoId} style={{
+                      display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 12,
+                      padding: '6px 11px', background: '#fef2f2', borderRadius: 7, marginBottom: 4, color: '#991b1b',
+                    }}>
+                      <span>{a.numero} · {a.fecha} · {a.concepto} <em>({a.categoria})</em></span>
+                      <strong style={{ whiteSpace: 'nowrap' }}>{fmt(a.valor)}</strong>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 11.5, color: '#991b1b', marginTop: 7, lineHeight: 1.6 }}>
+                    Están a nombre de {empleado.nombre} pero <strong>nadie los marcó como anticipo</strong>,
+                    así que el sistema no los puede cruzar. Andá a Egresos, editalos, marcá "Sí, es un
+                    anticipo" y enlazalos al empleado — o descontalos a mano abajo.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ✅ NOMINA-DEDUCCIONES-001 — préstamos, embargos, bonificaciones */}
+          {(() => {
+            const Lista = ({ titulo, ayuda, items, setItems, color }) => (
+              <div style={{ ...S.card, background: '#f8fafc', marginBottom: 14, padding: '14px 16px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <div>
+                    <h4 style={{ ...S.cardTitle, fontSize: 13 }}>{titulo}</h4>
+                    <p style={{ ...S.cardSub, fontSize: 11.5 }}>{ayuda}</p>
+                  </div>
+                  <button type="button" style={S.btnMini}
+                    onClick={() => setItems(x => [...x, { concepto: '', valor: '' }])}>
+                    + Agregar
+                  </button>
+                </div>
+                {items.map((it, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginTop: 10 }}>
+                    <div style={{ ...S.field, marginBottom: 0, flex: 2 }}>
+                      <input style={S.input} placeholder="Concepto" value={it.concepto}
+                        onChange={e => setItems(x => x.map((y, j) => j === i ? { ...y, concepto: e.target.value } : y))} />
+                    </div>
+                    <div style={{ ...S.field, marginBottom: 0, flex: 1 }}>
+                      <input type="number" min="0" style={S.input} placeholder="0" value={it.valor}
+                        onChange={e => setItems(x => x.map((y, j) => j === i ? { ...y, valor: e.target.value } : y))} />
+                    </div>
+                    <button type="button" style={{ ...S.btnMini, color, padding: '9px 11px' }}
+                      onClick={() => setItems(x => x.filter((_, j) => j !== i))}>×</button>
+                  </div>
+                ))}
+              </div>
+            );
+            return (
+              <>
+                <Lista
+                  titulo="Otras deducciones" color="#dc2626"
+                  ayuda="Préstamos de nómina, embargos, libranzas, dotación no devuelta."
+                  items={otrasDeducciones} setItems={setOtrasDeducciones} />
+                <Lista
+                  titulo="Otros devengados" color="#16a34a"
+                  ayuda="Bonificaciones, comisiones pendientes, acuerdos de retiro."
+                  items={otrosDevengados} setItems={setOtrosDevengados} />
+              </>
+            );
+          })()}
+
           {cargando && <div style={{ fontSize: 12.5, color: '#94a3b8', padding: '10px 0' }}>Calculando liquidación…</div>}
 
           {/* ── Resultado ────────────────────────────────────────────────── */}
@@ -220,6 +326,42 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
                     sub={`${p.dias != null ? `${fmtNum(p.dias)} días · ` : ''}${p.explica || ''}`} />
                 ))}
                 <Fila label="Total prestaciones" valor={L.totalPrestaciones} destacado />
+
+                {/* ✅ NOMINA-PRIMA-SEMESTRE-001 — la prima del semestre cerrado.
+                    El sistema no sabe si ya se pagó (venció el 30 de junio o el
+                    20 de diciembre), así que la calcula y deja que el usuario
+                    decida. Sin esta casilla quedaba invisible: no aparecía en
+                    ninguna parte de la liquidación aunque se la siguieran
+                    debiendo al trabajador. */}
+                {L.primaSemestreAnterior && (
+                  <div style={{
+                    marginTop: 12, padding: '12px 15px', borderRadius: 10,
+                    background: form.incluirPrimaSemestreAnterior ? '#f5f3ff' : '#fffbeb',
+                    border: `1px solid ${form.incluirPrimaSemestreAnterior ? '#c4b5fd' : '#fde68a'}`,
+                    display: 'flex', gap: 11, alignItems: 'flex-start',
+                  }}>
+                    <input type="checkbox" id="primaSemAnt"
+                      checked={form.incluirPrimaSemestreAnterior}
+                      onChange={e => set('incluirPrimaSemestreAnterior', e.target.checked)}
+                      style={{ width: 18, height: 18, cursor: 'pointer', marginTop: 2, flexShrink: 0 }} />
+                    <label htmlFor="primaSemAnt" style={{ cursor: 'pointer', flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        display: 'flex', justifyContent: 'space-between', gap: 10,
+                        fontSize: 12.5, fontWeight: 800,
+                        color: form.incluirPrimaSemestreAnterior ? '#6d28d9' : '#92400e',
+                      }}>
+                        <span>Prima del semestre anterior · {fmtNum(L.primaSemestreAnterior.dias)} días</span>
+                        <span style={{ whiteSpace: 'nowrap' }}>{fmt(L.primaSemestreAnterior.valor)}</span>
+                      </div>
+                      <div style={{
+                        fontSize: 11.5, marginTop: 5, lineHeight: 1.55,
+                        color: form.incluirPrimaSemestreAnterior ? '#5b21b6' : '#92400e',
+                      }}>
+                        Venció el {L.primaSemestreAnterior.vencio}. Marcala solo si <strong>no se la pagaste</strong>.
+                      </div>
+                    </label>
+                  </div>
+                )}
               </div>
 
               {(L.salarioPendiente > 0 || L.auxilioPendiente > 0 || L.indemnizacion) && (

@@ -34,6 +34,7 @@ const N = require('../services/nominaColombia');
 const PL = require('../services/pasivoLaboral');
 
 const resolverAdminId = (req) => req.adminId || req.user?.uid || req.user?.id || null;
+const hoyCO = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
 
 const norm = (s) => String(s || '')
@@ -402,7 +403,7 @@ router.get('/provisiones', async (req, res) => {
 
     for (const emp of empleados) {
       if (!N.vigenteEnMes(emp, anio, mes)) continue;
-      const dias = N.diasTrabajadosEnMes(emp, anio, mes);
+      const dias = N.diasTrabajadosEnMes(emp, anio, mes, hoyCO());
       if (dias <= 0) continue;
 
       const extras = N.devengadoAdicionalDeComprobantes(
@@ -490,6 +491,21 @@ router.post('/provisiones/causar', async (req, res) => {
       return res.status(400).json({ error: 'Año y mes válidos son obligatorios' });
     }
 
+    // ✅ FIX NOMINA-CAUSACION-ANTICIPADA-001
+    // Un mes se causa cuando terminó, no antes. Causarlo en curso reconocía como
+    // pasivo días que el empleado todavía no había trabajado — y como la
+    // causación es idempotente por mes, esos días quedaban mal para siempre.
+    // Se puede forzar (`permitirMesEnCurso`), y en ese caso solo se provisionan
+    // los días transcurridos.
+    if (!N.mesCerrado(anio, mes, hoyCO()) && req.body.permitirMesEnCurso !== true) {
+      return res.status(409).json({
+        codigo: 'MES_EN_CURSO',
+        error: `El mes ${anio}-${String(mes).padStart(2, '0')} todavía no ha terminado. ` +
+               `La provisión se causa por lo trabajado, así que causarlo ahora reconocería ` +
+               `días que el empleado aún no ha laborado. Causalo el día 30 o a comienzos del mes siguiente.`
+      });
+    }
+
     const [empSnap, cfgDoc, yaSnap, egSnap] = await Promise.all([
       db.collection('empleados').where('userId', '==', adminId).get(),
       db.collection('configuracion').doc(adminId).get(),
@@ -524,7 +540,7 @@ router.post('/provisiones/causar', async (req, res) => {
 
     for (const emp of empleados) {
       if (!N.vigenteEnMes(emp, anio, mes)) { continue; }
-      const dias = N.diasTrabajadosEnMes(emp, anio, mes);
+      const dias = N.diasTrabajadosEnMes(emp, anio, mes, hoyCO());
       if (dias <= 0) continue;
 
       if (yaCausados.has(emp.id)) {
