@@ -982,6 +982,90 @@ router.post('/nomina/comprobante', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// GET /api/empleados/nomina/comprobantes?anio&mes&empleadoId
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ NOMINA-COLILLA-REIMPRESION-001
+//
+// Comprobantes de nómina ya emitidos, con el desglose listo para volver a
+// imprimir la colilla.
+//
+// El comprobante guardaba todo el detalle desde el principio, pero no había
+// pantalla que lo mostrara: para reimprimir una colilla había que volver a
+// digitarla en Excel. Ahí fue donde alguien cambió el valor de la prima por el
+// de las vacaciones.
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/nomina/comprobantes', async (req, res) => {
+  try {
+    const adminId = resolverAdminId(req);
+    const anio = req.query.anio ? Number(req.query.anio) : null;
+    const mes = req.query.mes ? Number(req.query.mes) : null;
+
+    const [egSnap, empSnap] = await Promise.all([
+      db.collection('egresos').where('userId', '==', adminId).get(),
+      db.collection('empleados').where('userId', '==', adminId).get()
+    ]);
+    const empleados = {};
+    empSnap.forEach(d => { empleados[d.id] = { id: d.id, ...d.data() }; });
+
+    const lista = [];
+    egSnap.forEach(d => {
+      const e = d.data();
+      if (e.esComprobanteNomina !== true || e.anulado === true) return;
+      if (req.query.empleadoId && e.empleadoId !== req.query.empleadoId) return;
+      const pn = e.periodoNomina || {};
+      if (anio && Number(pn.anio) !== anio) return;
+      if (mes && Number(pn.mes) !== mes) return;
+
+      const L = e.liquidacion || {};
+      const emp = empleados[e.empleadoId] || {};
+
+      lista.push({
+        id: d.id,
+        numero: e.numero || '',
+        fecha: e.fecha || '',
+        empleadoId: e.empleadoId || null,
+        empleadoNombre: e.empleadoNombre || '',
+        periodo: pn,
+        netoAPagar: Number(L.netoAPagar) || Number(e.monto) || 0,
+        totalDevengado: Number(L.totalDevengado) || 0,
+        // Bloque con el shape que espera la colilla — así el frontend no tiene
+        // que saber cómo quedó guardado el documento.
+        colilla: {
+          nombre: e.empleadoNombre || '',
+          documento: e.empleadoDocumento || '',
+          cargo: emp.cargo || '',
+          tipoContrato: e.tipoContrato || '',
+          tipoContratoEtiqueta: N.TIPOS_CONTRATO[e.tipoContrato]?.etiqueta || e.tipoContrato || '',
+          periodo: {
+            desde: pn.desde || null, hasta: pn.hasta || null,
+            anio: pn.anio ?? null, mes: pn.mes ?? null,
+            diasTrabajados: pn.diasTrabajados ?? null,
+          },
+          devengados: L.devengados || [],
+          totalDevengado: Number(L.totalDevengado) || 0,
+          deducciones: L.deducciones || [],
+          totalDeducciones: Number(L.totalDeducciones) || 0,
+          totalAnticipos: Number(L.totalAnticipos) || 0,
+          netoAPagar: Number(L.netoAPagar) || 0,
+          horasExtras: L.horasExtras || null,
+          provision: {
+            totalPrestaciones: Number(L.prestacionesProvisionadas) || 0,
+            totalSeguridadSocial: Number(L.seguridadSocialPatronal) || 0,
+          },
+          costoTotalEmpleador: Number(L.costoTotalEmpleador) || 0,
+        }
+      });
+    });
+
+    lista.sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+    res.json({ total: lista.length, comprobantes: lista });
+  } catch (e) {
+    console.error('GET nomina/comprobantes:', e);
+    res.status(500).json({ error: 'Error al cargar los comprobantes de nómina' });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 // GET /api/empleados/buscar?q=
 // ─────────────────────────────────────────────────────────────────────────────
 // Búsqueda por nombre o documento. La usa el módulo de Egresos para detectar

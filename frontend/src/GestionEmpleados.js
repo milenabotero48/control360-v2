@@ -744,6 +744,8 @@ export default function GestionEmpleados({ user }) {
   const [empresas, setEmpresas] = useState([]);
   const [provisiones, setProvisiones] = useState(null);
   const [anticipos, setAnticipos] = useState(null);
+  // ✅ NOMINA-COLILLA-REIMPRESION-001
+  const [comprobantes, setComprobantes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
   const [verInactivos, setVerInactivos] = useState(false);
@@ -790,8 +792,15 @@ export default function GestionEmpleados({ user }) {
         const r = await axios.get(`${API}/empleados/anticipos?desde=${ini}&hasta=${fin}`, { headers: headers() });
         setAnticipos(r.data);
       } catch { setAnticipos(null); }
+      // ✅ NOMINA-COLILLA-REIMPRESION-001: comprobantes ya emitidos del período
+      try {
+        const c = await axios.get(
+          `${API}/empleados/nomina/comprobantes?anio=${periodo.anio}&mes=${periodo.mes}`,
+          { headers: headers() });
+        setComprobantes(c.data?.comprobantes || []);
+      } catch { setComprobantes([]); }
     })();
-  }, [periodo.anio, periodo.mes]);
+  }, [periodo.anio, periodo.mes, modal]);
 
   const crear = async (data) => {
     const r = await axios.post(`${API}/empleados`, data, { headers: headers() });
@@ -1207,6 +1216,73 @@ export default function GestionEmpleados({ user }) {
                 style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#16a34a,#15803d)', padding: '11px 24px', fontSize: 14 }}>
                 🧾 Nuevo comprobante de nómina
               </button>
+            </div>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════
+              ✅ NOMINA-COLILLA-REIMPRESION-001 — comprobantes ya emitidos
+              ───────────────────────────────────────────────────────────────
+              El detalle siempre estuvo guardado en el comprobante, pero no
+              había pantalla que lo mostrara: para reimprimir una colilla
+              tocaba volver a digitarla en Excel. Ahí fue donde se cambiaron
+              los valores de la prima y las vacaciones.
+              ═══════════════════════════════════════════════════════════════ */}
+          {comprobantes.length > 0 && (
+            <div style={{ ...S.tableWrap, marginTop: 18 }}>
+              <div style={{ padding: '18px 20px 12px' }}>
+                <div style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>
+                  Comprobantes emitidos · {MESES[periodo.mes - 1]} {periodo.anio}
+                </div>
+                <div style={{ fontSize: 12.5, color: '#64748b', marginTop: 4 }}>
+                  Volvé a imprimir la colilla cuando la necesites. No hace falta rehacerla.
+                </div>
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    <th style={S.th}>N°</th>
+                    <th style={S.th}>Empleado</th>
+                    <th style={S.th}>Período</th>
+                    <th style={{ ...S.th, textAlign: 'right' }}>Devengado</th>
+                    <th style={{ ...S.th, textAlign: 'right' }}>Neto pagado</th>
+                    <th style={{ ...S.th, textAlign: 'right' }}>Colilla</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {comprobantes.map(c => (
+                    <tr key={c.id} style={{ borderTop: '1px solid #f1f5f9' }}>
+                      <td style={S.td}><span style={{ fontSize: 12.5 }}>{c.numero}</span></td>
+                      <td style={S.td}>
+                        <span style={{ fontSize: 12.5, fontWeight: 700, color: '#0f172a' }}>{c.empleadoNombre}</span>
+                      </td>
+                      <td style={S.td}>
+                        <span style={{ fontSize: 12, color: '#64748b' }}>
+                          {c.periodo?.desde || '—'} a {c.periodo?.hasta || '—'}
+                          {c.periodo?.diasTrabajados != null && ` · ${c.periodo.diasTrabajados} días`}
+                        </span>
+                      </td>
+                      <td style={{ ...S.td, textAlign: 'right', fontSize: 12.5 }}>{fmt(c.totalDevengado)}</td>
+                      <td style={{ ...S.td, textAlign: 'right', fontSize: 13, fontWeight: 800, color: '#15803d' }}>
+                        {fmt(c.netoAPagar)}
+                      </td>
+                      <td style={{ ...S.td, textAlign: 'right' }}>
+                        <button style={S.actionBtn}
+                          onClick={() => imprimirComprobanteNomina({
+                            liquidacion: c.colilla,
+                            empleado: {
+                              nombre: c.colilla.nombre, documento: c.colilla.documento,
+                              cargo: c.colilla.cargo,
+                            },
+                            empresa: empresas[0] || {},
+                            numero: c.numero,
+                          })}>
+                          🖨 Imprimir
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>

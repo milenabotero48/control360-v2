@@ -20,12 +20,16 @@ import ModalPagoPrestaciones from './ModalPagoPrestaciones';
 import ModalLiquidacion from './ModalLiquidacion';
 import ModalRetroactivas from './ModalRetroactivas';
 import ModalPagoPILA from './ModalPagoPILA';
+// ✅ NOMINA-ACTA-REIMPRESION-001: el acta se puede volver a imprimir cuando
+// haga falta — copia para el trabajador, para el contador, o si se perdió.
+import { imprimirActaLiquidacion } from './actaLiquidacion';
 
 const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambio }) => {
   const [saldo, setSaldo] = useState(null);
   const [catalogos, setCatalogos] = useState(null);
   const [alertas, setAlertas] = useState(null);
   const [pila, setPila] = useState(null);
+  const [liquidaciones, setLiquidaciones] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [modal, setModal] = useState(null);
@@ -34,13 +38,15 @@ const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambi
   const cargar = useCallback(async () => {
     setLoading(true); setError('');
     try {
-      const [s, c, a, p] = await Promise.all([
+      const [s, c, a, p, l] = await Promise.all([
         api.get('/prestaciones/saldo'),
         api.get('/prestaciones/catalogos'),
         api.get('/prestaciones/alertas').catch(() => ({ data: null })),
         api.get('/prestaciones/pila').catch(() => ({ data: null })),
+        api.get('/prestaciones/liquidaciones').catch(() => ({ data: null })),
       ]);
       setSaldo(s.data); setCatalogos(c.data); setAlertas(a.data); setPila(p.data);
+      setLiquidaciones(l.data);
     } catch (e) { setError(errorDe(e, 'No se pudo cargar el pasivo laboral')); }
     setLoading(false);
   }, []);
@@ -316,6 +322,60 @@ const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambi
           </table>
         </div>
       </div>
+
+      {/* ── LIQUIDACIONES REALIZADAS ────────────────────────────────────── */}
+      {/* ✅ NOMINA-ACTA-REIMPRESION-001: el acta ya no vive solo en el momento
+          de confirmar. Se puede reimprimir cuando haga falta. */}
+      {liquidaciones?.liquidaciones?.length > 0 && (
+        <div style={{ ...S.card, marginTop: 16, padding: 0, overflow: 'hidden' }}>
+          <div style={{ padding: '18px 20px 12px' }}>
+            <h4 style={S.cardTitle}>Liquidaciones realizadas</h4>
+            <p style={S.cardSub}>
+              Volvé a imprimir el acta cuando la necesites: copia para el trabajador,
+              para el contador, o si se perdió el papel.
+            </p>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 620 }}>
+              <thead>
+                <tr>
+                  <th style={S.th}>N°</th>
+                  <th style={S.th}>Empleado</th>
+                  <th style={S.th}>Retiro</th>
+                  <th style={S.th}>Motivo</th>
+                  <th style={{ ...S.th, textAlign: 'right' }}>Neto</th>
+                  <th style={{ ...S.th, textAlign: 'right' }}>Acta</th>
+                </tr>
+              </thead>
+              <tbody>
+                {liquidaciones.liquidaciones.map(l => (
+                  <tr key={l.id}>
+                    <td style={S.td}>{l.numero}</td>
+                    <td style={{ ...S.td, fontWeight: 700, color: '#0f172a' }}>{l.acta.nombre}</td>
+                    <td style={S.td}>{l.fechaRetiro}</td>
+                    <td style={S.td}>{l.acta.motivoEtiqueta}</td>
+                    <td style={S.tdNum}>{fmt(l.netoAPagar)}</td>
+                    <td style={{ ...S.td, textAlign: 'right' }}>
+                      <button style={S.btnMini}
+                        onClick={() => imprimirActaLiquidacion({
+                          liquidacion: l.acta,
+                          empleado: {
+                            nombre: l.acta.nombre, documento: l.acta.documento,
+                            cargo: l.acta.cargo, tipoDocumento: l.acta.tipoDocumento,
+                          },
+                          empresa: empresas[0] || {},
+                          numero: l.numero,
+                        })}>
+                        Imprimir
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* ── 6 · HISTORIAL DE PAGOS ──────────────────────────────────────── */}
       {saldo?.pagosRecientes?.length > 0 && (

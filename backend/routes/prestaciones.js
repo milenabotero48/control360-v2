@@ -752,6 +752,15 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
       empleadoNombre: empleado.nombre,
       empleadoDocumento: empleado.documento || '',
       tipoContrato: liq.tipoContrato,
+      // ✅ NOMINA-ACTA-REIMPRESION-001: se guarda todo lo que el acta necesita
+      // para poder reimprimirla después. Un documento que solo existe en el
+      // instante en que se genera no sirve: se pierde el papel, el trabajador
+      // pide copia, o el contador la necesita meses después.
+      tipoContratoEtiqueta: liq.tipoContratoEtiqueta,
+      diasSalarioPendiente: liq.diasSalarioPendiente,
+      otrosDevengados: liq.otrosDevengados || [],
+      empleadoCargo: empleado.cargo || '',
+      empleadoTipoDocumento: empleado.tipoDocumento || 'CC',
       motivo: liq.motivo,
       motivoEtiqueta: liq.motivoEtiqueta,
       fechaInicio: liq.fechaInicio,
@@ -868,6 +877,67 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
   } catch (e) {
     console.error('POST prestaciones/liquidacion:', e);
     res.status(500).json({ error: e.message || 'Error al liquidar el contrato' });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GET /api/prestaciones/liquidaciones
+// ─────────────────────────────────────────────────────────────────────────────
+// ✅ NOMINA-ACTA-REIMPRESION-001
+// Historial de liquidaciones, con todo lo necesario para volver a imprimir el
+// acta. Antes el documento solo existía en la pantalla de confirmación: si se
+// cerraba, tocaba rehacerlo en Excel — que es justo lo que este módulo vino a
+// eliminar.
+// ═════════════════════════════════════════════════════════════════════════════
+router.get('/liquidaciones', async (req, res) => {
+  try {
+    const adminId = resolverAdminId(req);
+    const snap = await db.collection('liquidaciones_contrato')
+      .where('userId', '==', adminId).get();
+
+    const lista = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(l => l.anulada !== true)
+      .filter(l => !req.query.empleadoId || l.empleadoId === req.query.empleadoId)
+      .sort((a, b) => String(b.fechaRetiro || '').localeCompare(String(a.fechaRetiro || '')));
+
+    res.json({
+      total: lista.length,
+      liquidaciones: lista.map(l => ({
+        id: l.id,
+        numero: l.numero,
+        egresoId: l.egresoId,
+        empleadoId: l.empleadoId,
+        fechaRetiro: l.fechaRetiro,
+        netoAPagar: num(l.netoAPagar),
+        // Bloque listo para el acta — mismo shape que devuelve liquidarContrato
+        acta: {
+          nombre: l.empleadoNombre || '',
+          documento: l.empleadoDocumento || '',
+          cargo: l.empleadoCargo || '',
+          tipoDocumento: l.empleadoTipoDocumento || 'CC',
+          tipoContrato: l.tipoContrato,
+          tipoContratoEtiqueta: l.tipoContratoEtiqueta || l.tipoContrato || '',
+          motivo: l.motivo,
+          motivoEtiqueta: l.motivoEtiqueta || '',
+          fechaInicio: l.fechaInicio,
+          fechaRetiro: l.fechaRetiro,
+          prestaciones: l.prestaciones || {},
+          totalPrestaciones: num(l.totalPrestaciones),
+          salarioPendiente: num(l.salarioPendiente),
+          diasSalarioPendiente: l.diasSalarioPendiente ?? null,
+          auxilioPendiente: num(l.auxilioPendiente),
+          otrosDevengados: l.otrosDevengados || [],
+          indemnizacion: l.indemnizacion || null,
+          deducciones: l.deducciones || [],
+          totalDeducciones: num(l.totalDeducciones),
+          netoAPagar: num(l.netoAPagar),
+        }
+      }))
+    });
+  } catch (e) {
+    console.error('GET prestaciones/liquidaciones:', e);
+    res.status(500).json({ error: 'Error al cargar el historial de liquidaciones' });
   }
 });
 
