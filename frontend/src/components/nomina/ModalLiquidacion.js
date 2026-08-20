@@ -19,6 +19,9 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { S, Aviso, CampoPin, api, fmt, fmtNum, hoyISO, errorDe } from './nominaUI';
+// ✅ NOMINA-ACTA-001: el documento que el trabajador firma. Si el sistema
+// calcula bien pero el acta se hace aparte en Excel, el sistema no sirve.
+import { imprimirActaLiquidacion } from './actaLiquidacion';
 
 const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerrar }) => {
   const [form, setForm] = useState({
@@ -44,6 +47,10 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState('');
   const [confirmando, setConfirmando] = useState(false);
+  // ✅ NOMINA-ACTA-001: al confirmar no se cierra el modal de una. Se muestra
+  // el resultado con el botón del acta, porque el documento firmado es parte
+  // del trámite — cerrar sin ofrecerlo obligaba a rehacerlo en Excel.
+  const [resultado, setResultado] = useState(null);
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
@@ -95,10 +102,19 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
         otrasDeducciones: otrasDeducciones.filter(d => d.concepto && Number(d.valor) > 0),
         otrosDevengados: otrosDevengados.filter(d => d.concepto && Number(d.valor) > 0),
       });
-      onListo(r.data);
+      // ✅ NOMINA-ACTA-001: el acta se abre apenas se confirma, con los datos
+      // que quedaron guardados — no con los del preview, que pudieron cambiar.
+      setResultado(r.data);
     } catch (e) { setError(errorDe(e, 'No se pudo liquidar el contrato')); }
     setGuardando(false);
   };
+
+  const empresaSel = empresas.find(e => e.id === form.empresaId) || empresas[0] || {};
+
+  const imprimirActa = (r) => imprimirActaLiquidacion({
+    liquidacion: r?.liquidacion || L,
+    empleado, empresa: empresaSel, numero: r?.numero || '',
+  });
 
   const L = data?.liquidacion;
   const C = data?.comparacion;
@@ -138,6 +154,47 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
           <button onClick={onCerrar} style={S.closeBtn}>×</button>
         </div>
 
+        {/* ═══════════════════════════════════════════════════════════════════
+            ✅ NOMINA-ACTA-001 — pantalla de confirmación con el acta
+            ═══════════════════════════════════════════════════════════════ */}
+        {resultado ? (
+          <div style={S.modalBody}>
+            <div style={{
+              background: 'linear-gradient(135deg,#16a34a,#15803d)', borderRadius: 14,
+              padding: '20px 24px', color: '#fff', marginBottom: 18,
+            }}>
+              <div style={{ fontSize: 11.5, opacity: 0.85, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                Liquidación {resultado.numero} generada
+              </div>
+              <div style={{ fontSize: 29, fontWeight: 800, marginTop: 5, lineHeight: 1.1 }}>
+                {fmt(resultado.liquidacion?.netoAPagar)}
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.9, marginTop: 8, lineHeight: 1.6 }}>
+                Quedó como Cuenta por Pagar a nombre de {empleado.nombre}. El dinero sale
+                cuando la pagues desde el módulo CxP.
+              </div>
+            </div>
+
+            <Aviso nivel="media" titulo="Falta la firma" style={{ marginBottom: 16 }}>
+              Imprimí el acta en <strong>dos ejemplares</strong>: uno firmado por el trabajador
+              queda en su hoja de vida. Sin ese documento no hay constancia de que recibió
+              la liquidación.
+            </Aviso>
+
+            <button onClick={() => imprimirActa(resultado)}
+              style={{ ...S.btnPrimary, width: '100%', padding: '14px 20px', fontSize: 14.5 }}>
+              Imprimir acta de liquidación
+            </button>
+
+            <div style={{ fontSize: 11.5, color: '#94a3b8', marginTop: 10, lineHeight: 1.6, textAlign: 'center' }}>
+              Se abre en una ventana nueva. Desde ahí podés imprimir o guardar como PDF.
+            </div>
+
+            <div style={S.modalFooter}>
+              <button onClick={() => onListo(resultado)} style={S.btnSecondary}>Cerrar</button>
+            </div>
+          </div>
+        ) : (
         <div style={S.modalBody}>
           {/* ── Preaviso de término fijo ─────────────────────────────────── */}
           {pre && (pre.preavisoVencido || pre.enVentana || pre.vencido) && (
@@ -534,6 +591,7 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );

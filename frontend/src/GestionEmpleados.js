@@ -26,6 +26,9 @@ import PanelNominaConfig from './PanelNominaConfig';
 // propia carpeta. Este archivo ya pasaba de 1.200 líneas; meterle acá el pago
 // del pasivo y la liquidación lo volvía inmanejable.
 import PanelPasivoLaboral from './components/nomina/PanelPasivoLaboral';
+// ✅ NOMINA-COLILLA-001: la colilla que el trabajador firma. Antes había que
+// volver a digitarla en Excel, y ahí se colaban los errores de transcripción.
+import { imprimirComprobanteNomina } from './components/nomina/comprobanteNomina';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const fmt = (n) => new Intl.NumberFormat('es-CO', {
@@ -1230,13 +1233,25 @@ export default function GestionEmpleados({ user }) {
           empleados={empleados} config={config} cajas={cajas} empresas={empresas}
           onGenerado={(r) => {
             setModal(null);
-            alert(
+            // ✅ NOMINA-COLILLA-001: se ofrece imprimir en el momento. El
+            // trabajador firma el recibido y esa copia queda en su carpeta.
+            const imprimir = window.confirm(
               `✅ Comprobante ${r.numero} generado\n\n` +
               `Devengado: ${fmt(r.liquidacion.totalDevengado)}\n` +
               `Neto pagado: ${fmt(r.liquidacion.netoAPagar)}\n` +
               (r.anticiposCruzados > 0 ? `Anticipos cruzados: ${r.anticiposCruzados} por ${fmt(r.totalAnticiposCruzados)}\n` : '') +
-              `\nCosto real para la empresa: ${fmt(r.liquidacion.costoTotalEmpleador)}`
+              `\nCosto real para la empresa: ${fmt(r.liquidacion.costoTotalEmpleador)}\n\n` +
+              `¿Imprimir la colilla para que el trabajador firme el recibido?`
             );
+            if (imprimir) {
+              const emp = empleados.find(e => e.id === r.liquidacion?.empleadoId) || {};
+              imprimirComprobanteNomina({
+                liquidacion: r.liquidacion,
+                empleado: emp,
+                empresa: empresas[0] || {},
+                numero: r.numero,
+              });
+            }
             cargar();
           }}
           onCerrar={() => setModal(null)} />
