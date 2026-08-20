@@ -677,6 +677,16 @@ router.put('/nomina', async (req, res) => {
     // encendido exige confirmación explícita de que se entendió el corte.
     // ═══════════════════════════════════════════════════════════════════════
     if (causarSeguridadSocial !== undefined) {
+      // ✅ FIX FASE3-ROL-001: cambia el criterio contable de toda la empresa y
+      // el efecto de equivocarse es silencioso — el gasto de aportes se cuenta
+      // dos veces sin que nada avise. No es una preferencia de pantalla: solo
+      // el admin la toca.
+      if (req.user.role !== 'admin') {
+        return res.status(403).json({
+          error: 'Solo el administrador puede cambiar la causación de seguridad social. ' +
+                 'Es una decisión contable que afecta todos los informes de la empresa.'
+        });
+      }
       if (causarSeguridadSocial === true && confirmadoCorteePILA !== true) {
         return res.status(400).json({
           codigo: 'CONFIRMACION_REQUERIDA',

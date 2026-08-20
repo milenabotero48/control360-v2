@@ -451,7 +451,7 @@ const calcularTotales = (monto, ivaPct, retenPct) => {
 };
 
 // ─── Modal Nuevo / Editar ─────────────────────────────────────────────────────
-function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, categoriasList, provisionales, provisionalInicial, onSave, onClose, categoriasMeta = [], vehiculos = [], egresosRecientes = [], empleados = [], onNavegar }) {
+function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, categoriasList, provisionales, provisionalInicial, onSave, onClose, categoriasMeta = [], vehiculos = [], egresosRecientes = [], empleados = [], causacionSSActiva = false, onNavegar }) {
   const [form, setForm] = useState({
     concepto: '', proveedor: '', categoria: (categoriasList || CATEGORIAS_DEFAULT)[0],
     monto: '', ivaPct: 0, retenPct: 0, retenManual: '',
@@ -558,10 +558,12 @@ function ModalEgreso({ egreso, empresas, cajas, formasPago, formasPagoConfig, ca
         categoriaMeta: meta,
         categoriasValidas: categoriasList || [],
         egresosRecientes,
-        empleados
+        empleados,
+        // ✅ FASE3-AVISO-PILA-001
+        causacionSSActiva
       }
     ).alertas;
-  }, [form, categoriasMeta, categoriasList, egresosRecientes, productosCompra, empleados]);
+  }, [form, categoriasMeta, categoriasList, egresosRecientes, productosCompra, empleados, causacionSSActiva]);
 
   useEffect(() => {
     if (esCompra && productosDisponibles.length === 0) {
@@ -1948,7 +1950,7 @@ function ModalReclasificar({ egresos, categoriasList, onConfirmar, onClose }) {
 // exigia `pin` en el body — y el frontend nunca lo enviaba. El flujo estaba
 // roto y ademas usaba una credencial distinta a la del resto del sistema.
 // Ahora usa el MISMO PIN de 4 digitos que anular, cuadrar y validar pago.
-function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categoriasMeta = [], vehiculos = [], empleados = [] }) {
+function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categoriasMeta = [], vehiculos = [], empleados = [], causacionSSActiva = false }) {
   const [paso, setPaso]     = useState('auth');
   const [pin, setPin]       = useState('');
   const [motivo, setMotivo] = useState('');
@@ -1983,9 +1985,9 @@ function ModalEditarPagado({ egreso, onSave, onClose, categoriasList = [], categ
     const meta = categoriasMeta.find(c => normTxt(c.nombre) === normTxt(form.categoria)) || null;
     return validarEgreso(
       { ...form, totalPagar: totalRecalculado },
-      { categoriaMeta: meta, categoriasValidas: categoriasList }
+      { categoriaMeta: meta, categoriasValidas: categoriasList, empleados, causacionSSActiva }
     ).alertas;
-  }, [form, categoriasMeta, categoriasList, totalRecalculado]);
+  }, [form, categoriasMeta, categoriasList, totalRecalculado, empleados, causacionSSActiva]);
 
   const verificarPinAdmin = async () => {
     if (!/^\d{4}$/.test(pin)) { setErrorAuth('El PIN es de 4 digitos'); return; }
@@ -2381,6 +2383,9 @@ export default function GestionEgresos({ user, onNavegar }) {
   const [ordenes, setOrdenes]               = useState([]);   // ventas, para Ingresos vs Gastos
   // ✅ NOMINA-PROVISIONES-001: para detectar si el tercero es un empleado
   const [empleados, setEmpleados]           = useState([]);
+  // ✅ FASE3-AVISO-PILA-001: si la empresa causa los aportes, registrar la
+  // planilla como egreso duplica el gasto. El aviso vive en las reglas.
+  const [causacionSSActiva, setCausacionSSActiva] = useState(false);
   // ✅ EGRESO-EDICION-002 · EGRESO-RECLASIFICAR-001 · EGRESO-INTELIGENTE-001
   const [modalHistorial, setModalHistorial] = useState(null);
   const [modalLotes, setModalLotes]         = useState(false);
@@ -2416,6 +2421,8 @@ export default function GestionEgresos({ user, onNavegar }) {
       setEgresos(Array.isArray(eRes.data) ? eRes.data : []);
       setVehiculos(Array.isArray(vehRes.data) ? vehRes.data : []);
       setEmpleados(Array.isArray(emplRes.data) ? emplRes.data : []);
+      // ✅ FASE3-AVISO-PILA-001: se reusa la config que ya se trae
+      setCausacionSSActiva(configRes?.data?.causarSeguridadSocial === true);
 
       // ✅ EGRESO-VISUAL-001: ingresos agrupados por mes para la gráfica de
       // evolución. Se calcula acá y no en el backend para no agregar otra
@@ -3409,12 +3416,12 @@ export default function GestionEgresos({ user, onNavegar }) {
           los vehículos (para el selector de placa) y los egresos recientes
           (para detectar pagos duplicados). */}
       {modal === 'nuevo' && <ModalEgreso empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias}
-        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados} onNavegar={onNavegar}
+        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados} causacionSSActiva={causacionSSActiva} onNavegar={onNavegar}
         provisionales={egresos.filter(esAnticipoPendiente)}
         provisionalInicial={provisionalALegalizar}
         onSave={crearEgreso} onClose={() => { setModal(null); setProvisionalALegalizar(null); }} />}
       {modal === 'editar' && selected && <ModalEgreso egreso={{ ...selected, _categorias: categorias }} empresas={empresas} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} categoriasList={categorias}
-        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados} onNavegar={onNavegar}
+        categoriasMeta={categoriasMeta} vehiculos={vehiculos} egresosRecientes={egresos} empleados={empleados} causacionSSActiva={causacionSSActiva} onNavegar={onNavegar}
         onSave={editarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {modal === 'pagar' && selected && <ModalPagar egreso={selected} cajas={cajas} formasPago={formasPago} formasPagoConfig={formasPagoConfig} onPagar={pagarEgreso} onClose={() => { setModal(null); setSelected(null); }} />}
       {/* ✅ EGRESO-EDICION-002: se le pasan el catálogo de categorías, el mapa
@@ -3428,6 +3435,7 @@ export default function GestionEgresos({ user, onNavegar }) {
           categoriasMeta={categoriasMeta}
           vehiculos={vehiculos}
           empleados={empleados}
+          causacionSSActiva={causacionSSActiva}
           onSave={editarPagado}
           onClose={() => { setModal(null); setSelected(null); }} />
       )}
