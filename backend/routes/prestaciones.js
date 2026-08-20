@@ -103,16 +103,22 @@ const cargarAnticipos = async (adminId, empleado) => {
   const snap = await db.collection('egresos').where('userId', '==', adminId)
     .select('esAnticipoNomina', 'cruzadoEnNomina', 'anulado', 'empleadoId', 'numero',
             'fecha', 'concepto', 'proveedor', 'categoria', 'totalPagar', 'monto',
-            'esComprobanteNomina').get();
+            'esComprobanteNomina', 'periodoNomina').get();
 
   const pendientes = [];
   const sospechosos = [];
+  const comprobantes = [];
   const nombreEmp = norm(empleado.nombre);
 
   snap.docs.forEach(d => {
     const e = d.data();
     if (e.anulado === true) return;
-    if (e.esComprobanteNomina === true) return;
+    if (e.esComprobanteNomina === true) {
+      if (e.empleadoId === empleado.id) {
+        comprobantes.push({ numero: e.numero || '', periodoNomina: e.periodoNomina || null });
+      }
+      return;
+    }
     const valor = num(e.totalPagar || e.monto);
     if (valor <= 0) return;
 
@@ -141,6 +147,49 @@ const cargarAnticipos = async (adminId, empleado) => {
     sospechosos: sospechosos.sort(cmp),
     totalPendientes: pendientes.reduce((a, x) => a + x.valor, 0),
     totalSospechosos: sospechosos.reduce((a, x) => a + x.valor, 0),
+    comprobantes,
+  };
+};
+
+/**
+ * ✅ FIX NOMINA-DIAS-PENDIENTES-001
+ *
+ * Días de salario que quedan por pagar al liquidar.
+ *
+ * EL BUG: el valor por defecto eran los días TRABAJADOS en el mes de retiro.
+ * Con nómina quincenal eso está mal casi siempre: si el trabajador salió el 18
+ * y ya había cobrado la quincena del 1 al 15, se le deben 3 días, no 18.
+ * La liquidación proponía pagar 15 días de más — unos $437.000 en el caso que
+ * lo destapó.
+ *
+ * Ahora se mira hasta qué día lo cubren los comprobantes de nómina ya emitidos
+ * en ese mes, y se cuentan solo los días posteriores.
+ */
+const diasSalarioPendiente = (comprobantes, empleado, fechaRetiro) => {
+  const f = String(fechaRetiro || '').slice(0, 10);
+  const mesRetiro = f.slice(0, 7);
+  const diaRetiro = Math.min(30, Number(f.slice(8, 10)) || 0);
+
+  // Día hasta el que ya se pagó, dentro del mes de retiro.
+  let ultimoPagado = 0;
+  for (const c of comprobantes) {
+    const hasta = String(c.periodoNomina?.hasta || '').slice(0, 10);
+    if (!hasta || hasta.slice(0, 7) !== mesRetiro) continue;
+    ultimoPagado = Math.max(ultimoPagado, Math.min(30, Number(hasta.slice(8, 10)) || 0));
+  }
+
+  // Si entró en el mes de retiro, no se cuentan días previos a su ingreso.
+  const ini = String(empleado?.fechaInicio || '').slice(0, 10);
+  const diaIngreso = ini.slice(0, 7) === mesRetiro ? Math.min(30, Number(ini.slice(8, 10)) || 1) : 1;
+
+  const desde = Math.max(diaIngreso, ultimoPagado + 1);
+  return {
+    dias: Math.max(0, diaRetiro - desde + 1),
+    ultimoPagado,
+    desde, hasta: diaRetiro,
+    explica: ultimoPagado > 0
+      ? `Ya se le pagó hasta el día ${ultimoPagado} del mes. Quedan del ${desde} al ${diaRetiro}.`
+      : `No hay comprobante de nómina de este mes, así que se cuentan todos los días trabajados (${desde} al ${diaRetiro}). Si ya le pagaste una quincena, corregí el número.`
   };
 };
 
@@ -436,13 +485,19 @@ router.post('/liquidacion/:empleadoId/preview', async (req, res) => {
     const empleado = r.empleado;
 
     const anticipos = await cargarAnticipos(adminId, empleado);
+    const salarioPend = diasSalarioPendiente(anticipos.comprobantes, empleado, req.body.fechaRetiro || hoyCO());
     const liq = N.liquidarContrato(empleado, {
       fechaRetiro: req.body.fechaRetiro || hoyCO(),
       motivo: req.body.motivo || 'sin_justa_causa',
       diasVacacionesPendientes: req.body.diasVacacionesPendientes,
       fechaUltimasVacaciones: req.body.fechaUltimasVacaciones,
       salarioBaseIndemnizacion: req.body.salarioBaseIndemnizacion,
-      diasSalarioPendiente: req.body.diasSalarioPendiente,
+      // ✅ FIX NOMINA-DIAS-PENDIENTES-001: si el usuario no lo fija a mano,
+      // se calcula desde los comprobantes ya emitidos — no los días trabajados.
+      diasSalarioPendiente: (req.body.diasSalarioPendiente === undefined ||
+                             req.body.diasSalarioPendiente === null ||
+                             req.body.diasSalarioPendiente === '')
+        ? salarioPend.dias : req.body.diasSalarioPendiente,
       otrosDevengados: req.body.otrosDevengados,
       otrasDeducciones: req.body.otrasDeducciones,
       fechaFinObra: req.body.fechaFinObra,
@@ -501,7 +556,7 @@ router.post('/liquidacion/:empleadoId/preview', async (req, res) => {
     // Preaviso de término fijo — el aviso que evita una renovación por descuido
     const preaviso = N.estadoPreavisoFijo(empleado, hoyCO());
 
-    res.json({ liquidacion: liq, comparacion, preaviso, pasivoEmpleado: pasivo, anticipos });
+    res.json({ liquidacion: liq, comparacion, preaviso, pasivoEmpleado: pasivo, anticipos, salarioPendiente: salarioPend });
   } catch (e) {
     console.error('POST prestaciones/liquidacion/preview:', e);
     res.status(500).json({ error: e.message || 'Error al calcular la liquidación' });
@@ -540,13 +595,19 @@ router.post('/liquidacion/:empleadoId', async (req, res) => {
 
     const fechaRetiro = String(req.body.fechaRetiro || hoyCO()).slice(0, 10);
     const anticipos = await cargarAnticipos(adminId, empleado);
+    const salarioPend = diasSalarioPendiente(anticipos.comprobantes, empleado, fechaRetiro);
     const liq = N.liquidarContrato(empleado, {
       fechaRetiro,
       motivo: req.body.motivo || 'sin_justa_causa',
       diasVacacionesPendientes: req.body.diasVacacionesPendientes,
       fechaUltimasVacaciones: req.body.fechaUltimasVacaciones,
       salarioBaseIndemnizacion: req.body.salarioBaseIndemnizacion,
-      diasSalarioPendiente: req.body.diasSalarioPendiente,
+      // ✅ FIX NOMINA-DIAS-PENDIENTES-001: si el usuario no lo fija a mano,
+      // se calcula desde los comprobantes ya emitidos — no los días trabajados.
+      diasSalarioPendiente: (req.body.diasSalarioPendiente === undefined ||
+                             req.body.diasSalarioPendiente === null ||
+                             req.body.diasSalarioPendiente === '')
+        ? salarioPend.dias : req.body.diasSalarioPendiente,
       otrosDevengados: req.body.otrosDevengados,
       otrasDeducciones: req.body.otrasDeducciones,
       fechaFinObra: req.body.fechaFinObra,

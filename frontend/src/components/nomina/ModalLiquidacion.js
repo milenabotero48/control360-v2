@@ -171,6 +171,39 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
             </div>
           )}
 
+          {/* ═══════════════════════════════════════════════════════════════════
+              ✅ FIX NOMINA-DIAS-PENDIENTES-001 — sale del acordeón
+              ───────────────────────────────────────────────────────────────
+              Estaba escondido en "Ajustes finos" con el valor por defecto
+              equivocado: proponía los días TRABAJADOS del mes, no los que
+              faltan por pagar. Con nómina quincenal eso es pagar 15 días de
+              más. Es un campo que hay que mirar sí o sí, no esconderlo.
+              ═══════════════════════════════════════════════════════════════ */}
+          {data?.salarioPendiente && (
+            <div style={{
+              ...S.card, marginBottom: 14, padding: '14px 16px',
+              background: '#eff6ff', border: '1px solid #bfdbfe',
+            }}>
+              <div style={{ display: 'flex', gap: 14, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                <div style={{ ...S.field, marginBottom: 0, width: 130 }}>
+                  <label style={S.label}>Días de salario por pagar</label>
+                  <input type="number" min="0" max="30" style={S.input}
+                    value={form.diasSalarioPendiente !== '' ? form.diasSalarioPendiente : data.salarioPendiente.dias}
+                    onChange={e => set('diasSalarioPendiente', e.target.value)} />
+                </div>
+                <div style={{ flex: 1, minWidth: 220, fontSize: 11.5, color: '#1e40af', lineHeight: 1.6, paddingBottom: 4 }}>
+                  {data.salarioPendiente.explica}
+                  {data.salarioPendiente.ultimoPagado === 0 && (
+                    <div style={{ marginTop: 5, fontWeight: 700 }}>
+                      ⚠️ Revisá este número antes de confirmar: si pagás quincenal y ya cobró
+                      la quincena, acá van solo los días posteriores.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           <details style={{ marginBottom: 14 }}>
             <summary style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: '#4f46e5', padding: '6px 0' }}>
               Ajustes finos (vacaciones, salario pendiente, base de indemnización)
@@ -192,9 +225,10 @@ const ModalLiquidacion = ({ empleado, catalogos, empresas = [], onListo, onCerra
               </div>
               <div style={S.row2}>
                 <div style={S.field}>
-                  <label style={S.label}>Días de salario pendientes</label>
-                  <input type="number" min="0" max="30" style={S.input} value={form.diasSalarioPendiente}
-                    onChange={e => set('diasSalarioPendiente', e.target.value)} placeholder="Automático" />
+                  <label style={S.label}>Últimas vacaciones pagadas</label>
+                  <input type="date" style={S.input} value={form.fechaUltimasVacacionesPagadas || ''}
+                    onChange={e => set('fechaUltimasVacacionesPagadas', e.target.value)} />
+                  <span style={{ fontSize: 11, color: '#94a3b8' }}>Informativo, para tu control.</span>
                 </div>
                 <div style={S.field}>
                   <label style={S.label}>Base para la indemnización</label>

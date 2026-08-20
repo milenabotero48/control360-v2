@@ -266,6 +266,34 @@ router.delete('/:id', async (req, res) => {
     if (doc.data().userId !== adminId) return res.status(403).json({ error: 'Empleado de otra empresa' });
 
     const { fechaRetiro } = req.body || {};
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ✅ FIX NOMINA-RETIRO-SIN-LIQUIDAR-001
+    // ───────────────────────────────────────────────────────────────────────
+    // "Retirar" solo marcaba al empleado como inactivo. Su provisión acumulada
+    // quedaba viva en el balance sin dueño: nadie a quién pagarle, pero el
+    // pasivo seguía ahí — y sin la liquidación tampoco se cruzaban los
+    // anticipos que se le habían prestado.
+    //
+    // Si tiene pasivo pendiente, hay que liquidarlo. La liquidación descarga
+    // el pasivo, libera el sobrante, cruza los anticipos y genera la CxP.
+    // Retirar a secas se permite solo cuando no hay nada que liquidar.
+    // ═══════════════════════════════════════════════════════════════════════
+    const provSnap = await db.collection('provisiones_prestaciones')
+      .where('userId', '==', adminId).where('empleadoId', '==', req.params.id).get();
+    const pasivo = PL.consolidarPasivo(provSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+
+    if (pasivo.total > 0 && doc.data().liquidado !== true && req.body.forzarSinLiquidar !== true) {
+      return res.status(409).json({
+        codigo: 'REQUIERE_LIQUIDACION',
+        pasivoPendiente: pasivo.total,
+        error: `${doc.data().nombre} tiene ${fmt(pasivo.total)} de prestaciones causadas y sin pagar. ` +
+               `Retirarlo así dejaría ese pasivo en el balance sin dueño y sin cruzar los anticipos ` +
+               `que le hayas prestado. Usá "Liquidar" en Empleados → Pasivo laboral: calcula la ` +
+               `liquidación, descarga el pasivo, cruza los anticipos y genera la cuenta por pagar.`
+      });
+    }
+
     await ref.update({
       activo: false,
       fechaFin: fechaRetiro ? String(fechaRetiro).slice(0, 10) : (doc.data().fechaFin || new Date().toISOString().slice(0, 10)),

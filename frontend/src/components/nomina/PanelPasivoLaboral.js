@@ -227,7 +227,16 @@ const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambi
       <div style={{ ...S.card, marginTop: 16, padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '18px 20px 12px' }}>
           <h4 style={S.cardTitle}>Pasivo por empleado</h4>
-          <p style={S.cardSub}>Cuánto le debés a cada uno y qué cuesta terminar su contrato hoy.</p>
+          {/* ✅ FIX: el subtítulo prometía "qué cuesta terminar el contrato" y
+              el número mostrado es otra cosa — lo PROVISIONADO. Casi nunca
+              coinciden: el mes se causa completo aunque el retiro sea a mitad,
+              y los intereses se sobreprovisionan el primer año. El costo real
+              de terminar sale al abrir Liquidar. */}
+          <p style={S.cardSub}>
+            Lo <strong>provisionado</strong> a la fecha, no lo que cuesta liquidar.
+            El costo real de terminar un contrato lo calcula el botón <strong>Liquidar</strong>,
+            que compara ambos y te dice si alcanza.
+          </p>
         </div>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 720 }}>
@@ -243,14 +252,32 @@ const PanelPasivoLaboral = ({ empleados = [], cajas = [], empresas = [], onCambi
               </tr>
             </thead>
             <tbody>
-              {(saldo?.porEmpleado || []).map(e => {
+              {/* ✅ FIX NOMINA-EMPLEADO-INVISIBLE-001
+                  La tabla se armaba solo con quienes YA tienen provisiones. El
+                  empleado que más necesita causarlas —el que no tiene ninguna—
+                  era justamente el que no aparecía, y sin fila no había botón
+                  de Retroactivas para arreglarlo. Ahora se listan todos los
+                  activos, con ceros si no tienen nada causado. */}
+              {(() => {
+                const conPasivo = saldo?.porEmpleado || [];
+                const cero = { cesantias: 0, interesesCesantias: 0, prima: 0, vacaciones: 0 };
+                const faltantes = empleadosActivos
+                  .filter(emp => !conPasivo.some(e => e.empleadoId === emp.id))
+                  .map(emp => ({
+                    empleadoId: emp.id, nombre: emp.nombre, saldo: cero,
+                    total: 0, periodos: 0, sinProvisiones: true,
+                  }));
+                return [...conPasivo, ...faltantes];
+              })().map(e => {
                 const emp = empleadoDe(e.empleadoId);
                 return (
                   <tr key={e.empleadoId}>
                     <td style={S.td}>
                       <div style={{ fontWeight: 700, color: '#0f172a' }}>{e.nombre || '—'}</div>
-                      <div style={{ fontSize: 10.5, color: '#94a3b8', marginTop: 2 }}>
-                        {e.periodos} mes(es) · {e.primerPeriodo} a {e.ultimoPeriodo}
+                      <div style={{ fontSize: 10.5, color: e.sinProvisiones ? '#b45309' : '#94a3b8', marginTop: 2 }}>
+                        {e.sinProvisiones
+                          ? 'Sin provisiones causadas'
+                          : `${e.periodos} mes(es) · ${e.primerPeriodo} a ${e.ultimoPeriodo}`}
                       </div>
                     </td>
                     <td style={S.tdNum}>{fmt(e.saldo.cesantias)}</td>
