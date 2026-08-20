@@ -193,6 +193,11 @@ router.get('/flujo-efectivo', async (req, res) => {
       // Mezclarlos con papelería y transporte escondía cuánta plata se va en
       // materia prima, que en un negocio de servicios es la cifra clave.
       else if (tipoERI === 'costo_servicio')    bucket = 'insumos';
+      // ✅ NOMINA-PASIVO-001: pagar prestaciones o una liquidación es salida de
+      // caja por personal, aunque contablemente no sea gasto del período.
+      // En el FLUJO sí cuenta: la plata se fue.
+      else if (e.esPagoPasivoLaboral === true ||
+               tipoERI === 'pago_pasivo_laboral')  bucket = 'personal';
       else if (tipoERI === 'gasto_personal')    bucket = 'personal';
       else if (tipoERI === 'gasto_fijo')        bucket = 'fijos';
       else if (tipoERI === 'gasto_administrativo') bucket = 'administrativos';
@@ -259,6 +264,30 @@ router.get('/flujo-efectivo', async (req, res) => {
         concepto: 'Provisión de prestaciones sociales',
         valor: provisiones,
         explica: 'Es gasto del período pero no salió de caja: se paga después (cesantías en febrero, prima en junio y diciembre).'
+      });
+    }
+
+    // ✅ NOMINA-PASIVO-001: la contrapartida de lo anterior. Cuando se consigna
+    // al fondo o se paga la prima, sale plata que NO es gasto del período: el
+    // gasto ya se causó meses atrás. Sin esta línea la conciliación no cuadra —
+    // aparecía una salida sin explicación y el usuario no entendía por qué el
+    // resultado no coincidía con el movimiento de caja.
+    let pagosPasivoLaboral = 0;
+    egrSnap.docs.forEach(d => {
+      const e = d.data();
+      if (e.anulado === true) return;
+      if (e.esPagoPasivoLaboral !== true) return;
+      if (e.estado !== 'PAGADO') return;  // la CxP de liquidación aún no salió de caja
+      const fecha = aFechaISO(e.fechaPago || e.fecha || e.createdAt);
+      if (!enRango(fecha, desde, hasta)) return;
+      pagosPasivoLaboral += Number(e.totalPagar || e.monto) || 0;
+    });
+
+    if (pagosPasivoLaboral > 0) {
+      conciliacion.push({
+        concepto: 'Pago de prestaciones causadas en períodos anteriores',
+        valor: -pagosPasivoLaboral,
+        explica: 'Salió de caja pero no es gasto de este período: descarga el pasivo laboral que ya se había causado mes a mes.'
       });
     }
 

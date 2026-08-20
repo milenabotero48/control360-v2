@@ -69,6 +69,10 @@ app.use('/api/egresos',   authenticate, require('./routes/egresos'));
 app.use('/api/vehiculos', authenticate, require('./routes/vehiculos'));
 // ✅ NOMINA-PROVISIONES-001: empleados, provisiones de prestaciones y nómina
 app.use('/api/empleados', authenticate, require('./routes/empleados'));
+// ✅ NOMINA-PASIVO-001 / NOMINA-LIQUIDACION-001: pago del pasivo laboral,
+// liquidación de contrato con indemnización y causación retroactiva.
+// Va en su propio archivo: empleados.js ya pasaba de 890 líneas.
+app.use('/api/prestaciones', authenticate, require('./routes/prestaciones'));
 // ✅ NOVEDADES-001: anuncios a suscriptores y calendario laboral
 app.use('/api/novedades', authenticate, require('./routes/novedades'));
 app.use('/api/configuracion', authenticate, require('./routes/configuracion'));

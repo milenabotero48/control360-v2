@@ -19,6 +19,9 @@ const TIPOS_ERI = [
   // período — es convertir dinero en inventario (activo). NO resta en el ERI;
   // se muestra aparte, informativo. El costo real se causa cuando se VENDE.
   { value: 'compra_inventario',     label: '📦 Compra de inventario/mercancía',    desc: 'Compra de productos o insumos para stock. NO afecta la utilidad — va a inventario.' },
+  // ✅ NOMINA-PASIVO-001: descargue de un pasivo ya causado. Sale plata pero no
+  // es gasto del período: el gasto se reconoció mes a mes en la provisión.
+  { value: 'pago_pasivo_laboral',   label: '🏦 Pago de pasivo laboral',            desc: 'Consignación de cesantías, prima, liquidaciones. NO afecta la utilidad — descarga la provisión ya causada.' },
 ];
 
 const TIPOS_CAJA = ['Efectivo', 'Banco', 'Nequi/Daviplata', 'Datafono', 'Mensajero', 'Otro'];

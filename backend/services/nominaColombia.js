@@ -238,6 +238,10 @@ const tarifaARL = (empleado) => {
 
 // ─── Fondo de Solidaridad Pensional ──────────────────────────────────────────
 // A cargo del empleado, adicional, si gana 4 SMMLV o más (Ley 797 de 2003).
+//
+// ⚠️ LA BASE ES MENSUAL, SIEMPRE. Ver `calcularFSPPeriodo` abajo: pasarle acá
+// la base de una quincena hace que un salario de 4 SMMLV se vea como 2 y el
+// descuento no se practique.
 const calcularFSP = (salario, smmlv) => {
   const enSMMLV = salario / smmlv;
   if (enSMMLV < 4)  return 0;
@@ -247,6 +251,33 @@ const calcularFSP = (salario, smmlv) => {
   if (enSMMLV < 19) return salario * 0.016;
   if (enSMMLV < 20) return salario * 0.018;
   return salario * 0.02;
+};
+
+/**
+ * ✅ FIX NOMINA-QUINCENAL-001
+ *
+ * FSP de un PERÍODO que puede no ser un mes completo (quincena, ingreso o
+ * retiro a mitad de mes).
+ *
+ * EL BUG QUE CORRIGE
+ * ------------------
+ * `calcularFSP` compara la base contra los 4 SMMLV de la ley. Si se le pasa la
+ * base de una quincena, un trabajador de 4 SMMLV se ve como 2 SMMLV: cae bajo
+ * el umbral y NO se le descuenta nada. Dos quincenas del mes daban $0 de FSP
+ * donde la nómina mensual daba el descuento completo.
+ *
+ * Afectaba a todo salario entre 4 y 8 SMMLV. Y entre 16 y 20 SMMLV la mitad
+ * caía en una banda inferior, descontando de menos.
+ *
+ * LA REGLA: se mensualiza la base, se evalúa la escala contra el mes, y el
+ * resultado se prorratea por los días del período. Así dos quincenas suman
+ * exactamente lo mismo que una nómina mensual.
+ */
+const calcularFSPPeriodo = (baseDelPeriodo, smmlv, diasTrabajados = 30) => {
+  const dias = Math.min(30, Math.max(0, Number(diasTrabajados) || 0));
+  if (dias <= 0) return 0;
+  const baseMensualizada = (Number(baseDelPeriodo) || 0) * 30 / dias;
+  return Math.round(calcularFSP(baseMensualizada, smmlv) * dias / 30);
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -556,7 +587,9 @@ function liquidarNomina(empleado, datos = {}) {
     deducciones.push({ clave: 'salud_empleado',   etiqueta: 'Salud (4%)',   valor: saludEmp });
     deducciones.push({ clave: 'pension_empleado', etiqueta: 'Pensión (4%)', valor: pensionEmp });
 
-    const fsp = Math.round(calcularFSP(baseSalarial, P.smmlv));
+    // ✅ FIX NOMINA-QUINCENAL-001: la escala del FSP se evalúa contra el mes,
+    // no contra la quincena. Ver calcularFSPPeriodo.
+    const fsp = calcularFSPPeriodo(baseSalarial, P.smmlv, diasTrabajados);
     if (fsp > 0) deducciones.push({ clave: 'fsp', etiqueta: 'Fondo de Solidaridad Pensional', valor: fsp });
   }
 
@@ -588,6 +621,18 @@ function liquidarNomina(empleado, datos = {}) {
   const totalDeducciones = deducciones.reduce((a, d) => a + d.valor, 0);
   const netoAPagar = totalDevengado - totalDeducciones;
 
+  // ✅ NOMINA-RETENCION-001: lo que se le RETIENE al trabajador para la PILA.
+  // No es plata de la empresa: se descuenta del pago y se queda en caja hasta
+  // que se paga la planilla el mes siguiente. Es un pasivo, no un ingreso.
+  //
+  // Importa especialmente con nómina QUINCENAL: se retiene dos veces al mes y
+  // se paga una sola vez, así que entre la primera quincena y el pago de la
+  // PILA pueden pasar seis semanas con esa plata en la cuenta.
+  const CLAVES_RETENCION = ['salud_empleado', 'pension_empleado', 'fsp'];
+  const retencionSeguridadSocial = deducciones
+    .filter(d => CLAVES_RETENCION.includes(d.clave))
+    .reduce((a, d) => a + d.valor, 0);
+
   // ─── PROVISIÓN Y APORTES PATRONALES DEL PERÍODO ───────────────────────────
   const provision = calcularProvisionMensual(empleado, {
     anio, mes: datos.mes, diasTrabajados,
@@ -608,6 +653,8 @@ function liquidarNomina(empleado, datos = {}) {
     devengados, totalDevengado, baseSalarial,
     deducciones, totalDeducciones, totalAnticipos,
     netoAPagar,
+    // ✅ NOMINA-RETENCION-001
+    retencionSeguridadSocial,
     provision,
     // El costo REAL del empleado para la empresa este período
     costoTotalEmpleador: totalDevengado + provision.totalPrestaciones + provision.totalSeguridadSocial,
@@ -630,8 +677,557 @@ function liquidarNomina(empleado, datos = {}) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 8 · UTILIDADES
+// 8 · TERMINACIÓN DE CONTRATO — INDEMNIZACIÓN Y LIQUIDACIÓN DEFINITIVA
+// ─────────────────────────────────────────────────────────────────────────────
+// NOMINA-LIQUIDACION-001
+//
+// Lo que faltaba: el módulo causaba el pasivo pero no sabía cerrarlo. Cuando un
+// empleado se retiraba, su provisión acumulada quedaba huérfana en el balance.
+//
+// DOS CÁLCULOS DISTINTOS QUE NO HAY QUE MEZCLAR
+// --------------------------------------------
+//   1. LIQUIDACIÓN  · lo que el empleado YA se ganó (cesantías, intereses,
+//      prima, vacaciones, salario pendiente). Esto se DESCARGA contra la
+//      provisión: no es gasto nuevo, ya se causó mes a mes.
+//
+//   2. INDEMNIZACIÓN · la sanción por terminar sin justa causa. NUNCA se
+//      provisiona (no se sabe si va a pasar) y NO constituye salario: no
+//      genera prestaciones ni aportes. Es gasto NUEVO del mes del despido.
+//
+// Confundirlas es el error clásico: descargar la indemnización contra la
+// provisión deja el pasivo corto y el gasto subestimado.
 // ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Días entre dos fechas en año comercial de 360 días (30 días por mes).
+ * Es la convención laboral colombiana para liquidar prestaciones.
+ * Inclusive de ambos extremos: del 1 al 30 de enero son 30 días.
+ */
+const dias360 = (desdeISO, hastaISO) => {
+  const d = String(desdeISO || '').slice(0, 10);
+  const h = String(hastaISO || '').slice(0, 10);
+  if (d.length !== 10 || h.length !== 10 || h < d) return 0;
+  const [ay, am, ad] = d.split('-').map(Number);
+  const [by, bm, bd] = h.split('-').map(Number);
+  const diaA = Math.min(ad, 30);
+  const diaB = Math.min(bd, 30);
+  return Math.max(0, (by - ay) * 360 + (bm - am) * 30 + (diaB - diaA) + 1);
+};
+
+/** Suma días a una fecha ISO (calendario real, para preavisos). */
+const sumarDias = (fechaISO, dias) => {
+  const f = new Date(String(fechaISO).slice(0, 10) + 'T00:00:00');
+  if (isNaN(f)) return null;
+  f.setDate(f.getDate() + Number(dias || 0));
+  return f.toISOString().slice(0, 10);
+};
+
+// ─── Motivos de terminación ──────────────────────────────────────────────────
+// Solo uno genera indemnización. Se declaran acá para que la UI los liste sin
+// hardcodear strings y para que el backend valide contra la misma fuente.
+const MOTIVOS_TERMINACION = {
+  sin_justa_causa: {
+    id: 'sin_justa_causa',
+    etiqueta: 'Despido sin justa causa',
+    generaIndemnizacion: true,
+    descripcion: 'El empleador termina el contrato sin una de las causales del art. 62 CST. Genera indemnización del art. 64 CST.'
+  },
+  justa_causa: {
+    id: 'justa_causa',
+    etiqueta: 'Despido con justa causa',
+    generaIndemnizacion: false,
+    descripcion: 'Terminación por una causal del art. 62 CST, con proceso disciplinario y diligencia de descargos documentada. Sin indemnización.',
+    advertencia: 'La justa causa debe estar probada y documentada (carta motivada + diligencia de descargos). Si un juez la desestima, se paga la indemnización más las costas.'
+  },
+  renuncia: {
+    id: 'renuncia',
+    etiqueta: 'Renuncia voluntaria',
+    generaIndemnizacion: false,
+    descripcion: 'El trabajador termina el contrato. Se liquida lo causado, sin indemnización.'
+  },
+  mutuo_acuerdo: {
+    id: 'mutuo_acuerdo',
+    etiqueta: 'Mutuo acuerdo',
+    generaIndemnizacion: false,
+    descripcion: 'Terminación acordada entre las partes. Puede pactarse una bonificación, que se registra como otro devengado — no es indemnización de ley.'
+  },
+  vencimiento_plazo: {
+    id: 'vencimiento_plazo',
+    etiqueta: 'Vencimiento del plazo pactado',
+    generaIndemnizacion: false,
+    descripcion: 'Termina un contrato a término fijo en su fecha, con preaviso de 30 días dado a tiempo. Sin indemnización.',
+    advertencia: 'Sin preaviso escrito con 30 días de anticipación, el contrato se renueva automáticamente por un período igual (art. 46 CST).'
+  },
+  terminacion_obra: {
+    id: 'terminacion_obra',
+    etiqueta: 'Terminación de la obra o labor',
+    generaIndemnizacion: false,
+    descripcion: 'La obra contratada terminó. Sin indemnización si efectivamente concluyó.'
+  }
+};
+
+/**
+ * Indemnización por despido sin justa causa — art. 64 CST (Ley 789/2002 art. 28).
+ *
+ * TÉRMINO FIJO      · salarios del tiempo que falte hasta la fecha pactada
+ * OBRA O LABOR      · tiempo que falte para terminar la obra, mínimo 15 días
+ * INDEFINIDO < 10 SMMLV · 30 días el primer año + 20 días por año adicional
+ * INDEFINIDO ≥ 10 SMMLV · 20 días el primer año + 15 días por año adicional
+ *
+ * La fracción de año posterior al primero se paga proporcionalmente.
+ *
+ * @param {object} empleado  { tipoContrato, salario, fechaInicio, fechaFin }
+ * @param {object} opciones  { fechaRetiro, anio, salarioBase?, fechaFinObra? }
+ */
+function calcularIndemnizacion(empleado, opciones = {}) {
+  const anio = Number(opciones.anio) || Number(String(opciones.fechaRetiro || '').slice(0, 4)) || new Date().getFullYear();
+  const P = parametrosAnio(anio);
+  const tipo = TIPOS_CONTRATO[empleado?.tipoContrato] || TIPOS_CONTRATO.indefinido;
+  const fechaRetiro = String(opciones.fechaRetiro || '').slice(0, 10);
+  const fechaInicio = String(empleado?.fechaInicio || '').slice(0, 10);
+
+  // La base es el SALARIO (incluye factores salariales como comisiones y
+  // extras habituales). NO incluye auxilio de transporte: no es salario.
+  const salarioBase = Number(opciones.salarioBase) || Number(empleado?.salario) || 0;
+  const valorDia = salarioBase / 30;
+
+  const r = {
+    aplica: false,
+    tipoContrato: tipo.id,
+    tipoContratoEtiqueta: tipo.etiqueta,
+    salarioBase,
+    valorDia: Math.round(valorDia),
+    dias: 0,
+    valor: 0,
+    formula: '',
+    fundamento: 'Art. 64 CST, modificado por la Ley 789 de 2002 art. 28',
+    avisos: []
+  };
+
+  if (!tipo.esLaboral) {
+    r.formula = 'La relación no es laboral: no hay indemnización del art. 64 CST.';
+    return r;
+  }
+  if (!fechaInicio || !fechaRetiro) {
+    r.avisos.push({ nivel: 'grave', texto: 'Falta la fecha de ingreso o la de retiro: no se puede calcular la indemnización.' });
+    return r;
+  }
+
+  r.aplica = true;
+  const antiguedadDias = dias360(fechaInicio, fechaRetiro);
+  r.antiguedadDias = antiguedadDias;
+  r.antiguedadAnios = Number((antiguedadDias / 360).toFixed(2));
+
+  // ─── Término fijo: lo que falte del plazo pactado ──────────────────────────
+  if (tipo.id === 'fijo') {
+    const pactada = String(empleado?.fechaFin || '').slice(0, 10);
+    if (!pactada) {
+      r.aplica = false;
+      r.avisos.push({
+        nivel: 'grave',
+        texto: 'El contrato es a término fijo pero no tiene fecha de terminación pactada. Sin ella no se puede calcular la indemnización.'
+      });
+      return r;
+    }
+    if (pactada <= fechaRetiro) {
+      r.dias = 0; r.valor = 0;
+      r.formula = 'El plazo pactado ya venció: terminar el contrato en esta fecha no genera indemnización.';
+      return r;
+    }
+    // El día de retiro ya se paga como salario: se cuenta desde el siguiente.
+    r.dias = Math.max(0, dias360(fechaRetiro, pactada) - 1);
+    r.valor = Math.round(valorDia * r.dias);
+    r.formula = `Término fijo: ${r.dias} días que faltan hasta el ${pactada} × ${Math.round(valorDia).toLocaleString('es-CO')}/día`;
+    return r;
+  }
+
+  // ─── Obra o labor: lo que falte, mínimo 15 días ────────────────────────────
+  if (tipo.id === 'obra_labor') {
+    const finObra = String(opciones.fechaFinObra || empleado?.fechaFinObraEstimada || '').slice(0, 10);
+    let diasRestantes = 0;
+    if (finObra && finObra > fechaRetiro) {
+      diasRestantes = Math.max(0, dias360(fechaRetiro, finObra) - 1);
+    } else {
+      r.avisos.push({
+        nivel: 'media',
+        texto: 'No hay fecha estimada de terminación de la obra. Se aplica el mínimo legal de 15 días; si la obra tenía más tiempo por delante, la indemnización es mayor.'
+      });
+    }
+    r.dias = Math.max(15, diasRestantes);
+    r.valor = Math.round(valorDia * r.dias);
+    r.formula = diasRestantes > 15
+      ? `Obra o labor: ${r.dias} días que faltan para terminar la obra`
+      : 'Obra o labor: mínimo legal de 15 días de salario';
+    return r;
+  }
+
+  // ─── Indefinido: escala del art. 64 ────────────────────────────────────────
+  const topeAlto = P.smmlv * 10;
+  const esSalarioAlto = salarioBase >= topeAlto;
+  const diasPrimerAnio = esSalarioAlto ? 20 : 30;
+  const diasPorAnioAdicional = esSalarioAlto ? 15 : 20;
+
+  if (antiguedadDias <= 360) {
+    // Menos de un año se paga completo el primer año: es un mínimo, no un prorrateo.
+    r.dias = diasPrimerAnio;
+    r.formula = `Indefinido, salario ${esSalarioAlto ? '≥' : '<'} 10 SMMLV: ${diasPrimerAnio} días por el primer año`;
+  } else {
+    const diasAdicionales = antiguedadDias - 360;
+    const proporcional = (diasAdicionales / 360) * diasPorAnioAdicional;
+    r.dias = Number((diasPrimerAnio + proporcional).toFixed(2));
+    r.formula =
+      `Indefinido, salario ${esSalarioAlto ? '≥' : '<'} 10 SMMLV: ${diasPrimerAnio} días del primer año ` +
+      `+ ${proporcional.toFixed(2)} días por ${(diasAdicionales / 360).toFixed(2)} años adicionales ` +
+      `(${diasPorAnioAdicional} días/año, proporcional por fracción)`;
+  }
+  r.valor = Math.round(valorDia * r.dias);
+  r.escala = { diasPrimerAnio, diasPorAnioAdicional, topeAlto, esSalarioAlto };
+
+  // Régimen de transición: quien tenía 10+ años al 27-dic-2002 conserva el
+  // régimen anterior (más favorable). No se calcula acá: se advierte.
+  if (fechaInicio <= '1992-12-27') {
+    r.avisos.push({
+      nivel: 'grave',
+      texto: 'Este trabajador tenía 10 o más años de servicio al 27 de diciembre de 2002. ' +
+             'Conserva el régimen de indemnización anterior a la Ley 789 de 2002, que es más favorable ' +
+             'y puede incluir reintegro. El valor calculado acá NO le aplica: consultá con un abogado laboral.'
+    });
+  }
+
+  return r;
+}
+
+/**
+ * Retención en la fuente sobre indemnizaciones laborales — art. 401-3 ET.
+ * 20% para trabajadores que devenguen más de 204 UVT mensuales.
+ */
+const retencionIndemnizacion = (valorIndemnizacion, salarioMensual, anio) => {
+  const P = parametrosAnio(anio);
+  const tope = P.uvt * 204;
+  const aplica = Number(salarioMensual) > tope;
+  return {
+    aplica,
+    pct: aplica ? 20 : 0,
+    topeUVT: 204,
+    topePesos: Math.round(tope),
+    valor: aplica ? Math.round(Number(valorIndemnizacion) * 0.20) : 0,
+    fundamento: 'Art. 401-3 ET: retención del 20% sobre indemnizaciones laborales de trabajadores que devenguen más de 204 UVT mensuales.'
+  };
+};
+
+/**
+ * LIQUIDACIÓN DEFINITIVA DE CONTRATO.
+ *
+ * Devuelve tres bloques que el backend usa para asientos distintos:
+ *   · prestaciones  → se DESCARGAN contra la provisión acumulada
+ *   · indemnizacion → gasto NUEVO del período
+ *   · deducciones   → menor valor a pagar
+ *
+ * @param {object} empleado
+ * @param {object} datos {
+ *   fechaRetiro, motivo, anio?,
+ *   diasVacacionesPendientes?  (días de vacaciones no disfrutadas, en días de salario)
+ *   fechaUltimasVacaciones?    (si no se pasa, se toma desde fechaInicio)
+ *   salarioBaseIndemnizacion?  (promedio con factores variables)
+ *   otrosDevengados[], otrasDeducciones[],
+ *   diasSalarioPendiente?      (días del mes de retiro aún no pagados)
+ *   fechaFinObra?
+ * }
+ */
+function liquidarContrato(empleado, datos = {}) {
+  const fechaRetiro = String(datos.fechaRetiro || '').slice(0, 10);
+  const anio = Number(datos.anio) || Number(fechaRetiro.slice(0, 4)) || new Date().getFullYear();
+  const P = parametrosAnio(anio);
+  const tipo = TIPOS_CONTRATO[empleado?.tipoContrato] || TIPOS_CONTRATO.indefinido;
+  const motivo = MOTIVOS_TERMINACION[datos.motivo] || MOTIVOS_TERMINACION.sin_justa_causa;
+
+  const salario = Number(empleado?.salario) || 0;
+  const fechaInicio = String(empleado?.fechaInicio || '').slice(0, 10);
+
+  const r = {
+    empleadoId: empleado?.id || null,
+    nombre: empleado?.nombre || '',
+    documento: empleado?.documento || '',
+    tipoContrato: tipo.id,
+    tipoContratoEtiqueta: tipo.etiqueta,
+    motivo: motivo.id,
+    motivoEtiqueta: motivo.etiqueta,
+    fechaInicio, fechaRetiro,
+    parametros: P,
+    prestaciones: {},
+    totalPrestaciones: 0,
+    salarioPendiente: 0,
+    otrosDevengados: [],
+    indemnizacion: null,
+    deducciones: [],
+    totalDeducciones: 0,
+    totalADevengar: 0,
+    netoAPagar: 0,
+    avisos: []
+  };
+
+  if (!fechaInicio || !fechaRetiro) {
+    r.avisos.push({ nivel: 'grave', texto: 'Se requieren fecha de ingreso y fecha de retiro para liquidar.' });
+    return r;
+  }
+  if (fechaRetiro < fechaInicio) {
+    r.avisos.push({ nivel: 'grave', texto: 'La fecha de retiro es anterior a la de ingreso.' });
+    return r;
+  }
+
+  // ─── Auxilio de transporte del período ────────────────────────────────────
+  const tieneAuxilio = tipo.aplicaAuxilioTransporte && salario <= P.smmlv * 2;
+  const auxilioMensual = tieneAuxilio ? P.auxilioTransporte : 0;
+  const baseConAuxilio = salario + auxilioMensual;
+
+  // ─── Períodos de causación ────────────────────────────────────────────────
+  // Cesantías e intereses: desde el 1-ene del año de retiro (o el ingreso si
+  // fue después). Lo del año anterior YA se consignó al fondo el 14-feb.
+  const inicioAnio = `${anio}-01-01`;
+  const desdeCesantias = fechaInicio > inicioAnio ? fechaInicio : inicioAnio;
+  const diasCesantias = dias360(desdeCesantias, fechaRetiro);
+
+  // Prima: por semestre. Ene–jun o jul–dic.
+  const mesRetiro = Number(fechaRetiro.slice(5, 7));
+  const inicioSemestre = mesRetiro <= 6 ? `${anio}-01-01` : `${anio}-07-01`;
+  const desdePrima = fechaInicio > inicioSemestre ? fechaInicio : inicioSemestre;
+  const diasPrima = dias360(desdePrima, fechaRetiro);
+
+  // Vacaciones: desde las últimas disfrutadas (o el ingreso).
+  const desdeVacaciones = String(datos.fechaUltimasVacaciones || '').slice(0, 10) || fechaInicio;
+  const diasVacaciones = datos.diasVacacionesPendientes !== undefined && datos.diasVacacionesPendientes !== null && datos.diasVacacionesPendientes !== ''
+    ? null
+    : dias360(desdeVacaciones, fechaRetiro);
+
+  if (tipo.generaPrestaciones) {
+    // Cesantías: salario + auxilio, proporcional a 360 días
+    const cesantias = Math.round(baseConAuxilio * diasCesantias / 360);
+    // Intereses: 12% anual sobre las cesantías, proporcional al tiempo
+    const intereses = Math.round(cesantias * diasCesantias * 0.12 / 360);
+    // Prima: salario + auxilio, proporcional al semestre
+    const prima = Math.round(baseConAuxilio * diasPrima / 360);
+    // Vacaciones: SIN auxilio, 15 días hábiles por año → días/720
+    const vacaciones = diasVacaciones !== null
+      ? Math.round(salario * diasVacaciones / 720)
+      : Math.round((salario / 30) * Number(datos.diasVacacionesPendientes || 0));
+
+    r.prestaciones = {
+      cesantias: {
+        etiqueta: 'Cesantías', valor: cesantias, dias: diasCesantias, cuentaPUC: '2510',
+        base: baseConAuxilio, desde: desdeCesantias, hasta: fechaRetiro,
+        explica: 'Solo el año en curso. Lo del año anterior ya se consignó al fondo el 14 de febrero.'
+      },
+      interesesCesantias: {
+        etiqueta: 'Intereses a las cesantías', valor: intereses, dias: diasCesantias, cuentaPUC: '2515',
+        base: cesantias, explica: '12% anual sobre las cesantías, proporcional al tiempo trabajado.'
+      },
+      prima: {
+        etiqueta: 'Prima de servicios', valor: prima, dias: diasPrima, cuentaPUC: '2610',
+        base: baseConAuxilio, desde: desdePrima, hasta: fechaRetiro,
+        explica: `Proporcional al semestre en curso (${mesRetiro <= 6 ? 'enero–junio' : 'julio–diciembre'}).`
+      },
+      vacaciones: {
+        etiqueta: 'Vacaciones compensadas', valor: vacaciones,
+        dias: diasVacaciones, cuentaPUC: '2525', base: salario,
+        explica: 'Sin auxilio de transporte. 15 días hábiles por año trabajado (días / 720).'
+      }
+    };
+    r.totalPrestaciones = cesantias + intereses + prima + vacaciones;
+  } else {
+    r.avisos.push({
+      nivel: 'media',
+      texto: tipo.id === 'integral'
+        ? 'Salario integral: las prestaciones ya están incluidas en el factor prestacional. Solo se liquidan vacaciones y salario pendiente.'
+        : 'Este tipo de contrato no genera prestaciones sociales.'
+    });
+    if (tipo.id === 'integral') {
+      const diasVac = diasVacaciones !== null ? diasVacaciones : 0;
+      const vacaciones = Math.round(salario * 0.70 * diasVac / 720);
+      r.prestaciones = {
+        vacaciones: {
+          etiqueta: 'Vacaciones compensadas', valor: vacaciones, dias: diasVac, cuentaPUC: '2525',
+          base: Math.round(salario * 0.70),
+          explica: 'En salario integral las vacaciones se liquidan sobre el 70% (factor salarial).'
+        }
+      };
+      r.totalPrestaciones = vacaciones;
+    }
+  }
+
+  // ─── Salario pendiente del mes de retiro ──────────────────────────────────
+  const diasSalario = Number(datos.diasSalarioPendiente ?? diasTrabajadosEnMes(
+    { ...empleado, fechaFin: fechaRetiro }, anio, mesRetiro
+  )) || 0;
+  r.salarioPendiente = Math.round(salario * diasSalario / 30);
+  r.diasSalarioPendiente = diasSalario;
+  r.auxilioPendiente = Math.round(auxilioMensual * diasSalario / 30);
+
+  // ─── Otros devengados ─────────────────────────────────────────────────────
+  r.otrosDevengados = (datos.otrosDevengados || [])
+    .map(o => ({ concepto: o.concepto || 'Otro devengado', valor: Number(o.valor) || 0 }))
+    .filter(o => o.valor !== 0);
+  const totalOtros = r.otrosDevengados.reduce((a, o) => a + o.valor, 0);
+
+  // ─── Indemnización ────────────────────────────────────────────────────────
+  if (motivo.generaIndemnizacion) {
+    const ind = calcularIndemnizacion(empleado, {
+      fechaRetiro, anio,
+      salarioBase: Number(datos.salarioBaseIndemnizacion) || salario,
+      fechaFinObra: datos.fechaFinObra
+    });
+    ind.esGastoNuevo = true;
+    ind.explica = 'La indemnización NO se provisiona ni constituye salario: no genera prestaciones ni aportes. ' +
+                  'Es gasto del período en que se despide.';
+    r.indemnizacion = ind;
+    r.avisos.push(...(ind.avisos || []));
+  }
+  if (motivo.advertencia) {
+    r.avisos.push({ nivel: 'media', texto: motivo.advertencia });
+  }
+
+  // ─── Deducciones ──────────────────────────────────────────────────────────
+  // Salud y pensión SOLO sobre el salario del mes. Las prestaciones sociales
+  // no son base de aportes. La indemnización tampoco.
+  if (tipo.esLaboral && r.salarioPendiente > 0) {
+    let ibc = r.salarioPendiente;
+    if (tipo.baseSeguridadSocialPct) ibc = Math.round(ibc * tipo.baseSeguridadSocialPct / 100);
+    ibc = Math.max(ibc, Math.round(P.smmlv * diasSalario / 30));
+    r.deducciones.push({ clave: 'salud_empleado', etiqueta: 'Salud (4%)', valor: Math.round(ibc * 4 / 100) });
+    r.deducciones.push({ clave: 'pension_empleado', etiqueta: 'Pensión (4%)', valor: Math.round(ibc * 4 / 100) });
+    // ✅ FIX NOMINA-QUINCENAL-001: mismo criterio en la liquidación final —
+    // si el retiro es a mitad de mes, la escala se evalúa contra el mes.
+    const fsp = calcularFSPPeriodo(r.salarioPendiente, P.smmlv, diasSalario);
+    if (fsp > 0) r.deducciones.push({ clave: 'fsp', etiqueta: 'Fondo de Solidaridad Pensional', valor: fsp });
+  }
+
+  // Retención sobre la indemnización
+  if (r.indemnizacion && r.indemnizacion.valor > 0) {
+    const ret = retencionIndemnizacion(r.indemnizacion.valor, salario, anio);
+    r.retencionIndemnizacion = ret;
+    if (ret.valor > 0) {
+      r.deducciones.push({
+        clave: 'retencion_indemnizacion',
+        etiqueta: `Retención sobre indemnización (${ret.pct}%)`,
+        valor: ret.valor,
+        fundamento: ret.fundamento
+      });
+    }
+  }
+
+  // Anticipos y otras deducciones libres (préstamos, embargos, dotación)
+  for (const o of (datos.otrasDeducciones || [])) {
+    const v = Number(o.valor) || 0;
+    if (v === 0) continue;
+    r.deducciones.push({ clave: 'otra_deduccion', etiqueta: o.concepto || 'Otra deducción', valor: v });
+  }
+
+  r.totalDeducciones = r.deducciones.reduce((a, d) => a + d.valor, 0);
+  r.totalADevengar =
+    r.totalPrestaciones + r.salarioPendiente + r.auxilioPendiente + totalOtros +
+    (r.indemnizacion?.valor || 0);
+  r.netoAPagar = r.totalADevengar - r.totalDeducciones;
+
+  // ─── Naturaleza contable de cada bloque ───────────────────────────────────
+  // Esto es lo que el backend usa para no equivocarse en el asiento.
+  r.contabilidad = {
+    descargaProvision: r.totalPrestaciones,        // cruza contra el pasivo causado
+    gastoNuevo: (r.indemnizacion?.valor || 0) + r.salarioPendiente + r.auxilioPendiente + totalOtros,
+    explica: 'Las prestaciones se descargan contra la provisión acumulada (no son gasto nuevo). ' +
+             'La indemnización, el salario pendiente y otros devengados sí son gasto del período.'
+  };
+
+  // ─── Avisos de protección especial ────────────────────────────────────────
+  if (motivo.generaIndemnizacion) {
+    r.avisos.push({
+      nivel: 'grave',
+      texto: 'Antes de terminar, verificá si el trabajador tiene protección especial: fuero de maternidad o ' +
+             'lactancia, estabilidad reforzada por salud, prepensionado o fuero sindical. En esos casos el ' +
+             'despido puede declararse INEFICAZ y ordenarse el reintegro con salarios dejados de percibir: ' +
+             'pagar la indemnización no basta.'
+    });
+  }
+  if (P.estimado) {
+    r.avisos.push({
+      nivel: 'media',
+      texto: `No hay parámetros cargados para ${anio}. Se usaron los de ${P.anioBase}. Actualizá el salario mínimo del año.`
+    });
+  }
+
+  return r;
+}
+
+/**
+ * Preaviso de término fijo — art. 46 CST.
+ * Sin aviso escrito 30 días antes del vencimiento, el contrato se renueva
+ * automáticamente por un período igual.
+ */
+const estadoPreavisoFijo = (empleado, hoyISO) => {
+  const tipo = TIPOS_CONTRATO[empleado?.tipoContrato];
+  if (!tipo || tipo.id !== 'fijo') return null;
+  const fin = String(empleado?.fechaFin || '').slice(0, 10);
+  if (!fin) return null;
+  const hoy = String(hoyISO || '').slice(0, 10);
+  const limite = sumarDias(fin, -30);
+  const dif = (a, b) => Math.round((new Date(a + 'T00:00:00') - new Date(b + 'T00:00:00')) / 86400000);
+  const diasParaVencer = dif(fin, hoy);
+  // Lo que importa no es cuánto falta para que venza el contrato, sino cuánto
+  // queda para poder avisar. Se alerta dentro de los 30 días previos al límite:
+  // así el aviso llega cuando todavía se puede actuar, no cuando ya no.
+  const diasParaLimite = dif(limite, hoy);
+  return {
+    empleadoId: empleado?.id || null,
+    nombre: empleado?.nombre || '',
+    fechaFin: fin,
+    fechaLimitePreaviso: limite,
+    diasParaVencer,
+    diasParaLimite,
+    vencido: hoy > fin,
+    preavisoVencido: hoy > limite && hoy <= fin,
+    enVentana: diasParaLimite >= 0 && diasParaLimite <= 30,
+    mensaje: hoy > fin
+      ? 'El contrato ya venció. Si el trabajador sigue laborando y no hubo preaviso, se renovó por un período igual.'
+      : hoy > limite
+        ? `Ya pasó el plazo de preaviso (era el ${limite}). Si no avisaste por escrito, el contrato se renueva automáticamente por un período igual.`
+        : `Tenés ${diasParaLimite} día(s) — hasta el ${limite} — para dar el preaviso escrito de no renovación.`
+  };
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 9 · UTILIDADES
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * ✅ FIX NOMINA-EXTRAS-001
+ *
+ * Devengado adicional salarial de un comprobante de nómina ya generado:
+ * horas extras, recargos, comisiones y bonificaciones salariales — todo menos
+ * el salario base (que la provisión ya calcula por su cuenta) y el auxilio de
+ * transporte (que no es salario y se suma aparte).
+ *
+ * POR QUÉ EXISTE: `calcularProvisionMensual` siempre aceptó `devengadoAdicional`,
+ * pero la causación mensual nunca se lo pasaba. La provisión que se contabilizaba
+ * quedaba sin horas extras, subvaluada en 21,83% de esas extras. Las horas
+ * extras SON salario (art. 127 CST) y entran en la base de cesantías, intereses,
+ * prima y vacaciones.
+ *
+ * @param {Array} comprobantes egresos con esComprobanteNomina === true
+ */
+const devengadoAdicionalDeComprobantes = (comprobantes = []) => {
+  let total = 0;
+  const detalle = [];
+  for (const c of comprobantes) {
+    const devengados = c?.liquidacion?.devengados || [];
+    for (const d of devengados) {
+      if (d.esSalarial !== true) continue;      // el auxilio queda fuera
+      if (d.clave === 'salario') continue;      // ya lo calcula la provisión
+      const v = Number(d.valor) || 0;
+      if (v === 0) continue;
+      total += v;
+      detalle.push({ comprobante: c.numero || '', etiqueta: d.etiqueta || d.clave, valor: v });
+    }
+  }
+  return { total, detalle };
+};
 
 /** Meses entre dos fechas — para saber cuántos períodos provisionar. */
 const mesesEntre = (desdeISO, hastaISO) => {
@@ -687,9 +1283,19 @@ module.exports = {
   tarifaARL,
   calcularHorasExtras,
   calcularFSP,
+  calcularFSPPeriodo,
   calcularProvisionMensual,
   liquidarNomina,
   mesesEntre,
   vigenteEnMes,
-  diasTrabajadosEnMes
+  diasTrabajadosEnMes,
+  // ── NOMINA-LIQUIDACION-001 ──
+  MOTIVOS_TERMINACION,
+  dias360,
+  sumarDias,
+  calcularIndemnizacion,
+  retencionIndemnizacion,
+  liquidarContrato,
+  estadoPreavisoFijo,
+  devengadoAdicionalDeComprobantes
 };

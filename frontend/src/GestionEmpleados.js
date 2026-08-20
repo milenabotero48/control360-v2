@@ -22,6 +22,10 @@ import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 // ✅ NOMINA-PROVISIONES-001: parámetros que cambian el cálculo del costo laboral
 import PanelNominaConfig from './PanelNominaConfig';
+// ✅ NOMINA-PASIVO-001 / NOMINA-LIQUIDACION-001: el cierre del ciclo vive en su
+// propia carpeta. Este archivo ya pasaba de 1.200 líneas; meterle acá el pago
+// del pasivo y la liquidación lo volvía inmanejable.
+import PanelPasivoLaboral from './components/nomina/PanelPasivoLaboral';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const fmt = (n) => new Intl.NumberFormat('es-CO', {
@@ -480,6 +484,48 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
                 </div>
               </div>
 
+              {/* ✅ NOMINA-QUINCENAL-001 — atajos de período.
+                  Muchos suscriptores pagan quincenal. Fijar las fechas y los días
+                  a mano invita a equivocarse: 31 días en un mes de 31, o 16 días
+                  en la segunda quincena. La nómina colombiana usa mes comercial
+                  de 30 días, así que las dos quincenas son de 15 y punto. */}
+              {(() => {
+                const mesRef = String(form.hasta || form.desde || '').slice(0, 7) ||
+                  new Date().toLocaleDateString('en-CA').slice(0, 7);
+                const preset = (etiqueta, dia1, dia2, dias) => (
+                  <button key={etiqueta} type="button"
+                    onClick={() => setForm(f => ({
+                      ...f,
+                      desde: `${mesRef}-${dia1}`,
+                      hasta: `${mesRef}-${dia2}`,
+                      diasTrabajados: dias,
+                    }))}
+                    style={{
+                      padding: '7px 14px', borderRadius: 8, cursor: 'pointer',
+                      fontSize: 12, fontWeight: 700, border: '1px solid #e2e8f0',
+                      background: (form.desde === `${mesRef}-${dia1}` && form.hasta === `${mesRef}-${dia2}`)
+                        ? '#4f46e5' : '#f8fafc',
+                      color: (form.desde === `${mesRef}-${dia1}` && form.hasta === `${mesRef}-${dia2}`)
+                        ? '#fff' : '#475569',
+                    }}>{etiqueta}</button>
+                );
+                return (
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <span style={{ fontSize: 11.5, fontWeight: 700, color: '#64748b' }}>Período:</span>
+                      {preset('1ª quincena (1–15)', '01', '15', 15)}
+                      {preset('2ª quincena (16–30)', '16', '30', 15)}
+                      {preset('Mes completo', '01', '30', 30)}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6, lineHeight: 1.5 }}>
+                      La nómina se liquida sobre mes comercial de 30 días. Las dos quincenas
+                      suman lo mismo que un mes completo: salud, pensión y Fondo de Solidaridad
+                      se calculan sobre la base mensual y se prorratean.
+                    </div>
+                  </div>
+                );
+              })()}
+
               {empleado && (
                 <div style={{
                   background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10,
@@ -791,6 +837,9 @@ export default function GestionEmpleados({ user }) {
   const TABS = [
     { k: 'empleados', l: '👥 Empleados', c: '#4f46e5' },
     { k: 'provisiones', l: '📊 Provisiones', c: '#7c3aed' },
+    // ✅ NOMINA-PASIVO-001: acá se paga lo causado y se liquidan contratos.
+    // Sin esta pestaña el pasivo del balance solo crecía.
+    { k: 'pasivo', l: '🏦 Pasivo laboral', c: '#4338ca' },
     { k: 'nomina', l: '🧾 Nómina', c: '#16a34a' },
     // ✅ NOMINA-PROVISIONES-001: la exoneración vive acá y no en Mi Empresa
     // porque es donde el suscriptor está pensando en costo laboral.
@@ -1019,10 +1068,16 @@ export default function GestionEmpleados({ user }) {
 
                 <div style={{ background: '#fff', borderRadius: 14, padding: '16px 20px', border: '1px solid #f1f5f9' }}>
                   <div style={{ fontSize: 12.5, fontWeight: 800, color: '#0f172a', marginBottom: 4 }}>
-                    Pasivo acumulado
+                    Pasivo pendiente
                   </div>
+                  {/* ✅ FIX NOMINA-PASIVO-001: este número ahora es NETO —
+                      causado menos pagado. Antes solo sumaba lo causado y nunca
+                      bajaba: al consignar cesantías en febrero o pagar la prima
+                      en junio, el saldo seguía completo y el balance mostraba
+                      una deuda que la empresa ya no tenía. */}
                   <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 12, lineHeight: 1.5 }}>
-                    Lo que la empresa le debe a sus empleados por prestaciones causadas y no pagadas.
+                    Lo que le debés a tus empleados hoy: causado menos pagado.
+                    Los pagos se registran en <strong>Pasivo laboral</strong>.
                   </div>
                   {Object.entries(config?.prestaciones || {}).map(([k, cfg]) => (
                     <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '4px 0', color: '#475569' }}>
@@ -1152,6 +1207,15 @@ export default function GestionEmpleados({ user }) {
             </div>
           )}
         </div>
+      )}
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          TAB · PASIVO LABORAL — ✅ NOMINA-PASIVO-001
+          ═══════════════════════════════════════════════════════════════════ */}
+      {tab === 'pasivo' && (
+        <PanelPasivoLaboral
+          empleados={empleados} cajas={cajas} empresas={empresas}
+          onCambio={cargar} />
       )}
 
       {/* ═══════════════════════════════════════════════════════════════════════

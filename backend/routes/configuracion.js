@@ -81,7 +81,13 @@ const CATEGORIAS_DEFAULT = [
   { nombre: 'Impuestos',                  tipoERI: 'gasto_fiscal',    lineaServicioId: null, activa: true, orden: 12 },
   // ✅ ERI-COSTO-001: compra de mercancía va como inventario, NO como gasto/costo
   { nombre: 'Compra de mercancía',        tipoERI: 'compra_inventario', lineaServicioId: null, activa: true, orden: 13 },
-  { nombre: 'Otros',                      tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true, orden: 14 },
+  // ✅ NOMINA-PASIVO-001: pagar prestaciones NO es gasto — el gasto se causó
+  // mes a mes en la provisión. Esta categoría descarga el pasivo. Si se
+  // registrara como "Nómina" (gasto_personal), el ERI contaría el mismo gasto
+  // dos veces e inflaría febrero, junio y diciembre.
+  { nombre: 'Pago de prestaciones sociales', tipoERI: 'pago_pasivo_laboral', lineaServicioId: null, activa: true, orden: 14 },
+  { nombre: 'Liquidación de contrato',       tipoERI: 'pago_pasivo_laboral', lineaServicioId: null, activa: true, orden: 15 },
+  { nombre: 'Otros',                      tipoERI: 'gasto_operativo', lineaServicioId: null, activa: true, orden: 16 },
 ];
 
 // ─── RETENCIONES — Ola 2.5 Bloque 3 ─────────────────────────────────────────
@@ -248,7 +254,12 @@ router.put('/categorias', async (req, res) => {
     const TIPOS_ERI_VALIDOS = [
       'costo_servicio', 'gasto_personal', 'gasto_operativo',
       'gasto_fijo', 'gasto_administrativo', 'gasto_financiero', 'gasto_fiscal',
-      'compra_inventario' // ✅ ERI-COSTO-001: faltaba — sin esto se rechazaba al reclasificar
+      'compra_inventario', // ✅ ERI-COSTO-001: faltaba — sin esto se rechazaba al reclasificar
+      // ✅ NOMINA-PASIVO-001: descargue de un pasivo ya causado (prestaciones
+      // sociales, liquidaciones). Sale plata pero NO es gasto del período: el
+      // gasto se reconoció mes a mes en la provisión. Mismo tratamiento que
+      // 'compra_inventario': fuera del P&G, visible en el flujo de efectivo.
+      'pago_pasivo_laboral'
     ];
 
     for (const c of categoriasEgresos) {
@@ -648,9 +659,38 @@ router.put('/numeracion', async (req, res) => {
 router.put('/nomina', async (req, res) => {
   try {
     const adminId = req.adminId || req.user.uid || req.user.id;
-    const { empresaExoneradaAportes, claseRiesgoARLDefecto, confirmadoConContador } = req.body;
+    const {
+      empresaExoneradaAportes, claseRiesgoARLDefecto, confirmadoConContador,
+      causarSeguridadSocial, confirmadoCorteePILA
+    } = req.body;
 
     const update = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ✅ FASE 3 — causación de aportes patronales. APAGADO POR DEFECTO.
+    // ───────────────────────────────────────────────────────────────────────
+    // Encenderlo cambia el criterio contable de los aportes: pasan de entrar
+    // por caja (cuando se digita la PILA) a causarse mes a mes como pasivo.
+    //
+    // ⚠️ Si se enciende y el suscriptor SIGUE digitando la PILA como egreso
+    // categoría "Nómina", el gasto de aportes se cuenta DOS VECES. Por eso el
+    // encendido exige confirmación explícita de que se entendió el corte.
+    // ═══════════════════════════════════════════════════════════════════════
+    if (causarSeguridadSocial !== undefined) {
+      if (causarSeguridadSocial === true && confirmadoCorteePILA !== true) {
+        return res.status(400).json({
+          codigo: 'CONFIRMACION_REQUERIDA',
+          error: 'Para activar la causación de aportes patronales tenés que confirmar el procedimiento de corte: ' +
+                 '1) pagá la PILA del mes anterior como venís haciéndolo, 2) activá el interruptor, ' +
+                 '3) causá el mes en curso, 4) de ahí en adelante pagá la PILA desde Empleados → Pasivo laboral, ' +
+                 'NUNCA más como egreso con categoría "Nómina". Si seguís digitándola como egreso, ' +
+                 'el gasto de aportes se contará dos veces en el ERI.'
+        });
+      }
+      update.causarSeguridadSocial = causarSeguridadSocial === true;
+      update.causacionSSActualizadaPor = req.user.email;
+      update.causacionSSActualizadaEn = new Date().toISOString();
+    }
 
     if (empresaExoneradaAportes !== undefined) {
       update.empresaExoneradaAportes = empresaExoneradaAportes === true;

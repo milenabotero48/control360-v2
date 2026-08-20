@@ -29,6 +29,9 @@ const router = express.Router();
 const { db, admin } = require('../config/firebase');
 const { verificarPin } = require('./_autorizacion');
 const N = require('../services/nominaColombia');
+// ✅ NOMINA-PASIVO-001: el saldo del pasivo (causado − pagado) se calcula en un
+// solo lugar y lo comparten esta ruta, prestaciones.js y el ERI.
+const PL = require('../services/pasivoLaboral');
 
 const resolverAdminId = (req) => req.adminId || req.user?.uid || req.user?.id || null;
 const fmt = n => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n || 0);
@@ -366,10 +369,11 @@ router.get('/provisiones', async (req, res) => {
     const anio = Number(req.query.anio) || new Date().getFullYear();
     const mes  = Number(req.query.mes)  || (new Date().getMonth() + 1);
 
-    const [empSnap, cfgDoc, provSnap] = await Promise.all([
+    const [empSnap, cfgDoc, provSnap, egSnap] = await Promise.all([
       db.collection('empleados').where('userId', '==', adminId).get(),
       db.collection('configuracion').doc(adminId).get(),
-      db.collection('provisiones_prestaciones').where('userId', '==', adminId).get()
+      db.collection('provisiones_prestaciones').where('userId', '==', adminId).get(),
+      db.collection('egresos').where('userId', '==', adminId).select('esComprobanteNomina', 'anulado', 'periodoNomina', 'empleadoId', 'liquidacion', 'numero').get()
     ]);
 
     const empresaExonerada = cfgDoc.exists ? (cfgDoc.data().empresaExoneradaAportes !== false) : true;
@@ -382,8 +386,18 @@ router.get('/provisiones', async (req, res) => {
     provSnap.forEach(d => causadas.push({ id: d.id, ...d.data() }));
     const yaCausadoEsteMes = causadas.filter(p => p.anio === anio && p.mes === mes);
 
+    // ✅ FIX NOMINA-EXTRAS-001: comprobantes de nómina del mes. Las horas extras
+    // y los recargos SON salario (art. 127 CST) y entran en la base de
+    // cesantías, intereses, prima y vacaciones. La causación los ignoraba: el
+    // motor siempre aceptó `devengadoAdicional`, pero nadie se lo pasaba.
+    const comprobantesDelMes = egSnap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(e => e.esComprobanteNomina === true && e.anulado !== true)
+      .filter(e => Number(e.periodoNomina?.anio) === anio && Number(e.periodoNomina?.mes) === mes);
+
     const detalle = [];
     let totalPrestaciones = 0, totalSS = 0, totalDevengado = 0, totalCosto = 0;
+    let totalDevengadoAdicional = 0;
     const porConcepto = { cesantias: 0, interesesCesantias: 0, prima: 0, vacaciones: 0 };
 
     for (const emp of empleados) {
@@ -391,7 +405,17 @@ router.get('/provisiones', async (req, res) => {
       const dias = N.diasTrabajadosEnMes(emp, anio, mes);
       if (dias <= 0) continue;
 
-      const p = N.calcularProvisionMensual(emp, { anio, mes, diasTrabajados: dias, empresaExonerada });
+      const extras = N.devengadoAdicionalDeComprobantes(
+        comprobantesDelMes.filter(c => c.empleadoId === emp.id)
+      );
+      totalDevengadoAdicional += extras.total;
+
+      const p = N.calcularProvisionMensual(emp, {
+        anio, mes, diasTrabajados: dias, empresaExonerada,
+        devengadoAdicional: extras.total
+      });
+      p.devengadoAdicional = extras.total;
+      p.devengadoAdicionalDetalle = extras.detalle;
       p.empleadoId = emp.id;
       p.documento = emp.documento;
       p.cargo = emp.cargo || '';
@@ -408,15 +432,13 @@ router.get('/provisiones', async (req, res) => {
       }
     }
 
-    // Pasivo acumulado histórico por concepto
-    const pasivoAcumulado = { cesantias: 0, interesesCesantias: 0, prima: 0, vacaciones: 0, total: 0 };
-    for (const c of causadas) {
-      if (c.revertida === true) continue;
-      for (const k of Object.keys(porConcepto)) {
-        pasivoAcumulado[k] += Number(c.prestaciones?.[k]?.valor) || 0;
-      }
-      pasivoAcumulado.total += Number(c.totalPrestaciones) || 0;
-    }
+    // ✅ FIX NOMINA-PASIVO-001: el pasivo acumulado es NETO — causado menos
+    // pagado. Antes solo sumaba las provisiones causadas y nunca restaba nada,
+    // así que el pasivo del balance únicamente crecía: al consignar cesantías
+    // en febrero o pagar la prima en junio, la provisión seguía completa.
+    // El descargue lo lleva `pasivoLaboral.js` sobre el campo `aplicado`.
+    const pasivo = PL.consolidarPasivo(causadas);
+    const pasivoAcumulado = { ...pasivo.porConcepto, total: pasivo.total };
 
     res.json({
       anio, mes,
@@ -428,10 +450,13 @@ router.get('/provisiones', async (req, res) => {
         prestaciones: totalPrestaciones,
         seguridadSocial: totalSS,
         costoTotal: totalCosto,
+        devengadoAdicional: totalDevengadoAdicional,
         factorPromedio: totalDevengado > 0 ? Number((totalCosto / totalDevengado).toFixed(4)) : 0
       },
       porConcepto,
       pasivoAcumulado,
+      // Detalle del pasivo: causado, pagado y saldo por concepto y por empleado
+      pasivo,
       yaCausadoEsteMes: yaCausadoEsteMes.length,
       detalle
     });
@@ -465,16 +490,29 @@ router.post('/provisiones/causar', async (req, res) => {
       return res.status(400).json({ error: 'Año y mes válidos son obligatorios' });
     }
 
-    const [empSnap, cfgDoc, yaSnap] = await Promise.all([
+    const [empSnap, cfgDoc, yaSnap, egSnap] = await Promise.all([
       db.collection('empleados').where('userId', '==', adminId).get(),
       db.collection('configuracion').doc(adminId).get(),
       db.collection('provisiones_prestaciones')
-        .where('userId', '==', adminId).where('anio', '==', anio).where('mes', '==', mes).get()
+        .where('userId', '==', adminId).where('anio', '==', anio).where('mes', '==', mes).get(),
+      db.collection('egresos').where('userId', '==', adminId).select('esComprobanteNomina', 'anulado', 'periodoNomina', 'empleadoId', 'liquidacion', 'numero').get()
     ]);
 
     const empresaExonerada = cfgDoc.exists ? (cfgDoc.data().empresaExoneradaAportes !== false) : true;
+    // ✅ FASE 3: apagado por defecto a propósito. Ver la nota extensa en
+    // services/pasivoLaboral.js — encenderlo sin cambiar cómo se digita la PILA
+    // duplica el gasto de aportes patronales desde el primer mes.
+    const causarSeguridadSocial = cfgDoc.exists
+      ? (cfgDoc.data().causarSeguridadSocial === true) : false;
     const yaCausados = new Set();
     yaSnap.forEach(d => { if (d.data().revertida !== true) yaCausados.add(d.data().empleadoId); });
+
+    // ✅ FIX NOMINA-EXTRAS-001: mismos comprobantes que usa el preview, para que
+    // lo que se GUARDA coincida con lo que el usuario vio en pantalla.
+    const comprobantesDelMes = egSnap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .filter(e => e.esComprobanteNomina === true && e.anulado !== true)
+      .filter(e => Number(e.periodoNomina?.anio) === anio && Number(e.periodoNomina?.mes) === mes);
 
     const empleados = [];
     empSnap.forEach(d => empleados.push({ id: d.id, ...d.data() }));
@@ -494,7 +532,13 @@ router.post('/provisiones/causar', async (req, res) => {
         continue;
       }
 
-      const p = N.calcularProvisionMensual(emp, { anio, mes, diasTrabajados: dias, empresaExonerada });
+      const extras = N.devengadoAdicionalDeComprobantes(
+        comprobantesDelMes.filter(c => c.empleadoId === emp.id)
+      );
+      const p = N.calcularProvisionMensual(emp, {
+        anio, mes, diasTrabajados: dias, empresaExonerada,
+        devengadoAdicional: extras.total
+      });
 
       if (!p.aplicaProvision) {
         omitidos.push({ empleadoId: emp.id, nombre: emp.nombre, razon: p.motivoNoAplica });
@@ -515,6 +559,9 @@ router.post('/provisiones/causar', async (req, res) => {
         auxilioTransporte: p.auxilioTransporte,
         baseConAuxilio: p.baseConAuxilio,
         baseSinAuxilio: p.baseSinAuxilio,
+        // ✅ FIX NOMINA-EXTRAS-001: horas extras y recargos incluidos en la base
+        devengadoAdicional: extras.total,
+        devengadoAdicionalDetalle: extras.detalle,
         prestaciones: p.prestaciones,
         totalPrestaciones: p.totalPrestaciones,
         seguridadSocialPatronal: p.seguridadSocialPatronal,
@@ -523,6 +570,15 @@ router.post('/provisiones/causar', async (req, res) => {
         // Naturaleza contable — para que el ERI y el balance sepan qué hacer
         naturaleza: 'pasivo',
         tipoERI: 'gasto_personal',
+        // ✅ NOMINA-PASIVO-001: cuánto de cada concepto lleva pagado. Un doc
+        // viejo sin este campo se lee como cero — no hace falta migrar nada.
+        aplicado: { cesantias: 0, interesesCesantias: 0, prima: 0, vacaciones: 0 },
+        // ✅ FASE 3 (apagada por defecto): si el suscriptor activó la causación
+        // de aportes patronales, esta provisión los lleva como PASIVO y el ERI
+        // los causa. Si está apagado, los aportes siguen entrando al gasto
+        // cuando se digita la PILA como egreso — que es como funciona hoy.
+        causaSeguridadSocial: causarSeguridadSocial,
+        aplicadoSeguridadSocial: 0,
         pagada: false,
         revertida: false,
         causadaPor: req.user.email,
@@ -705,6 +761,11 @@ router.post('/nomina/comprobante', async (req, res) => {
 
     const cfgDoc = await db.collection('configuracion').doc(adminId).get();
     const empresaExonerada = cfgDoc.exists ? (cfgDoc.data().empresaExoneradaAportes !== false) : true;
+    // ✅ FASE 3 / NOMINA-RETENCION-001: si la causación está encendida, lo que
+    // se le retiene al trabajador queda como PASIVO hasta pagar la PILA.
+    // Apagado (por defecto), el comportamiento es el de siempre.
+    const causarSeguridadSocial = cfgDoc.exists
+      ? (cfgDoc.data().causarSeguridadSocial === true) : false;
 
     // Anticipos a cruzar
     const anticipos = [];
@@ -781,12 +842,32 @@ router.post('/nomina/comprobante', async (req, res) => {
         totalDeducciones: liq.totalDeducciones,
         totalAnticipos: liq.totalAnticipos,
         netoAPagar: liq.netoAPagar,
+        retencionSeguridadSocial: liq.retencionSeguridadSocial,
         horasExtras: liq.horasExtras,
         prestacionesProvisionadas: liq.provision.totalPrestaciones,
         seguridadSocialPatronal: liq.provision.totalSeguridadSocial,
         costoTotalEmpleador: liq.costoTotalEmpleador
       },
       anticiposCruzados: anticipos.map(a => ({ egresoId: a.egresoId, numero: a.numero, valor: a.valor })),
+      // ═══════════════════════════════════════════════════════════════════
+      // ✅ NOMINA-RETENCION-001 · lo retenido al trabajador para la PILA
+      // ───────────────────────────────────────────────────────────────────
+      // El egreso sale por el NETO — es lo que efectivamente se le entrega.
+      // Pero salud, pensión y FSP se le descontaron y se quedan en la caja de
+      // la empresa hasta que se paga la planilla el mes siguiente. Esa plata
+      // NO es de la empresa.
+      //
+      // Con nómina QUINCENAL se retiene dos veces y se paga una: entre la
+      // primera retención y el pago pasan hasta seis semanas.
+      //
+      // `causaRetencionEmpleado` marca si esto es pasivo (Fase 3 encendida) o
+      // si sigue el camino viejo (entra al gasto cuando se digita la PILA).
+      retencionSeguridadSocial: liq.retencionSeguridadSocial,
+      causaRetencionEmpleado: causarSeguridadSocial,
+      aplicadoRetencionEmpleado: 0,
+      // Devengado del período: lo que el ERI debe reconocer como gasto cuando
+      // la causación está encendida (el egreso solo lleva el neto).
+      totalDevengadoNomina: liq.totalDevengado,
       creadoPor: req.user.email,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()

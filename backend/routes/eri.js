@@ -226,6 +226,8 @@ router.get('/', async (req, res) => {
     let totalCostoServicios = 0;
     let totalProductos = 0;
     let totalCostoProductos = 0;
+    // ✅ ERI-TRAZABILIDAD-001: detalle línea por línea de cada categoría
+    const detallePorCategoria = {};
     const ingresosPorEmpresa = {};   // empresaId → monto
     const cantidadOrdenes = {};      // empresaId → conteo
     const detalleOrdenes = [];       // Para drill-down
@@ -279,6 +281,31 @@ router.get('/', async (req, res) => {
         if (costoItem > 0) {
           costoPorCategoria[catNombre] = (costoPorCategoria[catNombre] || 0) + costoItem;
         }
+
+        // ══════════════════════════════════════════════════════════════════
+        // ✅ ERI-TRAZABILIDAD-001 — De dónde sale cada cifra
+        // ──────────────────────────────────────────────────────────────────
+        // Antes el informe mostraba "CINTAS $37.100" y ahí se acababa: para
+        // saber QUÉ ventas generaron ese costo había que salir del sistema y
+        // revisar las órdenes a mano.
+        //
+        // Ahora cada categoría guarda el detalle línea por línea: qué orden,
+        // qué cliente, qué producto, cuántas unidades y a qué costo. Un
+        // informe que no se puede auditar no sirve para tomar decisiones.
+        // ══════════════════════════════════════════════════════════════════
+        if (!detallePorCategoria[catNombre]) detallePorCategoria[catNombre] = [];
+        detallePorCategoria[catNombre].push({
+          numeroOrden: o.numeroOrden || '',
+          fecha: (o._fechaRef instanceof Date ? o._fechaRef.toISOString() : '').slice(0, 10),
+          cliente: o.clienteNombre || '',
+          producto: item.nombre || item.descripcion || item.productoNombre || 'Sin nombre',
+          esServicio: cls.esServicio,
+          cantidad,
+          precioUnitario: Number(item.precioUnitario) || 0,
+          costoUnitario: cls.precioCosto,
+          ingreso: subtotal,
+          costo: costoItem
+        });
 
         if (cls.esServicio) {
           ingresoServiciosOrden += subtotal;
@@ -366,9 +393,55 @@ router.get('/', async (req, res) => {
     let totalComprasInventario = 0;
     const anexoCompras = []; // listado de compras de mercancía (anexo)
 
+    // ✅ NOMINA-PASIVO-001: pagos que descargan el pasivo laboral. NO son gasto:
+    // las prestaciones ya se causaron mes a mes en `provisiones_prestaciones`.
+    // Contarlas otra vez acá era el doble conteo que inflaba febrero, junio y
+    // diciembre. Salen del P&G y se muestran aparte, igual que las compras de
+    // inventario. La plata sí se ve salir en el flujo de efectivo.
+    let totalPagosPasivoLaboral = 0;
+    const anexoPagosPasivo = [];
+
     egresosEnRango.forEach(e => {
       const cls = mapaCategoria[e.categoria] || { tipoERI: 'gasto_operativo', lineaServicioId: null };
       const monto = Number(e.monto) || 0;
+
+      // ✅ NOMINA-PASIVO-001: descargue de pasivo laboral — fuera del P&G.
+      // Se reconoce por la marca del documento (robusta aunque el usuario
+      // elija mal la categoría) o por el tipoERI de la categoría.
+      if (e.esPagoPasivoLaboral === true || cls.tipoERI === 'pago_pasivo_laboral') {
+        totalPagosPasivoLaboral += monto;
+        anexoPagosPasivo.push({
+          fecha: (e.fecha || '').slice(0, 10),
+          numero: e.numero || '',
+          beneficiario: e.empleadoNombre || e.proveedor || '',
+          concepto: e.concepto || '',
+          monto
+        });
+        // El excedente sobre lo provisionado SÍ es gasto: se provisionó de menos.
+        const excedente = Number(e.excedenteGasto) || 0;
+        if (excedente > 0) {
+          gastosPorTipo.gasto_personal += excedente;
+          gastosDetallePorCategoria['Ajuste por defecto de provisión'] =
+            (gastosDetallePorCategoria['Ajuste por defecto de provisión'] || 0) + excedente;
+        }
+        return; // no suma a gastos ni a costos
+      }
+
+      // ✅ NOMINA-RETENCION-001 (Fase 3, apagada por defecto)
+      // El comprobante de nómina sale por el NETO, pero el gasto real es el
+      // DEVENGADO: la salud y la pensión que se le retienen al trabajador
+      // también son costo del período, solo que la empresa las guarda hasta
+      // pagar la PILA. Con la causación encendida, se agrega la retención
+      // acá y el pago de la PILA deja de ser gasto.
+      // Apagado (por defecto) no entra nada y todo funciona como siempre.
+      if (e.esComprobanteNomina === true && e.causaRetencionEmpleado === true) {
+        const retenido = Number(e.retencionSeguridadSocial) || 0;
+        if (retenido > 0) {
+          gastosPorTipo.gasto_personal += retenido;
+          gastosDetallePorCategoria['Retención al trabajador (salud y pensión)'] =
+            (gastosDetallePorCategoria['Retención al trabajador (salud y pensión)'] || 0) + retenido;
+        }
+      }
 
       // ✅ ERI-COSTO-001: compra de mercancía NO entra al P&G
       if (cls.tipoERI === 'compra_inventario') {
@@ -437,6 +510,7 @@ router.get('/', async (req, res) => {
     // acá como gasto de personal, con su contrapartida en el pasivo.
     // ══════════════════════════════════════════════════════════════════════
     let provisionesPrestaciones = 0;
+    let aportesPatronalesCausados = 0;   // ✅ FASE 3, apagada por defecto
     const anexoProvisiones = [];
     try {
       const provSnap = await db.collection('provisiones_prestaciones')
@@ -454,6 +528,14 @@ router.get('/', async (req, res) => {
 
         const valor = Number(p.totalPrestaciones) || 0;
         provisionesPrestaciones += valor;
+        // ✅ FASE 3 (apagada por defecto): los aportes patronales solo se causan
+        // si la provisión se generó con `causaSeguridadSocial: true`. Mientras
+        // esté apagado, entran al gasto vía el egreso de la planilla PILA —
+        // que es como venía funcionando. Causarlos acá sin apagar el otro
+        // camino contaría el mismo aporte dos veces.
+        if (p.causaSeguridadSocial === true) {
+          aportesPatronalesCausados += Number(p.totalSeguridadSocial) || 0;
+        }
         anexoProvisiones.push({
           periodo,
           empleado: p.empleadoNombre || '',
@@ -473,9 +555,72 @@ router.get('/', async (req, res) => {
         gastosDetallePorCategoria['Provisión de prestaciones sociales'] =
           (gastosDetallePorCategoria['Provisión de prestaciones sociales'] || 0) + provisionesPrestaciones;
       }
+      // ✅ FASE 3: solo entra si el suscriptor encendió la causación de aportes.
+      if (aportesPatronalesCausados > 0) {
+        gastosPorTipo.gasto_personal += aportesPatronalesCausados;
+        gastosDetallePorCategoria['Aportes patronales causados'] =
+          (gastosDetallePorCategoria['Aportes patronales causados'] || 0) + aportesPatronalesCausados;
+      }
     } catch (e) {
       // Si la colección no existe todavía, el ERI sigue funcionando sin ellas
       console.error('ERI provisiones:', e.message);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ NOMINA-LIQUIDACION-001 · GASTO NUEVO POR LIQUIDACIÓN DE CONTRATO
+    // ──────────────────────────────────────────────────────────────────────
+    // Una liquidación tiene dos naturalezas y hay que separarlas:
+    //
+    //   · Prestaciones ya causadas → NO son gasto acá. Se descargan del
+    //     pasivo; el gasto se reconoció mes a mes.
+    //   · Indemnización, salario pendiente y el defecto de provisión → SÍ son
+    //     gasto del período. La indemnización nunca se provisiona (no se sabe
+    //     si va a ocurrir) y no constituye salario.
+    //
+    // Por eso la CxP de la liquidación queda marcada `esPagoPasivoLaboral` y
+    // sale del P&G, mientras que este bloque causa únicamente lo nuevo.
+    // ══════════════════════════════════════════════════════════════════════
+    let gastoLiquidaciones = 0;
+    let indemnizacionesPeriodo = 0;
+    const anexoLiquidaciones = [];
+    try {
+      const liqSnap = await db.collection('liquidaciones_contrato')
+        .where('userId', '==', adminId).get();
+
+      liqSnap.docs.forEach(d => {
+        const l = d.data();
+        if (l.anulada === true) return;
+        const fecha = String(l.fechaRetiro || '').slice(0, 10);
+        if (!fecha) return;
+        if (desde && fecha < desde) return;
+        if (hasta && fecha > hasta) return;
+
+        const valor = Number(l.gastoNuevoTotal) || 0;
+        gastoLiquidaciones += valor;
+        indemnizacionesPeriodo += Number(l.valorIndemnizacion) || 0;
+        anexoLiquidaciones.push({
+          fecha,
+          numero: l.numero || '',
+          empleado: l.empleadoNombre || '',
+          motivo: l.motivoEtiqueta || '',
+          prestaciones: Number(l.totalPrestaciones) || 0,
+          descargadoDelPasivo: Number(l.descargadoDelPasivo) || 0,
+          indemnizacion: Number(l.valorIndemnizacion) || 0,
+          salarioPendiente: Number(l.salarioPendiente) || 0,
+          defectoProvision: Number(l.defectoProvision) || 0,
+          gastoNuevo: valor,
+          netoAPagar: Number(l.netoAPagar) || 0
+        });
+      });
+
+      if (gastoLiquidaciones > 0) {
+        gastosPorTipo.gasto_personal += gastoLiquidaciones;
+        gastosDetallePorCategoria['Liquidaciones e indemnizaciones'] =
+          (gastosDetallePorCategoria['Liquidaciones e indemnizaciones'] || 0) + gastoLiquidaciones;
+      }
+    } catch (e) {
+      // Colección aún inexistente: el ERI sigue funcionando
+      console.error('ERI liquidaciones:', e.message);
     }
 
     // ── Totales ─────────────────────────────────────────────────────────────
@@ -818,16 +963,48 @@ router.get('/', async (req, res) => {
             tipoERI: e.tipoERI || ''
           }))
           .sort((a, b) => String(a.numero || '').localeCompare(String(b.numero || ''), undefined, { numeric: true })),
+        // ✅ ERI-TRAZABILIDAD-001: qué ventas generaron el ingreso y el costo
+        // de cada categoría. Es lo que permite responder "¿de qué son estos
+        // $37.100?" sin salir del sistema.
+        detalleCategorias: Object.entries(detallePorCategoria)
+          .map(([categoria, items]) => ({
+            categoria,
+            items: items.sort((a, b) => b.costo - a.costo),
+            totalIngreso: items.reduce((a, i) => a + i.ingreso, 0),
+            totalCosto: items.reduce((a, i) => a + i.costo, 0),
+            cantidadItems: items.length
+          }))
+          .sort((a, b) => b.totalCosto - a.totalCosto),
         // ✅ ERI-PRESTACIONES-001: soporte de la provisión causada
         provisiones: anexoProvisiones.sort((a, b) =>
           String(a.periodo).localeCompare(String(b.periodo)) ||
-          String(a.empleado).localeCompare(String(b.empleado)))
+          String(a.empleado).localeCompare(String(b.empleado))),
+        // ✅ NOMINA-PASIVO-001: pagos que descargaron el pasivo. Van de anexo
+        // porque no son gasto, pero el dinero salió y tiene que verse.
+        pagosPasivoLaboral: anexoPagosPasivo.sort((a, b) =>
+          String(a.fecha).localeCompare(String(b.fecha))),
+        // ✅ NOMINA-LIQUIDACION-001: liquidaciones del período
+        liquidaciones: anexoLiquidaciones.sort((a, b) =>
+          String(a.fecha).localeCompare(String(b.fecha)))
       },
       // ✅ ERI-PRESTACIONES-001: se expone aparte para que el análisis
       // financiero pueda usarlo como pasivo corriente sin recalcularlo.
       prestaciones: {
         causadasEnPeriodo: Math.round(provisionesPrestaciones),
         empleadosConProvision: new Set(anexoProvisiones.map(p => p.documento)).size,
+        // ✅ NOMINA-PASIVO-001 / NOMINA-LIQUIDACION-001
+        pagadasEnPeriodo: Math.round(totalPagosPasivoLaboral),
+        // ✅ FASE 3: 0 mientras el interruptor esté apagado (los aportes entran
+        // por el egreso de la PILA, como siempre).
+        aportesPatronalesCausados: Math.round(aportesPatronalesCausados),
+        gastoPorLiquidaciones: Math.round(gastoLiquidaciones),
+        indemnizacionesDelPeriodo: Math.round(indemnizacionesPeriodo),
+        notaPagos: totalPagosPasivoLaboral > 0
+          ? 'Los pagos de prestaciones NO restan en este informe: descargan el pasivo que ya se causó mes a mes. Contarlos acá sería duplicar el gasto.'
+          : null,
+        notaLiquidaciones: gastoLiquidaciones > 0
+          ? 'De las liquidaciones solo entra al gasto lo que NO estaba provisionado: indemnización, salario pendiente y el defecto de provisión.'
+          : null,
         nota: provisionesPrestaciones > 0
           ? 'Gasto causado del período. No mueve caja: se acumula como obligación con los empleados.'
           : 'No hay provisiones causadas en este período. Causalas en Empleados → Provisiones para que el informe refleje el costo real de la nómina.'

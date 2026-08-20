@@ -41,6 +41,9 @@ export default function PanelNominaConfig({ user }) {
   const [exonerada, setExonerada] = useState(true);
   const [confirmado, setConfirmado] = useState(false);
   const [periodoCerrado, setPeriodoCerrado] = useState('');
+  // ✅ FASE 3 · NOMINA-RETENCION-001 — causación de seguridad social
+  const [causarSS, setCausarSS] = useState(false);
+  const [corteConfirmado, setCorteConfirmado] = useState(false);
 
   const headers = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}` });
 
@@ -56,6 +59,7 @@ export default function PanelNominaConfig({ user }) {
         setExonerada(c.data?.empresaExoneradaAportes !== false);
         setConfirmado(c.data?.exoneracionConfirmadaConContador === true);
         setPeriodoCerrado(c.data?.periodoCerradoHasta || '');
+        setCausarSS(c.data?.causarSeguridadSocial === true);
       } catch { }
       setCargando(false);
     })();
@@ -68,6 +72,32 @@ export default function PanelNominaConfig({ user }) {
         { empresaExoneradaAportes: exonerada, confirmadoConContador: confirmado },
         { headers: headers() });
       setMensaje('✅ Guardado. Las provisiones se recalculan con este criterio.');
+    } catch (e) {
+      setMensaje('✖ ' + (e.response?.data?.error || e.message));
+    }
+    setGuardando(false);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ FASE 3 — causación de seguridad social
+  // ───────────────────────────────────────────────────────────────────────────
+  // Encenderlo cambia el criterio contable de los aportes: pasan de entrar por
+  // caja (cuando se digita la PILA) a causarse mes a mes como pasivo.
+  //
+  // El backend rechaza el encendido sin `confirmadoCorteePILA: true`. No es
+  // burocracia: si se enciende y el suscriptor sigue digitando la planilla como
+  // egreso categoría "Nómina", el gasto de aportes se cuenta DOS VECES.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const guardarCausacionSS = async () => {
+    setGuardando(true); setMensaje('');
+    try {
+      await axios.put(`${API}/configuracion/nomina`,
+        { causarSeguridadSocial: causarSS, confirmadoCorteePILA: corteConfirmado },
+        { headers: headers() });
+      setConfig(c => ({ ...c, causarSeguridadSocial: causarSS }));
+      setMensaje(causarSS
+        ? '✅ Causación activada. Desde ahora la PILA se paga en Empleados → Pasivo laboral, NUNCA como egreso "Nómina".'
+        : '✅ Causación desactivada. La PILA vuelve a registrarse como egreso con categoría "Nómina".');
     } catch (e) {
       setMensaje('✖ ' + (e.response?.data?.error || e.message));
     }
@@ -233,6 +263,108 @@ export default function PanelNominaConfig({ user }) {
             {config.exoneracionConfirmadaConContador
               ? ' · ✓ confirmado con contador'
               : ' · ⚠️ sin confirmar con contador'}
+          </div>
+        )}
+      </div>
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          ✅ FASE 3 · CAUSACIÓN DE SEGURIDAD SOCIAL
+          ═══════════════════════════════════════════════════════════════════ */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>
+          <span style={{ ...S.acento, background: '#7c3aed' }} />
+          Causación de seguridad social
+          <span style={{
+            marginLeft: 10, fontSize: 10.5, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
+            background: config?.causarSeguridadSocial ? '#f5f3ff' : '#f1f5f9',
+            color: config?.causarSeguridadSocial ? '#6d28d9' : '#64748b',
+          }}>
+            {config?.causarSeguridadSocial ? 'ACTIVA' : 'APAGADA'}
+          </span>
+        </div>
+
+        <p style={{ margin: '0 0 14px', fontSize: 12.5, color: '#475569', lineHeight: 1.7 }}>
+          Hoy los aportes patronales y lo que se le retiene al trabajador entran al gasto
+          <strong> cuando digitás la planilla PILA</strong> como egreso. Funciona, pero el gasto
+          cae en el mes en que pagás, no en el que causaste: marzo queda corto y abril largo.
+          Y si un mes se te olvida digitarla, ese costo no aparece nunca.
+        </p>
+
+        <p style={{ margin: '0 0 16px', fontSize: 12.5, color: '#475569', lineHeight: 1.7 }}>
+          Al activar esto, los aportes se causan mes a mes junto con las prestaciones y la PILA
+          pasa a ser un <strong>descargue de pasivo</strong>, no un gasto. Desaparece el desfase
+          y la dependencia de no olvidarse.
+        </p>
+
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 12, padding: '14px 17px',
+          background: causarSS ? '#f5f3ff' : '#f8fafc',
+          border: `1.5px solid ${causarSS ? '#c4b5fd' : '#e2e8f0'}`,
+          borderRadius: 11, marginBottom: 14,
+        }}>
+          <input type="checkbox" id="causarSS" checked={causarSS}
+            onChange={e => { setCausarSS(e.target.checked); if (!e.target.checked) setCorteConfirmado(false); }}
+            style={{ width: 21, height: 21, cursor: 'pointer', marginTop: 2, flexShrink: 0 }} />
+          <label htmlFor="causarSS" style={{ cursor: 'pointer', flex: 1 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 800, color: causarSS ? '#6d28d9' : '#475569' }}>
+              Causar aportes patronales y retención al trabajador como pasivo
+            </div>
+            <div style={{ fontSize: 12, color: causarSS ? '#5b21b6' : '#64748b', marginTop: 4, lineHeight: 1.55 }}>
+              {causarSS
+                ? 'La PILA se paga en Empleados → Pasivo laboral. Registrarla como egreso "Nómina" duplicaría el gasto.'
+                : 'Comportamiento actual: la PILA se digita como egreso con categoría "Nómina" desde el módulo de Egresos.'}
+            </div>
+          </label>
+        </div>
+
+        {/* El procedimiento de corte. Sin esto, encenderlo duplica el gasto. */}
+        {causarSS && !config?.causarSeguridadSocial && (
+          <div style={{
+            background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 11,
+            padding: '14px 17px', marginBottom: 14, fontSize: 12.5, color: '#92400e', lineHeight: 1.75,
+          }}>
+            <div style={{ fontWeight: 800, marginBottom: 8 }}>⚠️ Procedimiento de corte — en este orden</div>
+            <ol style={{ margin: 0, paddingLeft: 20 }}>
+              <li>Pagá la PILA del mes anterior como venís haciéndolo (egreso categoría "Nómina").</li>
+              <li>Activá este interruptor.</li>
+              <li>Causá el mes en curso — la provisión ya incluirá los aportes.</li>
+              <li>De ahí en adelante, pagá la PILA desde <strong>Empleados → Pasivo laboral</strong>.
+                  Nunca más como egreso "Nómina".</li>
+              <li>Revisá el ERI del primer mes: si "Personal" saltó al doble, algún pago de PILA
+                  quedó con la categoría vieja.</li>
+            </ol>
+          </div>
+        )}
+
+        {causarSS && !config?.causarSeguridadSocial && (
+          <div style={{
+            display: 'flex', alignItems: 'flex-start', gap: 11, padding: '11px 16px',
+            background: '#f8fafc', borderRadius: 10, marginBottom: 14,
+          }}>
+            <input type="checkbox" id="corteConfirmado" checked={corteConfirmado}
+              onChange={e => setCorteConfirmado(e.target.checked)}
+              style={{ width: 17, height: 17, cursor: 'pointer', flexShrink: 0, marginTop: 2 }} />
+            <label htmlFor="corteConfirmado" style={{ cursor: 'pointer', fontSize: 12, color: '#475569', lineHeight: 1.55 }}>
+              Entiendo el procedimiento y me comprometo a <strong>no volver a digitar la PILA como
+              egreso con categoría "Nómina"</strong>.
+              <span style={{ color: '#94a3b8' }}> Queda registrado en auditoría con mi usuario y la fecha.</span>
+            </label>
+          </div>
+        )}
+
+        <button onClick={guardarCausacionSS}
+          disabled={guardando || (causarSS && !config?.causarSeguridadSocial && !corteConfirmado)}
+          style={{
+            ...S.btnPrimary,
+            opacity: (guardando || (causarSS && !config?.causarSeguridadSocial && !corteConfirmado)) ? 0.5 : 1,
+          }}>
+          {guardando ? 'Guardando...' : causarSS ? 'Activar causación' : 'Guardar'}
+        </button>
+
+        {config?.causacionSSActualizadaEn && (
+          <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 10 }}>
+            Última actualización: {String(config.causacionSSActualizadaEn).slice(0, 16).replace('T', ' ')}
+            {config.causacionSSActualizadaPor && ` · ${config.causacionSSActualizadaPor}`}
           </div>
         )}
       </div>
