@@ -1083,22 +1083,109 @@ const DIAS_MIN_ENTRE_WA = 30;   // un mensaje por cliente al mes
 // ✅ ANNY-VERTICAL-025: el nombre de la empresa y la palabra "extintor" NO se
 // escriben a mano — este módulo lo usan suscriptores de otros rubros. La
 // empresa sale del perfil del tenant y los equipos de su propio registro.
+// ✅ TELEVENC-WA-002: tres defectos de redacción corregidos.
+// ------------------------------------------------------------
+// 1. "(1 Extintor, 1 Extintor)" — se listaba CADA registro por
+//    separado en vez de agrupar por tipo. Un cliente con 2
+//    extintores leía su inventario duplicado como si fuéramos
+//    incapaces de contar. Ahora se agrupa y se suma.
+// 2. "su equipo ya están" — el verbo estaba fijo en plural y no
+//    concordaba con el sujeto singular.
+// 3. Paréntesis redundante: "sus 2 equipos (2 Extintores)" no
+//    aporta nada. Si todos son del mismo tipo, se nombra el tipo
+//    directamente: "sus 2 extintores".
+// Un mensaje de retención mal escrito trabaja en contra: el
+// cliente que lo lee concluye que no tenemos su información al día.
+// Pluraliza SOLO la primera palabra: la descripción suele traer la
+// referencia técnica detrás ("Extintor ABC 5 lbs") y pluralizar el
+// conjunto producía "extintor abc 5 lbses".
+const pluralizarEquipo = (descripcion, n) => {
+  const texto = String(descripcion || 'equipo').trim();
+  if (n === 1) return texto;
+
+  const partes = texto.split(/\s+/);
+  const cabeza = partes[0];
+  let plural;
+  if (/s$/i.test(cabeza)) plural = cabeza;                       // ya viene en plural
+  else if (/[aeiouáéíóú]$/i.test(cabeza)) plural = `${cabeza}s`;
+  else if (/z$/i.test(cabeza)) plural = `${cabeza.slice(0, -1)}ces`;
+  else plural = `${cabeza}es`;
+
+  return [plural, ...partes.slice(1)].join(' ');
+};
+
+// Una sola palabra genérica ("Extintor") se lee mejor en minúscula
+// dentro de la frase. Una referencia técnica ("Extintor ABC 5 lbs")
+// pierde sentido en minúscula: se respeta como está escrita.
+const etiquetaEnFrase = (texto) => {
+  const t = String(texto || '').trim();
+  return t.split(/\s+/).length === 1 ? t.toLowerCase() : t;
+};
+
 const construirMensajeVencidos = (cliente, equipos, nombreEmpresa) => {
   const nombre = (cliente.nombre || cliente.empresa || '').trim();
-  const total = equipos.reduce((a, e) => a + (Number(e.cantidad) || 1), 0);
-  const detalle = equipos.slice(0, 4)
-    .map(e => `${e.cantidad || 1} ${e.descripcionEquipo || 'equipo'}`)
-    .join(', ');
-  const sujeto = total === 1 ? 'su equipo' : `sus ${total} equipos`;
+
+  // Agrupar por tipo de equipo, sumando cantidades.
+  const porTipo = new Map();
+  for (const e of equipos || []) {
+    const etiqueta = String(e.descripcionEquipo || 'equipo').trim() || 'equipo';
+    const clave = etiqueta.toLowerCase();
+    const cant = Number(e.cantidad) || 1;
+    const prev = porTipo.get(clave);
+    porTipo.set(clave, { etiqueta: prev?.etiqueta || etiqueta, cantidad: (prev?.cantidad || 0) + cant });
+  }
+
+  const grupos = [...porTipo.values()].sort((a, b) => b.cantidad - a.cantidad);
+  const total = grupos.reduce((a, g) => a + g.cantidad, 0);
+
+  let sujeto = total === 1 ? 'su equipo' : `sus ${total} equipos`;
+  let detalle = '';
+
+  if (grupos.length === 1) {
+    // Un solo tipo: se nombra directo, sin paréntesis que repita lo mismo.
+    const base = etiquetaEnFrase(grupos[0].etiqueta);
+    sujeto = total === 1 ? `su ${base}` : `sus ${total} ${pluralizarEquipo(base, total)}`;
+  } else {
+    detalle = grupos.slice(0, 4)
+      .map(g => `${g.cantidad} ${pluralizarEquipo(etiquetaEnFrase(g.etiqueta), g.cantidad)}`)
+      .join(', ');
+  }
+
+  const verbo = total === 1 ? 'ya está' : 'ya están';
   const firma = nombreEmpresa ? ` Le escribimos de ${nombreEmpresa}.` : '';
 
   return `Hola ${nombre} 👋${firma} ` +
-    `Vemos que ${sujeto} ya están para renovar el servicio${detalle ? ` (${detalle})` : ''}. ` +
+    `Vemos que ${sujeto} ${verbo} para renovar el servicio${detalle ? ` (${detalle})` : ''}. ` +
     `¿Le agendamos esta semana o prefiere pasar por la oficina?`;
 };
 
 // Nombre comercial del tenant para firmar el mensaje. Se toma del perfil de
 // Anny (annyConfig.perfil.empresa); si no está, del documento del usuario.
+// ✅ TELEVENC-WA-002: `perfil.empresa` debe contener SOLO el nombre
+// comercial ("Extintores del Valle"). Si alguien guarda ahí una frase
+// completa —"Hola soy Anny, asistente virtual de Extintores del Valle"—
+// el mensaje sale como "Le escribimos de Hola soy Anny, asistente
+// virtual de Extintores del Valle." y, peor, la identidad de Anny en su
+// propio prompt queda igual de rota.
+// Aquí se detecta y se rescata el nombre real. NO reemplaza al arreglo
+// de fondo: el log avisa para que se corrija el dato en el perfil.
+const limpiarNombreEmpresa = (valor, adminId) => {
+  const bruto = String(valor || '').trim();
+  if (!bruto) return '';
+
+  const pareceFrase = /\b(hola|soy|buenas|asistente|virtual|escribimos)\b/i.test(bruto) || bruto.length > 70;
+  if (!pareceFrase) return bruto;
+
+  console.warn(`[TELEVENC-WA-002] perfil.empresa del tenant ${adminId} parece una frase, no un nombre: "${bruto.slice(0, 80)}". Corregir en el perfil de Anny.`);
+
+  // Rescate: casi siempre el nombre real va después del último " de ".
+  const partes = bruto.split(/\s+de\s+/i);
+  const candidato = partes.length > 1 ? partes[partes.length - 1].trim() : '';
+  if (candidato && candidato.length <= 70) return candidato.replace(/[.,;]+$/, '');
+
+  return '';
+};
+
 const obtenerNombreEmpresaTenant = async (adminId) => {
   try {
     const [cfgDoc, userDoc] = await Promise.all([
@@ -1106,7 +1193,8 @@ const obtenerNombreEmpresaTenant = async (adminId) => {
       db.collection('users').doc(adminId).get(),
     ]);
     const perfilEmpresa = cfgDoc.exists ? (cfgDoc.data()?.perfil?.empresa || '') : '';
-    if (perfilEmpresa && perfilEmpresa !== 'la empresa') return perfilEmpresa;
+    const limpio = limpiarNombreEmpresa(perfilEmpresa, adminId);
+    if (limpio && limpio !== 'la empresa') return limpio;
     const u = userDoc.exists ? userDoc.data() : {};
     return u.empresaNombre || u.nombreEmpresa || u.nombre || '';
   } catch (e) {

@@ -182,6 +182,33 @@ router.put('/perfil/:adminId', authenticate, soloSuperAdmin, async (req, res) =>
       return res.status(400).json({ error: 'nicho inválido' });
     }
 
+    // ✅ ANNY-PERFIL-055: `empresa` y `nombreAgente` son NOMBRES, no frases.
+    // Guardar ahí "Hola soy Anny, asistente virtual de Extintores del Valle"
+    // rompía dos cosas a la vez: el mensaje de Telemercadeo salía como
+    // "Le escribimos de Hola soy Anny, asistente virtual de..." y la
+    // identidad de Anny en su propio prompt quedaba igual de rota
+    // ("Eres Anny, asesora comercial de Hola soy Anny, asistente...").
+    // Se valida al guardar: es el único punto donde se puede evitar.
+    const pareceFrase = (v) => /\b(hola|buenas|soy|asistente|virtual|escribimos|buenos días)\b/i.test(String(v));
+
+    if (empresa !== undefined) {
+      const e = String(empresa).trim();
+      if (e.length > 70 || pareceFrase(e)) {
+        return res.status(400).json({
+          error: 'El campo "empresa" debe ser SOLO el nombre comercial (ej: "Extintores del Valle"), no un saludo ni una frase. Anny arma la presentación por su cuenta.'
+        });
+      }
+    }
+
+    if (nombreAgente !== undefined) {
+      const n = String(nombreAgente).trim();
+      if (n.length > 30 || n.split(/\s+/).length > 3) {
+        return res.status(400).json({
+          error: 'El campo "nombreAgente" debe ser SOLO el nombre de la agente (ej: "Anny").'
+        });
+      }
+    }
+
     const resultado = await annyService.actualizarPerfilTenant(adminId, {
       nombreAgente, empresa, vertical, queVende, fuentePrecios, reglasNegocio,
       nicho,
