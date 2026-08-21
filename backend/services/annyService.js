@@ -315,7 +315,7 @@ const MISIONES = {
     ventaReactiva: true,
     permitePedido: true,
     maxChars: 280,
-    reglas: 'NO ofrezcas productos por iniciativa propia: el tema es el saldo, el medio de pago y la fecha. Si el cliente discute el valor o dice que ya pagó, ESCALA. Si el cliente pide comprar o cotizar algo, atiéndelo con el catálogo y recuérdale amablemente que también quede pendiente el saldo.'
+    reglas: 'NO ofrezcas productos por iniciativa propia: el tema es el saldo, el medio de pago y la fecha. Si el cliente DISCUTE el valor, ESCALA. Si dice que YA PAGÓ, NO escales: es un reporte de pago — llena "comprobantePago" y el sistema avisa a tesorería (ANNY-PAGO-050). Si el cliente pide comprar o cotizar algo, atiéndelo con el catálogo y recuérdale amablemente que también quede pendiente el saldo.'
   },
   NOTIFICACION_TALLER: {
     objetivo: 'Informar un cambio de repuesto o novedad del taller y obtener autorización SÍ/NO.',
@@ -344,7 +344,7 @@ const MISIONES = {
     ventaReactiva: true,
     permitePedido: true,
     maxChars: 300,
-    reglas: 'El pedido YA está registrado: NO lo vuelvas a tomar ni abras uno nuevo por lo mismo. Resuelve dudas de pago y entrega con la base de conocimiento. Si dice que ya pagó, agradece y dile que se valida el comprobante — NUNCA confirmes tú que el pago quedó registrado. Si discute el valor, ESCALA.'
+    reglas: 'El pedido YA está registrado: NO lo vuelvas a tomar ni abras uno nuevo por lo mismo. Resuelve dudas de pago y entrega con la base de conocimiento. Si dice que ya pagó, es un reporte de pago: llena "comprobantePago" y NUNCA confirmes tú que el pago quedó registrado. Si discute el valor, ESCALA.'
   },
   REACTIVACION: {
     objetivo: 'Reactivar a un cliente con servicio vencido o inactivo e invitarlo a agendar.',
@@ -1593,20 +1593,40 @@ Además de responderle, CLASIFICA su mensaje en el campo "respuestaTaller":
     // Anny CONFIRMA lo que ve, nunca lo da por hecho: una etiqueta borrosa
     // metida al pedido como certeza termina en una recarga equivocada.
     const bloqueImagen = imagenAdjunta ? `
-EL CLIENTE ENVIÓ UNA FOTO (la estás viendo arriba):
+EL CLIENTE ENVIÓ UNA FOTO (la estás viendo arriba). CLASIFÍCALA PRIMERO — hay tres casos y se responden distinto:
+
+CASO A · LA FOTO TIENE QUE VER CON NUESTRO NEGOCIO (un equipo, una etiqueta, un extintor, un producto, un sitio que hay que señalizar, algo que quiere cotizar):
 - Descríbele lo que identificas y PÍDELE QUE CONFIRME antes de usarlo. Ejemplo: "Veo [lo que sea que identifiques], ¿es correcto?".
 - Si no se lee bien o dudas de algún dato, DILO y pide otra foto más cerca. NO adivines.
 - Si ves varios artículos, di cuántos cuentas y pide confirmación.
 - NUNCA cierres un pedido con datos que solo salieron de una foto sin que el cliente los haya confirmado por texto.
-- Relaciona lo que ves con el CATÁLOGO de arriba. Si no corresponde a nada del catálogo, describe lo que ves y PREGUNTA al cliente qué necesita con ese equipo. ESCALA (tipo PRECIO) solo cuando el cliente confirme que quiere ese producto/servicio y no tengas precio para dárselo.
+- Relaciona lo que ves con el CATÁLOGO de arriba. ESCALA (tipo PRECIO) solo cuando el cliente confirme que quiere ese producto/servicio y no tengas precio para dárselo.
 
-SI LA FOTO ES UN COMPROBANTE DE PAGO (ANNY-PAGO-050):
-Un comprobante es una transferencia, consignación, pantallazo de Nequi, Daviplata, Bancolombia, Davivienda, PSE o un recibo de caja.
-- Devuelve "comprobantePago" con lo que alcances a leer: monto, fecha, banco o billetera, y número de referencia. Lo que no se lea, ponlo en null. NO adivines cifras.
-- Pon "escalado": false y deja "respuesta" vacía: el texto para el cliente lo pone el sistema, no tú.
-- NUNCA escribas que el pago quedó recibido, aplicado, confirmado, abonado o registrado. Tú no ves la cuenta bancaria de la empresa. Quien valida es tesorería.
-- Si dudas de si es un comprobante, trátalo como comprobante: es preferible que tesorería reciba un soporte de más a que se pierda uno.
+CASO B · ES UN COMPROBANTE DE PAGO — ver la sección de pagos más abajo.
+
+CASO C · LA FOTO NO TIENE NADA QUE VER CON NUESTRO NEGOCIO (ANNY-FOTO-053):
+Publicidad de otro negocio, el menú de un restaurante, una promoción, una tarjeta de presentación, un volante, un saludo, una cadena, un meme, un sticker, una foto personal o familiar.
+- Responde en UNA sola frase: agradece con cordialidad y cierra. Ejemplo: "¡Gracias por compartirlo! Cualquier cosa que necesites, aquí estoy."
+- NO preguntes qué necesita con esa foto: es evidente que no necesita nada, solo la compartió.
+- NO la relaciones con el catálogo ni ofrezcas productos. Nadie manda el menú de su restaurante para que le vendan un extintor.
+- NO ESCALES. Esto no necesita un asesor, necesita educación. Escalar un menú del día por WhatsApp le hace perder el tiempo al equipo y le enseña a la gente a ignorar los avisos.
+- Pon "escalado": false y "tipo": "INFO".
+
 ` : '';
+
+    // ✅ ANNY-PAGO-050 (ampliado): el reporte de pago no siempre viene con
+    // foto. "Ya te consigné", "hice la transferencia esta mañana" es
+    // exactamente el mismo hecho de negocio y merece el mismo trato:
+    // acuse honesto al cliente + aviso a tesorería, sin escalar.
+    const bloquePago = `
+CUANDO EL CLIENTE REPORTA UN PAGO (ANNY-PAGO-050) — con foto o sin ella:
+Cuenta como reporte de pago un comprobante de transferencia, consignación, pantallazo de Nequi, Daviplata, Bancolombia, Davivienda o PSE, un recibo de caja, y también un mensaje de texto donde el cliente AFIRMA que ya pagó ("ya te consigné", "hice la transferencia", "ya quedó el pago", "te mandé la plata").
+- Llena "comprobantePago" con lo que tengas: monto, fecha, banco o billetera, referencia. Lo que no sepas, va en null. NO adivines cifras ni fechas.
+- Pon "escalado": false y deja "respuesta" vacía. El texto para el cliente lo pone el sistema, no tú: es la frase donde una palabra de más cuesta plata.
+- NUNCA escribas que el pago quedó recibido, aplicado, confirmado, abonado o registrado. Tú no ves la cuenta bancaria de la empresa. Quien valida es tesorería.
+- SOLO cuenta si el pago YA se hizo. "Mañana te pago", "voy a consignar" o "¿a qué cuenta te consigno?" NO son reportes de pago: eso se responde normal.
+- Si dudas de si una foto es un comprobante, trátala como comprobante: es preferible que tesorería reciba un soporte de más a que se pierda uno.
+`;
 
     // ✅ ANNY-SALUDO-037: presentación e identificación del interlocutor.
     const bloquePresentacion = esPrimerContacto ? `
@@ -1755,13 +1775,15 @@ PEDIDO CONFIRMADO: ${mision.permitePedido ? 'cuando el cliente confirme la compr
 
 ${bloqueDefecto}
 ${bloqueImagen}
+${bloquePago}
 
 Responde SOLO en JSON (sin markdown):
 {
   "escalado": boolean,
   "tipo": "PRECIO|SERVICIO|DATOS|PAGO|NEGOCIACION|CAPACITACION|PROBLEMA|VENTA|HUMANO|OTRO",
   "respuesta": "tu respuesta si NO escalado",
-  "razon": "por qué escalas (si escalado)",${imagenAdjunta ? '\n  "comprobantePago": null | { "monto": "valor leído o null", "fecha": "fecha leída o null", "banco": "banco o billetera o null", "referencia": "número de referencia o null" },' : ''}${defectoPendiente ? '\n  "respuestaTaller": "APROBADO" | "RECHAZADO" | null,' : ''}
+  "razon": "por qué escalas (si escalado)",
+  "comprobantePago": null | { "monto": "valor o null", "fecha": "fecha o null", "banco": "banco o billetera o null", "referencia": "referencia o null" },${defectoPendiente ? '\n  "respuestaTaller": "APROBADO" | "RECHAZADO" | null,' : ''}
   "contacto": { "nombre": "nombre de la persona SI lo dijo en este mensaje, si no null", "empresa": "empresa que representa SI la dijo, si no null" },
   "pedido": null | {
     "producto": "descripción del producto/servicio",
@@ -2041,6 +2063,36 @@ async function procesarMensajeEntrante(props) {
     // pasaba nada. Ahora se responde determinístico: se le pide
     // el dato por texto, sin prometer una revisión que no existe.
     // ══════════════════════════════════════════════════════════
+    // ✅ ANNY-AUDIO-054: la nota de voz no se pudo transcribir. Antes el
+    // marcador entraba al modelo y salía una respuesta inventada o un
+    // "permíteme escucharlo" imposible. Ahora se admite y se pide por texto.
+    // El log de abajo es el que dice POR QUÉ falló: buscar [ANNY-MEDIA] en
+    // los logs del servidor (falta de credencial, tope, o error del proveedor).
+    // Cubre los dos marcadores que produce baileysService: transcripción
+    // fallida y medio no analizado por tope o por configuración.
+    if (/^\[el cliente envió una nota de voz/i.test(String(mensajeTexto).trim())) {
+      const porTope = /no se analizó/i.test(String(mensajeTexto));
+      const respuestaAudio = 'No logré escuchar tu nota de voz. ¿Me lo escribes en un mensaje? Así te respondo de una.';
+      console.error(`[ANNY-AUDIO-054] Nota de voz sin procesar (${porTope ? 'tope o análisis desactivado' : 'transcripción fallida'}) — tenant ${adminId}, chat ${telefono}. Revisa los logs [ANNY-MEDIA] para la causa.`);
+
+      await registrarConversacion(adminId, {
+        telefono,
+        nombreCliente,
+        mensajeCliente: mensajeTexto,
+        respuestaAgente: respuestaAudio,
+        respondidoPor: 'AGENTE_AUTOMATICO',
+        tipo: 'AUDIO_NO_PROCESADO',
+        escalado: false
+      });
+
+      return {
+        procesado: true,
+        tipo: 'AUDIO_NO_PROCESADO',
+        accion: 'enviar_mensaje',
+        respuesta: respuestaAudio
+      };
+    }
+
     if (!imagenAdjunta && /^\[el cliente envió una foto/i.test(String(mensajeTexto).trim())) {
       // Texto neutro entre verticales: no menciona extintores porque el
       // motor es multipropósito (ANNY-CFG-010).
@@ -2221,9 +2273,12 @@ async function procesarMensajeEntrante(props) {
 
       // Texto determinístico: el modelo NO redacta esto. Es la frase
       // donde más caro sale una palabra de más ("recibido" ≠ "aplicado").
+      // Con foto se dice "comprobante"; sin foto, "aviso de pago". Decirle
+      // comprobante a un mensaje de texto suena a que se recibió algo que no llegó.
+      const queLlego = imagenAdjunta ? 'tu comprobante' : 'tu aviso de pago';
       const respuestaPago = orden
-        ? `Recibí tu comprobante y lo dejé asociado a la orden ${orden.numero}. Tesorería lo valida y te confirmamos. ¡Gracias!`
-        : 'Recibí tu comprobante y ya lo pasé a tesorería para que lo validen. Apenas quede confirmado te avisamos. ¡Gracias!';
+        ? `Recibí ${queLlego} y lo dejé asociado a la orden ${orden.numero}. Tesorería lo valida y te confirmamos. ¡Gracias!`
+        : `Recibí ${queLlego} y ya lo pasé a tesorería para que lo validen. Apenas quede confirmado te avisamos. ¡Gracias!`;
 
       await registrarConversacion(adminId, {
         telefono,
@@ -2242,7 +2297,9 @@ async function procesarMensajeEntrante(props) {
         cp.fecha ? `Fecha: ${cp.fecha}` : null,
         cp.banco ? `Medio: ${cp.banco}` : null,
         cp.referencia ? `Ref: ${cp.referencia}` : null
-      ].filter(Boolean).join(' · ') || 'No se pudo leer el detalle del comprobante';
+      ].filter(Boolean).join(' · ') || (imagenAdjunta
+        ? 'No se pudo leer el detalle del comprobante — revisar la imagen'
+        : 'El cliente no dio detalles del pago — confirmar antes de abonar');
 
       return {
         procesado: true,
@@ -2250,7 +2307,7 @@ async function procesarMensajeEntrante(props) {
         accion: 'enviar_mensaje',
         respuesta: respuestaPago,
         avisoPago:
-          `💵 *COMPROBANTE DE PAGO RECIBIDO*\n` +
+          `💵 *${imagenAdjunta ? 'COMPROBANTE DE PAGO RECIBIDO' : 'EL CLIENTE AVISA QUE YA PAGÓ (sin soporte)'}*\n` +
           `${nombreCliente || 'Sin nombre'} — ${telefono}\n` +
           `${detalle}\n` +
           `${orden ? `Orden ${orden.numero}${orden.saldo > 0 ? ` · saldo $${orden.saldo.toLocaleString('es-CO')}` : ''}` : '⚠️ Sin orden asociada — verificar a qué corresponde'}\n` +
