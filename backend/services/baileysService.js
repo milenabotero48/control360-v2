@@ -345,6 +345,38 @@ async function casoPendienteDe(adminId, telefono) {
   }
 }
 
+// ✅ ANNY-ATENDIDO-052: cierra los casos pendientes de un chat
+// cuando una persona del equipo le escribe al cliente. Silencioso
+// a propósito: no manda avisos, solo deja de insistir.
+async function cerrarCasosPorRespuestaManual(adminId, telefono) {
+  try {
+    const snap = await db.collection('casosEscaladosAnny')
+      .doc(adminId)
+      .collection('casos')
+      .where('telefono', '==', telefono)
+      .where('estado', '==', 'PENDIENTE')
+      .limit(10)
+      .get();
+
+    if (snap.empty) return 0;
+
+    const lote = db.batch();
+    snap.docs.forEach(d => lote.update(d.ref, {
+      estado: 'RESUELTO',
+      resueltoPor: 'respuesta_manual',
+      resueltoMs: Date.now(),
+      notas: 'Cerrado automáticamente: el equipo le respondió al cliente por WhatsApp.'
+    }));
+    await lote.commit();
+
+    console.log(`[BAILEYS] ${snap.size} caso(s) de ${telefono} cerrados por respuesta manual`);
+    return snap.size;
+  } catch (err) {
+    console.error('[BAILEYS] Error cerrando casos por respuesta manual:', err.message);
+    return 0;
+  }
+}
+
 // ============================================================
 // ✅ ANNY-AVISO-041 — BUG CRÍTICO: el aviso interno de
 // escalamiento se armaba y se tiraba a la basura.
@@ -519,6 +551,20 @@ async function procesarMensaje(adminId, msg) {
     });
 
     await annyService.pausarAnny(adminId, telefono, 30, 'intervencion_manual');
+
+    // ✅ ANNY-ATENDIDO-052 — atender es escribirle al cliente, no
+    // entrar al panel a marcar una casilla.
+    // ------------------------------------------------------------
+    // El caso solo pasaba a RESUELTO desde el botón del panel. Quien
+    // atiende de verdad lo hace desde WhatsApp, contestándole al
+    // cliente — y el caso quedaba PENDIENTE, así que el cron de SLA
+    // seguía insistiendo con un caso ya atendido. Avisos que mienten
+    // se vuelven avisos que nadie lee, y ahí se pierde todo lo ganado.
+    //
+    // Ahora: un mensaje manual real de una persona a ese chat cierra
+    // los casos pendientes de ese teléfono. Queda constancia de que
+    // se cerró por respuesta manual, no con un click en el panel.
+    await cerrarCasosPorRespuestaManual(adminId, telefono);
     return;
   }
 
