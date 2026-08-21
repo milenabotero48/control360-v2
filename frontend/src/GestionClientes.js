@@ -672,6 +672,12 @@ const GestionClientes = ({ user, empresas = [] }) => {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
               <div style={{ fontWeight: 700, color, marginBottom: 4 }}>
                 Mismo {g.criterioLabel}: {g.valor}
+                {/* ✅ DUP-003: el mismo cliente cargado en dos empresas del tenant */}
+                {g.entreEmpresas && (
+                  <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 800, color: '#7c3aed', background: '#f3e8ff', border: '1px solid #ddd6fe', borderRadius: 999, padding: '2px 8px', whiteSpace: 'nowrap' }}>
+                    🏢 En {(g.empresas || []).length} empresas
+                  </span>
+                )}
               </div>
               <button onClick={() => descartarGrupo(g)}
                 style={{ border: '1px solid #d1d5db', background: '#fff', color: '#475569', borderRadius: 6, padding: '3px 10px', fontSize: 11, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}
@@ -701,7 +707,7 @@ const GestionClientes = ({ user, empresas = [] }) => {
             {totalSeg > 0 && (
               <div style={{ marginBottom: totalRev > 0 ? 14 : 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 800, color: '#dc2626', marginBottom: 8 }}>
-                  🔴 Duplicados probables ({totalSeg}) — mismo NIT o mismo cliente repetido
+                  🔴 Duplicados probables ({totalSeg}) — mismo NIT, mismo nombre o el mismo cliente en dos empresas
                 </div>
                 {(duplicados.seguros || []).map((g, i) => (
                   <TarjetaGrupo key={i} g={g} color="#b91c1c" bg="#fef2f2" border="#fecaca" />
@@ -714,13 +720,13 @@ const GestionClientes = ({ user, empresas = [] }) => {
               <div>
                 <button onClick={() => setVerMultinegocio(v => !v)}
                   style={{ width: '100%', textAlign: 'left', border: '1px solid #fde68a', background: '#fffbeb', borderRadius: 8, padding: '8px 12px', fontSize: 13, fontWeight: 700, color: '#b45309', cursor: 'pointer', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>🟡 Posibles empresas del mismo dueño ({totalRev}) — mismo teléfono, nombres distintos</span>
+                  <span>🟡 Requieren tu criterio ({totalRev}) — mismo teléfono o razón social parecida con NIT distinto</span>
                   <span>{verMultinegocio ? '▲' : '▼'}</span>
                 </button>
                 {verMultinegocio && (
                   <div style={{ marginTop: 8 }}>
                     <p style={{ fontSize: 11, color: '#6b7280', margin: '0 0 8px' }}>
-                      Estos NO son duplicados: comparten teléfono pero son clientes distintos (un dueño con varias empresas). Si confirmas que es así, descártalos para no volver a verlos.
+                      Probablemente NO son duplicados: comparten teléfono con nombres distintos (un dueño con varios negocios), o el nombre se parece pero el NIT es distinto (razones sociales diferentes). Si confirmas que son legítimos, descártalos para no volver a verlos.
                     </p>
                     {(duplicados.revisar || []).map((g, i) => (
                       <TarjetaGrupo key={i} g={g} color="#b45309" bg="#fffbeb" border="#fde68a" />

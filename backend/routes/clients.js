@@ -334,21 +334,74 @@ router.get('/duplicados', authenticate, async (req, res) => {
       .where('adminId', '==', adminId).get();
     const gruposDescartados = new Set(descSnap.docs.map(d => d.data().firma));
 
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ DUP-003: identidad de cliente a nivel TENANT, no por empresa.
+    // Antes cada llave incluía empresaId (`NIT|empresa|valor`), así que el
+    // mismo cliente cargado en dos empresas del suscriptor (Sur y Valle) era
+    // IMPOSIBLE de detectar. Ahora la llave es del tenant y el grupo marca
+    // `entreEmpresas` para que la UI lo explique.
+    // ══════════════════════════════════════════════════════════════════════
     const normTel = (t) => {
       let d = String(t || '').replace(/\D/g, '');
       if (d.length === 12 && d.startsWith('57')) d = d.slice(2);
       return d || null;
     };
-    const normNom = (n) => String(n || '').toUpperCase().trim().replace(/\s+/g, ' ') || null;
+
+    // Sufijos societarios: no aportan identidad. "COLTANQUES S.A.S",
+    // "COLTANQUES SAS" y "COLTANQUES" son la misma razón social escrita
+    // de tres formas distintas.
+    const SUFIJOS_SOCIETARIOS = new Set([
+      'SAS', 'SA', 'LTDA', 'LTD', 'EU', 'ESP', 'BIC', 'CIA', 'Y',
+      'INC', 'CORP', 'SCA', 'SENC', 'SCS', 'SRL', 'EAT', 'EICE'
+    ]);
+
+    // Normalización base: mayúsculas, sin tildes, sin paréntesis (ahí suele
+    // ir el NIT), sin puntos (S.A.S → SAS) y sin puntuación.
+    const normNomBase = (n) => String(n || '')
+      .toUpperCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/\([^)]*\)/g, ' ')
+      .replace(/\./g, '')
+      .replace(/[^A-Z0-9]+/g, ' ')
+      .trim();
+
+    // Normalización de identidad: quita el NIT suelto y los sufijos finales.
+    const normNom = (n) => {
+      const base = normNomBase(n);
+      if (!base) return null;
+      const toks = base.split(' ').filter(w => w && !/^\d{6,}$/.test(w));
+      while (toks.length > 1 && SUFIJOS_SOCIETARIOS.has(toks[toks.length - 1])) toks.pop();
+      return toks.join(' ') || null;
+    };
+
+    // ✅ DUP-003: muchos clientes traen el NIT metido en el nombre
+    // ("COLTANQUES S.A.S (860040576)") y el campo nit vacío. Sin esto, ese
+    // registro nunca cruzaba con su gemelo que sí tiene el NIT en su campo.
+    // Se descarta lo que parece celular colombiano (10 dígitos que empiezan
+    // en 3) para no confundir un teléfono escrito en el nombre con un NIT.
+    const nitDesdeNombre = (n) => {
+      const m = String(n || '').match(/\b(\d{6,12})\b/);
+      if (!m) return null;
+      const v = m[1];
+      if (v.length === 10 && v.startsWith('3')) return null;
+      return v;
+    };
+    const nitEfectivo = (c) => {
+      const propio = String(c.nit || '').replace(/\D/g, '');
+      return propio || nitDesdeNombre(c.nombre);
+    };
+
     // Palabras significativas de un nombre (para medir similitud)
-    const palabras = (n) => new Set(normNom(n)?.split(' ').filter(w => w.length >= 3) || []);
+    const palabras = (n) => new Set(
+      (normNom(n) || '').split(' ').filter(w => w.length >= 3)
+    );
     const compartenPalabra = (a, b) => {
       const pa = palabras(a), pb = palabras(b);
       for (const w of pa) if (pb.has(w)) return true;
       return false;
     };
 
-    // Agrupar por cada criterio
+    // Agrupar por cada criterio — llaves de TENANT (sin empresaId)
     const grupos = new Map();
     const agrupar = (clave, c) => {
       if (!clave) return;
@@ -356,25 +409,39 @@ router.get('/duplicados', authenticate, async (req, res) => {
       grupos.get(clave).set(c.id, c);
     };
     for (const c of clientes) {
-      const emp = c.empresaId || '';
-      if (c.nit) agrupar(`NIT|${emp}|${c.nit}`, c);
+      const nitC = nitEfectivo(c);
+      if (nitC) agrupar(`NIT|${nitC}`, c);
       const t = normTel(c.celular) || normTel(c.telefono);
-      if (t) agrupar(`TEL|${emp}|${t}`, c);
+      if (t) agrupar(`TEL|${t}`, c);
       const n = normNom(c.nombre);
-      // ✅ DUP-002: el nombre solo agrupa si es COMPLETO (2+ palabras). Antes
-      // "OSCAR" o "GERMAN" a secas generaban falsos grupos con homónimos.
-      if (n && n.split(' ').length >= 2) agrupar(`NOMBRE|${emp}|${n}`, c);
+      // ✅ DUP-002: el nombre solo agrupa si es COMPLETO (2+ palabras) para no
+      // cruzar homónimos ("OSCAR", "GERMAN"). El conteo se hace ANTES de quitar
+      // el sufijo societario, así "COLTANQUES SAS" (2 palabras) sí califica
+      // aunque su identidad normalizada quede en una sola palabra.
+      const tokensOriginales = normNomBase(c.nombre).split(' ').filter(Boolean).length;
+      if (n && tokensOriginales >= 2) agrupar(`NOMBRE|${n}`, c);
     }
 
     // ✅ DUP-002: clasificar cada grupo por nivel de confianza
-    //   🔴 seguro   → mismo NIT, o mismo teléfono + nombres que se parecen
+    //   🔴 seguro   → mismo NIT, mismo nombre, o mismo teléfono + nombres que
+    //                 se parecen. Incluye el mismo cliente repetido en dos
+    //                 empresas del tenant (DUP-003).
     //   🟡 revisar  → mismo teléfono con nombres distintos (posible multi-negocio
-    //                 de un mismo dueño: NO es duplicado, solo se muestra por si acaso)
+    //                 de un mismo dueño), o mismo nombre con NITs distintos
+    //                 (razones sociales legítimamente diferentes).
     const seguros = [];
     const revisar = [];
     const vistos = new Set();
+    const emitidos = [];   // conjuntos de ids ya reportados (para no repetir subgrupos)
 
-    for (const [clave, mapaC] of grupos) {
+    // Grupos grandes primero: si un grupo queda contenido en otro ya emitido,
+    // no se muestra dos veces el mismo hallazgo con distinto criterio.
+    const clavesOrdenadas = [...grupos.keys()].sort(
+      (a, b) => grupos.get(b).size - grupos.get(a).size
+    );
+
+    for (const clave of clavesOrdenadas) {
+      const mapaC = grupos.get(clave);
       if (mapaC.size < 2) continue;
       const arr = [...mapaC.values()];
       const ids = arr.map(c => c.id).sort();
@@ -383,13 +450,24 @@ router.get('/duplicados', authenticate, async (req, res) => {
       if (vistos.has(firma)) continue;
       vistos.add(firma);
       if (gruposDescartados.has(firma)) continue; // ✅ ya revisado, es legítimo
+      // Subconjunto de un grupo ya reportado → mismo hallazgo, no repetir
+      if (emitidos.some(set => ids.every(id => set.has(id)))) continue;
 
-      const criterio = clave.split('|')[0];
-      const valor = clave.split('|')[2];
+      const partes = clave.split('|');
+      const criterio = partes[0];
+      const valor = partes.slice(1).join('|');
+
+      const nitsDistintos = new Set(
+        arr.map(c => String(c.nit || '').replace(/\D/g, '')).filter(Boolean)
+      );
 
       let nivel;
-      if (criterio === 'NIT' || criterio === 'NOMBRE') {
-        nivel = 'seguro'; // mismo NIT o mismo nombre completo = misma entidad
+      if (criterio === 'NIT') {
+        nivel = 'seguro';
+      } else if (criterio === 'NOMBRE') {
+        // Si el grupo trae NITs distintos son entidades distintas que
+        // colapsaron al quitar el sufijo ("X SAS" vs "X LTDA") → a revisar.
+        nivel = nitsDistintos.size > 1 ? 'revisar' : 'seguro';
       } else {
         // Criterio TEL: ¿los nombres se parecen entre sí?
         let algunoSimilar = false;
@@ -398,15 +476,20 @@ router.get('/duplicados', authenticate, async (req, res) => {
             if (compartenPalabra(arr[i].nombre, arr[j].nombre)) { algunoSimilar = true; break; }
           }
         }
-        nivel = algunoSimilar ? 'seguro' : 'revisar';
+        nivel = algunoSimilar && nitsDistintos.size <= 1 ? 'seguro' : 'revisar';
       }
+
+      const empresasGrupo = [...new Set(arr.map(c => c.empresaNombre || 'Sin empresa'))];
 
       const grupo = {
         firma, criterio,
         criterioLabel: criterio === 'TEL' ? 'teléfono' : criterio === 'NIT' ? 'NIT' : 'nombre',
         valor,
+        entreEmpresas: empresasGrupo.length > 1,   // ✅ DUP-003
+        empresas: empresasGrupo,
         clientes: arr
       };
+      emitidos.push(new Set(ids));
       (nivel === 'seguro' ? seguros : revisar).push(grupo);
     }
 
