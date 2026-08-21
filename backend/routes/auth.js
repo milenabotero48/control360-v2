@@ -271,13 +271,30 @@ router.post('/login', async (req, res) => {
     const resetCampos = { intentosFallidos: 0, sessionToken };
     if (user.bloqueadoHasta) resetCampos.bloqueadoHasta = admin.firestore.FieldValue.delete();
 
-    // ✅ FIX MULTIADMIN-001 — autocuración: si el documento no traía la marca de
-    // propiedad, se estampa con el valor que la regla legacy ya le daba. El
-    // sistema se migra solo con el uso normal, sin cambiarle el comportamiento
-    // a nadie, aunque el script de migración no se haya ejecutado.
-    if (typeof user.esPropietario !== 'boolean') {
-      resetCampos.esPropietario = esPropietario;
-      resetCampos.adminId       = adminId;
+    // ⚠️ CORRECCIÓN MULTIADMIN-001-b (2026-08-21)
+    // ─────────────────────────────────────────────────────────────────────────
+    // La primera versión de este bloque estampaba el veredicto de la regla
+    // legacy TAL CUAL, incluido `esPropietario: true`. Eso convirtió un fallo
+    // transitorio en un dato permanente: un administrador secundario sin marca
+    // entraba, la regla legacy lo declaraba dueño de su propio tenant, y la
+    // autocuración lo grababa — sobrescribiendo además su `adminId` correcto.
+    //
+    // Regla nueva: la autocuración SOLO puede escribir `esPropietario: false`,
+    // y únicamente cuando la pertenencia a otro tenant está PROBADA por el
+    // propio documento: un `adminId` que apunta a alguien distinto de uno mismo.
+    // Nunca declara propietario a nadie: esa decisión es del registro o de un
+    // script de migración revisado a mano, jamás de una inferencia.
+    // Así la autocuración solo puede arreglar, nunca cementar un error.
+    //
+    // ⚠️ `creadoPor` NO sirve como prueba: los SUSCRIPTORES creados desde el
+    // panel de SuperAdmin también lo traen (apuntando a la cuenta operadora),
+    // y son dueños de su propio tenant. Usarlo aquí los degradaría a
+    // sub-usuarios y les quitaría el control de su cuenta.
+    const tenantProbado = user.adminId && user.adminId !== uid;
+
+    if (typeof user.esPropietario !== 'boolean' && tenantProbado) {
+      resetCampos.esPropietario = false;
+      resetCampos.adminId       = user.adminId;
     }
 
     await userDoc.ref.update(resetCampos);
