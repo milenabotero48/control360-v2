@@ -70,7 +70,13 @@ function formatearMes(mesStr) {
 
 // ─── Normalización de celular a JID de WhatsApp ──────────────
 function aJid(celular) {
-  const num = String(celular || '').replace(/\D/g, '');
+  // ✅ ANNY-GRUPO-051: acepta también un jid ya formado (grupo @g.us
+  // o contacto @s.whatsapp.net), no solo un número de 10 dígitos.
+  const raw = String(celular || '').trim();
+  if (raw.endsWith('@g.us') || raw.endsWith('@s.whatsapp.net')) {
+    return { num: raw.split('@')[0], jid: raw };
+  }
+  const num = raw.replace(/\D/g, '');
   if (num.length < 10) return null;
   const con57 = num.startsWith('57') ? num : '57' + num;
   return { num: con57, jid: `${con57}@s.whatsapp.net` };
@@ -154,7 +160,19 @@ async function enviarAvisoInterno(adminId, texto, destinoExplicito = null) {
   try {
     if (!adminId || !texto) return false;
 
-    let destino = destinoExplicito;
+    // ✅ ANNY-GRUPO-051: el grupo interno manda sobre el número
+    // individual. Un aviso que ven cinco personas se atiende; uno
+    // que llega a un solo celular se pierde cuando esa persona
+    // está manejando.
+    let destino = null;
+    try {
+      const cfgDoc = await db.collection('annyConfig').doc(adminId).get();
+      if (cfgDoc.exists && cfgDoc.data().notificarGrupoJid) {
+        destino = cfgDoc.data().notificarGrupoJid;
+      }
+    } catch (e) { /* sigue con el destino normal */ }
+
+    if (!destino) destino = destinoExplicito;
     if (!destino) {
       const perfil = await annyService.obtenerPerfilTenant(adminId);
       destino = perfil.notificarEscalamientoA;
@@ -621,6 +639,116 @@ function iniciarCronCobranzaAnny() {
   console.log('✅ Cron cobranza Anny activo — viernes 9:00 AM Colombia');
 }
 
+// ============================================================
+// ✅ ANNY-SLA-048 — vigilante de casos escalados.
+// ------------------------------------------------------------
+// Un aviso que sale UNA sola vez es un aviso que se pierde entre
+// 200 chats. Este cron revisa cada 5 minutos los casos PENDIENTE
+// y vuelve a avisar con urgencia creciente:
+//
+//   > 15 min sin atender  → recordatorio al asesor
+//   > 45 min sin atender  → alerta al admin (notificarPedidosA)
+//   > 24 h sin atender    → se marca VENCIDO y deja de insistir
+//
+// No responde al cliente ni cierra casos: solo insiste hasta que
+// una persona entre. Cerrar el caso lo hace un humano en el panel.
+// ============================================================
+const SLA_RECORDATORIO_MIN = 15;
+const SLA_ALERTA_ADMIN_MIN = 45;
+const SLA_VENCIMIENTO_MIN = 24 * 60;
+
+function _ms(v) {
+  if (!v) return 0;
+  if (typeof v === 'number') return v;
+  if (typeof v.toMillis === 'function') return v.toMillis();
+  if (v.seconds) return v.seconds * 1000;
+  if (v._seconds) return v._seconds * 1000;
+  return 0;
+}
+
+async function revisarCasosEscalados() {
+  try {
+    const cfgSnap = await db.collection('annyConfig')
+      .where('conexionEstado', '==', 'conectado')
+      .get();
+
+    for (const cfgDoc of cfgSnap.docs) {
+      const adminId = cfgDoc.id;
+      const cfg = cfgDoc.data() || {};
+
+      let perfil = {};
+      try { perfil = await annyService.obtenerPerfilTenant(adminId); } catch (e) { perfil = {}; }
+
+      const destinoAsesor = perfil.notificarEscalamientoA || cfg.notificarPedidosA || null;
+      const destinoAdmin = cfg.notificarPedidosA || perfil.notificarEscalamientoA || null;
+
+      const snap = await db.collection('casosEscaladosAnny')
+        .doc(adminId)
+        .collection('casos')
+        .where('estado', '==', 'PENDIENTE')
+        .limit(100)
+        .get();
+
+      if (snap.empty) continue;
+
+      let pendientes = 0;
+      for (const doc of snap.docs) {
+        const c = doc.data() || {};
+        const creadoMs = _ms(c.createdAt) || Date.now();
+        const edadMin = (Date.now() - creadoMs) / 60000;
+        pendientes += 1;
+
+        // Caducidad: deja de insistir, pero NO lo cierra como resuelto.
+        if (edadMin > SLA_VENCIMIENTO_MIN) {
+          await doc.ref.set({ estado: 'VENCIDO', vencidoEn: Date.now() }, { merge: true });
+          continue;
+        }
+
+        const nivel = Number(c.nivelSLA) || 0;
+
+        if (edadMin >= SLA_ALERTA_ADMIN_MIN && nivel < 2) {
+          await enviarAvisoInterno(
+            adminId,
+            `🔴 *CASO SIN ATENDER HACE ${Math.round(edadMin)} MIN*\n` +
+            `${c.nombreCliente || 'Sin nombre'} — ${c.telefono || ''}\n` +
+            `${c.tipo || ''} · ${c.razon || ''}\n` +
+            `El cliente lleva casi una hora esperando. Abrir: https://wa.me/${String(c.telefono || '').replace(/\D/g, '')}`,
+            destinoAdmin
+          );
+          await doc.ref.set({ nivelSLA: 2, ultimoAvisoMs: Date.now() }, { merge: true });
+        } else if (edadMin >= SLA_RECORDATORIO_MIN && nivel < 1) {
+          await enviarAvisoInterno(
+            adminId,
+            `⏳ *Recordatorio — caso escalado sin atender (${Math.round(edadMin)} min)*\n` +
+            `${c.nombreCliente || 'Sin nombre'} — ${c.telefono || ''}\n` +
+            `${c.tipo || ''} · ${c.razon || ''}\n` +
+            `Abrir: https://wa.me/${String(c.telefono || '').replace(/\D/g, '')}`,
+            destinoAsesor
+          );
+          await doc.ref.set({ nivelSLA: 1, ultimoAvisoMs: Date.now() }, { merge: true });
+        }
+
+        await sleep(300); // no saturar la sesión de WhatsApp
+      }
+
+      if (pendientes >= 10) {
+        console.warn(`[ANNY-SLA] Tenant ${adminId} acumula ${pendientes} casos escalados pendientes`);
+      }
+    }
+  } catch (err) {
+    console.error('[ANNY-SLA] Error revisando casos escalados:', err.message);
+  }
+}
+
+function iniciarCronSLAEscalados() {
+  setInterval(() => {
+    revisarCasosEscalados().catch(err =>
+      console.error('[ANNY-SLA] Error en cron:', err.message)
+    );
+  }, 5 * 60 * 1000);
+  console.log('✅ Cron SLA de escalados activo — recordatorio 15 min, alerta admin 45 min');
+}
+
 module.exports = {
   notificarClienteWhatsApp,
   ejecutarCobranzaCxC,
@@ -632,6 +760,9 @@ module.exports = {
   marcarMisionActiva,
   notificarCambioTaller,
   notificarVentaCliente, // ✅ ANNY-VENTA-034
-  ejecutarRenovacionSaaS
+  ejecutarRenovacionSaaS,
+  // ── ANNY-SLA-048 ──
+  revisarCasosEscalados,
+  iniciarCronSLAEscalados
 };
 // FIN annyNotificaciones.js (v22)

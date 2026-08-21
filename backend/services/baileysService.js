@@ -135,6 +135,54 @@ async function enviarMensaje(adminId, jid, texto) {
 }
 
 // ============================================================
+// ✅ ANNY-PAGO-050: reenviar una imagen (comprobante de pago) al
+// grupo interno. Se manda la foto tal cual la envió el cliente,
+// con el pie de contexto: quien valida necesita VER el soporte,
+// no una descripción de él.
+// ============================================================
+async function enviarImagen(adminId, jid, base64, mimetype, caption) {
+  const ses = sesiones.get(adminId);
+  if (!ses?.sock || !base64) return null;
+  try {
+    const enviado = await ses.sock.sendMessage(jid, {
+      image: Buffer.from(base64, 'base64'),
+      mimetype: mimetype || 'image/jpeg',
+      caption: caption || ''
+    });
+    if (enviado?.key?.id && enviado.message) {
+      guardarMensajeEnviado(enviado.key.id, enviado.message);
+    }
+    return enviado;
+  } catch (err) {
+    console.error('[BAILEYS] Error enviando imagen:', err.message);
+    return null;
+  }
+}
+
+// ============================================================
+// ✅ ANNY-GRUPO-051: listar los grupos donde está el número
+// conectado, para que la suscriptora elija el grupo de avisos
+// desde el panel sin tener que copiar un jid a mano.
+// ============================================================
+async function listarGrupos(adminId) {
+  const ses = sesiones.get(adminId);
+  if (!ses?.sock) return [];
+  try {
+    const grupos = await ses.sock.groupFetchAllParticipating();
+    return Object.values(grupos || {})
+      .map(g => ({
+        jid: g.id,
+        nombre: g.subject || '(sin nombre)',
+        participantes: Array.isArray(g.participants) ? g.participants.length : 0
+      }))
+      .sort((a, b) => a.nombre.localeCompare(b.nombre));
+  } catch (err) {
+    console.error('[BAILEYS] Error listando grupos:', err.message);
+    return [];
+  }
+}
+
+// ============================================================
 // Guardar estado de conexión en annyConfig
 // ============================================================
 async function guardarEstado(adminId, conexionEstado, numero = null) {
@@ -231,18 +279,144 @@ async function descargarMedia(msg) {
 // ============================================================
 // Anti-colisión: ¿hay caso escalado PENDIENTE de este teléfono?
 // ============================================================
-async function hayCasoPendiente(adminId, telefono) {
+// ============================================================
+// ✅ ANNY-MUDA-043 — BUG CRÍTICO: el escalamiento dejaba a Anny
+// muda PARA SIEMPRE en ese chat.
+// ------------------------------------------------------------
+// CAUSA RAÍZ de "25 escalados sin atender y ningún cliente
+// respondido": esta función devolvía true mientras existiera un
+// caso en estado PENDIENTE, sin límite de tiempo. Como el aviso
+// interno nunca salía (ver ANNY-AVISO-041), nadie entraba al
+// panel a cerrar el caso, y el cliente quedaba en silencio
+// permanente. Un cliente escribió "Cancelamos servicio" y no
+// recibió respuesta porque el sistema lo tenía mudo.
+//
+// REGLA NUEVA: el caso pendiente silencia a Anny durante una
+// VENTANA acotada (VENTANA_SILENCIO_MIN). Pasada la ventana sin
+// que un humano haya entrado, Anny retoma el chat: es preferible
+// que responda a que el cliente se vaya sin respuesta.
+// Devuelve el caso para poder RE-AVISAR (ANNY-REAVISO-044).
+// ============================================================
+const VENTANA_SILENCIO_MIN = 45;
+const REAVISO_MIN = 10; // no re-avisar el mismo caso más seguido que esto
+
+function msDe(v) {
+  if (!v) return 0;
+  if (typeof v === 'number') return v;
+  if (typeof v.toMillis === 'function') return v.toMillis();
+  if (v.seconds) return v.seconds * 1000;
+  return 0;
+}
+
+async function casoPendienteDe(adminId, telefono) {
   try {
     const snap = await db.collection('casosEscaladosAnny')
       .doc(adminId)
       .collection('casos')
       .where('telefono', '==', telefono)
       .where('estado', '==', 'PENDIENTE')
-      .limit(1)
+      .limit(5)
       .get();
-    return !snap.empty;
+
+    if (snap.empty) return null;
+
+    // el más reciente
+    const docs = snap.docs
+      .map(d => ({ ref: d.ref, id: d.id, ...d.data() }))
+      .sort((a, b) => msDe(b.createdAt) - msDe(a.createdAt));
+
+    const c = docs[0];
+    const creadoMs = msDe(c.createdAt) || Date.now();
+    const edadMin = (Date.now() - creadoMs) / 60000;
+
+    return {
+      ref: c.ref,
+      id: c.id,
+      tipo: c.tipo || 'OTRO',
+      razon: c.razon || '',
+      nombreCliente: c.nombreCliente || '',
+      edadMin,
+      dentroDeVentana: edadMin < VENTANA_SILENCIO_MIN,
+      ultimoAvisoMs: Number(c.ultimoAvisoMs) || creadoMs
+    };
   } catch (err) {
     console.error('[BAILEYS] Error consultando casos pendientes:', err.message);
+    return null; // fail-open: ante error Anny responde, no se queda muda
+  }
+}
+
+// ============================================================
+// ✅ ANNY-AVISO-041 — BUG CRÍTICO: el aviso interno de
+// escalamiento se armaba y se tiraba a la basura.
+// ------------------------------------------------------------
+// annyService devolvía `avisoEscalamiento` + `notificarA`, pero
+// el único bloque que enviaba avisos exigía `resultado.pedido`.
+// En un escalamiento no hay pedido → la condición daba falso y
+// el aviso nunca salía. `enviarAvisoInterno()` estaba declarada
+// y exportada en annyNotificaciones, pero nadie la llamaba.
+//
+// REGLA NUEVA: el aviso SIEMPRE encuentra destino. Orden:
+//   1. perfil.notificarEscalamientoA (o notificarPedidosA)
+//   2. el propio número conectado de la sesión → "chat contigo
+//      misma", como una nota interna. Nunca se pierde un caso.
+// El eco de este envío lo filtra ANNY-ECO-001 (mensajesEnviados),
+// así que no hay bucle: Anny no se lee a sí misma.
+// ============================================================
+// ✅ ANNY-GRUPO-051: el destino puede ser un número O un grupo de
+// WhatsApp (jid terminado en @g.us). Un grupo es mejor destino que un
+// número: lo ven varias personas y el caso no depende de que una
+// sola esté mirando el celular.
+function aJidCo(destinoRaw) {
+  const raw = String(destinoRaw || '').trim();
+  if (!raw) return null;
+  if (raw.endsWith('@g.us') || raw.endsWith('@s.whatsapp.net')) return raw;
+  const n = raw.replace(/\D/g, '');
+  if (n.length < 10) return null;
+  return `${n.startsWith('57') ? n : '57' + n}@s.whatsapp.net`;
+}
+
+// ✅ ANNY-GRUPO-051: orden de destino — grupo interno configurado →
+// destino preferido → propio número (nota interna). Nunca se pierde.
+async function destinoAvisos(adminId, destinoPreferido) {
+  try {
+    const doc = await db.collection('annyConfig').doc(adminId).get();
+    const grupo = doc.exists ? doc.data().notificarGrupoJid : null;
+    if (grupo) return aJidCo(grupo);
+  } catch (err) {
+    console.error('[BAILEYS] Error leyendo grupo de avisos:', err.message);
+  }
+  return aJidCo(destinoPreferido);
+}
+
+async function enviarAvisoEscalamiento(adminId, texto, destinoPreferido, telefonoCliente) {
+  try {
+    let jid = await destinoAvisos(adminId, destinoPreferido);
+    let viaFallback = false;
+
+    if (!jid) {
+      // Fallback: nota interna al propio número conectado
+      const ses = sesiones.get(adminId);
+      jid = aJidCo(ses?.numero);
+      viaFallback = true;
+    }
+
+    if (!jid) {
+      console.warn(`[BAILEYS] Escalamiento sin destino de aviso (tenant ${adminId})`);
+      return false;
+    }
+
+    const link = telefonoCliente
+      ? `\n\nAbrir chat: https://wa.me/${String(telefonoCliente).replace(/\D/g, '')}`
+      : '';
+    const pie = '\nGestiónalo en Control360 → Anny → Escalados';
+
+    await enviarMensaje(adminId, jid, `${texto}${link}${pie}`);
+    if (viaFallback) {
+      console.log(`[BAILEYS] Aviso de escalamiento enviado al propio número (tenant ${adminId}) — configura notificarEscalamientoA para dirigirlo al asesor`);
+    }
+    return true;
+  } catch (err) {
+    console.error('[BAILEYS] Error enviando aviso de escalamiento:', err.message);
     return false;
   }
 }
@@ -349,8 +523,13 @@ async function procesarMensaje(adminId, msg) {
   }
 
   // Caso escalado pendiente = la admin está atendiendo → silencio
-  const enManosDeAdmin = await hayCasoPendiente(adminId, telefono);
-  if (enManosDeAdmin) {
+  // ✅ ANNY-MUDA-043 + ANNY-REAVISO-044
+  // Caso escalado pendiente = el humano debería estar atendiendo.
+  // Anny calla, pero SOLO durante la ventana. Y cada mensaje del
+  // cliente dentro de la ventana dispara un RE-AVISO: que el
+  // cliente insista es la señal más fuerte de que nadie entró.
+  const casoPend = await casoPendienteDe(adminId, telefono);
+  if (casoPend && casoPend.dentroDeVentana) {
     await annyService.registrarConversacion(adminId, {
       telefono,
       nombreCliente: msg.pushName || telefono,
@@ -358,9 +537,32 @@ async function procesarMensaje(adminId, msg) {
       respuestaAgente: null,
       respondidoPor: 'EN_MANOS_DE_ADMIN',
       escalado: true,
-      caseId: null
+      caseId: casoPend.id
     });
+
+    if (Date.now() - casoPend.ultimoAvisoMs > REAVISO_MIN * 60 * 1000) {
+      try {
+        const perfil = await annyService.obtenerPerfilTenant(adminId);
+        await enviarAvisoEscalamiento(
+          adminId,
+          `⏰ *EL CLIENTE INSISTE* — caso sin atender hace ${Math.round(casoPend.edadMin)} min\n` +
+          `${casoPend.nombreCliente || msg.pushName || 'Sin nombre'} — ${telefono}\n` +
+          `Escribió: "${String(texto).slice(0, 120)}"`,
+          perfil?.notificarEscalamientoA,
+          telefono
+        );
+        await casoPend.ref.set({ ultimoAvisoMs: Date.now() }, { merge: true });
+      } catch (eRe) {
+        console.error('[BAILEYS] Error en re-aviso de escalado:', eRe.message);
+      }
+    }
     return;
+  }
+
+  // Ventana vencida y el caso sigue PENDIENTE: nadie entró. Anny
+  // retoma — mejor una respuesta imperfecta que un cliente mudo.
+  if (casoPend && !casoPend.dentroDeVentana) {
+    console.log(`[BAILEYS] Caso ${casoPend.id} pendiente hace ${Math.round(casoPend.edadMin)} min sin atender — Anny retoma el chat ${telefono}`);
   }
 
   const resultado = await annyService.procesarMensajeEntrante({
@@ -373,6 +575,46 @@ async function procesarMensaje(adminId, msg) {
 
   if (resultado?.accion === 'enviar_mensaje' && resultado.respuesta) {
     await enviarMensaje(adminId, jid, resultado.respuesta);
+  }
+
+  // ✅ ANNY-PAGO-050: el cliente mandó un comprobante de pago.
+  // Se reenvía LA FOTO al grupo interno con el contexto. Anny ya le
+  // acusó recibo al cliente sin afirmar que el pago quedó aplicado:
+  // validar es trabajo de tesorería, no del agente.
+  if (resultado?.avisoPago) {
+    try {
+      const jidAviso = await destinoAvisos(adminId, resultado.notificarA);
+      if (jidAviso) {
+        const img = resultado.imagenComprobante;
+        if (img?.data) {
+          await enviarImagen(adminId, jidAviso, img.data, img.media_type, resultado.avisoPago);
+        } else {
+          await enviarMensaje(adminId, jidAviso, resultado.avisoPago);
+        }
+      } else {
+        console.warn(`[BAILEYS] Comprobante de pago sin destino de aviso (tenant ${adminId})`);
+      }
+    } catch (ePago) {
+      console.error('[BAILEYS] Error reenviando comprobante de pago:', ePago.message);
+    }
+  }
+
+  // ✅ ANNY-AVISO-041: caso escalado → aviso interno AHORA.
+  // Este bloque es el que faltaba: sin él el escalamiento era un
+  // callejón sin salida (el cliente esperando, nadie enterado).
+  if (resultado?.avisoEscalamiento) {
+    await enviarAvisoEscalamiento(
+      adminId,
+      resultado.avisoEscalamiento,
+      resultado.notificarA,
+      resultado.telefonoCliente || telefono
+    );
+    if (resultado.caseId) {
+      db.collection('casosEscaladosAnny').doc(adminId)
+        .collection('casos').doc(resultado.caseId)
+        .set({ ultimoAvisoMs: Date.now() }, { merge: true })
+        .catch(() => {});
+    }
   }
 
   // FIX ANNY-PEDIDOS-001: Anny cerró una venta → avisar a la admin
@@ -586,6 +828,8 @@ module.exports = {
   getEstado,
   getQR,
   enviarMensaje,
+  enviarImagen,      // ✅ ANNY-PAGO-050
+  listarGrupos,      // ✅ ANNY-GRUPO-051
   invalidarCacheSilencio,
   restaurarSesiones
 };

@@ -143,8 +143,10 @@ app.listen(PORT, () => {
   // FIX ANNY-NOTIF-001: cobranza CxC viernes 9 AM Colombia.
   // FIX ANNY-VENC-001: rondas de vencimientos en días configurables.
   // ═══════════════════════════════════════════════════════════════════════════
-  const { iniciarCronCobranzaAnny, iniciarCronRondasVencimientos } = require('./services/annyNotificaciones');
+  // ✅ ANNY-SLA-048: vigilante de casos escalados sin atender.
+  const { iniciarCronCobranzaAnny, iniciarCronRondasVencimientos, iniciarCronSLAEscalados } = require('./services/annyNotificaciones');
   iniciarCronCobranzaAnny();
   iniciarCronRondasVencimientos();
+  iniciarCronSLAEscalados();
 });
 // FIN server.js

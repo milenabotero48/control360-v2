@@ -834,7 +834,7 @@ async function obtenerCatalogoProductos(adminId) {
     const snap = await db.collection('products')
       .where('creadoPor', '==', adminId)
       .where('activo', '==', true)
-      .limit(200)
+      .limit(500)
       .get();
 
     const items = [];
@@ -842,12 +842,49 @@ async function obtenerCatalogoProductos(adminId) {
       const p = d.data();
       const precio = Number(p.precioVenta) || 0;
       if (p.nombre && precio > 0) {
-        items.push({ nombre: String(p.nombre).trim(), precio });
+        // ✅ ANNY-CATALOGO-045: alias = cómo lo dice el CLIENTE.
+        // El catálogo está escrito en lenguaje de inventario
+        // ("ABC 5 LB"); el cliente escribe "extintor de 5 libras del
+        // carro". Sin puente entre los dos, el modelo no encuentra el
+        // ítem y escala una venta que tenía ganada.
+        const alias = []
+          .concat(Array.isArray(p.alias) ? p.alias : [])
+          .concat(Array.isArray(p.palabrasClave) ? p.palabrasClave : [])
+          .map(a => String(a).trim())
+          .filter(Boolean)
+          .slice(0, 6);
+        items.push({
+          id: d.id,
+          nombre: String(p.nombre).trim(),
+          precio,
+          categoria: p.categoria ? String(p.categoria).trim() : '',
+          alias
+        });
       }
     });
 
-    items.sort((a, b) => a.nombre.localeCompare(b.nombre));
-    const data = items.slice(0, 80);
+    // ⛔ ANNY-CATALOGO-045 — BUG CRÍTICO (corregido)
+    // ------------------------------------------------------------
+    // Aquí había `items.slice(0, 80)` DESPUÉS de ordenar
+    // alfabéticamente. En un tenant con ~188 productos, Anny solo
+    // veía de la A hasta cerca de la E: todo lo que empieza por
+    // "Recarga" o "Señalización" quedaba FUERA del prompt.
+    // Y el prompt ordena: "si no está en el catálogo, ESCALA".
+    // Resultado: el negocio principal del tenant era invisible y
+    // toda pregunta de precio terminaba escalada.
+    //
+    // Se ordena por CATEGORÍA y luego por nombre (agrupado se lee
+    // mejor y el modelo relaciona mejor), y el tope sube a 250:
+    // ~250 líneas cortas son ~3K tokens de entrada, costo marginal
+    // frente a perder la venta.
+    items.sort((a, b) =>
+      (a.categoria || 'zzz').localeCompare(b.categoria || 'zzz') ||
+      a.nombre.localeCompare(b.nombre)
+    );
+    const data = items.slice(0, 250);
+    if (items.length > 250) {
+      console.warn(`[ANNY] Tenant ${adminId} tiene ${items.length} productos activos: el catálogo se recortó a 250. Desactiva los que no vendas.`);
+    }
 
     _cacheCatalogo.set(adminId, { data, ts: Date.now() });
     return data;
@@ -1133,10 +1170,299 @@ async function obtenerEstadoPedidoHilo(adminId, telefono) {
 }
 
 // ============================================================
+// ✅ ANNY-DICC-049 — DICCIONARIO DE PALABRAS CLAVE
+// ------------------------------------------------------------
+// PROBLEMA REAL: el catálogo está escrito en lenguaje de
+// inventario ("RECARGA EXTINTOR ABC 5 LB") y el cliente escribe
+// "cuanto vale recargar el del carro". Sin puente entre los dos,
+// el modelo no encuentra el ítem, y el prompt le ordena escalar.
+// Esa era la razón de fondo por la que Anny dejó de cotizar.
+//
+// POR QUÉ NO SE VUELVE A PONER EL PRECIO EN ENTRENAMIENTO:
+// serían dos fuentes de verdad para el mismo número. El día que
+// el suscriptor suba tarifas, Anny seguiría cotizando la vieja.
+// Además el candado de buscarRespuestaConfigura (ANNY-FUGA-035)
+// descarta toda entrada con cifras, así que ni siquiera se leería.
+//
+// SOLUCIÓN: el suscriptor mapea PALABRAS → PRODUCTO del catálogo.
+// El precio se lee VIVO del catálogo en cada mensaje. Se cambia
+// una tarifa en Inventario y Anny la usa en el siguiente mensaje,
+// sin tocar el diccionario.
+//
+// Estructura: diccionarioAnny/{adminId} = {
+//   [productoId]: { nombre, palabras: ['del carro', '5 libras'] }
+// }
+// ============================================================
+const _cacheDiccionario = new Map();
+
+async function obtenerDiccionarioTenant(adminId) {
+  const cached = _cacheDiccionario.get(adminId);
+  if (cached && (Date.now() - cached.ts) < CACHE_TTL_MS) return cached.data;
+  try {
+    const doc = await db.collection('diccionarioAnny').doc(adminId).get();
+    const data = doc.exists ? (doc.data() || {}) : {};
+    _cacheDiccionario.set(adminId, { data, ts: Date.now() });
+    return data;
+  } catch (err) {
+    console.error('[ANNY] Error leyendo diccionario:', err.message);
+    return {};
+  }
+}
+
+function invalidarCacheDiccionario(adminId) {
+  _cacheDiccionario.delete(adminId);
+}
+
+// Sin tildes y sin puntuación: "recargá el del carró" ≡ "recarga el del carro"
+function normalizarTextoBusqueda(t) {
+  return String(t || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9ñ\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Una palabra clave de 1-2 caracteres haría match con cualquier cosa.
+function palabraClaveUtil(p) {
+  const n = normalizarTextoBusqueda(p);
+  return n.length >= 4;
+}
+
+function resolverPorPalabrasClave(mensajeTexto, diccionario, catalogo) {
+  const texto = normalizarTextoBusqueda(mensajeTexto);
+  if (!texto || !diccionario) return [];
+
+  const porId = new Map((catalogo || []).map(p => [p.id, p]));
+  const encontrados = [];
+
+  for (const [productoId, entrada] of Object.entries(diccionario)) {
+    if (!entrada || !Array.isArray(entrada.palabras)) continue;
+
+    const palabras = entrada.palabras.filter(palabraClaveUtil);
+    if (!palabras.length) continue;
+
+    // La palabra clave más LARGA que coincida gana: "extintor de carro
+    // 10 libras" es más específico que "extintor" y debe mandar.
+    let mejor = null;
+    for (const p of palabras) {
+      const n = normalizarTextoBusqueda(p);
+      if (texto.includes(n) && (!mejor || n.length > mejor.length)) mejor = n;
+    }
+    if (!mejor) continue;
+
+    const prod = porId.get(productoId);
+    if (!prod) {
+      // El producto se borró o se desactivó en Inventario. No se
+      // inventa un precio: se avisa en log para depurar el diccionario.
+      console.warn(`[ANNY-DICC] La palabra "${mejor}" apunta al producto ${productoId}, que ya no está activo en el catálogo`);
+      continue;
+    }
+
+    encontrados.push({
+      nombre: prod.nombre,
+      precio: prod.precio,
+      coincidio: mejor,
+      especificidad: mejor.length
+    });
+  }
+
+  return encontrados
+    .sort((a, b) => b.especificidad - a.especificidad)
+    .slice(0, 5);
+}
+
+function formatearResueltos(resueltos) {
+  if (!resueltos || !resueltos.length) return '';
+  return resueltos
+    .map(r => `- El cliente dijo "${r.coincidio}" → ${r.nombre}: $${r.precio.toLocaleString('es-CO')}`)
+    .join('\n');
+}
+
+// ============================================================
+// ✅ ANNY-COMPROMISO-047 — plazo real en vez de promesa vaga.
+// ------------------------------------------------------------
+// Horario de atención por defecto (Colombia, UTC-5):
+//   L-V 8:30-17:30 · Sáb 9:00-12:00 · Dom cerrado
+// Dentro de horario compromete ~30 min; fuera de horario dice
+// cuándo se retoma. Nunca promete inmediatez que no se cumple.
+// ============================================================
+function compromisoDeRespuesta(ahora = new Date()) {
+  try {
+    const co = new Date(ahora.getTime() - 5 * 3600 * 1000);
+    const dia = co.getUTCDay(); // 0 dom … 6 sáb
+    const min = co.getUTCHours() * 60 + co.getUTCMinutes();
+
+    const esHabil = dia >= 1 && dia <= 5;
+    const esSabado = dia === 6;
+    const abre = esHabil ? 8 * 60 + 30 : (esSabado ? 9 * 60 : null);
+    const cierra = esHabil ? 17 * 60 + 30 : (esSabado ? 12 * 60 : null);
+
+    if (abre !== null && min >= abre && min <= cierra - 30) {
+      const t = new Date(co.getTime() + 30 * 60 * 1000);
+      let h = t.getUTCHours();
+      const m = String(t.getUTCMinutes()).padStart(2, '0');
+      const ampm = h >= 12 ? 'p.m.' : 'a.m.';
+      h = h % 12 || 12;
+      return `Te escribe antes de las ${h}:${m} ${ampm}`; // 'a.m.'/'p.m.' ya trae el punto final
+    }
+
+    if (dia === 6 && min > cierra - 30) return 'Te escribe el lunes a primera hora.';
+    if (dia === 0) return 'Te escribe el lunes a primera hora.';
+    if (esHabil && min > cierra - 30) {
+      return dia === 5
+        ? 'Ya cerramos por hoy: te escribe mañana sábado en la mañana.'
+        : 'Ya cerramos por hoy: te escribe mañana a primera hora.';
+    }
+    return 'Te escribe apenas abramos, a las 8:30 a.m.';
+  } catch (err) {
+    return 'Te escribe un asesor en el transcurso del día.';
+  }
+}
+
+// ============================================================
+// ✅ ANNY-ORDEN-046 — Anny no veía las ÓRDENES DE SERVICIO.
+// ------------------------------------------------------------
+// CAUSA RAÍZ del caso "La cita programada para hoy, ¿en qué
+// horario quedó?" → escalado → cliente cancela.
+//
+// `obtenerEstadoPedidoHilo` solo mira `pedidosAnny`: los pedidos
+// que tomó la propia Anny. Las órdenes que crea el equipo en
+// Control360 viven en `orders` y Anny NUNCA las consultaba. Como
+// el prompt ordena "si no consta en el sistema, ESCALA", una
+// pregunta cuya respuesta el sistema TENÍA (fechaProgramada +
+// horaProgramada) terminaba en un escalado.
+//
+// Solo lectura. No cambia estados, no crea nada, no toca taller
+// ni logística: alimenta el prompt con hechos verificables.
+// ============================================================
+const ESTADOS_ORDEN_LEGIBLE = {
+  programada: 'Programada',
+  taller: 'En taller',
+  despacho: 'En despacho',
+  facturar: 'Por facturar',
+  completada: 'Completada',
+  cxc: 'Completada (con saldo pendiente)',
+  anulada: 'Anulada'
+};
+
+async function obtenerOrdenesServicio(adminId, telefonoRaw) {
+  try {
+    const tel = normalizarTelefonoAnny(telefonoRaw);
+    if (!tel || !adminId) return [];
+
+    const variantes = [tel, `57${tel}`];
+    const vistos = new Set();
+    const ordenes = [];
+
+    for (const v of variantes) {
+      const snap = await db.collection('orders')
+        .where('adminId', '==', adminId)
+        .where('clienteCelular', '==', v)
+        .limit(20)
+        .get();
+
+      snap.forEach(d => {
+        if (vistos.has(d.id)) return;
+        vistos.add(d.id);
+        const o = d.data();
+        if (o.estado === 'anulada') return;
+        ordenes.push({
+          numero: o.numeroOrden || '',
+          estado: ESTADOS_ORDEN_LEGIBLE[o.estado] || o.estado || 'Sin estado',
+          fechaProgramada: o.fechaProgramada || null,
+          horaProgramada: o.horaProgramada || null,
+          total: Number(o.total) || 0,
+          saldo: Math.max(0, (Number(o.total) || 0) - (Number(o.montoPagado) || 0)),
+          creadaMs: (o.createdAt?.seconds || 0) * 1000
+        });
+      });
+    }
+
+    ordenes.sort((a, b) => b.creadaMs - a.creadaMs);
+    return ordenes.slice(0, 3);
+  } catch (err) {
+    console.error('[ANNY] Error leyendo órdenes de servicio:', err.message);
+    return [];
+  }
+}
+
+// ============================================================
+// ✅ ANNY-PAGO-050 — constancia de pago reportado por el cliente.
+// ------------------------------------------------------------
+// ADITIVO Y NO DESTRUCTIVO, a propósito:
+// - NO cambia el estado de la orden
+// - NO mueve caja ni CxC
+// - NO marca la orden como pagada
+// Solo escribe el campo `pagoReportadoAnny` para que tesorería vea
+// que hay un soporte esperando validación. Aplicar el pago sigue
+// siendo un acto humano con un click, como debe ser.
+// ============================================================
+async function registrarPagoReportado(adminId, telefonoRaw, datos) {
+  try {
+    const tel = normalizarTelefonoAnny(telefonoRaw);
+    if (!tel || !adminId) return null;
+
+    const variantes = [tel, `57${tel}`];
+    let candidatas = [];
+
+    for (const v of variantes) {
+      const snap = await db.collection('orders')
+        .where('adminId', '==', adminId)
+        .where('clienteCelular', '==', v)
+        .limit(20)
+        .get();
+      snap.forEach(d => {
+        const o = d.data();
+        if (o.estado === 'anulada') return;
+        const saldo = (Number(o.total) || 0) - (Number(o.montoPagado) || 0);
+        candidatas.push({ ref: d.ref, numero: o.numeroOrden || d.id, saldo, creadaMs: (o.createdAt?.seconds || 0) * 1000 });
+      });
+    }
+
+    if (!candidatas.length) return null;
+
+    // Preferir la orden con saldo pendiente; si hay varias, la más reciente.
+    candidatas.sort((a, b) => (b.saldo > 0) - (a.saldo > 0) || b.creadaMs - a.creadaMs);
+    const elegida = candidatas[0];
+
+    await elegida.ref.set({
+      pagoReportadoAnny: {
+        reportadoMs: Date.now(),
+        monto: datos.monto || null,
+        fecha: datos.fecha || null,
+        banco: datos.banco || null,
+        referencia: datos.referencia || null,
+        telefono: tel,
+        validado: false
+      }
+    }, { merge: true });
+
+    return { numero: elegida.numero, saldo: elegida.saldo };
+  } catch (err) {
+    console.error('[ANNY] Error registrando pago reportado:', err.message);
+    return null;
+  }
+}
+
+function formatearOrdenes(ordenes) {
+  if (!ordenes || !ordenes.length) {
+    return '(este cliente no tiene órdenes de servicio registradas en Control360)';
+  }
+  return ordenes.map(o => {
+    const cita = o.fechaProgramada
+      ? `agendada para el ${o.fechaProgramada}${o.horaProgramada ? ` a las ${o.horaProgramada}` : ' (hora por confirmar con el mensajero)'}`
+      : 'sin fecha agendada';
+    const saldo = o.saldo > 0 ? ` · saldo pendiente $${o.saldo.toLocaleString('es-CO')}` : '';
+    return `- Orden ${o.numero}: ${o.estado}, ${cita} · total $${o.total.toLocaleString('es-CO')}${saldo}`;
+  }).join('\n');
+}
+
+// ============================================================
 // FIX ANNY-CIERRE-007 + v22: Claude decide.
 // Motor único: PERFIL (quién es) × MISIÓN (a qué vino).
 // ============================================================
-async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = [], fichaCliente = { existe: false }, catalogo = [], perfil = PERFIL_DEFAULT, misionNombre = 'ATENCION', estadoPedido = { existe: false }, defectoPendiente = null, imagenAdjunta = null, contactoChat = { nombre: null, empresa: null, presentada: false }) {
+async function claudeDecide(adminId, clienteNombre, mensajeTexto, respuestas = {}, historial = [], fichaCliente = { existe: false }, catalogo = [], perfil = PERFIL_DEFAULT, misionNombre = 'ATENCION', estadoPedido = { existe: false }, defectoPendiente = null, imagenAdjunta = null, contactoChat = { nombre: null, empresa: null, presentada: false }, ordenesServicio = [], resueltos = []) {
   try {
     const mision = obtenerMision(misionNombre);
 
@@ -1187,8 +1513,17 @@ ${misMensajes.join('\n')}
     // hay nada que ofrecer.
     // ✅ ANNY-VENTA-034: el catálogo también entra en misiones con venta
     // reactiva (el cliente puede pedir comprar en medio de un cobro).
+    // ✅ ANNY-DICC-049: solo tiene sentido donde Anny puede cotizar.
+    const resueltosTxt = (mision.permiteVenta || mision.ventaReactiva)
+      ? formatearResueltos(resueltos)
+      : '';
+
     const catalogoTxt = (perfil.fuentePrecios === 'products' && (mision.permiteVenta || mision.ventaReactiva))
-      ? (catalogo || []).map(p => `- ${p.nombre}: $${p.precio.toLocaleString('es-CO')}`).join('\n')
+      ? (catalogo || []).map(p => {
+          const ali = (p.alias && p.alias.length) ? ` (también: ${p.alias.join(', ')})` : '';
+          const cat = p.categoria ? `[${p.categoria}] ` : '';
+          return `- ${cat}${p.nombre}: $${p.precio.toLocaleString('es-CO')}${ali}`;
+        }).join('\n')
       : '';
 
     let fichaTxt = '(cliente NO registrado en el sistema — habrá que capturar sus datos)';
@@ -1264,6 +1599,13 @@ EL CLIENTE ENVIÓ UNA FOTO (la estás viendo arriba):
 - Si ves varios artículos, di cuántos cuentas y pide confirmación.
 - NUNCA cierres un pedido con datos que solo salieron de una foto sin que el cliente los haya confirmado por texto.
 - Relaciona lo que ves con el CATÁLOGO de arriba. Si no corresponde a nada del catálogo, describe lo que ves y PREGUNTA al cliente qué necesita con ese equipo. ESCALA (tipo PRECIO) solo cuando el cliente confirme que quiere ese producto/servicio y no tengas precio para dárselo.
+
+SI LA FOTO ES UN COMPROBANTE DE PAGO (ANNY-PAGO-050):
+Un comprobante es una transferencia, consignación, pantallazo de Nequi, Daviplata, Bancolombia, Davivienda, PSE o un recibo de caja.
+- Devuelve "comprobantePago" con lo que alcances a leer: monto, fecha, banco o billetera, y número de referencia. Lo que no se lea, ponlo en null. NO adivines cifras.
+- Pon "escalado": false y deja "respuesta" vacía: el texto para el cliente lo pone el sistema, no tú.
+- NUNCA escribas que el pago quedó recibido, aplicado, confirmado, abonado o registrado. Tú no ves la cuenta bancaria de la empresa. Quien valida es tesorería.
+- Si dudas de si es un comprobante, trátalo como comprobante: es preferible que tesorería reciba un soporte de más a que se pierda uno.
 ` : '';
 
     // ✅ ANNY-SALUDO-037: presentación e identificación del interlocutor.
@@ -1341,6 +1683,14 @@ ${fichaTxt}
 ESTADO REAL DEL PEDIDO (única fuente válida — el sistema, no tu memoria):
 ${estadoTxt}
 
+ÓRDENES DE SERVICIO DE ESTE CLIENTE EN CONTROL360 (ANNY-ORDEN-046 — dato real del sistema):
+${formatearOrdenes(ordenesServicio)}
+
+${resueltosTxt ? `LO QUE EL CLIENTE ESTÁ PIDIENDO — YA RESUELTO (ANNY-DICC-049):
+El suscriptor configuró estas palabras clave. El precio de abajo es el VIGENTE del catálogo, leído ahora mismo.
+${resueltosTxt}
+REGLA: si el ítem aparece aquí, YA TIENES EL PRECIO. Dalo directo y con naturalidad, sin rodeos y sin pedir especificaciones técnicas primero. NO escales por precio. NO cambies la cifra. Si hay varias opciones arriba, ofrece la más específica y menciona la alternativa en la misma frase.
+` : ''}
 ${catalogoTxt ? `CATÁLOGO OFICIAL DE PRODUCTOS Y PRECIOS VIGENTES (única fuente válida de precios):\n${catalogoTxt}` : (mision.permiteVenta ? '(esta empresa NO maneja catálogo de productos físicos — no inventes productos ni precios)' : '(en esta misión NO tienes catálogo: no cites productos ni precios)')}
 
 BASE DE CONOCIMIENTO DE LA EMPRESA (domicilio, horarios, medios de pago, políticas):
@@ -1376,10 +1726,12 @@ REGLAS DE ATENCIÓN (prioridad máxima):
 - Cada dato faltante se pide máximo UNA vez más en toda la conversación.
 - NO saludes de nuevo en conversación en curso.
 
-REGLA DE ESTADO (ANNY-ESTADO-013 — crítica):
+REGLA DE ESTADO (ANNY-ESTADO-013 + ANNY-ORDEN-046 — crítica):
 - NUNCA afirmes que un pedido está listo, despachado, en camino o entregado. Tú NO ves el taller ni la logística.
-- Si el cliente pregunta por el estado y arriba dice que NO existe pedido registrado → NO inventes: ESCALA (tipo SERVICIO).
 - Si existe pedido, puedes mencionar únicamente el estado literal que aparece arriba. Nada más.
+- Si el cliente pregunta por SU CITA, SU VISITA, SU ORDEN o "en qué horario quedó": mira el bloque ÓRDENES DE SERVICIO. Ahí está la respuesta y se la das textual (número de orden, estado, fecha y hora). NO escales algo que el sistema ya te está mostrando.
+- Si la orden aparece SIN hora agendada, dilo tal cual: "quedó para el <fecha>, la hora la confirma el mensajero el mismo día". Eso es un dato honesto, no un motivo para escalar.
+- Solo escalas (tipo SERVICIO) si el cliente pregunta por algo que NO aparece ni en el pedido ni en las órdenes de arriba.
 
 CIERRE DE PEDIDO (regla anti-estancamiento):
 - Mínimos REALES: producto/servicio + nombre + dirección de entrega. El teléfono ya lo tienes (este chat).
@@ -1390,8 +1742,8 @@ CIERRE DE PEDIDO (regla anti-estancamiento):
 ESCALAR A ADMIN si:
 - El cliente pide hablar con una persona, asesor o humano, o se queja de la IA (ESCALA SIEMPRE, sin excepción)
 - Solicita descuento/promoción especial
-- Pide cambio de fecha/horario de un servicio ya agendado
-- Pregunta por precio o producto que NO está en el catálogo ni en la base de conocimiento
+- Pide CAMBIAR la fecha/horario de un servicio ya agendado (consultarla NO se escala: está en ÓRDENES DE SERVICIO)
+- Pregunta por precio o producto que NO está en el catálogo, ni en el bloque YA RESUELTO, ni en la base de conocimiento
 - Requiere capacitación
 - Tiene queja/problema
 - Pregunta sobre facturación legal/documentos
@@ -1409,7 +1761,7 @@ Responde SOLO en JSON (sin markdown):
   "escalado": boolean,
   "tipo": "PRECIO|SERVICIO|DATOS|PAGO|NEGOCIACION|CAPACITACION|PROBLEMA|VENTA|HUMANO|OTRO",
   "respuesta": "tu respuesta si NO escalado",
-  "razon": "por qué escalas (si escalado)",${defectoPendiente ? '\n  "respuestaTaller": "APROBADO" | "RECHAZADO" | null,' : ''}
+  "razon": "por qué escalas (si escalado)",${imagenAdjunta ? '\n  "comprobantePago": null | { "monto": "valor leído o null", "fecha": "fecha leída o null", "banco": "banco o billetera o null", "referencia": "número de referencia o null" },' : ''}${defectoPendiente ? '\n  "respuestaTaller": "APROBADO" | "RECHAZADO" | null,' : ''}
   "contacto": { "nombre": "nombre de la persona SI lo dijo en este mensaje, si no null", "empresa": "empresa que representa SI la dijo, si no null" },
   "pedido": null | {
     "producto": "descripción del producto/servicio",
@@ -1729,7 +2081,7 @@ async function procesarMensajeEntrante(props) {
         asignadoA: adminId
       });
 
-      const respuesta = 'Claro, ya le aviso a un asesor para que te escriba en seguida.';
+      const respuesta = `Claro, ya le aviso a un asesor. ${compromisoDeRespuesta()}`;
 
       // Anny se pausa 60 min: deja de responder mientras entra el humano
       await pausarAnny(adminId, telefono, 60, 'cliente_pidio_asesor');
@@ -1760,7 +2112,8 @@ async function procesarMensajeEntrante(props) {
     }
 
     // PASO 2: conocimiento + historial + ficha + catálogo + estado + defecto
-    const [respuestas, historial, fichaCliente, catalogo, estadoPedido, defectoPendiente, contactoChat] = await Promise.all([
+    //         + órdenes de servicio (✅ ANNY-ORDEN-046)
+    const [respuestas, historial, fichaCliente, catalogo, estadoPedido, defectoPendiente, contactoChat, ordenesServicio, diccionario] = await Promise.all([
       obtenerRespuestasTenant(adminId),
       obtenerHistorialReciente(adminId, telefono),
       buscarClienteEnBD(adminId, telefono),
@@ -1770,7 +2123,12 @@ async function procesarMensajeEntrante(props) {
       // autorización devuelve null y todo el flujo sigue igual que antes.
       tallerRespuestas.buscarDefectoPendiente(adminId, telefono).catch(() => null),
       // ✅ ANNY-SALUDO-037: con quién habla y si ya se presentó en este chat.
-      obtenerContactoChat(adminId, telefono)
+      obtenerContactoChat(adminId, telefono),
+      // ✅ ANNY-ORDEN-046: órdenes reales del cliente en Control360.
+      // Solo lectura; ante error devuelve [] y el flujo sigue igual.
+      obtenerOrdenesServicio(adminId, telefono).catch(() => []),
+      // ✅ ANNY-DICC-049: palabras clave del suscriptor → producto.
+      obtenerDiccionarioTenant(adminId).catch(() => ({}))
     ]);
 
     // FIX ANNY-CIERRE-007: ventana de hilo activo 24 h
@@ -1824,12 +2182,22 @@ async function procesarMensajeEntrante(props) {
       }
     }
 
+    // ✅ ANNY-DICC-049: se resuelve ANTES del modelo, de forma
+    // determinística. El modelo no tiene que "encontrar" el producto
+    // entre 250 líneas: llega con el precio ya servido.
+    const resueltos = resolverPorPalabrasClave(mensajeTexto, diccionario, catalogo);
+    if (resueltos.length) {
+      console.log(`[ANNY-DICC] ${telefono}: "${resueltos[0].coincidio}" → ${resueltos[0].nombre} $${resueltos[0].precio}`);
+    }
+
     // PASO 3: Claude decide (perfil × misión × estado real)
     const decision = await claudeDecide(
       adminId, nombreCliente, mensajeTexto, respuestas, historial,
       fichaCliente, catalogo, perfil, misionNombre, estadoPedido, defectoPendiente,
-      imagenAdjunta, // ✅ ANNY-MEDIA-024
-      contactoChat   // ✅ ANNY-SALUDO-037
+      imagenAdjunta,  // ✅ ANNY-MEDIA-024
+      contactoChat,    // ✅ ANNY-SALUDO-037
+      ordenesServicio, // ✅ ANNY-ORDEN-046
+      resueltos        // ✅ ANNY-DICC-049
     );
 
     // ✅ ANNY-SALUDO-037: se guarda quién es el interlocutor apenas lo dice y
@@ -1840,6 +2208,58 @@ async function procesarMensajeEntrante(props) {
       empresa: decision.contacto?.empresa,
       presentada: decision._primerContacto === true
     }).catch(() => {});
+
+    // ══════════════════════════════════════════════════════════
+    // ✅ ANNY-PAGO-050 — comprobante de pago.
+    // Va ANTES del escalado a propósito: un soporte de pago no es
+    // un problema, es una buena noticia. Escalarlo dejaba a Anny
+    // muda y al cliente sin siquiera un "lo recibí".
+    // ══════════════════════════════════════════════════════════
+    if (decision.comprobantePago) {
+      const cp = decision.comprobantePago;
+      const orden = await registrarPagoReportado(adminId, telefono, cp);
+
+      // Texto determinístico: el modelo NO redacta esto. Es la frase
+      // donde más caro sale una palabra de más ("recibido" ≠ "aplicado").
+      const respuestaPago = orden
+        ? `Recibí tu comprobante y lo dejé asociado a la orden ${orden.numero}. Tesorería lo valida y te confirmamos. ¡Gracias!`
+        : 'Recibí tu comprobante y ya lo pasé a tesorería para que lo validen. Apenas quede confirmado te avisamos. ¡Gracias!';
+
+      await registrarConversacion(adminId, {
+        telefono,
+        nombreCliente,
+        mensajeCliente: mensajeTexto,
+        respuestaAgente: respuestaPago,
+        respondidoPor: 'AGENTE_AUTOMATICO',
+        tipo: 'PAGO',
+        escalado: false
+      });
+
+      await actualizarMetricas(adminId, 'respuestas_ia');
+
+      const detalle = [
+        cp.monto ? `Monto: ${cp.monto}` : null,
+        cp.fecha ? `Fecha: ${cp.fecha}` : null,
+        cp.banco ? `Medio: ${cp.banco}` : null,
+        cp.referencia ? `Ref: ${cp.referencia}` : null
+      ].filter(Boolean).join(' · ') || 'No se pudo leer el detalle del comprobante';
+
+      return {
+        procesado: true,
+        tipo: 'COMPROBANTE_PAGO',
+        accion: 'enviar_mensaje',
+        respuesta: respuestaPago,
+        avisoPago:
+          `💵 *COMPROBANTE DE PAGO RECIBIDO*\n` +
+          `${nombreCliente || 'Sin nombre'} — ${telefono}\n` +
+          `${detalle}\n` +
+          `${orden ? `Orden ${orden.numero}${orden.saldo > 0 ? ` · saldo $${orden.saldo.toLocaleString('es-CO')}` : ''}` : '⚠️ Sin orden asociada — verificar a qué corresponde'}\n` +
+          `Pendiente de VALIDAR en Control360.`,
+        imagenComprobante: imagenAdjunta,
+        notificarA: perfil.notificarEscalamientoA,
+        telefonoCliente: telefono
+      };
+    }
 
     if (decision.escalado) {
       const caseId = await registrarCasoEscalado(adminId, {
@@ -1857,7 +2277,12 @@ async function procesarMensajeEntrante(props) {
       // ✅ ANNY-TRANSFER-039: se dice explícitamente que la conversación se
       // TRANSFIERE. "Un asesor te escribe" dejaba al cliente sin saber si
       // debía seguir hablando con Anny o esperar.
-      const respuestaEsc = 'Este caso prefiero pasarlo a un asesor para no darte un dato equivocado. Ya le transferí tu conversación y te escribe por aquí mismo.';
+      // ✅ ANNY-COMPROMISO-047: "te escribe por aquí mismo" es una promesa
+      // sin plazo — y sin plazo el cliente no sabe si esperar 5 minutos o
+      // todo el día. Un cliente canceló justamente ahí. Ahora el mensaje
+      // compromete una FRANJA REAL calculada sobre el horario de atención,
+      // y fuera de horario dice la verdad en vez de fingir inmediatez.
+      const respuestaEsc = `Este caso prefiero pasarlo a un asesor para no darte un dato equivocado. ${compromisoDeRespuesta()}`;
 
       // ✅ ANNY-TRANSFER-039: si Anny acaba de decir que transfiere, no puede
       // seguir contestando. Antes solo se pausaba cuando el cliente PEDÍA un
@@ -2181,6 +2606,12 @@ module.exports = {
   reactivarAnny,
   buscarClienteEnBD,
   obtenerCatalogoProductos,
+  obtenerOrdenesServicio,
+  compromisoDeRespuesta,
+  obtenerDiccionarioTenant,     // ✅ ANNY-DICC-049
+  invalidarCacheDiccionario,
+  resolverPorPalabrasClave,
+  registrarPagoReportado,       // ✅ ANNY-PAGO-050
   sugerirRespuestaEntrenamiento, // ✅ ANNY-KB-022
   RESPUESTAS_BASE,
   // ── v22 ──

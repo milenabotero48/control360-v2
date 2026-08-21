@@ -109,7 +109,8 @@ router.put('/config', authenticate, requireAnnyActivo, async (req, res) => {
       horaEnvio = '09:00',
       notificarPedidosA = '',
       diasRondaVencimientos = '',
-      topeDiarioRonda = 60
+      topeDiarioRonda = 60,
+      notificarGrupoJid // ✅ ANNY-GRUPO-051 (undefined = no tocar)
     } = req.body;
 
     const resultado = await annyService.actualizarConfig(adminId, {
@@ -123,6 +124,10 @@ router.put('/config', authenticate, requireAnnyActivo, async (req, res) => {
         .filter(n => n >= 1 && n <= 31)
         .join(','),
       topeDiarioRonda: Math.min(Math.max(parseInt(topeDiarioRonda) || 60, 10), 150),
+      // ✅ ANNY-GRUPO-051: '' limpia el grupo; undefined lo deja como está.
+      ...(notificarGrupoJid !== undefined
+        ? { notificarGrupoJid: String(notificarGrupoJid).endsWith('@g.us') ? String(notificarGrupoJid) : '' }
+        : {}),
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
@@ -1130,6 +1135,156 @@ router.post('/desconectar', authenticate, requireAnnyActivo, requireAdmin, async
     const adminId = req.user.adminId || req.user.uid;
     const resultado = await baileysService.desconectar(adminId);
     return res.json(resultado);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// ✅ ANNY-GRUPO-051 — GET /api/anny/grupos
+// Lista los grupos de WhatsApp donde está el número conectado,
+// para elegir el grupo de avisos desde el panel sin copiar jids.
+// ============================================================
+router.get('/grupos', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const grupos = await baileysService.listarGrupos(adminId);
+    return res.json({ grupos });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// ✅ ANNY-DICC-049 — DICCIONARIO DE PALABRAS CLAVE
+// ------------------------------------------------------------
+// Mapea cómo habla el CLIENTE con lo que dice el CATÁLOGO.
+// Guarda solo la referencia al producto, NUNCA el precio: el
+// precio se lee vivo del catálogo en cada mensaje. Así una
+// actualización de tarifas no obliga a tocar el diccionario.
+// ============================================================
+
+// GET — diccionario + catálogo activo para poblar el selector
+router.get('/diccionario', authenticate, requireAnnyActivo, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const [diccionario, catalogo] = await Promise.all([
+      annyService.obtenerDiccionarioTenant(adminId),
+      annyService.obtenerCatalogoProductos(adminId)
+    ]);
+
+    // Marca las entradas cuyo producto ya no está activo: son las
+    // que harían que Anny no encuentre precio y termine escalando.
+    const idsActivos = new Set(catalogo.map(p => p.id));
+    const entradas = Object.entries(diccionario || {}).map(([productoId, e]) => ({
+      productoId,
+      nombre: e.nombre || '(producto sin nombre)',
+      palabras: Array.isArray(e.palabras) ? e.palabras : [],
+      huerfana: !idsActivos.has(productoId)
+    })).sort((a, b) => a.nombre.localeCompare(b.nombre));
+
+    return res.json({ entradas, catalogo });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT — crear o reemplazar las palabras de UN producto
+router.put('/diccionario/:productoId', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const { productoId } = req.params;
+    const { palabras } = req.body || {};
+
+    if (!Array.isArray(palabras)) {
+      return res.status(400).json({ error: 'palabras debe ser un arreglo' });
+    }
+
+    // El producto debe existir y estar activo en el catálogo del
+    // PROPIO tenant: así el diccionario no puede apuntar a nada ajeno.
+    const catalogo = await annyService.obtenerCatalogoProductos(adminId);
+    const prod = catalogo.find(p => p.id === productoId);
+    if (!prod) {
+      return res.status(404).json({ error: 'El producto no existe o no está activo en tu catálogo' });
+    }
+
+    const avisos = [];
+    const limpias = [...new Set(
+      palabras
+        .map(p => String(p || '').trim().toLowerCase())
+        .filter(Boolean)
+    )];
+
+    const utiles = limpias.filter(p => p.length >= 4);
+    limpias.filter(p => p.length < 4).forEach(p =>
+      avisos.push(`"${p}" es demasiado corta: haría match con casi cualquier mensaje. Se descartó.`)
+    );
+
+    if (!utiles.length) {
+      return res.status(400).json({ error: 'Ninguna palabra clave es utilizable (mínimo 4 caracteres)', avisos });
+    }
+
+    const docRef = db.collection('diccionarioAnny').doc(adminId);
+    const doc = await docRef.get();
+    const dicc = doc.exists ? (doc.data() || {}) : {};
+
+    // Aviso de colisión: la misma palabra en dos productos hace que
+    // Anny tenga que elegir. Gana la más específica, pero conviene saberlo.
+    for (const [otroId, otra] of Object.entries(dicc)) {
+      if (otroId === productoId || !otra || !Array.isArray(otra.palabras)) continue;
+      const repetidas = utiles.filter(p => otra.palabras.includes(p));
+      if (repetidas.length) {
+        avisos.push(`"${repetidas.join('", "')}" ya está en "${otra.nombre}". Anny elegirá la palabra clave más específica.`);
+      }
+    }
+
+    dicc[productoId] = { nombre: prod.nombre, palabras: utiles.slice(0, 20) };
+    await docRef.set(dicc);
+    annyService.invalidarCacheDiccionario(adminId);
+
+    return res.json({ ok: true, productoId, nombre: prod.nombre, palabras: dicc[productoId].palabras, avisos });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE — quitar un producto del diccionario
+router.delete('/diccionario/:productoId', authenticate, requireAnnyActivo, requireAdmin, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const docRef = db.collection('diccionarioAnny').doc(adminId);
+    const doc = await docRef.get();
+    const dicc = doc.exists ? (doc.data() || {}) : {};
+
+    if (!dicc[req.params.productoId]) {
+      return res.status(404).json({ error: 'Esa entrada no existe en el diccionario' });
+    }
+
+    delete dicc[req.params.productoId];
+    await docRef.set(dicc);
+    annyService.invalidarCacheDiccionario(adminId);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /diccionario/probar — banco de pruebas: escribe una frase de
+// cliente y mira qué resolvería Anny. Evita cargar el diccionario a ciegas.
+router.post('/diccionario/probar', authenticate, requireAnnyActivo, async (req, res) => {
+  try {
+    const adminId = req.user.adminId || req.user.uid;
+    const { frase } = req.body || {};
+    if (!frase) return res.status(400).json({ error: 'Escribe una frase de prueba' });
+
+    const [diccionario, catalogo] = await Promise.all([
+      annyService.obtenerDiccionarioTenant(adminId),
+      annyService.obtenerCatalogoProductos(adminId)
+    ]);
+
+    const resueltos = annyService.resolverPorPalabrasClave(frase, diccionario, catalogo);
+    return res.json({ frase, resueltos, encontrado: resueltos.length > 0 });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
