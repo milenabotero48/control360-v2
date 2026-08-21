@@ -837,9 +837,17 @@ export default function GestionTaller({ user }) {
     catch (e) { console.error('Dashboard taller:', e); }
   }, []);
 
+  // ✅ TALLER-SYNC-001: devuelve los datos además de setearlos. Sin esto, quien
+  // llama no tiene forma de trabajar con la orden FRESCA: `ordenes` es estado de
+  // React y no se actualiza hasta el siguiente render, así que cualquier lectura
+  // inmediata veía la versión vieja (origen del bug del "verde que retrocede").
   const cargarOrdenes = useCallback(async () => {
-    try { const { data } = await axios.get(`${API}/workshop/ordenes`, auth()); setOrdenes(data); }
-    catch (e) { console.error('Órdenes taller:', e); }
+    try {
+      const { data } = await axios.get(`${API}/workshop/ordenes`, auth());
+      setOrdenes(data);
+      return Array.isArray(data) ? data : [];
+    }
+    catch (e) { console.error('Órdenes taller:', e); return []; }
   }, []);
 
   const cargarProcesos = useCallback(async () => {
@@ -891,7 +899,12 @@ export default function GestionTaller({ user }) {
       .some(c => cat.includes(c));
   };
 
-  const cargarEquiposDeOrden = async (ordenId, numeroOrden) => {
+  // ✅ TALLER-SYNC-001: `ordenFresca` es opcional pero es la vía correcta.
+  // Antes esta función SIEMPRE leía `ordenes` del closure (estado viejo) y se
+  // invocaba sin esperar a cargarOrdenes(), así que reconstruía la lista sin el
+  // paso recién guardado y borraba el "procesado" que la UI ya había pintado.
+  // Devuelve la lista reconstruida para que el llamador decida con datos reales.
+  const cargarEquiposDeOrden = async (ordenId, numeroOrden, ordenFresca = null) => {
     // Ola 2.5 FIX: SIEMPRE recargar (no return si ya está cargado), porque al
     // procesar un equipo se crean QRs nuevos y debemos verlos reflejados.
     try {
@@ -908,7 +921,7 @@ export default function GestionTaller({ user }) {
       //    tener solo 1 después de procesar el primero. BUG CRÍTICO: con la
       //    lógica anterior, procesar 1 → "todos listos" → orden completada
       //    sin haber recargado los otros 9.
-      const ord = ordenes.find(o => o.id === ordenId);
+      const ord = ordenFresca || ordenes.find(o => o.id === ordenId);
       const items = (ord?.items || []).filter(esItemTallerFront);
       // ✅ FIX TALLER-002: historial persistido en la orden — de aquí se
       // recupera el estado "procesado" de los equipos SIN QR (para QR, ese
@@ -1019,7 +1032,8 @@ export default function GestionTaller({ user }) {
       });
 
       setEquiposOrden(prev => ({ ...prev, [ordenId]: equipos }));
-    } catch (e) { console.error('Error cargando equipos orden:', e); }
+      return equipos;
+    } catch (e) { console.error('Error cargando equipos orden:', e); return null; }
   };
 
   // ─── ACCIONES ÓRDENES ────────────────────────────────────────────────────────
@@ -1107,10 +1121,12 @@ export default function GestionTaller({ user }) {
       ? `Servicio agregado al equipo ${data.codigoQR}`
       : `QR ${data.codigoQR} generado · Continúa con el proceso`);
     setModalQR(null);
-    cargarOrdenes(); cargarDashboard();
+    cargarDashboard();
 
-    // Recargar lista de equipos y luego abrir el modal de proceso para ESTE equipo.
-    await cargarEquiposDeOrden(orden.id, orden.numeroOrden);
+    // ✅ TALLER-SYNC-001: esperar la orden FRESCA antes de reconstruir la lista.
+    const ordsQR = await cargarOrdenes();
+    const frescaQR = (ordsQR || []).find(o => o.id === orden.id) || orden;
+    await cargarEquiposDeOrden(orden.id, orden.numeroOrden, frescaQR);
 
     // Construir el equipo "con QR ya asignado" para pasarlo directo al modal
     // de Proceso. No esperamos a que se re-renderice la lista — vamos directo.
@@ -1155,15 +1171,20 @@ export default function GestionTaller({ user }) {
       ? `equipo_${codigoQR}`
       : construirPasoIdSinQR(eqActual);
 
+    let pasoDuplicado = false;
     if (!esOrdenManual) {
       // 1. Registrar paso en la orden
-      await axios.post(`${API}/workshop/ordenes/${ordenId}/paso`, {
+      // ✅ TALLER-IDEMP-001: el backend responde duplicado:true si ese pasoId ya
+      // estaba registrado. No es un error — el equipo ya está procesado y NO se
+      // vuelven a descontar insumos.
+      const { data: respPaso } = await axios.post(`${API}/workshop/ordenes/${ordenId}/paso`, {
         pasoId,
         pasoNombre: `${codigoQR || 'Sin QR'} — ${procesoNombre}`,
         insumosUsados,
         observaciones,
         motivoSinQR: modalProcesoEquipo?.equipo?.motivoSinQR || undefined, // ✅ QR-EXCEPCION-001
       }, auth());
+      pasoDuplicado = !!respPaso?.duplicado;
     } else {
       // Para procesos manuales, descontar insumos directamente
       for (const insumo of (insumosUsados || [])) {
@@ -1190,37 +1211,71 @@ export default function GestionTaller({ user }) {
 
     // 3. Si NO es manual: verificar si todos los equipos de la orden están listos
     if (!esOrdenManual) {
+      // ── Pintado optimista: el técnico ve el verde de inmediato ──────────
       const equipos = equiposOrden[ordenId] || [];
       // ✅ TALLER-QR-002: identificar el equipo procesado por su pasoId
       // determinístico (misma clave que se escribió) en vez de comparar
       // _itemIdx/_unidad sueltos — que fallaba cuando esos campos venían
       // undefined y dejaba el verde "retrocediendo" a pendiente al recargar.
-      const updatedEquipos = equipos.map(e => {
-        if (codigoQR && e.codigoQR === codigoQR) return { ...e, procesado: true };
-        if (!codigoQR && construirPasoIdSinQR(e) === pasoId) return { ...e, procesado: true };
-        return e;
-      });
-      setEquiposOrden(prev => ({ ...prev, [ordenId]: updatedEquipos }));
+      setEquiposOrden(prev => ({
+        ...prev,
+        [ordenId]: (prev[ordenId] || equipos).map(e => {
+          if (codigoQR && e.codigoQR === codigoQR) return { ...e, procesado: true };
+          if (!codigoQR && construirPasoIdSinQR(e) === pasoId) return { ...e, procesado: true };
+          return e;
+        })
+      }));
 
-      const todosListos = updatedEquipos.length > 0 && updatedEquipos.every(e => e.procesado);
+      // ══════════════════════════════════════════════════════════════════
+      // ✅ TALLER-SYNC-001: releer la orden y RECONSTRUIR con datos frescos
+      // ANTES de decidir nada. Antes se reconstruía en paralelo con
+      // cargarOrdenes(), leyendo `ordenes` del closure (sin el paso recién
+      // guardado): la lista volvía a "pendiente" y el técnico reprocesaba
+      // el mismo equipo. Ese reproceso es el que descontaba insumos dos
+      // veces (ver TALLER-IDEMP-001 en el backend).
+      // ══════════════════════════════════════════════════════════════════
+      const ords = await cargarOrdenes();
+      const fresca = (ords || []).find(o => o.id === ordenId) || orden;
+      const equiposFrescos = await cargarEquiposDeOrden(ordenId, orden.numeroOrden, fresca);
+
+      // ✅ TALLER-SYNC-001: total REAL esperado, calculado desde los items de
+      // la orden fresca. Es la guarda contra el peor escenario: que la lista
+      // en memoria llegue incompleta y una orden de 22 equipos se dé por
+      // terminada tras procesar uno solo.
+      const totalEsperado = (fresca.items || [])
+        .filter(esItemTallerFront)
+        .reduce((acc, it) => acc + (it.cantidad || 1), 0);
+
+      const lista = Array.isArray(equiposFrescos) ? equiposFrescos : [];
+      const listos = lista.filter(e => e.procesado).length;
+      const todosListos =
+        lista.length > 0 &&
+        lista.length >= totalEsperado &&
+        listos === lista.length;
+
+      const etiquetaEquipo = codigoQR || 'equipo sin QR';
 
       if (todosListos) {
         // Completar toda la orden → pasa a Facturación
         await axios.post(`${API}/workshop/ordenes/${ordenId}/completar`, {
-          observacionesFinal: `Todos los equipos procesados. Último: ${codigoQR}`,
+          observacionesFinal: `Todos los equipos procesados. Último: ${etiquetaEquipo}`,
           procesosCompletados
         }, auth());
         notif(`✅ Todos los equipos listos — Orden ${orden.numeroOrden} pasa a Facturación`);
+      } else if (pasoDuplicado) {
+        notif(`Este equipo ya estaba procesado — no se descontaron insumos de nuevo. Van ${listos}/${totalEsperado || lista.length}`);
       } else {
-        notif(`✅ Equipo ${codigoQR} listo`);
+        notif(`✅ ${etiquetaEquipo} listo — ${listos}/${totalEsperado || lista.length} equipos procesados`);
       }
     } else {
-      notif(`✅ Proceso manual registrado en ${codigoQR}`);
+      notif(`✅ Proceso manual registrado en ${codigoQR || 'equipo sin QR'}`);
     }
 
     setModalProcesoEquipo(null);
-    cargarOrdenes(); cargarDashboard();
-    if (!esOrdenManual) cargarEquiposDeOrden(ordenId, orden.numeroOrden);
+    // La rama no-manual ya refrescó órdenes arriba (con await). La manual no
+    // toca la orden, pero sí puede mover insumos y el dashboard.
+    if (esOrdenManual) cargarOrdenes();
+    cargarDashboard();
   };
 
   // ─── ACCIONES PROCESOS ───────────────────────────────────────────────────────
@@ -1405,11 +1460,22 @@ export default function GestionTaller({ user }) {
 <p style={{ margin: '4px 0 0', fontSize: 13, fontWeight: 600, color: '#374151' }}>
   {orden.clienteNombre}
   {/* ✅ NUEVO: Subtítulo mostrando equipos de taller */}
-  {orden.items && orden.items.length > 0 && (
-    <span style={{ fontSize: 12, fontWeight: 400, color: '#6b7280', marginLeft: 8 }}>
-      · {orden.items.length} equipo{orden.items.length !== 1 ? 's' : ''} de taller
-    </span>
-  )}
+  {/* ✅ TALLER-SYNC-001: antes decía "3 equipos de taller" contando LÍNEAS de
+      la cotización, mientras la barra de progreso contaba UNIDADES (22) y las
+      filas decían "Equipo 1/14". Tres números distintos para lo mismo. Ahora
+      manda la unidad —que es lo que el técnico procesa— y la referencia va
+      entre paréntesis. */}
+  {(() => {
+    const itemsTaller = (orden.items || []).filter(esItemTallerFront);
+    if (itemsTaller.length === 0) return null;
+    const unidades = itemsTaller.reduce((acc, it) => acc + (it.cantidad || 1), 0);
+    return (
+      <span style={{ fontSize: 12, fontWeight: 400, color: '#6b7280', marginLeft: 8 }}>
+        · {unidades} equipo{unidades !== 1 ? 's' : ''} de taller
+        {itemsTaller.length !== unidades && ` (${itemsTaller.length} referencia${itemsTaller.length !== 1 ? 's' : ''})`}
+      </span>
+    );
+  })()}
 </p>
 
                         <p style={{ margin: '2px 0 0', fontSize: 12, color: '#6b7280' }}>{orden.empresaNombre}</p>
@@ -1441,8 +1507,13 @@ export default function GestionTaller({ user }) {
                             Si es una venta, no requiere proceso de taller.
                           </div>
                         )}
+                        {/* ✅ TALLER-SYNC-001: key por IDENTIDAD del equipo
+                            (item + unidad), no por índice de render. Con keys
+                            posicionales React reusaba el nodo equivocado al
+                            reconstruirse la lista y el estado visual saltaba
+                            de una fila a otra. */}
                         {equipos.map((eq, i) => (
-                          <div key={eq.codigoQR || `pend-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: eq.procesado ? '#f0fdf4' : '#fafafa', border: `1px solid ${eq.procesado ? '#bbf7d0' : '#e5e7eb'}`, marginBottom: 6 }}>
+                          <div key={eq.codigoQR || (eq._itemIdx !== undefined ? `it${eq._itemIdx}-u${eq._unidad}` : `pend-${i}`)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: eq.procesado ? '#f0fdf4' : '#fafafa', border: `1px solid ${eq.procesado ? '#bbf7d0' : '#e5e7eb'}`, marginBottom: 6 }}>
                             {/* ✅ FIX TALLER-003: sin módulo QR, ícono neutro (nunca 🏷️) */}
                             <span style={{ fontSize: 18 }}>{eq.procesado ? '✅' : (tieneQR ? (eq.codigoQR ? '⏳' : '🏷️') : '⏳')}</span>
                             <div style={{ flex: 1 }}>
@@ -1499,7 +1570,7 @@ export default function GestionTaller({ user }) {
                       )}
 
                       {orden.tallerRecepcion && !equiposCargados && !orden.tallerCompletado && (
-                        <button onClick={() => cargarEquiposDeOrden(orden.id, orden.numeroOrden)} style={s.btn()}>
+                        <button onClick={() => cargarEquiposDeOrden(orden.id, orden.numeroOrden, orden)} style={s.btn()}>
                           📋 Ver equipos individuales
                         </button>
                       )}

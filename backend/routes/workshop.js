@@ -470,6 +470,8 @@ router.post('/ordenes/:ordenId/paso', authenticate, validarTenant('orders'), asy
     const ordenDoc = await ordenRef.get();
     if (!ordenDoc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
 
+    if (!pasoId) return res.status(400).json({ error: 'pasoId es obligatorio' });
+
     const registro = {
       pasoId,
       pasoNombre,
@@ -481,20 +483,48 @@ router.post('/ordenes/:ordenId/paso', authenticate, validarTenant('orders'), asy
       fecha: new Date().toISOString()
     };
 
-    // Agregar paso al historial de la orden
-    await ordenRef.update({
-      tallerPasos: admin.firestore.FieldValue.arrayUnion(registro),
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    // ══════════════════════════════════════════════════════════════════════
+    // ✅ TALLER-IDEMP-001: el registro de paso es IDEMPOTENTE por pasoId.
+    //
+    // Antes se usaba arrayUnion(registro) — y como `registro` lleva `fecha`
+    // y `tecnicoId`, cada llamada producía un objeto DISTINTO: arrayUnion
+    // nunca deduplicaba. Un doble clic, un reintento de red, o el técnico
+    // reprocesando un equipo que la UI había "devuelto" a pendiente,
+    // escribía el paso dos veces Y descontaba los insumos dos veces.
+    // Fuga de inventario silenciosa.
+    //
+    // Ahora la escritura va en transacción: si ya existe un paso con ese
+    // pasoId, no se escribe nada y NO se descuenta insumo. Se responde 200
+    // con duplicado:true para que el front lo trate como éxito (el equipo
+    // efectivamente ya está procesado), no como error.
+    // ══════════════════════════════════════════════════════════════════════
+    const yaExistia = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ordenRef);
+      const pasos = snap.data()?.tallerPasos || [];
+      if (pasos.some(p => p && p.pasoId === pasoId)) return true;
+      tx.update(ordenRef, {
+        tallerPasos: [...pasos, registro],
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      return false;
     });
 
-    // Descontar insumos usados del stock
+    if (yaExistia) {
+      return res.json({
+        message: 'Este equipo ya estaba registrado como procesado',
+        duplicado: true,
+        registro
+      });
+    }
+
+    // Descontar insumos usados del stock — solo en la escritura real
     for (const insumo of insumosUsados) {
       if (insumo.insumoId && insumo.cantidad > 0) {
         await descontarInsumo(adminId, insumo.insumoId, insumo.cantidad);
       }
     }
 
-    res.json({ message: 'Paso registrado', registro });
+    res.json({ message: 'Paso registrado', duplicado: false, registro });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
