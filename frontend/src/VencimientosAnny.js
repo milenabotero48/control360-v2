@@ -7,9 +7,6 @@
 // ============================================================
 
 import React, { useState, useEffect, useRef } from 'react';
-// ✅ ANNY-DICC-049 / ANNY-GRUPO-051: pestaña aislada. Se monta aquí,
-// pero toda su lógica vive en su propio archivo.
-import AnnyDiccionario from './AnnyDiccionario';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -473,8 +470,7 @@ export default function VencimientosAnny() {
           { id: 'conversaciones', label: '💬 Conversaciones' },
           { id: 'pedidos', label: '🛒 Pedidos', badge: pedidosNuevos.length },
           { id: 'casos', label: '⚠️ Casos Escalados', badge: pendientes.length },
-          { id: 'entrenamiento', label: '🧠 Entrenamiento' },
-          { id: 'diccionario', label: '🔑 Palabras clave' }
+          { id: 'entrenamiento', label: '🧠 Entrenamiento' }
         ].map(tab => (
           <button
             key={tab.id}
@@ -1081,8 +1077,6 @@ export default function VencimientosAnny() {
       )}
 
       {/* =============== TAB: ENTRENAMIENTO =============== */}
-      {activeTab === 'diccionario' && <AnnyDiccionario />}
-
       {activeTab === 'entrenamiento' && (
         <div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>

@@ -26,6 +26,8 @@ import { API, authHeaders, C, fmtEspera, fmtMoneda, sumarPedidos } from './annyU
 //   lectura en un solo helper para no repetir el error.
 import AnnyConversaciones from './AnnyConversaciones';
 import AnnyEntrenamiento from './AnnyEntrenamiento';
+// ✅ ANNY-DICC-049: puente entre cómo habla el cliente y el catálogo.
+import AnnyPalabrasClave from './AnnyPalabrasClave';
 
 // FIX ANNY-ESTADO-025: única fuente de verdad de la conexión.
 const estaConectado = (e) => String(e?.estado || '').toLowerCase() === 'conectado';
@@ -251,6 +253,7 @@ export default function ModuloAnny({ onNavegar }) {
           { id: 'pedidos', label: `Pedidos${pedidosPendientes.length ? ` (${pedidosPendientes.length})` : ''}` },
           { id: 'casos', label: `Escalados${casos.length ? ` (${casos.length})` : ''}` },
           { id: 'entrenamiento', label: 'Entrenamiento' },
+          { id: 'palabras', label: 'Palabras clave' },
           { id: 'config', label: 'Configuración' }
         ].map(t => (
           <button
@@ -266,6 +269,7 @@ export default function ModuloAnny({ onNavegar }) {
       {/* ─── Contenido ─── */}
       {tab === 'conversaciones' && <AnnyConversaciones />}
       {tab === 'entrenamiento' && <AnnyEntrenamiento />}
+      {tab === 'palabras' && <AnnyPalabrasClave />}
       {tab === 'pedidos' && <Pedidos pedidos={pedidos} onCambio={cargarResumen} onNavegar={onNavegar} />}
       {tab === 'casos' && <Casos casos={casos} onCambio={cargarResumen} />}
       {tab === 'config' && <Configuracion />}
@@ -491,6 +495,28 @@ function Configuracion() {
   const [guardando, setGuardando] = useState(false);
   const [msg, setMsg] = useState(null);
   const [ronda, setRonda] = useState(null);
+  // ✅ ANNY-GRUPO-051: escalados y comprobantes de pago a un grupo.
+  // Un aviso que ven varias personas se atiende; uno que llega a un
+  // solo celular se pierde cuando esa persona está manejando.
+  const [grupos, setGrupos] = useState([]);
+  const [buscandoGrupos, setBuscandoGrupos] = useState(false);
+
+  const buscarGrupos = async () => {
+    setBuscandoGrupos(true);
+    setMsg(null);
+    try {
+      const r = await fetch(`${API}/anny/grupos`, { headers: authHeaders() });
+      const d = r.ok ? await r.json() : {};
+      setGrupos(d.grupos || []);
+      if (!(d.grupos || []).length) {
+        setMsg({ ok: false, texto: 'No se encontraron grupos. Revisá que Anny esté conectada y que su número esté dentro del grupo.' });
+      }
+    } catch (e) {
+      setMsg({ ok: false, texto: 'Error de conexión.' });
+    } finally {
+      setBuscandoGrupos(false);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -502,7 +528,9 @@ function Configuracion() {
           horaEnvio: d.horaEnvio || '09:00',
           notificarPedidosA: d.notificarPedidosA || '',
           diasRondaVencimientos: d.diasRondaVencimientos || '',
-          topeDiarioRonda: d.topeDiarioRonda ?? 60
+          topeDiarioRonda: d.topeDiarioRonda ?? 60,
+          // ✅ ANNY-GRUPO-051
+          notificarGrupoJid: d.notificarGrupoJid || ''
         });
       } catch (e) { setCfg({}); }
     })();
@@ -560,6 +588,33 @@ function Configuracion() {
         {campo('WhatsApp para avisos', 'notificarPedidosA', 'text', 'Aquí llegan los pedidos nuevos y los escalamientos urgentes.')}
         {campo('Días de ronda del mes', 'diasRondaVencimientos', 'text', 'Separados por coma. Ejemplo: 5, 20')}
         {campo('Tope de mensajes por ronda', 'topeDiarioRonda', 'number', 'Entre 10 y 150. Protege el número de bloqueos.')}
+      </div>
+
+      {/* ✅ ANNY-GRUPO-051 — grupo interno de avisos */}
+      <div style={{ marginBottom: 14 }}>
+        <label style={S.label}>Grupo de WhatsApp para avisos internos</label>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <select
+            value={cfg.notificarGrupoJid || ''}
+            onChange={e => setCfg(c => ({ ...c, notificarGrupoJid: e.target.value }))}
+            style={{ ...S.input, flex: '1 1 240px' }}
+          >
+            <option value="">Sin grupo — avisar al WhatsApp de arriba</option>
+            {cfg.notificarGrupoJid && !grupos.some(g => g.jid === cfg.notificarGrupoJid) && (
+              <option value={cfg.notificarGrupoJid}>Grupo configurado actualmente</option>
+            )}
+            {grupos.map(g => (
+              <option key={g.jid} value={g.jid}>{g.nombre} ({g.participantes})</option>
+            ))}
+          </select>
+          <button onClick={buscarGrupos} disabled={buscandoGrupos} style={S.btnSec}>
+            {buscandoGrupos ? 'Buscando…' : 'Buscar mis grupos'}
+          </button>
+        </div>
+        <p style={S.ayuda}>
+          Los casos escalados y los comprobantes de pago llegan aquí. El número de Anny tiene que
+          estar dentro del grupo. Tocá “Buscar mis grupos” y elegilo de la lista.
+        </p>
       </div>
 
       {msg && (
