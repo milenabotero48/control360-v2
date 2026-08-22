@@ -163,8 +163,12 @@ const construirFlujo = (lugarAtencion, requiereFactura, tieneEquipoTaller = true
       en_ruta_entrega:  { siguiente: 'entrega_cobranza', auto: false, accion: 'entrega' },
       entrega_cobranza: { siguiente: 'cuadre_dinero',    auto: false, accion: 'cuadre' }
     }) : (F ? {
-      despacho:         { siguiente: 'facturado',        auto: true,  requiereFacturaAntes: true },
-      facturado:        { siguiente: 'en_ruta_entrega',  auto: true },
+      despacho:         { siguiente: 'facturado',        auto: true },
+      // ✅ FACTURA-ATASCO-001: el candado va en 'facturado', igual que en TODOS
+      // los demás flujos. Estaba en 'despacho', y la cascada pasaba de
+      // 'facturado' a 'en_ruta_entrega' SIN número de factura — así se
+      // escapaban las órdenes que después quedaban atascadas.
+      facturado:        { siguiente: 'en_ruta_entrega',  auto: true,  requiereFacturaAntes: true },
       en_ruta_entrega:  { siguiente: 'entrega_cobranza', auto: false, accion: 'entrega' },
       entrega_cobranza: { siguiente: 'cuadre_dinero',    auto: false, accion: 'cuadre' }
     } : {
@@ -1195,7 +1199,21 @@ router.post('/', authenticate, async (req, res) => {
       dineroEnCaja: pagadoAlCrear && !marcarPagoAdelantado && formaPago === 'Efectivo' ? false : false,
       // Marca pendiente de validación si fue pago electrónico anticipado
       pagoVirtualPendienteValidar: marcarPagoAdelantado,
-      pagoValidado: marcarPagoAdelantado ? false : null,
+      // ✅ PAGO-ADMIN-002: el admin es el dueño de la operación. Si ÉL registra
+      // el pago virtual, ese pago NACE validado — su palabra ES la validación.
+      // Antes quedaba en null y el banner de "pendiente de validación" le pedía
+      // aprobar su propio pago. Para los demás roles NADA cambia: siguen
+      // esperando a tesorería. Se deja la huella de quién y cuándo, igual que
+      // en una validación manual, para no perder el rastro contable.
+      ...(esAdmin && esPagoVirtual && (pagadoAlCrear || marcarPagoAdelantado) ? {
+        pagoValidado: true,
+        pagoValidadoPor: req.user.uid || req.user.id,
+        pagoValidadoPorNombre: req.user.nombre || req.user.email,
+        pagoValidadoEn: new Date().toISOString(),
+        validadoAutomaticamente: true
+      } : {
+        pagoValidado: marcarPagoAdelantado ? false : null
+      }),
       fotoTransferenciaUrl: fotoTransferenciaUrl || null,
       cobradoPorMensajero: false,
       creadoPor: req.user.uid || req.user.id,
@@ -2114,6 +2132,349 @@ router.put('/:id/estado', authenticate, async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 // POST /api/orders/:id/pago — Registrar pago (anti-recobro + avance auto)
 // ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ FACTURA-ATASCO-001 — Guardar el N° de factura DIAN SIN mover el estado
+// ──────────────────────────────────────────────────────────────────────────────
+// Por qué existe: la validación integral exige el número en 7 estados
+// (facturado, completada, cxc, en_ruta_entrega, entrega_cobranza, cuadre_dinero,
+// listo_entregar), pero el ÚNICO camino para digitarlo era PUT /:id/estado, que
+// además AVANZA la orden. Una orden que llegó a entrega_cobranza o a cxc sin
+// número quedaba atascada: el backend pedía la factura y no había dónde
+// escribirla (caso real INVERSIONES J GALLO).
+//
+// Este endpoint NO toca estado, NO toca dinero, NO dispara cascada. Solo escribe
+// el dato fiscal que faltaba, con las mismas defensas del flujo normal:
+// duplicado por empresa, corrección solo admin, y auditoría.
+// ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ NO-PAGO-001 — Reportar que el cliente NO pagó y mandar la orden a CxC
+// ──────────────────────────────────────────────────────────────────────────────
+// Caso real OS-0654 (Club Deportivo Sócrates): el mensajero marcó "cobrado" una
+// orden que el cliente nunca pagó. Resultado: la plata quedó sumando en el
+// cuadre de efectivo del mensajero —tenía que entregar un dinero que nunca
+// recibió— y la deuda nunca apareció en cartera.
+//
+// PRINCIPIOS DE DISEÑO (decididos con la dueña del producto):
+//   1. Solo Tesorería y Admin. El mensajero reporta, la oficina reversa.
+//   2. NADA se borra ni se edita. La reversión es un movimiento NUEVO
+//      (contra-asiento) en la subcolección `movimientosCobro` de la orden.
+//      El cobro original queda intacto y auditable para siempre.
+//   3. El cuadre YA CERRADO no se toca nunca. Si el dinero ya había entrado a
+//      caja, se crea un egreso de ajuste CON FECHA DE HOY. No se reabren
+//      períodos conciliados.
+//   4. Motivo obligatorio. Sin motivo no hay reversión.
+//
+// EFECTO EN EL ERI: ninguno en la utilidad. El ingreso se reconoce al generar
+// la orden, así que esto solo mueve la contrapartida de caja a cartera.
+// Cambia el flujo de efectivo, no el resultado.
+// ══════════════════════════════════════════════════════════════════════════════
+const MOTIVOS_NO_PAGO = {
+  CLIENTE_NO_PAGO:    'El cliente no pagó',
+  ERROR_MENSAJERO:    'El mensajero marcó pagado por error',
+  CREDITO_AUTORIZADO: 'Quedó a crédito autorizado',
+  PAGO_NO_LLEGO:      'Transferencia reportada que nunca llegó',
+  CHEQUE_DEVUELTO:    'Cheque devuelto',
+  OTRO:               'Otro motivo'
+};
+
+router.post('/:id/reversar-cobro', authenticate, validarTenant('orders'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const usuarioId = req.user.uid || req.user.id;
+    const usuarioNombre = req.user.nombre || req.user.email;
+
+    // 1 · Solo Tesorería y Admin.
+    if (!['admin', 'tesoreria'].includes(req.user.role)) {
+      return res.status(403).json({
+        error: 'Solo Tesorería o el Administrador pueden reportar que un cliente no pagó.'
+      });
+    }
+
+    const motivoCodigo = String(req.body.motivo || '').trim().toUpperCase();
+    const notas = String(req.body.notas || '').trim();
+    if (!MOTIVOS_NO_PAGO[motivoCodigo]) {
+      return res.status(400).json({
+        error: 'Motivo obligatorio.',
+        motivosValidos: Object.keys(MOTIVOS_NO_PAGO)
+      });
+    }
+    if (motivoCodigo === 'OTRO' && !notas) {
+      return res.status(400).json({ error: 'Con motivo "Otro" tenés que escribir la explicación.' });
+    }
+
+    const ordenRef = db.collection('orders').doc(id);
+    const snap = await ordenRef.get();
+    if (!snap.exists) return res.status(404).json({ error: 'Orden no encontrada' });
+    const actual = snap.data();
+
+    if (actual.estado === 'anulada') {
+      return res.status(400).json({ error: 'La orden está anulada: no hay cobro que reversar.' });
+    }
+
+    const totalOrden   = Math.round(Number(actual.total) || 0);
+    const pagadoPrevio = Math.round(Number(actual.montoPagado) || 0);
+    if (pagadoPrevio <= 0) {
+      return res.status(400).json({
+        error: `La orden ${actual.numeroOrden} no tiene ningún pago registrado. No hay nada que reversar.`
+      });
+    }
+
+    // Monto: por defecto se reversa TODO lo cobrado. Un monto explícito permite
+    // reversar solo una parte (el cliente abonó menos de lo que se registró).
+    const montoPedido = Math.round(Number(req.body.montoRevertir) || 0);
+    const montoRevertir = montoPedido > 0 ? Math.min(montoPedido, pagadoPrevio) : pagadoPrevio;
+
+    const nuevoPagado = Math.max(0, pagadoPrevio - montoRevertir);
+    const nuevoSaldo  = Math.max(0, totalOrden - nuevoPagado);
+    const quedaPagada = nuevoSaldo <= 1;
+    const ahoraISO    = new Date().toISOString();
+
+    // ── 2 · Reversión de caja SOLO si el dinero ya había entrado ──────────────
+    // Mismo patrón probado de la anulación (FIX CAJA-001): no se edita el
+    // movimiento original, se crea un egreso de ajuste con fecha de HOY.
+    let cajaRevertida = null;
+    const dineroYaEnCaja = actual.dineroEnCaja === true || Math.round(Number(actual.ingresadoCaja) || 0) > 0;
+    if (dineroYaEnCaja) {
+      try {
+        const movSnap = await db.collection('movimientos').where('ordenId', '==', id).limit(10).get();
+        const ingresos = movSnap.docs.filter(d => d.data().tipo === 'ingreso' && !d.data().esReversionCobro);
+        if (ingresos.length > 0) {
+          const movData = ingresos[0].data();
+          const cajaId  = movData.cajaId;
+          const montoCaja = Math.min(montoRevertir, Math.round(Number(movData.monto) || montoRevertir));
+          if (cajaId && cajaId !== 'sin_asignar' && montoCaja > 0) {
+            const cajaRef = db.collection('cajas').doc(cajaId);
+            const cajaDoc = await cajaRef.get();
+            if (cajaDoc.exists) {
+              await cajaRef.update({
+                saldo: (Number(cajaDoc.data().saldo) || 0) - montoCaja,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              await db.collection('movimientos').add({
+                userId: actual.adminId || req.adminId || usuarioId,
+                cajaId,
+                tipo: 'egreso',
+                concepto: `AJUSTE NO PAGO ${actual.numeroOrden} — ${actual.clienteNombre || ''} — ${MOTIVOS_NO_PAGO[motivoCodigo]}${notas ? ` — ${notas}` : ''}`,
+                monto: montoCaja,
+                referencia: actual.numeroOrden,
+                ordenId: id,
+                formaPago: actual.formaPago || '',
+                // Bandera propia: este egreso NO es un gasto del negocio, es la
+                // corrección de un ingreso que nunca existió. Que no lo cuente
+                // el P&G como egreso operativo.
+                esReversionCobro: true,
+                esAjusteContable: true,
+                creadoPor: usuarioNombre,
+                fecha: ahoraISO,
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+              });
+              cajaRevertida = { cajaId, montoRevertido: montoCaja, fechaAjuste: ahoraISO };
+            }
+          }
+        }
+      } catch (eCaja) {
+        // Nunca se bloquea la reversión por un fallo de caja: la deuda del
+        // cliente es lo crítico. El descuadre queda visible en la auditoría.
+        console.error('NO-PAGO-001: fallo revirtiendo caja:', eCaja);
+      }
+    }
+
+    // ── 3 · Movimiento append-only. El cobro original NO se toca ──────────────
+    await ordenRef.collection('movimientosCobro').add({
+      tipo: 'REVERSION',
+      monto: montoRevertir,
+      motivoCodigo,
+      motivoTexto: MOTIVOS_NO_PAGO[motivoCodigo],
+      notas,
+      // Foto del cobro que se está reversando, para poder reconstruir la
+      // historia sin depender de que la orden conserve esos campos.
+      cobroOriginal: {
+        formaPago: actual.formaPago || null,
+        montoPagado: pagadoPrevio,
+        fechaPago: actual.fechaPago || null,
+        mensajeroId: actual.mensajeroId || null,
+        mensajeroNombre: actual.mensajeroNombre || null,
+        cuadrado: actual.cuadrado === true,
+        fechaCuadre: actual.fechaCuadre || null,
+        dineroEnCaja: actual.dineroEnCaja === true
+      },
+      saldoAntes: Math.max(0, totalOrden - pagadoPrevio),
+      saldoDespues: nuevoSaldo,
+      estadoAntes: actual.estado,
+      cajaRevertida,
+      usuarioId,
+      usuarioNombre,
+      rol: req.user.role,
+      fecha: ahoraISO,
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    });
+
+    // ── 4 · La orden vuelve a deber ───────────────────────────────────────────
+    // El estado operativo solo se mueve a 'cxc' desde los estados de cobranza:
+    // una orden que aún va en ruta conserva su flujo (regla Ola 2.5 — pago y
+    // estado son dos dimensiones separadas).
+    const ESTADOS_COBRANZA = ['entrega_cobranza', 'cuadre_dinero', 'completada', 'cxc'];
+    const mueveEstado = !quedaPagada && ESTADOS_COBRANZA.includes(actual.estado);
+
+    const cambios = {
+      montoPagado: nuevoPagado,
+      pagado: quedaPagada,
+      cxcSaldo: nuevoSaldo,
+      cxcEstado: quedaPagada ? 'pagada' : (nuevoPagado > 0 ? 'parcial' : 'pendiente'),
+      montoRecaudado: 0,
+      cobroRevertido: true,
+      cobroRevertidoEn: ahoraISO,
+      cobroRevertidoPor: usuarioNombre,
+      cobroRevertidoMotivo: MOTIVOS_NO_PAGO[motivoCodigo],
+      // El mensajero deja de tener esta plata en sus manos: sale de su cuadre.
+      cobradoPorMensajero: false,
+      dineroEstado: 'pendiente',
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    if (!quedaPagada) {
+      cambios.fechaPago = null;
+      if (nuevoPagado <= 0) {
+        cambios.formaPagoRecaudo = 'A crédito (CxC)';
+        cambios.tipoCobro = 'credito';
+      }
+    }
+    if (cajaRevertida) {
+      cambios.dineroEnCaja = false;
+      cambios.ingresadoCaja = Math.max(0, Math.round(Number(actual.ingresadoCaja) || 0) - cajaRevertida.montoRevertido);
+    }
+    if (mueveEstado) {
+      cambios.estado = 'cxc';
+      cambios.historialEstados = admin.firestore.FieldValue.arrayUnion({
+        estado: 'cxc',
+        fecha: ahoraISO,
+        usuarioId,
+        usuarioNombre,
+        notas: `No pago reportado — ${MOTIVOS_NO_PAGO[motivoCodigo]}${notas ? `: ${notas}` : ''}`
+      });
+    }
+    await ordenRef.update(cambios);
+
+    // ── 5 · Avisar. Quien cobró tiene que enterarse de que su cuadre cambió ───
+    try {
+      await db.collection('notificaciones').add({
+        tipo: 'COBRO_REVERSADO',
+        ordenId: id,
+        numeroOrden: actual.numeroOrden,
+        clienteNombre: actual.clienteNombre || '',
+        adminId: actual.adminId || req.adminId || usuarioId,
+        empresaId: actual.empresaId || '',
+        mensajeroId: actual.mensajeroId || null,
+        total: montoRevertir,
+        mensaje: `${actual.numeroOrden} — ${actual.clienteNombre || ''}: se reversó un cobro de $${montoRevertir.toLocaleString('es-CO')} y pasó a cartera. Motivo: ${MOTIVOS_NO_PAGO[motivoCodigo]}`,
+        leida: false,
+        creadoEn: ahoraISO,
+        createdAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+    } catch (eNot) { console.warn('NO-PAGO-001: no se pudo notificar:', eNot.message); }
+
+    await auditar({
+      accion: 'REVERSAR_COBRO',
+      descripcion: `${usuarioNombre} reversó un cobro de $${montoRevertir.toLocaleString('es-CO')} en ${actual.numeroOrden} (${actual.clienteNombre || ''}) — ${MOTIVOS_NO_PAGO[motivoCodigo]}${notas ? ` — ${notas}` : ''}${cajaRevertida ? ` — Caja ajustada: -$${cajaRevertida.montoRevertido.toLocaleString('es-CO')}` : ' — El dinero no había entrado a caja'}`,
+      usuarioId, usuarioNombre, ordenId: id,
+      documento: actual.numeroOrden,
+      datos: {
+        motivoCodigo, notas, montoRevertir,
+        pagadoAntes: pagadoPrevio, pagadoDespues: nuevoPagado,
+        estadoAntes: actual.estado, estadoDespues: mueveEstado ? 'cxc' : actual.estado,
+        mensajeroNombre: actual.mensajeroNombre || null,
+        cajaRevertida
+      }
+    });
+
+    return res.json({
+      id,
+      numeroOrden: actual.numeroOrden,
+      estado: mueveEstado ? 'cxc' : actual.estado,
+      montoRevertido: montoRevertir,
+      saldoPendiente: nuevoSaldo,
+      cajaRevertida,
+      mensaje: cajaRevertida
+        ? `Cobro reversado. Se ajustó la caja con fecha de hoy por $${cajaRevertida.montoRevertido.toLocaleString('es-CO')} y la orden quedó en cartera.`
+        : 'Cobro reversado. El dinero aún no había entrado a caja, así que salió del cuadre del mensajero y la orden quedó en cartera.'
+    });
+  } catch (e) {
+    console.error('NO-PAGO-001 error:', e);
+    return res.status(500).json({ error: 'Error reversando el cobro' });
+  }
+});
+
+router.post('/:id/factura-numero', authenticate, validarTenant('orders'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const usuarioId = req.user.uid || req.user.id;
+    const usuarioNombre = req.user.nombre || req.user.email;
+
+    if (!['admin', 'tesoreria', 'comercial'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Tu rol no puede registrar el número de factura DIAN.' });
+    }
+
+    const facturaLimpia = String(req.body.numeroFactura || '').trim();
+    if (!facturaLimpia) return res.status(400).json({ error: 'Escribe el número de factura DIAN.' });
+
+    const ordenRef = db.collection('orders').doc(id);
+    const snap = await ordenRef.get();
+    if (!snap.exists) return res.status(404).json({ error: 'Orden no encontrada' });
+    const actual = snap.data();
+
+    if (actual.estado === 'anulada') {
+      return res.status(400).json({ error: 'No se puede facturar una orden anulada.' });
+    }
+    if (actual.numeroFactura && actual.numeroFactura !== facturaLimpia && req.user.role !== 'admin') {
+      return res.status(403).json({
+        error: `Esta orden ya tiene registrada la factura ${actual.numeroFactura}. Solo el administrador puede corregirla.`
+      });
+    }
+    if (actual.numeroFactura === facturaLimpia) {
+      return res.json({ id, numeroFactura: facturaLimpia, sinCambios: true });
+    }
+
+    // Consecutivo DIAN: no dos órdenes de la misma empresa con el mismo número.
+    try {
+      const dupSnap = await db.collection('orders')
+        .where('adminId', '==', actual.adminId || usuarioId)
+        .where('empresaId', '==', actual.empresaId || '')
+        .where('numeroFactura', '==', facturaLimpia)
+        .limit(1).get();
+      if (!dupSnap.empty && dupSnap.docs[0].id !== id) {
+        const dup = dupSnap.docs[0].data();
+        return res.status(400).json({
+          error: `El número de factura ${facturaLimpia} ya está registrado en la orden ${dup.numeroOrden} de la misma empresa.`,
+          facturaDuplicada: true, ordenExistente: dup.numeroOrden
+        });
+      }
+    } catch (eDup) {
+      console.warn('FACTURA-ATASCO-001: verificación de duplicados omitida (posible índice faltante):', eDup.message);
+    }
+
+    const cambios = {
+      numeroFactura: facturaLimpia,
+      facturaRegistradaPor: usuarioNombre,
+      facturaRegistradaEn: new Date().toISOString(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    if (!actual.fechaFactura) cambios.fechaFactura = new Date().toISOString();
+    await ordenRef.update(cambios);
+
+    await auditar({
+      accion: actual.numeroFactura ? 'CORREGIR_FACTURA' : 'REGISTRAR_FACTURA',
+      descripcion: `${usuarioNombre} registró la factura DIAN ${facturaLimpia} en ${actual.numeroOrden} (orden en ${actual.estado}, sin mover el estado)`,
+      usuarioId, usuarioNombre, ordenId: id,
+      documento: actual.numeroOrden,
+      datos: { facturaAnterior: actual.numeroFactura || null, facturaNueva: facturaLimpia, estado: actual.estado }
+    });
+
+    return res.json({ id, numeroFactura: facturaLimpia, estado: actual.estado });
+  } catch (e) {
+    console.error('FACTURA-ATASCO-001 error:', e);
+    return res.status(500).json({ error: 'Error registrando el número de factura' });
+  }
+});
+
 router.post('/:id/pago', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
@@ -2200,6 +2561,20 @@ router.post('/:id/pago', authenticate, async (req, res) => {
       formaPago,
       notasPago: notas || '',
       fechaPago: (!esCxC && ep.pagado) ? new Date().toISOString() : (actual.fechaPago || null),
+      // ✅ PAGO-ADMIN-002: mismo criterio que al crear la orden. Un pago
+      // virtual (transferencia, Nequi, datáfono) que registra el ADMIN nace
+      // validado: no se le pide validar su propio registro. El banner de
+      // "pendiente de validación" queda reservado para lo que sí necesita un
+      // segundo par de ojos: los cobros del mensajero en la calle.
+      // EFECTIVO-PALABRA-001: "efectivo" en el nombre de la forma de pago.
+      ...(req.user.role === 'admin' && !esCxC && !/efectivo/i.test(formaPago || '') ? {
+        pagoValidado: true,
+        pagoValidadoPor: usuarioId,
+        pagoValidadoPorNombre: usuarioNombre,
+        pagoValidadoEn: new Date().toISOString(),
+        pagoVirtualPendienteValidar: false,
+        validadoAutomaticamente: true
+      } : {}),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       historialEstados: admin.firestore.FieldValue.arrayUnion({
         estado: actual.estado,

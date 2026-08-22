@@ -457,6 +457,28 @@ router.put('/orden/:id/estado', authenticate, validarTenant('orders'), async (re
       }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // ✅ FACTURA-ATASCO-001 — candado de factura ANTES de salir a la calle
+    // ──────────────────────────────────────────────────────────────────────────
+    // Este endpoint avanzaba estados sin la validación dura de factura DIAN que
+    // sí tiene orders.js. Por acá se escapaban órdenes que llegaban a
+    // entrega_cobranza sin número y después quedaban bloqueadas (el backend les
+    // exigía la factura y no había pantalla dónde digitarla).
+    //
+    // El candado se pone ARRIBA, no abajo: si la orden requiere factura, no
+    // puede DESPACHARSE sin número. Así el problema se resuelve en la oficina y
+    // nunca en la calle — al mensajero jamás se le bloquea una entrega ya hecha.
+    // ══════════════════════════════════════════════════════════════════════════
+    const ESTADOS_SALIDA_CALLE = ['en_ruta_entrega', 'listo_entregar'];
+    if (orden.requiereFactura && !orden.numeroFactura
+        && ESTADOS_SALIDA_CALLE.includes(nuevoEstado)) {
+      return res.status(400).json({
+        error: `La orden ${orden.numeroOrden} requiere factura DIAN y aún no tiene número. Regístralo en el detalle de la orden antes de despacharla.`,
+        requiereFactura: true,
+        estadoActual: orden.estado
+      });
+    }
+
     const update = {
       estado: nuevoEstado,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),

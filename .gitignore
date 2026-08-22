@@ -20,3 +20,8 @@ backend/genericos-*.json
 
 # Mensaje de commit temporal
 commit-msg.txt
+
+# Respaldos locales de archivos antes de editar (nunca al repositorio)
+_respaldos-*/
+*.bak
+*.bak-*

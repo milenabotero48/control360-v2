@@ -169,6 +169,68 @@ const [configCerts, setConfigCerts]   = useState([]);
     setAvanzandoFactura(false);
   };
 
+  // ✅ FACTURA-ATASCO-001: guardar el N° de factura SIN mover el estado.
+  // Salida para las órdenes que ya avanzaron (entrega_cobranza, cxc,
+  // cuadre_dinero...) y el backend les exige la factura para continuar.
+  const [guardandoFactura, setGuardandoFactura] = useState(false);
+  const guardarNumeroFactura = async () => {
+    if (!numeroFactura.trim()) return;
+    setGuardandoFactura(true);
+    try {
+      await axios.post(`${API}/orders/${ordenId}/factura-numero`,
+        { numeroFactura: numeroFactura.trim() }, { headers });
+      setNumeroFactura('');
+      setExito('N° de factura registrado');
+      await cargarOrden();
+      setTimeout(() => setExito(''), 3000);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error registrando la factura');
+      setTimeout(() => setError(''), 5000);
+    }
+    setGuardandoFactura(false);
+  };
+
+  // ✅ NO-PAGO-001: reportar que el cliente NO pagó → la orden vuelve a deber.
+  // Solo Admin y Tesorería. El cobro original nunca se borra: el backend crea
+  // un movimiento de reversión y, si el dinero ya estaba en caja, un ajuste
+  // con fecha de hoy. El cuadre ya cerrado no se toca.
+  const MOTIVOS_NO_PAGO = [
+    { codigo: 'CLIENTE_NO_PAGO',    texto: 'El cliente no pagó' },
+    { codigo: 'ERROR_MENSAJERO',    texto: 'El mensajero marcó pagado por error' },
+    { codigo: 'CREDITO_AUTORIZADO', texto: 'Quedó a crédito autorizado' },
+    { codigo: 'PAGO_NO_LLEGO',      texto: 'Transferencia reportada que nunca llegó' },
+    { codigo: 'CHEQUE_DEVUELTO',    texto: 'Cheque devuelto' },
+    { codigo: 'OTRO',               texto: 'Otro motivo' }
+  ];
+  const [mostrarNoPago, setMostrarNoPago] = useState(false);
+  const [motivoNoPago, setMotivoNoPago]   = useState('');
+  const [notasNoPago, setNotasNoPago]     = useState('');
+  const [reversandoCobro, setReversandoCobro] = useState(false);
+
+  const reportarNoPago = async () => {
+    if (!motivoNoPago) return setError('Seleccioná el motivo');
+    if (motivoNoPago === 'OTRO' && !notasNoPago.trim()) return setError('Escribí la explicación del motivo');
+    const montoTexto = formatCOP(orden.montoPagado || 0);
+    if (!window.confirm(
+      `Se van a reversar ${montoTexto} de la orden ${orden.numeroOrden}.\n\n` +
+      `La orden pasa a Cuentas por Cobrar y ese dinero sale del cuadre. ` +
+      `El cobro original queda registrado en la auditoría — no se borra nada.\n\n¿Confirmás?`
+    )) return;
+    setReversandoCobro(true);
+    try {
+      const res = await axios.post(`${API}/orders/${ordenId}/reversar-cobro`,
+        { motivo: motivoNoPago, notas: notasNoPago.trim() }, { headers });
+      setMostrarNoPago(false); setMotivoNoPago(''); setNotasNoPago('');
+      setExito(res.data?.mensaje || 'Cobro reversado — la orden quedó en cartera');
+      await cargarOrden();
+      setTimeout(() => setExito(''), 6000);
+    } catch (e) {
+      setError(e.response?.data?.error || 'Error reversando el cobro');
+      setTimeout(() => setError(''), 6000);
+    }
+    setReversandoCobro(false);
+  };
+
   const responderDefecto = async (defectoIndex, autorizado) => {
     const msg = autorizado
       ? '¿El cliente APROBÓ la reparación? Los repuestos cotizados se agregarán a la orden y se facturarán.'
@@ -596,9 +658,17 @@ const cargarConfigCerts = async () => {
           orden.formaPago !== 'A crédito (CxC)' &&
           orden.formaPago !== 'A crédito' &&
           orden.formaPago !== 'CXC';
+        // ✅ PAGO-ADMIN-002: si el dinero YA está en una caja, no hay nada
+        // pendiente de validar — validar es justamente lo que lo mete a caja.
+        // Los pagos que registra admin/tesorería desde Órdenes entran directo,
+        // y este banner les pedía aprobar un dinero que ya estaba adentro.
+        // El banner queda para lo que sí necesita un segundo par de ojos: el
+        // cobro virtual del mensajero en la calle, que espera en el limbo.
+        const dineroYaEnCaja = orden.dineroEnCaja === true;
         const pendienteValidar = tienePagoElectronico &&
           orden.pagoValidado !== true &&
           !orden.pagoRechazado &&
+          !dineroYaEnCaja &&
           (orden.estado === 'cuadre_dinero' || orden.estado === 'entrega_cobranza' || orden.estado === 'completada' || orden.pagado === true);
         const puedeValidar = isAdmin || (user?.role === 'tesoreria');
 
@@ -849,6 +919,30 @@ const cargarConfigCerts = async () => {
             </div>
           </div>
 
+          {/* ✅ FACTURA-ATASCO-001: orden que YA avanzó y le falta la factura.
+              Sin esta tarjeta no había dónde digitar el número y la orden
+              quedaba bloqueada para siempre. Guarda sin mover el estado. */}
+          {puedeCargaFactura && orden.requiereFactura && !orden.numeroFactura
+            && !['facturado', 'anulada'].includes(orden.estado) && (
+            <div style={{ ...s.card, border: '2px solid #dc2626', background: '#fff7f7' }}>
+              <h3 style={{ ...s.cardTitulo, color: '#dc2626' }}>⚠️ Falta el N° de factura DIAN</h3>
+              <p style={{ fontSize: 12, color: '#6b7280', margin: '0 0 10px' }}>
+                Esta orden avanzó a <strong>{ESTADOS[orden.estado]?.label || orden.estado}</strong> sin número de
+                factura y el sistema no la deja continuar sin él. Regístralo aquí — no cambia el estado de la orden.
+              </p>
+              <input style={{ ...s.input, marginBottom: 10 }} placeholder="FE-0001..."
+                value={numeroFactura} onChange={e => setNumeroFactura(e.target.value)} />
+              <button onClick={guardarNumeroFactura}
+                disabled={!numeroFactura.trim() || guardandoFactura}
+                style={{ width: '100%', padding: '10px', borderRadius: 8, border: 'none',
+                  background: (!numeroFactura.trim() || guardandoFactura) ? '#9ca3af' : '#dc2626',
+                  color: '#fff', fontWeight: 800, fontSize: 13,
+                  cursor: (!numeroFactura.trim() || guardandoFactura) ? 'not-allowed' : 'pointer' }}>
+                {guardandoFactura ? '⏳ Guardando...' : '📄 Guardar N° de factura'}
+              </button>
+            </div>
+          )}
+
           {/* ✅ FACTURA-FLOW-001: registrar factura DIAN — comercial/tesorería */}
           {!isAdmin && puedeCargaFactura && orden.estado === 'facturado' && (
             <div style={{ ...s.card, border: '2px solid #7c3aed' }}>
@@ -1027,6 +1121,66 @@ const cargarConfigCerts = async () => {
 
         {/* COLUMNA DERECHA */}
         <div>
+          {/* ✅ NO-PAGO-001: el mensajero puede marcar "cobrado" una orden que el
+              cliente nunca pagó (caso real OS-0654 Sócrates). Sin esta salida,
+              la plata quedaba en el cuadre del mensajero y la deuda no llegaba
+              nunca a cartera. Solo Admin/Tesorería. */}
+          {(isAdmin || isTesoreria) && orden.estado !== 'anulada'
+            && ((orden.montoPagado || 0) > 0 || orden.cobroRevertido) && (
+            <div style={{ ...s.card, border: '1px solid #fcd34d', background: '#fffdf5' }}>
+              <h3 style={{ ...s.cardTitulo, color: '#b45309' }}>🚩 ¿El cliente no pagó?</h3>
+
+              {orden.cobroRevertido && (
+                <div style={{ padding: '8px 12px', background: '#fff1f2', border: '1px solid #fecaca',
+                  borderRadius: 8, fontSize: 12, color: '#b91c1c', marginBottom: 10 }}>
+                  Cobro reversado por <strong>{orden.cobroRevertidoPor}</strong> — {orden.cobroRevertidoMotivo}
+                  {orden.cobroRevertidoEn && <> · {formatFechaCorta(orden.cobroRevertidoEn)}</>}
+                </div>
+              )}
+
+              {(orden.montoPagado || 0) > 0 && (!mostrarNoPago ? (
+                <>
+                  <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10 }}>
+                    Esta orden tiene <strong>{formatCOP(orden.montoPagado)}</strong> registrados como cobrados
+                    {orden.mensajeroNombre ? <> por <strong>{orden.mensajeroNombre}</strong></> : null}.
+                    Si ese pago nunca entró, reportalo: la orden pasa a Cuentas por Cobrar y el dinero sale del cuadre.
+                  </div>
+                  <button onClick={() => setMostrarNoPago(true)}
+                    style={{ width: '100%', padding: '10px', borderRadius: 8, border: '1px solid #f59e0b',
+                      background: '#fff', color: '#b45309', fontWeight: 800, fontSize: 13, cursor: 'pointer' }}>
+                    🚩 Reportar no pago
+                  </button>
+                </>
+              ) : (
+                <>
+                  <label style={{ ...s.label, marginBottom: 6, display: 'block' }}>Motivo <span style={{ color: '#dc2626' }}>*</span></label>
+                  <select style={{ ...s.input, marginBottom: 10 }} value={motivoNoPago}
+                    onChange={e => setMotivoNoPago(e.target.value)}>
+                    <option value="">Seleccioná el motivo...</option>
+                    {MOTIVOS_NO_PAGO.map(m => <option key={m.codigo} value={m.codigo}>{m.texto}</option>)}
+                  </select>
+                  <textarea style={{ ...s.input, marginBottom: 10, minHeight: 64, resize: 'vertical' }}
+                    placeholder={motivoNoPago === 'OTRO' ? 'Explicá qué pasó (obligatorio)...' : 'Detalle (opcional)...'}
+                    value={notasNoPago} onChange={e => setNotasNoPago(e.target.value)} />
+                  <div style={{ padding: '8px 12px', background: '#fffbeb', border: '1px solid #fcd34d',
+                    borderRadius: 8, fontSize: 11.5, color: '#92400e', marginBottom: 10, lineHeight: 1.5 }}>
+                    Al confirmar: la orden queda debiendo <strong>{formatCOP(orden.total)}</strong> en
+                    Cuentas por Cobrar, el dinero sale del cuadre y —si ya había entrado a caja— se registra un
+                    ajuste <strong>con fecha de hoy</strong>. Los cierres de caja anteriores no se tocan.
+                  </div>
+                  <div style={{ display: 'flex', gap: 10 }}>
+                    <button onClick={reportarNoPago} disabled={reversandoCobro || !motivoNoPago}
+                      style={{ ...s.btnPrimario, background: reversandoCobro || !motivoNoPago ? '#9ca3af' : '#dc2626' }}>
+                      {reversandoCobro ? 'Reversando...' : '🚩 Confirmar no pago'}
+                    </button>
+                    <button onClick={() => { setMostrarNoPago(false); setMotivoNoPago(''); setNotasNoPago(''); }}
+                      style={s.btnSecundario}>Cancelar</button>
+                  </div>
+                </>
+              ))}
+            </div>
+          )}
+
           {/* ── PAGO — inline, sin modal ──────────────────────────────────── */}
           {!orden.pagado && orden.estado !== 'anulada' && (
             <div style={s.card}>
@@ -1214,11 +1368,14 @@ const cargarConfigCerts = async () => {
     // Bloqueo de factura: aplica cuando la orden requiere factura Y el
     // siguiente paso sale del estado 'facturado' o entra a él (cualquier
     // flujo, no solo despacho). Resuelve tu bug de domicilio IVA 19%.
-    const cruzaFactura = orden.requiereFactura &&
-      (orden.estado === 'facturado' || siguienteEstado === 'facturado'
-       || siguienteEstado === 'completada' || siguienteEstado === 'en_ruta_entrega'
-       || siguienteEstado === 'listo_entregar')
-      && !numeroFactura && !orden.numeroFactura;
+    // ✅ FACTURA-ATASCO-001: espejo de `estadosQueExigenFactura` en
+    // backend/routes/orders.js. Antes esta lista era más corta que la del
+    // backend: el botón se veía habilitado y el servidor respondía con el
+    // error rojo. Mantener las dos listas iguales.
+    const ESTADOS_EXIGEN_FACTURA = ['facturado', 'completada', 'cxc', 'en_ruta_entrega',
+      'entrega_cobranza', 'cuadre_dinero', 'listo_entregar'];
+    const cruzaFactura = orden.requiereFactura && !numeroFactura && !orden.numeroFactura &&
+      (ESTADOS_EXIGEN_FACTURA.includes(orden.estado) || ESTADOS_EXIGEN_FACTURA.includes(siguienteEstado));
     // Etiqueta especial: cuando el equipo de taller espera que el cliente venga
     // FIX Bug 2: si va a "entrega_cobranza" y ya está pagada, decir "Entrega" sin "Cobranza"
     let labelEstadoSiguiente = ESTADOS[siguienteEstado]?.label || siguienteEstado;
