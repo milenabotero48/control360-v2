@@ -11,6 +11,12 @@ const { authenticate, validarTenant } = require('../middleware/auth');
 const ordersRouter = require('./orders');
 const registrarIngresoEnCaja = ordersRouter.registrarIngresoEnCaja;
 
+// ✅ PAGO-VALIDACION-003: criterio único de validación de pagos electrónicos.
+// Un recaudo de cartera por transferencia/Nequi/datáfono también necesita que
+// alguien confirme que llegó al banco. Antes CxC encendía dineroEnCaja sin
+// tocar pagoValidado y la orden quedaba pendiente de validar para siempre.
+const { camposValidacionAutomatica } = require('../services/validacionPagos');
+
 // ─── AUDITORÍA ────────────────────────────────────────────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioEmail, datos = {} }) => {
   try {
@@ -406,6 +412,10 @@ router.post('/:ordenId/pago', authenticate, async (req, res) => {
     if (quedoPagada) {
       ordenUpdate.estado = 'completada';
       ordenUpdate.pagado = true;
+      // ✅ PAGO-VALIDACION-003: si el recaudo virtual lo registra admin o
+      // tesorería, nace validado; de cualquier otro rol queda pendiente de
+      // confirmarse contra el banco.
+      Object.assign(ordenUpdate, camposValidacionAutomatica({ user: req.user, formaPago }));
       if (montoRetencion > 0) {
         ordenUpdate.dineroEnCaja = true;
         ordenUpdate.dineroEnCajaFecha = new Date().toISOString();
@@ -684,6 +694,8 @@ router.post('/cobrar', authenticate, validarTenant('clients'), async (req, res) 
         ordenUpdate.estado = 'completada';
         ordenUpdate.pagado = true;
         ordenUpdate.fechaPago = new Date().toISOString();
+        // ✅ PAGO-VALIDACION-003: mismo criterio en la cobranza masiva.
+        Object.assign(ordenUpdate, camposValidacionAutomatica({ user: req.user, formaPago: metodoPago }));
         if (retencionTotal > 0) {
           ordenUpdate.dineroEnCaja = true;
           ordenUpdate.dineroEnCajaFecha = new Date().toISOString();

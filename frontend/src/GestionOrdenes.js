@@ -3,6 +3,9 @@ import axios from 'axios';
 import NuevaOrden from './NuevaOrden';
 import DetalleOrden from './DetalleOrden';
 import { exportarExcel } from './exportExcel';
+// ✅ PAGO-VALIDACION-003: criterio ÚNICO de "pago pendiente de validar".
+// Espejo de backend/services/validacionPagos.js — no editar a mano.
+import { pagoPendienteValidacion } from './utils/validacionPagos';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -164,22 +167,15 @@ const GestionOrdenes = ({ user }) => {
   }
 
   // ─── VISTA LISTA ────────────────────────────────────────────────────────────
-  const esPagoVirtualFn = (fp) => fp && fp !== 'Efectivo' && fp !== 'A crédito (CxC)' &&
-    fp !== 'A crédito' && fp !== 'CXC' && fp !== 'Cuenta por Pagar';
-
-  // Contador global de pendientes — excluir anuladas (pueden tener pagado:true previo)
-  const totalPendientesPago = ordenes.filter(o =>
-    o.estado !== 'anulada' &&
-    esPagoVirtualFn(o.formaPago) && o.pagado === true &&
-    o.pagoValidado !== true && !o.pagoRechazado
-  ).length;
+  // Contador global de pendientes. El criterio (anuladas fuera, pago virtual,
+  // sin validar, sin rechazar) vive en utils/validacionPagos.js y es el MISMO
+  // que usa el detalle de la orden y el dashboard de tesorería.
+  const totalPendientesPago = ordenes.filter(pagoPendienteValidacion).length;
 
   const ordenesFiltradas = ordenes.filter(o => {
     // Filtro de pendientes de validar pago (Ola 2.5)
     if (filtroPendientesPago) {
-      const esVirtual = esPagoVirtualFn(o.formaPago);
-      const pend = esVirtual && o.pagado === true && o.pagoValidado !== true && !o.pagoRechazado;
-      if (!pend) return false;
+      if (!pagoPendienteValidacion(o)) return false;
     }
     // FIX: filtrar por estado y tipo en memoria (los badges y el select)
     if (filtroEstado && o.estado !== filtroEstado) return false;
@@ -376,9 +372,7 @@ const GestionOrdenes = ({ user }) => {
             const est = esCxcSinPagar
               ? { label: '💳 CxC', color: '#b45309', bg: '#fef3c7' }
               : (ESTADOS[o.estado] || { label: o.estado, color: '#666', bg: '#f3f4f6' });
-            const pendienteValidar = o.estado !== 'anulada' &&
-              esPagoVirtualFn(o.formaPago) && o.pagado === true &&
-              o.pagoValidado !== true && !o.pagoRechazado;
+            const pendienteValidar = pagoPendienteValidacion(o);
             return (
               <div key={o.id} onClick={() => abrirDetalle(o)}
                 style={{ background: '#fff', borderRadius: 14, border: '1px solid #e5e7eb', padding: 14, borderLeft: `4px solid ${est.color}`, cursor: 'pointer' }}>
@@ -478,12 +472,7 @@ const GestionOrdenes = ({ user }) => {
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
                         <span style={{ ...s.estadoBadge, background: est.bg, color: est.color }}>{est.label}</span>
                         {(() => {
-                          const esVirtual = o.formaPago && o.formaPago !== 'Efectivo' &&
-                            o.formaPago !== 'A crédito (CxC)' && o.formaPago !== 'A crédito' &&
-                            o.formaPago !== 'CXC' && o.formaPago !== 'Cuenta por Pagar';
-                          const pendienteValidar = o.estado !== 'anulada' && esVirtual && o.pagado === true &&
-                            o.pagoValidado !== true && !o.pagoRechazado;
-                          if (!pendienteValidar) return null;
+                          if (!pagoPendienteValidacion(o)) return null;
                           return (
                             <span style={{ padding: '3px 10px', borderRadius: 12, background: '#fef3c7', color: '#92400e', fontSize: 11, fontWeight: 700, border: '1px solid #fcd34d', animation: 'pulse 2s infinite' }}
                               title="Pago electrónico pendiente de validación por Admin/Tesorería">

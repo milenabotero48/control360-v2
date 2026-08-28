@@ -21,58 +21,104 @@
 const fs = require('fs');
 const path = require('path');
 
-const RAIZ     = path.resolve(__dirname, '..', '..');
-const ORIGEN   = path.join(RAIZ, 'backend', 'services', 'validacionEgresos.js');
-const DESTINO  = path.join(RAIZ, 'frontend', 'src', 'utils', 'validacionEgresos.js');
-const MARCA    = '// ─── Severidades ──';
+const RAIZ = path.resolve(__dirname, '..', '..');
 
-const CABECERA = `// ═══════════════════════════════════════════════════════════════════════════════
-// validacionEgresos.js (FRONTEND) — ⚠️ ARCHIVO ESPEJO · NO EDITAR A MANO
+// ✅ PAGO-VALIDACION-003: el script pasó de un solo motor a una LISTA. Cada
+// regla de negocio que el frontend necesita aplicar en vivo se registra aquí y
+// se genera sola. Agregar un motor nuevo = una entrada más en este arreglo.
+const MODULOS = [
+  {
+    nombre:  'validacionEgresos.js',
+    origen:  ['backend', 'services', 'validacionEgresos.js'],
+    destino: ['frontend', 'src', 'utils', 'validacionEgresos.js'],
+    marca:   '// ─── Severidades ──',
+    exports: 'module.exports = { validarEgreso, auditarLote, norm, GRAVE, MEDIA, LEVE };',
+    esm:     'export { validarEgreso, auditarLote, norm, GRAVE, MEDIA, LEVE };'
+  },
+  {
+    nombre:  'validacionPagos.js',
+    origen:  ['backend', 'services', 'validacionPagos.js'],
+    destino: ['frontend', 'src', 'utils', 'validacionPagos.js'],
+    marca:   '// ─── Normalizador ──',
+    exports: `module.exports = {
+  norm,
+  esPagoVirtual,
+  esFormaCredito,
+  validaConSuPropioRegistro,
+  camposValidacionAutomatica,
+  pagoPendienteValidacion,
+  ROLES_CON_ACCESO_BANCO
+};`,
+    esm: `export {
+  norm,
+  esPagoVirtual,
+  esFormaCredito,
+  validaConSuPropioRegistro,
+  camposValidacionAutomatica,
+  pagoPendienteValidacion,
+  ROLES_CON_ACCESO_BANCO
+};`
+  }
+];
+
+const cabecera = (m) => `// ═══════════════════════════════════════════════════════════════════════════════
+// ${m.nombre} (FRONTEND) — ⚠️ ARCHIVO ESPEJO · NO EDITAR A MANO
 // ─────────────────────────────────────────────────────────────────────────────
-// Copia exacta de backend/services/validacionEgresos.js, con la única
+// Copia exacta de ${m.origen.join('/')}, con la única
 // diferencia del sistema de módulos (ESM en vez de CommonJS).
 //
 // POR QUÉ ESTÁ DUPLICADO
-// El frontend valida MIENTRAS se digita (feedback inmediato, sin ida y vuelta
-// al servidor). El backend valida AL GUARDAR (nadie puede saltarse la regla
-// llamando la API directo). Las dos capas deben aplicar EXACTAMENTE las mismas
-// reglas, si no el usuario ve una cosa y el sistema guarda otra.
+// El frontend aplica la regla MIENTRAS se usa la pantalla (feedback inmediato,
+// sin ida y vuelta al servidor). El backend la aplica AL GUARDAR (nadie puede
+// saltársela llamando la API directo). Las dos capas deben aplicar EXACTAMENTE
+// las mismas reglas, si no el usuario ve una cosa y el sistema guarda otra.
 //
 // CÓMO ACTUALIZARLO
-// Editá SIEMPRE backend/services/validacionEgresos.js y volvé a generar este:
+// Editá SIEMPRE ${m.origen.join('/')} y volvé a generar este:
 //     node backend/scripts/sync-validaciones.js
 // ═══════════════════════════════════════════════════════════════════════════════
 
 `;
 
-function generar() {
-  const src = fs.readFileSync(ORIGEN, 'utf8');
-  const i = src.indexOf(MARCA);
+function generar(m) {
+  const origen = path.join(RAIZ, ...m.origen);
+  const src = fs.readFileSync(origen, 'utf8');
+  const i = src.indexOf(m.marca);
   if (i === -1) {
-    console.error(`✖ No se encontró la marca "${MARCA}" en el origen.`);
+    console.error(`✖ ${m.nombre}: no se encontró la marca "${m.marca}" en el origen.`);
     process.exit(1);
   }
-  const cuerpo = src.slice(i).replace(
-    'module.exports = { validarEgreso, auditarLote, norm, GRAVE, MEDIA, LEVE };',
-    'export { validarEgreso, auditarLote, norm, GRAVE, MEDIA, LEVE };'
-  );
-  return CABECERA + cuerpo;
+  if (src.indexOf(m.exports) === -1) {
+    console.error(`✖ ${m.nombre}: no se encontró el bloque de exports esperado.`);
+    process.exit(1);
+  }
+  return cabecera(m) + src.slice(i).replace(m.exports, m.esm);
 }
 
-const esperado = generar();
 const soloVerificar = process.argv.includes('--check');
+let desincronizados = 0;
 
-if (soloVerificar) {
-  const actual = fs.existsSync(DESTINO) ? fs.readFileSync(DESTINO, 'utf8') : '';
-  if (actual === esperado) {
-    console.log('✓ El motor de validaciones está sincronizado.');
-    process.exit(0);
+for (const m of MODULOS) {
+  const destino  = path.join(RAIZ, ...m.destino);
+  const esperado = generar(m);
+
+  if (soloVerificar) {
+    const actual = fs.existsSync(destino) ? fs.readFileSync(destino, 'utf8') : '';
+    if (actual === esperado) {
+      console.log(`✓ ${m.nombre} sincronizado.`);
+    } else {
+      console.error(`✖ ${m.nombre} DESINCRONIZADO: el frontend no refleja las reglas del backend.`);
+      desincronizados++;
+    }
+    continue;
   }
-  console.error('✖ DESINCRONIZADO: el frontend no refleja las reglas del backend.');
+
+  fs.mkdirSync(path.dirname(destino), { recursive: true });
+  fs.writeFileSync(destino, esperado, 'utf8');
+  console.log(`✓ Sincronizado → ${path.relative(RAIZ, destino)} (${esperado.split('\n').length} líneas)`);
+}
+
+if (soloVerificar && desincronizados > 0) {
   console.error('  Corregí con:  node backend/scripts/sync-validaciones.js');
   process.exit(1);
 }
-
-fs.mkdirSync(path.dirname(DESTINO), { recursive: true });
-fs.writeFileSync(DESTINO, esperado, 'utf8');
-console.log(`✓ Sincronizado → ${path.relative(RAIZ, DESTINO)} (${esperado.split('\n').length} líneas)`);

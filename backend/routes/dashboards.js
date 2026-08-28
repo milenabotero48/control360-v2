@@ -2,6 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { db } = require('../config/firebase');
 
+// ✅ PAGO-VALIDACION-003: el contador de "pagos por validar" usa el MISMO
+// predicado que la lista de órdenes y el detalle. Antes tenía su propio
+// criterio (solo 2 estados) y el dashboard decía un número y la lista otro.
+const { pagoPendienteValidacion } = require('../services/validacionPagos');
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Control360 v2 — Dashboards (Ola 2)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -322,7 +327,8 @@ router.get('/tesoreria', async (req, res) => {
   let pagosElectronicosSinValidar = 0;
   try {
     const snap = await db.collection('orders').where('adminId', '==', adminId)
-      .select('estado', 'total', 'montoPagado', 'clienteNombre', 'formaPago', 'pagoValidado')
+      .select('estado', 'total', 'montoPagado', 'clienteNombre', 'formaPago', 'pagoValidado',
+              'pagado', 'pagoRechazado', 'pagoVirtualPendienteValidar')
       .get();
     const deudaPorCliente = {};
     snap.forEach(d => {
@@ -334,10 +340,7 @@ router.get('/tesoreria', async (req, res) => {
         deudaPorCliente[k] = (deudaPorCliente[k] || 0) + saldo;
       }
       if (['facturado', 'entrega_cobranza'].includes(o.estado)) pendientesFacturar++;
-      if (o.formaPago && o.formaPago !== 'Efectivo' && !o.pagoValidado &&
-          (o.estado === 'cuadre_dinero' || o.estado === 'entrega_cobranza')) {
-        pagosElectronicosSinValidar++;
-      }
+      if (pagoPendienteValidacion(o)) pagosElectronicosSinValidar++;
     });
     clientesConDeuda = Object.keys(deudaPorCliente).length;
     topDeudores = Object.entries(deudaPorCliente)

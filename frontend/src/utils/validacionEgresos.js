@@ -5,10 +5,10 @@
 // diferencia del sistema de módulos (ESM en vez de CommonJS).
 //
 // POR QUÉ ESTÁ DUPLICADO
-// El frontend valida MIENTRAS se digita (feedback inmediato, sin ida y vuelta
-// al servidor). El backend valida AL GUARDAR (nadie puede saltarse la regla
-// llamando la API directo). Las dos capas deben aplicar EXACTAMENTE las mismas
-// reglas, si no el usuario ve una cosa y el sistema guarda otra.
+// El frontend aplica la regla MIENTRAS se usa la pantalla (feedback inmediato,
+// sin ida y vuelta al servidor). El backend la aplica AL GUARDAR (nadie puede
+// saltársela llamando la API directo). Las dos capas deben aplicar EXACTAMENTE
+// las mismas reglas, si no el usuario ve una cosa y el sistema guarda otra.
 //
 // CÓMO ACTUALIZARLO
 // Editá SIEMPRE backend/services/validacionEgresos.js y volvé a generar este:
@@ -399,6 +399,43 @@ const REGLAS = [
   },
 
   // ───────────────────────────────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────────────────────
+  // R18 · La PILA registrada acá cuando la empresa ya causa los aportes
+  // ───────────────────────────────────────────────────────────────────────────
+  // FASE3-AVISO-PILA-001
+  //
+  // Con la causación de seguridad social activa, los aportes patronales y lo
+  // retenido al trabajador ya se reconocieron como gasto y como pasivo cuando
+  // se causó el mes. Registrar la planilla como un egreso más los cuenta OTRA
+  // VEZ — y en silencio: el número se ve razonable, solo que está doblado.
+  //
+  // No se bloquea, porque hay pagos de seguridad social que sí van por acá
+  // (correcciones de períodos anteriores, intereses de mora, planillas de
+  // independientes). Pero el aviso aparece antes de guardar, que es cuando
+  // todavía se puede corregir sin costo.
+  // ───────────────────────────────────────────────────────────────────────────
+  {
+    id: 'PILA_COMO_EGRESO',
+    severidad: GRAVE,
+    test: (e, ctx) => {
+      if (!ctx.causacionSSActiva) return false;          // apagado: camino normal
+      if (e.esPagoPasivoLaboral === true) return false;   // ya va por el módulo
+      if (e.esComprobanteNomina === true) return false;
+      const texto = `${norm(e.concepto)} ${norm(e.proveedor)} ${norm(e.categoria)}`;
+      return /\bpila\b|planilla|seguridad social|aportes|parafiscal|aportes en linea|\bsoi\b|arus|simple/.test(texto)
+        || (ctx.categoriaMeta?.tipoERI === 'gasto_personal' && /salud|pension|caja de compensacion|\barl\b/.test(texto));
+    },
+    mensaje: () => ({
+      titulo: 'La planilla de seguridad social ya no se registra acá',
+      detalle: 'Tu empresa causa los aportes patronales y la retención al trabajador mes a mes, ' +
+               'junto con las prestaciones. Ese gasto YA está reconocido. Si registrás la planilla ' +
+               'como un egreso más, el mismo costo se cuenta dos veces y tu utilidad queda por debajo ' +
+               'de lo real — sin que nada más te avise.',
+      sugerencia: 'Registrala en Empleados → Pasivo laboral → Planilla PILA → Pagar la planilla. ' +
+                  'Allá descarga el pasivo en vez de volver a ser gasto.'
+    })
+  },
+
   // R17 · Anticipo de nómina sin empleado asignado
   // ───────────────────────────────────────────────────────────────────────────
   {
@@ -450,7 +487,10 @@ function validarEgreso(egreso, contexto = {}) {
     periodoCerradoHasta: contexto.periodoCerradoHasta || null,
     // ✅ NOMINA-PROVISIONES-001: lista de empleados, para detectar si el
     // tercero de un egreso es en realidad alguien de la nómina.
-    empleados: contexto.empleados || []
+    empleados: contexto.empleados || [],
+    // ✅ FASE3-AVISO-PILA-001: si la empresa ya causa los aportes patronales,
+    // registrar la planilla acá los cuenta dos veces.
+    causacionSSActiva: contexto.causacionSSActiva === true
   };
 
   const alertas = [];

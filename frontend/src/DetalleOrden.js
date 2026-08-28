@@ -3,6 +3,10 @@ import axios from 'axios';
 // Ola 3: plantilla ÚNICA de impresión de órdenes (compartida con NuevaOrden).
 // Cualquier ajuste de diseño de impresión se hace SOLO en printOrden.js.
 import { abrirImpresionOrden } from './printOrden';
+// ✅ PAGO-VALIDACION-003: criterio ÚNICO de "pago pendiente de validar",
+// compartido con la lista de órdenes y el backend. Espejo de
+// backend/services/validacionPagos.js — no editar a mano.
+import { esPagoVirtual, pagoPendienteValidacion } from './utils/validacionPagos';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -653,23 +657,20 @@ const cargarConfigCerts = async () => {
 
       {/* ── Ola 2.5: BANNER Pago Electrónico Pendiente de Validación ────────── */}
       {(() => {
-        const tienePagoElectronico = orden.formaPago &&
-          orden.formaPago !== 'Efectivo' &&
-          orden.formaPago !== 'A crédito (CxC)' &&
-          orden.formaPago !== 'A crédito' &&
-          orden.formaPago !== 'CXC';
-        // ✅ PAGO-ADMIN-002: si el dinero YA está en una caja, no hay nada
-        // pendiente de validar — validar es justamente lo que lo mete a caja.
-        // Los pagos que registra admin/tesorería desde Órdenes entran directo,
-        // y este banner les pedía aprobar un dinero que ya estaba adentro.
-        // El banner queda para lo que sí necesita un segundo par de ojos: el
-        // cobro virtual del mensajero en la calle, que espera en el limbo.
+        // ✅ PAGO-VALIDACION-003 (corrige PAGO-ADMIN-002): el predicado es el
+        // MISMO de la lista de órdenes y del dashboard. Antes este banner
+        // agregaba una condición que la lista no tenía (!dineroEnCaja): la
+        // orden aparecía marcada "⏳ Validar pago" en la lista y acá no salía
+        // el botón — quedaba pendiente para siempre y no había cómo validarla
+        // (caso real OS-0528 y OS-0516, agosto 2026).
+        //
+        // El dinero en caja ya no oculta el banner: entra a caja por varias
+        // vías que nadie revisó contra el banco. Lo que evita pedirle al dueño
+        // que valide su propio pago es que ahora ese pago NACE validado en el
+        // backend cuando lo registra admin o tesorería.
+        const tienePagoElectronico = esPagoVirtual(orden.formaPago);
         const dineroYaEnCaja = orden.dineroEnCaja === true;
-        const pendienteValidar = tienePagoElectronico &&
-          orden.pagoValidado !== true &&
-          !orden.pagoRechazado &&
-          !dineroYaEnCaja &&
-          (orden.estado === 'cuadre_dinero' || orden.estado === 'entrega_cobranza' || orden.estado === 'completada' || orden.pagado === true);
+        const pendienteValidar = pagoPendienteValidacion(orden);
         const puedeValidar = isAdmin || (user?.role === 'tesoreria');
 
         if (!pendienteValidar) {
@@ -740,11 +741,17 @@ const cargarConfigCerts = async () => {
                 Pago electrónico pendiente de validación
               </div>
               <div style={{ fontSize: 13, color: '#78350f' }}>
-                El mensajero registró un pago por <strong>{orden.formaPago}</strong> por <strong>{formatCOP(orden.total)}</strong>.
+                Se registró un pago por <strong>{orden.formaPago}</strong> de <strong>{formatCOP(orden.total)}</strong>.
                 {puedeValidar
                   ? ' Verifica el ingreso en el banco antes de aprobar.'
                   : ' Admin o Tesorería deben verificarlo en el banco.'
                 }
+                {dineroYaEnCaja && (
+                  <div style={{ marginTop: 4, fontSize: 12, color: '#92400e' }}>
+                    El dinero ya figura en caja. Aprobar solo deja la constancia de que llegó al banco:
+                    el candado por monto impide que se vuelva a sumar.
+                  </div>
+                )}
               </div>
             </div>
             {puedeValidar && (

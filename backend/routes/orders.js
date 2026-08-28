@@ -23,6 +23,11 @@ const { getCapacidades } = require('../services/capacidadesTenant');
 // accion son los ROLES permitidos, no el PIN.
 const { verificarPin } = require('./_autorizacion');
 
+// ✅ PAGO-VALIDACION-003: criterio ÚNICO de validación de pagos electrónicos.
+// Vive en services/validacionPagos.js y lo comparten órdenes, CxC, dashboards
+// y el frontend (frontend/src/utils/validacionPagos.js, archivo espejo).
+const { camposValidacionAutomatica, pagoPendienteValidacion, esPagoVirtual: esPagoVirtualFn } = require('../services/validacionPagos');
+
 // ─── ESTADOS VÁLIDOS ──────────────────────────────────────────────────────────
 const ESTADOS = [
   'programada', 'en_ruta_recogida', 'en_taller', 'listo_entregar', 'facturado',
@@ -1199,21 +1204,19 @@ router.post('/', authenticate, async (req, res) => {
       dineroEnCaja: pagadoAlCrear && !marcarPagoAdelantado && formaPago === 'Efectivo' ? false : false,
       // Marca pendiente de validación si fue pago electrónico anticipado
       pagoVirtualPendienteValidar: marcarPagoAdelantado,
-      // ✅ PAGO-ADMIN-002: el admin es el dueño de la operación. Si ÉL registra
-      // el pago virtual, ese pago NACE validado — su palabra ES la validación.
-      // Antes quedaba en null y el banner de "pendiente de validación" le pedía
-      // aprobar su propio pago. Para los demás roles NADA cambia: siguen
-      // esperando a tesorería. Se deja la huella de quién y cuándo, igual que
-      // en una validación manual, para no perder el rastro contable.
-      ...(esAdmin && esPagoVirtual && (pagadoAlCrear || marcarPagoAdelantado) ? {
-        pagoValidado: true,
-        pagoValidadoPor: req.user.uid || req.user.id,
-        pagoValidadoPorNombre: req.user.nombre || req.user.email,
-        pagoValidadoEn: new Date().toISOString(),
-        validadoAutomaticamente: true
-      } : {
-        pagoValidado: marcarPagoAdelantado ? false : null
-      }),
+      // ✅ PAGO-VALIDACION-003 (reemplaza PAGO-ADMIN-002): quien tiene acceso a
+      // la cuenta bancaria (admin o tesorería) valida con su propio registro —
+      // pedirle que apruebe su propio pago es papeleo, no control. Para los
+      // demás roles NADA cambia: el pago queda pendiente de que alguien lo
+      // confirme contra el banco. El criterio vive en services/validacionPagos.js.
+      ...(function () {
+        const auto = (pagadoAlCrear || marcarPagoAdelantado)
+          ? camposValidacionAutomatica({ user: req.user, formaPago })
+          : {};
+        return Object.keys(auto).length
+          ? auto
+          : { pagoValidado: marcarPagoAdelantado ? false : null };
+      })(),
       fotoTransferenciaUrl: fotoTransferenciaUrl || null,
       cobradoPorMensajero: false,
       creadoPor: req.user.uid || req.user.id,
@@ -2561,20 +2564,10 @@ router.post('/:id/pago', authenticate, async (req, res) => {
       formaPago,
       notasPago: notas || '',
       fechaPago: (!esCxC && ep.pagado) ? new Date().toISOString() : (actual.fechaPago || null),
-      // ✅ PAGO-ADMIN-002: mismo criterio que al crear la orden. Un pago
-      // virtual (transferencia, Nequi, datáfono) que registra el ADMIN nace
-      // validado: no se le pide validar su propio registro. El banner de
-      // "pendiente de validación" queda reservado para lo que sí necesita un
-      // segundo par de ojos: los cobros del mensajero en la calle.
-      // EFECTIVO-PALABRA-001: "efectivo" en el nombre de la forma de pago.
-      ...(req.user.role === 'admin' && !esCxC && !/efectivo/i.test(formaPago || '') ? {
-        pagoValidado: true,
-        pagoValidadoPor: usuarioId,
-        pagoValidadoPorNombre: usuarioNombre,
-        pagoValidadoEn: new Date().toISOString(),
-        pagoVirtualPendienteValidar: false,
-        validadoAutomaticamente: true
-      } : {}),
+      // ✅ PAGO-VALIDACION-003: mismo criterio único que al crear la orden.
+      // Admin/tesorería validan con su propio registro; los demás roles dejan
+      // el pago pendiente de confirmación contra el banco.
+      ...camposValidacionAutomatica({ user: req.user, formaPago, esCxC }),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       historialEstados: admin.firestore.FieldValue.arrayUnion({
         estado: actual.estado,
