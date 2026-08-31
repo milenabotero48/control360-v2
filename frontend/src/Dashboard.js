@@ -1,8 +1,12 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloque 3
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+
+// ✅ DASHBOARD-001: 5 minutos. El backend cachea el bloque operativo 60 s,
+// así que refrescar más seguido no trae datos más frescos, solo cuesta lecturas.
+const REFRESCO_MS = 5 * 60 * 1000;
 
 // ─── HOOK RESPONSIVE ──────────────────────────────────────────────────────────
 const useIsMobile = () => {
@@ -164,11 +168,35 @@ const Dashboard = ({ user }) => {
     }
   }, [token]);
 
-  useEffect(() => {
+  // ✅ DASHBOARD-001 — refresco cada 5 min y SOLO con la pestaña visible.
+  // Antes refrescaba cada 60 s aunque la pestaña estuviera olvidada en segundo
+  // plano: una pestaña abierta todo el día disparaba ~600 llamadas, cada una
+  // leyendo miles de documentos de Firestore. Ahora una pestaña en segundo
+  // plano no consume nada, y al volver a ella se refresca si el dato ya venció.
+  const ultimaCargaRef = useRef(0);
+
+  const cargarSiVisible = useCallback(() => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    ultimaCargaRef.current = Date.now();
     cargar();
-    const t = setInterval(cargar, 60000); // refresco cada 60s (antes 30s)
-    return () => clearInterval(t);
   }, [cargar]);
+
+  useEffect(() => {
+    cargarSiVisible();
+    const t = setInterval(cargarSiVisible, REFRESCO_MS);
+
+    // Al volver a la pestaña, refrescar solo si el dato ya está vencido.
+    const alVolver = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - ultimaCargaRef.current >= REFRESCO_MS) cargarSiVisible();
+    };
+    document.addEventListener('visibilitychange', alVolver);
+
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', alVolver);
+    };
+  }, [cargarSiVisible]);
 
   const guardarMetas = async (m) => {
     setMetas(m);

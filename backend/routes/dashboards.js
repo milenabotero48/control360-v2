@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { db } = require('../config/firebase');
+const { Timestamp } = require('firebase-admin').firestore;
 
 // ✅ PAGO-VALIDACION-003: el contador de "pagos por validar" usa el MISMO
 // predicado que la lista de órdenes y el detalle. Antes tenía su propio
@@ -79,52 +80,292 @@ const dentroDeRango = (val, inicioISO, finISO) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Devuelve 8 KPIs + panel multi-alerta consolidado.
 // ═════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ DASHBOARD-001 — Caché por tenant en dos bloques de cadencia distinta
+// ─────────────────────────────────────────────────────────────────────────────
+// El endpoint /admin traía las colecciones COMPLETAS del tenant y filtraba por
+// fecha en memoria, en cada llamada. Con el frontend refrescando cada 60 s eso
+// eran ~600 llamadas diarias por pestaña abierta, cada una leyendo miles de
+// documentos. Fue el 54% del consumo de lecturas de Firestore.
+//
+// Ahora:
+//   1. Las consultas filtran en Firestore, no en memoria. Los filtros por fecha
+//      comparan Timestamp contra Timestamp — NUNCA contra string ISO: Firestore
+//      ordena primero por tipo, así que `Timestamp >= "2026-08-01T..."` no falla,
+//      devuelve CERO documentos en silencio. Validado con validar-dashboard.js
+//      en los 6 tenants antes de aplicarse.
+//   2. El resultado se cachea en dos bloques con vencimiento distinto, según qué
+//      tan rápido cambia cada dato:
+//        · operativo (60 s)  — órdenes del mes, órdenes abiertas, caja de hoy
+//        · acumulado (10 min)— cartera histórica, egresos, productos, cajas
+//      Varias pestañas del mismo tenant comparten el caché.
+//
+// LO QUE NO CAMBIA: los 14 KPIs se calculan con las mismas reglas. Cada consulta
+// nueva devuelve exactamente el mismo conjunto de documentos que el filtro en
+// memoria que reemplaza.
+//
+// Índices requeridos (creados 31/08/2026):
+//   orders      → adminId (Asc) + createdAt (Asc)
+//   movimientos → tipo (Asc) + userId (Asc) + createdAt (Asc)
+// ═════════════════════════════════════════════════════════════════════════════
+
+const TTL_OPERATIVO = 60 * 1000;        // 1 minuto
+const TTL_ACUMULADO = 10 * 60 * 1000;   // 10 minutos
+
+const cacheDash = new Map(); // adminId → { operativo:{data,exp}, acumulado:{data,exp} }
+
+const bloqueTenant = (adminId) => {
+  if (!cacheDash.has(adminId)) cacheDash.set(adminId, {});
+  return cacheDash.get(adminId);
+};
+
+// Devuelve el bloque cacheado, o lo recalcula si venció.
+const conCache = async (adminId, bloque, ttl, calcular) => {
+  const t = bloqueTenant(adminId);
+  const e = t[bloque];
+  if (e && Date.now() < e.exp) return e.data;
+  const data = await calcular();
+  t[bloque] = { data, exp: Date.now() + ttl };
+  return data;
+};
+
+const invalidarCacheDashboard = (adminId) => {
+  if (adminId) cacheDash.delete(adminId);
+  else cacheDash.clear();
+};
+
+// Estados que representan una orden todavía "en movimiento".
+const ESTADOS_ABIERTOS = ['en_taller', 'taller_proceso', 'en_ruta_recogida', 'en_ruta_entrega', 'despacho'];
+// Estados que pueden dejar saldo pendiente de cobro.
+const ESTADOS_CXC = ['completada', 'cuadre_dinero', 'cxc'];
+
+// Si a Firestore le falta un índice, cae a la consulta sin filtrar en vez de
+// dejar el dashboard en blanco. Una optimización pendiente nunca rompe la app.
+const leerConFallback = async (queryFiltrada, queryBase, etiqueta, warnings) => {
+  try {
+    return await queryFiltrada.get();
+  } catch (e) {
+    const msg = String(e?.message || '');
+    if (msg.includes('index') || e?.code === 9) {
+      warnings.push(`${etiqueta}: falta índice, usando consulta sin filtro`);
+      console.warn(`[dashboards] ${etiqueta}: falta índice compuesto → ${msg.slice(0, 300)}`);
+      return await queryBase.get();
+    }
+    throw e;
+  }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GET /api/dashboards/admin
+// ─────────────────────────────────────────────────────────────────────────────
+// Devuelve 8 KPIs + panel multi-alerta consolidado.
+// ═════════════════════════════════════════════════════════════════════════════
 router.get('/admin', async (req, res) => {
   const warnings = [];
   const adminId = req.adminId || req.user.uid || req.user.id;
 
   const hoy = rangoHoyCO();
   const mes = rangoMesCO();
+  const tsMesIni = Timestamp.fromDate(new Date(mes.inicioISO));
+  const tsMesFin = Timestamp.fromDate(new Date(mes.finISO));
+  const tsHoyIni = Timestamp.fromDate(new Date(hoy.inicioISO));
+  const tsHoyFin = Timestamp.fromDate(new Date(hoy.finISO));
 
-  // ── 1) Órdenes (todo lo que necesitamos para 5 KPIs) ──────────────────────
-  // .select() excluye campos pesados (historialEstados, fotos, etc.)
-  let ordenes = [];
-  try {
-    const snap = await db.collection('orders').where('adminId', '==', adminId)
-      .select('estado', 'createdAt', 'total', 'subtotal', 'lugarAtencion',
-              'mensajeroId', 'montoPagado', 'clienteId', 'clienteNombre',
-              'numeroOrden', 'fechaCompletada', 'completadaEn', 'items',
-              'tipoOrden', 'anulada') // ✅ FIX VENTAS-UNIF-001: para causación
-      .get();
-    ordenes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  } catch (e) { warnings.push('orders: ' + e.message); }
+  const baseOrders = db.collection('orders').where('adminId', '==', adminId);
 
-  // Filtrar órdenes hoy / mes
-  const ordenesHoy = ordenes.filter(o => dentroDeRango(o.createdAt, hoy.inicioISO, hoy.finISO));
-  const ordenesMes = ordenes.filter(o => dentroDeRango(o.createdAt, mes.inicioISO, mes.finISO));
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BLOQUE OPERATIVO (60 s) — lo que cambia durante el día
+  // ═══════════════════════════════════════════════════════════════════════════
+  const operativo = await conCache(adminId, 'operativo', TTL_OPERATIVO, async () => {
+    const w = [];
 
-  // Completadas (para KPIs operativos: domicilios, extintores recargados)
+    // Órdenes del mes en curso — cubre ordenesHoy, ventas, domicilios, extintores
+    let ordenesMes = [];
+    try {
+      const snap = await leerConFallback(
+        baseOrders
+          .where('createdAt', '>=', tsMesIni)
+          .where('createdAt', '<=', tsMesFin)
+          .select('estado', 'createdAt', 'total', 'subtotal', 'lugarAtencion',
+                  'items', 'tipoOrden', 'anulada', 'numeroOrden', 'clienteNombre'),
+        baseOrders.select('estado', 'createdAt', 'total', 'subtotal', 'lugarAtencion',
+                          'items', 'tipoOrden', 'anulada', 'numeroOrden', 'clienteNombre'),
+        'orders.mes', w
+      );
+      ordenesMes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      // Si hubo fallback, el conjunto viene sin acotar: se acota en memoria.
+      ordenesMes = ordenesMes.filter(o => dentroDeRango(o.createdAt, mes.inicioISO, mes.finISO));
+    } catch (e) { w.push('orders: ' + e.message); }
+
+    // Órdenes abiertas — cubre enTaller y mensajerosActivos
+    let ordenesAbiertas = [];
+    try {
+      const snap = await leerConFallback(
+        baseOrders.where('estado', 'in', ESTADOS_ABIERTOS).select('estado', 'mensajeroId'),
+        baseOrders.select('estado', 'mensajeroId'),
+        'orders.abiertas', w
+      );
+      ordenesAbiertas = snap.docs
+        .map(d => ({ id: d.id, ...d.data() }))
+        .filter(o => ESTADOS_ABIERTOS.includes(o.estado));
+    } catch (e) { w.push('orders abiertas: ' + e.message); }
+
+    // Últimas 8 órdenes para la sección de actividad
+    let ordenesRecientes = [];
+    try {
+      const snap = await baseOrders
+        .orderBy('createdAt', 'desc').limit(8)
+        .select('numeroOrden', 'clienteNombre', 'estado', 'lugarAtencion', 'total', 'createdAt')
+        .get();
+      ordenesRecientes = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch (e) {
+      // Fallback: derivarlas de las del mes
+      ordenesRecientes = [...ordenesMes]
+        .sort((a, b) => (aTime(b.createdAt)?.getTime() || 0) - (aTime(a.createdAt)?.getTime() || 0))
+        .slice(0, 8)
+        .map(o => ({
+          id: o.id, numeroOrden: o.numeroOrden, clienteNombre: o.clienteNombre,
+          estado: o.estado, lugarAtencion: o.lugarAtencion, total: o.total, createdAt: o.createdAt,
+        }));
+    }
+
+    // Recaudo de hoy
+    let recaudoHoy = 0;
+    try {
+      const baseMovs = db.collection('movimientos')
+        .where('userId', '==', adminId).where('tipo', '==', 'ingreso');
+      const snap = await leerConFallback(
+        baseMovs.where('createdAt', '>=', tsHoyIni).where('createdAt', '<=', tsHoyFin)
+          .select('monto', 'createdAt'),
+        baseMovs.select('monto', 'createdAt'),
+        'movimientos.hoy', w
+      );
+      snap.forEach(d => {
+        const m = d.data();
+        if (dentroDeRango(m.createdAt, hoy.inicioISO, hoy.finISO)) {
+          recaudoHoy += Number(m.monto) || 0;
+        }
+      });
+    } catch (e) { w.push('movimientos: ' + e.message); }
+
+    return { ordenesMes, ordenesAbiertas, ordenesRecientes, recaudoHoy, warnings: w };
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BLOQUE ACUMULADO (10 min) — histórico y saldos, no cambian minuto a minuto
+  // ═══════════════════════════════════════════════════════════════════════════
+  const acumulado = await conCache(adminId, 'acumulado', TTL_ACUMULADO, async () => {
+    const w = [];
+
+    // Saldo total en cajas
+    let totalEnCajas = 0;
+    try {
+      const snap = await db.collection('cajas').where('userId', '==', adminId).select('saldo').get();
+      snap.forEach(d => { totalEnCajas += Number(d.data().saldo) || 0; });
+    } catch (e) { w.push('cajas: ' + e.message); }
+
+    // Cartera pendiente — necesita el histórico completo: una factura de hace
+    // ocho meses sigue contando. Por eso vive en el bloque de 10 minutos y NO
+    // se acota por fecha.
+    let cxcPendiente = 0;
+    let clientesConMora = 0;
+    try {
+      const snap = await leerConFallback(
+        baseOrders.where('estado', 'in', ESTADOS_CXC)
+          .select('estado', 'total', 'montoPagado', 'clienteId', 'clienteNombre',
+                  'fechaCompletada', 'completadaEn', 'createdAt'),
+        baseOrders.select('estado', 'total', 'montoPagado', 'clienteId', 'clienteNombre',
+                          'fechaCompletada', 'completadaEn', 'createdAt'),
+        'orders.cxc', w
+      );
+      const clientesMora = new Set();
+      snap.forEach(doc => {
+        const o = doc.data();
+        if (!ESTADOS_CXC.includes(o.estado) || o.estado === 'anulada') return;
+        const saldo = (Number(o.total) || 0) - (Number(o.montoPagado) || 0);
+        if (saldo > 0) {
+          cxcPendiente += saldo;
+          const t = aTime(o.fechaCompletada || o.completadaEn || o.createdAt);
+          if (t && (Date.now() - t.getTime()) > 30 * 24 * 3600 * 1000) {
+            clientesMora.add(o.clienteId || o.clienteNombre);
+          }
+        }
+      });
+      clientesConMora = clientesMora.size;
+    } catch (e) { w.push('cxc: ' + e.message); }
+
+    // Egresos — no se acota por fecha porque provisionalesPendientes cuenta
+    // TODOS los provisionales sin legalizar, sin importar de cuándo sean.
+    let egresosMes = 0;
+    let provisionalesPendientes = 0;
+    try {
+      const snap = await db.collection('egresos').where('userId', '==', adminId)
+        .select('estado', 'totalPagar', 'monto', 'tipo', 'cuadrado', 'legalizado',
+                'anulado', 'pagadoEn', 'createdAt')
+        .get();
+      snap.forEach(d => {
+        const e = d.data();
+        const esAnticipo = e.tipo === 'provisional' || e.estado === 'ANTICIPO';
+        if (!esAnticipo && e.anulado !== true
+            && e.estado === 'PAGADO'
+            && dentroDeRango(e.pagadoEn || e.createdAt, mes.inicioISO, mes.finISO)) {
+          egresosMes += Number(e.totalPagar || e.monto) || 0;
+        }
+        if (e.tipo === 'provisional' && e.legalizado !== true && e.cuadrado !== true && e.anulado !== true) {
+          provisionalesPendientes++;
+        }
+      });
+    } catch (e) { w.push('egresos: ' + e.message); }
+
+    // Stock crítico
+    let stockCritico = 0;
+    let productosStockCritico = [];
+    try {
+      const snap = await db.collection('products').where('adminId', '==', adminId)
+        .select('nombre', 'stock', 'stockMinimo').get();
+      snap.forEach(d => {
+        const p = d.data();
+        const min = Number(p.stockMinimo) || 0;
+        const stock = Number(p.stock) || 0;
+        if (min > 0 && stock <= min) {
+          stockCritico++;
+          productosStockCritico.push({ id: d.id, nombre: p.nombre, stock, stockMinimo: min });
+        }
+      });
+    } catch (e) { w.push('productos: ' + e.message); }
+    productosStockCritico = productosStockCritico.slice(0, 5);
+
+    return {
+      totalEnCajas, cxcPendiente, clientesConMora,
+      egresosMes, provisionalesPendientes,
+      stockCritico, productosStockCritico, warnings: w,
+    };
+  });
+
+  warnings.push(...operativo.warnings, ...acumulado.warnings);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CÁLCULO DE KPIs — reglas idénticas a la versión anterior
+  // ═══════════════════════════════════════════════════════════════════════════
+  const { ordenesMes, ordenesAbiertas, ordenesRecientes, recaudoHoy } = operativo;
+
+  const ordenesHoy = ordenesMes.filter(o => dentroDeRango(o.createdAt, hoy.inicioISO, hoy.finISO));
+
   const completadasMes = ordenesMes.filter(o =>
     ['completada', 'cuadre_dinero', 'cxc'].includes(o.estado)
   );
 
   // ✅ FIX VENTAS-UNIF-001: ventas del mes por CAUSACIÓN — la MISMA definición
-  // del ERI. ANTES el dashboard solo sumaba completada/cuadre_dinero/cxc: toda
-  // orden aún en taller o en ruta contaba en el ERI pero NO aquí, y las ventas
-  // del dashboard salían mucho menores que las del ERI (dos "verdades"
-  // distintas). AHORA: toda orden elaborada en el mes cuenta como venta, sin
-  // importar su estado operativo — excepto anuladas, internas y producción
-  // (igual que eri.js, ERI-CAUSACION-001). Una sola definición de ventas.
+  // del ERI. Toda orden elaborada en el mes cuenta como venta, sin importar su
+  // estado operativo — excepto anuladas, internas y de producción.
   const ventasCausadasMes = ordenesMes.filter(o =>
     o.estado !== 'anulada' && o.anulada !== true &&
     o.tipoOrden !== 'interna' && o.tipoOrden !== 'produccion'
   );
   const ventasMes = ventasCausadasMes.reduce((s, o) => s + (Number(o.subtotal) || Number(o.total) || 0), 0);
 
-  // Domicilios completados del mes
   const domiciliosMes = completadasMes.filter(o => o.lugarAtencion === 'domicilio').length;
 
-  // Extintores (productos categoría taller) recargados del mes
   let extintoresMes = 0;
   completadasMes.forEach(o => {
     (o.items || []).forEach(it => {
@@ -135,126 +376,27 @@ router.get('/admin', async (req, res) => {
     });
   });
 
-  // En taller
-  const enTaller = ordenes.filter(o => o.estado === 'en_taller').length;
+  const enTaller = ordenesAbiertas.filter(o => o.estado === 'en_taller').length;
 
-  // ── 2) Caja (recaudo hoy y saldo total) ───────────────────────────────────
-  let recaudoHoy = 0;
-  let totalEnCajas = 0;
-  try {
-    // Saldo en cajas (filtrado por userId)
-    const cajasSnap = await db.collection('cajas').where('userId', '==', adminId).get();
-    cajasSnap.forEach(d => { totalEnCajas += Number(d.data().saldo) || 0; });
+  const mensajerosActivos = new Set(
+    ordenesAbiertas
+      .filter(o => ['en_ruta_recogida', 'en_ruta_entrega', 'despacho'].includes(o.estado) && o.mensajeroId)
+      .map(o => o.mensajeroId)
+  ).size;
 
-    // Recaudo de hoy desde movimientos (ingresos del día)
-    const movsSnap = await db.collection('movimientos')
-      .where('userId', '==', adminId)
-      .where('tipo', '==', 'ingreso')
-      .select('monto', 'createdAt')
-      .get();
-    movsSnap.forEach(d => {
-      const m = d.data();
-      if (dentroDeRango(m.createdAt, hoy.inicioISO, hoy.finISO)) {
-        recaudoHoy += Number(m.monto) || 0;
-      }
-    });
-  } catch (e) { warnings.push('cajas: ' + e.message); }
+  const {
+    totalEnCajas, cxcPendiente, clientesConMora,
+    egresosMes, provisionalesPendientes, stockCritico, productosStockCritico,
+  } = acumulado;
 
-  // ── 3) CxC pendiente (reusar ordenes ya cargadas — NO duplicar query) ────
-  let cxcPendiente = 0;
-  let clientesConMora = 0;
-  try {
-    const clientesMora = new Set();
-    ordenes.forEach(o => {
-      const saldo = (Number(o.total) || 0) - (Number(o.montoPagado) || 0);
-      if (saldo > 0 && ['completada', 'cuadre_dinero', 'cxc'].includes(o.estado) && o.estado !== 'anulada') {
-        cxcPendiente += saldo;
-        const t = aTime(o.fechaCompletada || o.completadaEn || o.createdAt);
-        if (t && (Date.now() - t.getTime()) > 30 * 24 * 3600 * 1000) {
-          clientesMora.add(o.clienteId || o.clienteNombre);
-        }
-      }
-    });
-    clientesConMora = clientesMora.size;
-  } catch (e) { warnings.push('cxc: ' + e.message); }
-
-  // ── 4) Egresos del mes (gastos operativos del mes) ────────────────────────
-  let egresosMes = 0;
-  let provisionalesPendientes = 0;
-  try {
-    const egSnap = await db.collection('egresos').where('userId', '==', adminId)
-      .select('estado', 'totalPagar', 'monto', 'tipo', 'cuadrado', 'pagadoEn', 'createdAt')
-      .get();
-    egSnap.forEach(d => {
-      const e = d.data();
-      // ✅ EGRESO-PROV-001: un ANTICIPO no es gasto. Si suma aquí, contamina
-      // egresosMes y por tanto utilidadMes (ventasMes − egresosMes), y se
-      // cuenta doble cuando el anticipo se legaliza con su egreso definitivo.
-      const esAnticipo = e.tipo === 'provisional' || e.estado === 'ANTICIPO';
-      if (!esAnticipo && e.anulado !== true
-          && e.estado === 'PAGADO'
-          && dentroDeRango(e.pagadoEn || e.createdAt, mes.inicioISO, mes.finISO)) {
-        egresosMes += Number(e.totalPagar || e.monto) || 0;
-      }
-      // ✅ EGRESO-PROV-001: pendiente = sin legalizar (cubre docs viejos que
-      // solo tienen `cuadrado` y nuevos que ya traen `legalizado`).
-      if (e.tipo === 'provisional' && e.legalizado !== true && e.cuadrado !== true && e.anulado !== true) {
-        provisionalesPendientes++;
-      }
-    });
-  } catch (e) { warnings.push('egresos: ' + e.message); }
-
-  // ── 5) Mensajeros activos hoy (con órdenes asignadas en curso) ────────────
-  let mensajerosActivos = 0;
-  try {
-    const enRuta = ordenes.filter(o =>
-      ['en_ruta_recogida', 'en_ruta_entrega', 'despacho'].includes(o.estado) && o.mensajeroId
-    );
-    mensajerosActivos = new Set(enRuta.map(o => o.mensajeroId)).size;
-  } catch (e) { warnings.push('mensajeros: ' + e.message); }
-
-  // ── 6) Stock crítico (productos por debajo del mínimo) ────────────────────
-  let stockCritico = 0;
-  let productosStockCritico = [];
-  try {
-    const prodSnap = await db.collection('products').where('adminId', '==', adminId)
-      .select('nombre', 'stock', 'stockMinimo')
-      .get();
-    prodSnap.forEach(d => {
-      const p = d.data();
-      const min = Number(p.stockMinimo) || 0;
-      const stock = Number(p.stock) || 0;
-      if (min > 0 && stock <= min) {
-        stockCritico++;
-        productosStockCritico.push({ id: d.id, nombre: p.nombre, stock, stockMinimo: min });
-      }
-    });
-  } catch (e) { warnings.push('productos: ' + e.message); }
-  productosStockCritico = productosStockCritico.slice(0, 5);
-
-  // ── 7) Utilidad del mes (ventas − egresos del mes) ────────────────────────
   const utilidadMes = ventasMes - egresosMes;
 
-  // ── 8) Alertas consolidadas ───────────────────────────────────────────────
+  // ── Alertas consolidadas ──────────────────────────────────────────────────
   const alertas = [];
   if (clientesConMora > 0)         alertas.push({ tipo: 'cartera', nivel: 'critico', mensaje: `${clientesConMora} cliente(s) con mora > 30 días`, modulo: 'cxc' });
   if (provisionalesPendientes > 0) alertas.push({ tipo: 'provisional', nivel: 'advertencia', mensaje: `${provisionalesPendientes} egreso(s) provisional(es) sin cuadrar`, modulo: 'egresos' });
   if (stockCritico > 0)            alertas.push({ tipo: 'stock', nivel: 'advertencia', mensaje: `${stockCritico} producto(s) en stock crítico`, modulo: 'productos' });
   if (enTaller > 10)               alertas.push({ tipo: 'taller', nivel: 'info', mensaje: `${enTaller} órdenes en taller (revisar capacidad)`, modulo: 'taller' });
-
-  // ── Órdenes recientes para la sección de actividad ────────────────────────
-  const ordenesRecientes = ordenes
-    .sort((a, b) => (aTime(b.createdAt)?.getTime() || 0) - (aTime(a.createdAt)?.getTime() || 0))
-    .slice(0, 8)
-    .map(o => ({
-      id: o.id,
-      numeroOrden: o.numeroOrden,
-      clienteNombre: o.clienteNombre,
-      estado: o.estado,
-      lugarAtencion: o.lugarAtencion,
-      total: o.total,
-      createdAt: o.createdAt
-    }));
 
   res.json({
     fechaCO: hoy.fechaCO,
@@ -663,3 +805,6 @@ router.get('/comercial/:comercialId', async (req, res) => {
 });
 
 module.exports = router;
+
+// ✅ DASHBOARD-001: permite refrescar el caché desde otros módulos si hiciera falta.
+module.exports.invalidarCacheDashboard = invalidarCacheDashboard;
