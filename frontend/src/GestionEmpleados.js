@@ -454,6 +454,15 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
     diasTrabajados: 30,
     cajaId: '', formaPago: 'Transferencia', empresaId: '', notas: ''
   });
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ NOMINA-CXP-001 — pago mixto y saldo a cuenta por pagar
+  // Cada línea es una salida real de dinero: caja + forma de pago + monto.
+  // La lista VACÍA es un caso válido y deliberado: el comprobante se crea
+  // completo como cuenta por pagar. Antes eso era imposible y el gasto del
+  // período no entraba al ERI.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const [pagos, setPagos] = useState([]);
+  const [formasPago, setFormasPago] = useState(['Efectivo', 'Transferencia', 'Nequi', 'Cheque']);
   const [horas, setHoras] = useState({});
   const [otrosDevengados, setOtrosDev] = useState([]);
   const [otrasDeducciones, setOtrasDed] = useState([]);
@@ -467,6 +476,39 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const headers = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}` });
   const empleado = empleados.find(e => e.id === form.empleadoId);
+
+  // ✅ NOMINA-CXP-001: una sola fuente de verdad para las formas de pago —
+  // la misma configuración que usa CxC. Si mañana se agrega Daviplata o
+  // Bancolombia, aparece sola acá sin tocar código.
+  useEffect(() => {
+    let vivo = true;
+    (async () => {
+      try {
+        const r = await axios.get(`${API}/configuracion`, { headers: headers() });
+        const fps = (r.data?.formasPago || [])
+          .filter(f => f.activa && f.tipo !== 'credito')
+          .map(f => f.nombre);
+        if (vivo && fps.length > 0) setFormasPago(fps);
+      } catch { /* si falla, quedan las de por defecto */ }
+    })();
+    return () => { vivo = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ✅ NOMINA-CXP-001 — cuentas del pago
+  const netoAPagar = Number(preview?.netoAPagar) || 0;
+  const totalPagado = pagos.reduce((acc, p) => acc + (Number(p.monto) || 0), 0);
+  const saldoCxP = Math.max(0, netoAPagar - totalPagado);
+  const pagoExcedido = totalPagado > netoAPagar + 0.5;
+
+  const agregarPago = () => setPagos(ps => [...ps, {
+    cajaId: '',
+    formaPago: formasPago[0] || 'Efectivo',
+    // La primera línea propone el saldo que falta: el caso normal es pagar todo.
+    monto: String(Math.max(0, netoAPagar - ps.reduce((a, x) => a + (Number(x.monto) || 0), 0)))
+  }]);
+  const quitarPago = (i) => setPagos(ps => ps.filter((_, j) => j !== i));
+  const setPago = (i, k, v) => setPagos(ps => ps.map((p, j) => j === i ? { ...p, [k]: v } : p));
 
   // Recalcular en vivo
   useEffect(() => {
@@ -491,12 +533,18 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
 
   const generar = async () => {
     if (!/^\d{4}$/.test(pin)) { setError('El PIN es de 4 dígitos'); return; }
-    if (!form.cajaId) { setError('Seleccioná la caja de donde sale el pago'); return; }
+    // ✅ NOMINA-CXP-001: ya NO se exige caja. Sin líneas de pago, el
+    // comprobante nace completo como cuenta por pagar.
+    if (pagos.some(p => !p.cajaId)) { setError('Hay una línea de pago sin caja seleccionada'); return; }
+    if (pagos.some(p => !(Number(p.monto) > 0))) { setError('Hay una línea de pago sin monto'); return; }
+    if (pagoExcedido) { setError('La suma de los pagos supera el neto a pagar'); return; }
     setGenerando(true); setError('');
     try {
       const r = await axios.post(`${API}/empleados/nomina/comprobante`, {
         ...form, diasTrabajados: Number(form.diasTrabajados),
-        horas, otrosDevengados, otrasDeducciones, pin
+        horas, otrosDevengados, otrasDeducciones, pin,
+        // ✅ NOMINA-CXP-001
+        pagos: pagos.map(p => ({ cajaId: p.cajaId, formaPago: p.formaPago, monto: Number(p.monto) }))
       }, { headers: headers() });
       onGenerado(r.data);
     } catch (e) {
@@ -715,27 +763,86 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
                 </>
               )}
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-                <div style={S.field}>
-                  <label style={S.label}>Caja *</label>
-                  <select style={S.select} value={form.cajaId} onChange={e => set('cajaId', e.target.value)}>
-                    <option value="">— Seleccionar —</option>
-                    {(cajas || []).map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
-                  </select>
+              {/* ═══════════════════════════════════════════════════════════
+                  ✅ NOMINA-CXP-001 — CÓMO SE PAGA
+                  ───────────────────────────────────────────────────────────
+                  Podés pagar por varias cajas a la vez (parte en efectivo,
+                  parte por banco) o no pagar nada todavía: lo que quede sin
+                  pagar pasa solo a Cuentas por Pagar y se abona desde allí.
+                  ═══════════════════════════════════════════════════════════ */}
+              <div style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 14, marginBottom: 14, background: '#fafafa' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 13.5, fontWeight: 800, color: '#111' }}>💵 Cómo se paga</div>
+                    <div style={{ fontSize: 11.5, color: '#6b7280', marginTop: 2 }}>
+                      Podés combinar efectivo y banco. Lo que dejes sin pagar queda en Cuentas por Pagar.
+                    </div>
+                  </div>
+                  <button type="button" onClick={agregarPago} disabled={!preview || saldoCxP <= 0}
+                    style={{ ...S.btnSecondary, opacity: (!preview || saldoCxP <= 0) ? 0.5 : 1, cursor: (!preview || saldoCxP <= 0) ? 'not-allowed' : 'pointer' }}>
+                    + Agregar forma de pago
+                  </button>
                 </div>
-                <div style={S.field}>
-                  <label style={S.label}>Forma de pago</label>
-                  <select style={S.select} value={form.formaPago} onChange={e => set('formaPago', e.target.value)}>
-                    {['Transferencia', 'Efectivo', 'Nequi', 'Cheque'].map(f => <option key={f}>{f}</option>)}
-                  </select>
-                </div>
-                <div style={S.field}>
-                  <label style={S.label}>Empresa</label>
-                  <select style={S.select} value={form.empresaId} onChange={e => set('empresaId', e.target.value)}>
-                    <option value="">— Principal —</option>
-                    {(empresas || []).map(e => <option key={e.id} value={e.id}>{e.name || e.nombre}</option>)}
-                  </select>
-                </div>
+
+                {pagos.length === 0 ? (
+                  <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 9, padding: '11px 13px', fontSize: 12.5, color: '#92400e', lineHeight: 1.6 }}>
+                    📌 Sin líneas de pago, el comprobante queda <strong>completo en Cuentas por Pagar</strong>.
+                    La nómina sí entra como gasto del período en el ERI; el dinero sale cuando lo abones desde CxP.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {pagos.map((pg, i) => (
+                      <div key={i} style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr 1fr 36px', gap: 8, alignItems: 'center' }}>
+                        <select style={S.select} value={pg.cajaId} onChange={e => setPago(i, 'cajaId', e.target.value)}>
+                          <option value="">— Caja —</option>
+                          {(cajas || []).map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                        </select>
+                        <select style={S.select} value={pg.formaPago} onChange={e => setPago(i, 'formaPago', e.target.value)}>
+                          {formasPago.map(f => <option key={f} value={f}>{f}</option>)}
+                        </select>
+                        <input type="number" style={S.input} value={pg.monto} min="0"
+                          onChange={e => setPago(i, 'monto', e.target.value)} placeholder="0" />
+                        <button type="button" onClick={() => quitarPago(i)} title="Quitar esta línea"
+                          style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca', borderRadius: 8, height: 36, cursor: 'pointer', fontWeight: 800 }}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Cuentas en vivo */}
+                {preview && (
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 12,
+                    background: '#fff', border: '1px solid #e5e7eb', borderRadius: 9, padding: '10px 12px'
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 10.5, color: '#9ca3af', fontWeight: 700, textTransform: 'uppercase' }}>Neto a pagar</div>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: '#111' }}>{fmt(netoAPagar)}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10.5, color: '#9ca3af', fontWeight: 700, textTransform: 'uppercase' }}>Se paga ahora</div>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: pagoExcedido ? '#dc2626' : '#16a34a' }}>{fmt(totalPagado)}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10.5, color: '#9ca3af', fontWeight: 700, textTransform: 'uppercase' }}>Queda en CxP</div>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: saldoCxP > 0 ? '#d97706' : '#9ca3af' }}>{fmt(saldoCxP)}</div>
+                    </div>
+                  </div>
+                )}
+
+                {pagoExcedido && (
+                  <div style={{ marginTop: 10, background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '9px 12px', fontSize: 12.5, color: '#991b1b' }}>
+                    🚨 Estás pagando {fmt(totalPagado)} y el neto es {fmt(netoAPagar)}. Ajustá las líneas.
+                  </div>
+                )}
+              </div>
+
+              <div style={S.field}>
+                <label style={S.label}>Empresa</label>
+                <select style={S.select} value={form.empresaId} onChange={e => set('empresaId', e.target.value)}>
+                  <option value="">— Principal —</option>
+                  {(empresas || []).map(e => <option key={e.id} value={e.id}>{e.name || e.nombre}</option>)}
+                </select>
               </div>
 
               {error && <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '10px 13px', fontSize: 12.5, color: '#991b1b', marginBottom: 12 }}>{error}</div>}
@@ -756,7 +863,18 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
                 {preview?.totalAnticipos > 0 && (
                   <> Se cruzarán <strong>{fmt(preview.totalAnticipos)}</strong> en anticipos, que quedarán marcados y dejarán de contar como gasto aparte.</>
                 )}
-                {' '}Sale de caja y queda en auditoría.
+                {/* ✅ NOMINA-CXP-001: decir con claridad qué sale de caja y qué queda debiendo */}
+                {totalPagado > 0 && (
+                  <> Salen <strong>{fmt(totalPagado)}</strong> de caja
+                    {pagos.length > 1 ? ` en ${pagos.length} formas de pago` : ''}.</>
+                )}
+                {saldoCxP > 0 && (
+                  <> Quedan <strong>{fmt(saldoCxP)}</strong> en <strong>Cuentas por Pagar</strong> a nombre de {empleado?.nombre}.</>
+                )}
+                {totalPagado === 0 && (
+                  <> No sale dinero de caja: el comprobante queda completo en <strong>Cuentas por Pagar</strong>.</>
+                )}
+                {' '}Queda en auditoría.
               </div>
 
               <div style={S.field}>
@@ -779,7 +897,9 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
                 <button onClick={() => { setPaso('datos'); setError(''); }} style={S.btnSecondary}>← Volver</button>
                 <button onClick={generar} disabled={generando}
                   style={{ ...S.btnPrimary, background: 'linear-gradient(135deg,#16a34a,#15803d)' }}>
-                  {generando ? 'Generando...' : `🧾 Generar comprobante ${fmt(preview?.netoAPagar)}`}
+                  {generando ? 'Generando...' : (saldoCxP > 0 && totalPagado === 0
+                    ? `🧾 Generar y dejar en CxP ${fmt(netoAPagar)}`
+                    : `🧾 Generar comprobante ${fmt(netoAPagar)}`)}
                 </button>
               </div>
             </>
@@ -1447,7 +1567,12 @@ export default function GestionEmpleados({ user }) {
             const imprimir = window.confirm(
               `✅ Comprobante ${r.numero} generado\n\n` +
               `Devengado: ${fmt(r.liquidacion.totalDevengado)}\n` +
-              `Neto pagado: ${fmt(r.liquidacion.netoAPagar)}\n` +
+              `Neto a pagar: ${fmt(r.liquidacion.netoAPagar)}\n` +
+              // ✅ NOMINA-CXP-001: decir qué salió de caja y qué quedó debiendo
+              `Pagado ahora: ${fmt(r.montoPagado || 0)}\n` +
+              ((r.saldoPendiente || 0) > 0
+                ? `Queda en Cuentas por Pagar: ${fmt(r.saldoPendiente)}\n`
+                : '') +
               (r.anticiposCruzados > 0 ? `Anticipos cruzados: ${r.anticiposCruzados} por ${fmt(r.totalAnticiposCruzados)}\n` : '') +
               `\nCosto real para la empresa: ${fmt(r.liquidacion.costoTotalEmpleador)}\n\n` +
               `¿Imprimir la colilla para que el trabajador firme el recibido?`

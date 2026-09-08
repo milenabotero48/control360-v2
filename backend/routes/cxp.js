@@ -135,7 +135,14 @@ router.get('/', async (req, res) => {
       proveedores[key].egresos.push({
         id: e.id, numero: e.numero, concepto: e.concepto,
         fecha: e.fecha, total: e.totalPagar || e.monto || 0,
-        saldo, formaPago: e.formaPago || 'Pendiente'
+        saldo, formaPago: e.formaPago || 'Pendiente',
+        // ✅ NOMINA-CXP-001: sin `abonos` el historial que GestionCxP ya sabe
+        // pintar nunca aparecía. Al pagar el saldo de una nómina hay que ver
+        // el abono en efectivo que ya se hizo al crear el comprobante.
+        abonos: Array.isArray(e.abonos) ? e.abonos : [],
+        montoPagado: Number(e.montoPagado) || 0,
+        esComprobanteNomina: e.esComprobanteNomina === true,
+        empleadoNombre: e.empleadoNombre || ''
       });
     });
 

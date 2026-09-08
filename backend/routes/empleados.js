@@ -888,7 +888,7 @@ router.post('/nomina/comprobante', async (req, res) => {
     const {
       empleadoId, desde, hasta, diasTrabajados, horas,
       otrosDevengados, otrasDeducciones, cajaId, formaPago, empresaId,
-      notas, pin, categoriaNomina
+      notas, pin, categoriaNomina, pagos
     } = req.body;
 
     const verif = await verificarPin(req.user.uid || req.user.id, pin, 'editar_egreso_pagado');
@@ -950,6 +950,77 @@ router.post('/nomina/comprobante', async (req, res) => {
     });
     const numero = `EGR-${String(siguiente).padStart(4, '0')}`;
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // ✅ NOMINA-CXP-001 — PAGO MIXTO Y SALDO A CUENTA POR PAGAR
+    // ───────────────────────────────────────────────────────────────────────
+    // Problema que resuelve (caso real): había que digitar la nómina pero aún
+    // no estaba el dinero. El sistema exigía una caja, no dejaba crear el
+    // comprobante, y el gasto del período nunca entró al ERI.
+    //
+    // Ahora el comprobante se crea SIEMPRE. Lo que cambia es cuánto se paga:
+    //   · pagos = []                    → todo queda en CxP (estado PENDIENTE)
+    //   · pagos = [efectivo, banco...]  → se paga por varias cajas a la vez
+    //   · si la suma < neto             → el resto queda en CxP
+    //
+    // No se inventa un mecanismo nuevo: se reutiliza EXACTAMENTE la forma que
+    // CxP ya maneja para proveedores (`saldo`, `montoPagado`, `abonos[]`), de
+    // modo que el saldo se abona después desde el módulo de CxP con el flujo
+    // que ya existe (cxp.js → POST /:egresoId/pagar).
+    // ═══════════════════════════════════════════════════════════════════════
+    const lineasPago = Array.isArray(pagos) && pagos.length > 0
+      ? pagos
+      : (cajaId ? [{ cajaId, formaPago: formaPago || '', monto: liq.netoAPagar }] : []);
+
+    const pagosNorm = [];
+    for (const lp of lineasPago) {
+      const m = Number(lp.monto) || 0;
+      if (!lp.cajaId) return res.status(400).json({ error: 'Cada línea de pago necesita una caja' });
+      if (m <= 0) return res.status(400).json({ error: 'Cada línea de pago necesita un monto mayor a cero' });
+      pagosNorm.push({ cajaId: lp.cajaId, formaPago: lp.formaPago || '', monto: m });
+    }
+
+    const montoPagado = pagosNorm.reduce((acc, x) => acc + x.monto, 0);
+    if (montoPagado > liq.netoAPagar + 0.5) {
+      return res.status(400).json({
+        error: `Estás pagando ${fmt(montoPagado)} y el neto es ${fmt(liq.netoAPagar)}. Ajustá las líneas de pago.`
+      });
+    }
+    const saldoPendiente = Math.max(0, liq.netoAPagar - montoPagado);
+
+    // Validar TODAS las cajas antes de tocar ninguna: si una falla, no queremos
+    // haber descontado ya de las otras.
+    const cajasPorId = {};
+    for (const lp of pagosNorm) {
+      if (!cajasPorId[lp.cajaId]) {
+        const cd = await db.collection('cajas').doc(lp.cajaId).get();
+        if (!cd.exists) return res.status(404).json({ error: 'Caja no encontrada' });
+        const c = cd.data();
+        if (c.userId !== adminId) return res.status(403).json({ error: 'Caja de otra empresa' });
+        cajasPorId[lp.cajaId] = { ref: cd.ref, nombre: c.nombre, saldo: Number(c.saldo) || 0, aDescontar: 0 };
+      }
+      cajasPorId[lp.cajaId].aDescontar += lp.monto;
+    }
+    for (const id of Object.keys(cajasPorId)) {
+      const c = cajasPorId[id];
+      if (c.saldo < c.aDescontar) {
+        return res.status(400).json({ error: `Saldo insuficiente en "${c.nombre}". Disponible: ${fmt(c.saldo)}, requerido: ${fmt(c.aDescontar)}` });
+      }
+    }
+
+    const ahoraISO = new Date().toISOString();
+    const abonosIniciales = pagosNorm.map((lp, idx) => ({
+      monto: lp.monto,
+      formaPago: lp.formaPago,
+      cajaId: lp.cajaId,
+      cajaNombre: cajasPorId[lp.cajaId].nombre,
+      fecha: (hasta || ahoraISO.slice(0, 10)),
+      creadoPor: req.user.email || '',
+      origen: 'comprobante_nomina',
+      saldoAntes: liq.netoAPagar - pagosNorm.slice(0, idx).reduce((a, x) => a + x.monto, 0),
+      saldoDespues: liq.netoAPagar - pagosNorm.slice(0, idx + 1).reduce((a, x) => a + x.monto, 0),
+      createdAt: ahoraISO
+    }));
+
     // ─── Crear el egreso por el NETO ───────────────────────────────────────
     const egreso = {
       userId: adminId,
@@ -960,13 +1031,29 @@ router.post('/nomina/comprobante', async (req, res) => {
       monto: liq.netoAPagar,
       totalPagar: liq.netoAPagar,
       ivaVal: 0, ivaPct: 0, retenVal: 0, retenPct: 0,
-      formaPago: formaPago || '',
-      cajaId: cajaId || '',
+      // ✅ NOMINA-CXP-001: con pago mixto no hay UNA forma de pago ni UNA caja.
+      // Se deja la única cuando la hay (compatibilidad con pantallas viejas) y
+      // 'Mixto' cuando son varias. El detalle real vive en `abonos[]`.
+      formaPago: pagosNorm.length === 1 ? (pagosNorm[0].formaPago || '') : (pagosNorm.length > 1 ? 'Mixto' : 'Cuenta por Pagar'),
+      cajaId: pagosNorm.length === 1 ? pagosNorm[0].cajaId : '',
       empresaId: empresaId || '',
       fecha: (hasta || new Date().toISOString().slice(0, 10)).slice(0, 10),
+      // ✅ NOMINA-CXP-001 + CAUSACION-001: el ERI lee `fechaCausacion`. La nómina
+      // pertenece al mes del período liquidado, se pague cuando se pague.
+      fechaCausacion: (hasta || new Date().toISOString().slice(0, 10)).slice(0, 10),
       notas: notas || '',
       tipo: 'nomina',
-      estado: 'PAGADO',
+      // ═══════════════════════════════════════════════════════════════════
+      // ✅ NOMINA-CXP-001 — estado y saldo con la MISMA forma que usa CxP
+      // Si queda saldo, el comprobante aparece solo en el módulo de CxP bajo
+      // el nombre del empleado y se abona desde allí (cxp.js POST /:id/pagar,
+      // que ya acumula montoPagado, saldo y abonos[]).
+      // ═══════════════════════════════════════════════════════════════════
+      estado: saldoPendiente > 0 ? 'PENDIENTE' : 'PAGADO',
+      montoPagado,
+      saldo: saldoPendiente,
+      abonos: abonosIniciales,
+      fechaPago: saldoPendiente > 0 ? null : ahoraISO,
       cuadrado: true, legalizado: true,
       // ─── Trazabilidad laboral ───
       esComprobanteNomina: true,
@@ -1032,20 +1119,27 @@ router.post('/nomina/comprobante', async (req, res) => {
     }
 
     // ─── Descontar de caja ─────────────────────────────────────────────────
-    if (cajaId) {
-      const cajaRef = db.collection('cajas').doc(cajaId);
-      const cajaDoc = await cajaRef.get();
-      if (cajaDoc.exists) {
-        await cajaRef.update({
-          saldo: admin.firestore.FieldValue.increment(-liq.netoAPagar),
+    // ✅ NOMINA-CXP-001: una línea por forma de pago. Si no hay pagos (todo a
+    // CxP), no se toca ninguna caja — que era justamente lo que antes impedía
+    // crear el comprobante.
+    if (pagosNorm.length > 0) {
+      const batchCajas = db.batch();
+      for (const id of Object.keys(cajasPorId)) {
+        batchCajas.update(cajasPorId[id].ref, {
+          saldo: admin.firestore.FieldValue.increment(-cajasPorId[id].aDescontar),
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
+      }
+      await batchCajas.commit();
+
+      for (const lp of pagosNorm) {
         await db.collection('movimientos').add({
-          userId: adminId, cajaId, tipo: 'egreso',
-          monto: liq.netoAPagar,
-          concepto: `Nómina ${emp.nombre}`,
+          userId: adminId, cajaId: lp.cajaId, tipo: 'egreso',
+          monto: lp.monto,
+          concepto: `Nómina ${emp.nombre}` + (pagosNorm.length > 1 ? ` (${lp.formaPago || 'pago'})` : ''),
           referencia: numero,
-          formaPago: formaPago || '',
+          formaPago: lp.formaPago || '',
+          egresoId: ref.id,
           creadoPor: req.user.email,
           createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
@@ -1055,6 +1149,7 @@ router.post('/nomina/comprobante', async (req, res) => {
     await registrarAuditoria({
       accion: 'COMPROBANTE_NOMINA_CREADO', modulo: 'empleados',
       descripcion: `Nómina ${numero} · ${emp.nombre} · devengado ${fmt(liq.totalDevengado)} · neto ${fmt(liq.netoAPagar)}` +
+                   ` · pagado ${fmt(montoPagado)}` + (saldoPendiente > 0 ? ` · queda en CxP ${fmt(saldoPendiente)}` : '') +
                    (anticipos.length ? ` · ${anticipos.length} anticipo(s) cruzado(s) por ${fmt(liq.totalAnticipos)}` : ''),
       usuarioId: adminId, usuarioNombre: req.user.email, documento: numero,
       datos: {
@@ -1069,7 +1164,12 @@ router.post('/nomina/comprobante', async (req, res) => {
       ok: true, id: ref.id, numero,
       liquidacion: liq,
       anticiposCruzados: anticipos.length,
-      totalAnticiposCruzados: liq.totalAnticipos
+      totalAnticiposCruzados: liq.totalAnticipos,
+      // ✅ NOMINA-CXP-001
+      montoPagado,
+      saldoPendiente,
+      estado: saldoPendiente > 0 ? 'PENDIENTE' : 'PAGADO',
+      pagos: abonosIniciales.map(a => ({ cajaNombre: a.cajaNombre, formaPago: a.formaPago, monto: a.monto }))
     });
   } catch (e) {
     console.error('POST nomina/comprobante:', e);

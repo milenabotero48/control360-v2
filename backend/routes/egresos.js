@@ -570,7 +570,28 @@ router.post('/:id/pagar', async (req, res) => {
     if (!cajaDoc.exists) return res.status(404).json({ error: 'Caja no encontrada' });
 
     const caja = cajaDoc.data();
-    const totalAPagar = Number(egreso.totalPagar) || Number(egreso.monto) || 0;
+    // ═════════════════════════════════════════════════════════════════════════
+    // ✅ NOMINA-CXP-001 — pagar el SALDO, no el total
+    // ─────────────────────────────────────────────────────────────────────────
+    // Un egreso puede llegar acá con parte del dinero ya entregado: es el caso
+    // del comprobante de nomina pagado mitad en efectivo y mitad por banco, y
+    // el de cualquier CxP con abonos previos (cxp.js ya escribe `saldo`,
+    // `montoPagado` y `abonos[]`).
+    //
+    // Antes este endpoint cobraba SIEMPRE `totalPagar`: darle "Pagar" a un
+    // egreso con abonos habria sacado el valor completo de caja por segunda
+    // vez. Ahora manda `saldo` cuando existe; si el egreso no lo tiene (todos
+    // los anteriores a este cambio), cae a `totalPagar` y se comporta igual
+    // que siempre.
+    // ═════════════════════════════════════════════════════════════════════════
+    const totalDoc = Number(egreso.totalPagar) || Number(egreso.monto) || 0;
+    const totalAPagar = (egreso.saldo !== undefined && egreso.saldo !== null)
+      ? Number(egreso.saldo) || 0
+      : totalDoc;
+
+    if (totalAPagar <= 0) {
+      return res.status(400).json({ error: 'Este egreso ya esta completamente pagado' });
+    }
 
     if (Number(caja.saldo) < totalAPagar) {
       return res.status(400).json({ error: `Saldo insuficiente en caja. Disponible: ${fmt(caja.saldo)}` });
@@ -582,6 +603,21 @@ router.post('/:id/pagar', async (req, res) => {
       estado: 'PAGADO',
       cajaId,
       formaPago,
+      // ✅ NOMINA-CXP-001: mismos campos que usa CxP, para que las dos vias de
+      // pago dejen el documento en el mismo estado.
+      saldo: 0,
+      montoPagado: (Number(egreso.montoPagado) || 0) + totalAPagar,
+      abonos: admin.firestore.FieldValue.arrayUnion({
+        monto: totalAPagar,
+        formaPago: formaPago || '',
+        cajaId,
+        fecha: new Date().toISOString(),
+        creadoPor: req.user.email || '',
+        origen: 'egresos_pagar',
+        saldoAntes: totalAPagar,
+        saldoDespues: 0,
+        createdAt: new Date().toISOString()
+      }),
       pagadoEn: admin.firestore.FieldValue.serverTimestamp(),
       pagadoPor: req.user.email,
       updatedAt: admin.firestore.FieldValue.serverTimestamp()

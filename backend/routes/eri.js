@@ -155,7 +155,25 @@ router.get('/', async (req, res) => {
     const egresosEnRango = [];
     egresosSnap.docs.forEach(d => {
       const e = d.data();
-      if (e.estado !== 'PAGADO') return;
+      // ══════════════════════════════════════════════════════════════════════
+      // ✅ NOMINA-CXP-001 — la nómina causada es gasto aunque no se haya pagado
+      // ──────────────────────────────────────────────────────────────────────
+      // El resto de egresos sigue entrando SOLO cuando están PAGADOS (regla de
+      // siempre, no se toca: cambiarla movería el ERI de todos los meses ya
+      // cerrados). La excepción es el comprobante de nómina: el trabajador ya
+      // prestó el servicio, así que el costo pertenece a ese mes aunque el
+      // dinero salga después. Si queda saldo, el pasivo ya lo reconoce el
+      // bloque de cuentas por pagar más abajo (egresos PENDIENTE), de modo que
+      // el asiento queda cuadrado: gasto en el ERI + CxP en el balance.
+      //
+      // El Estado de Flujo de Efectivo (finanzas.js) NO cambia: ahí sigue
+      // mandando la caja, que es lo correcto.
+      // ══════════════════════════════════════════════════════════════════════
+      const esNominaCausada = e.esComprobanteNomina === true;
+      if (e.estado !== 'PAGADO' && !esNominaCausada) return;
+      // Un comprobante de nómina ANULADO no es gasto (se filtra abajo por
+      // e.anulado, igual que el resto).
+      if (esNominaCausada && e.estado === 'ANULADO') return;
       // Excluir retenciones automáticas (ya están en la orden, no doble-contar)
       if (e.tipo === 'retencion') return;
       // ✅ EGRESO-PROV-001: los ANTICIPOS a mensajeros NO son gasto. El gasto
