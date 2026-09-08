@@ -57,6 +57,15 @@ const MATRIZ_ACCIONES = {
   editar_vencimiento:   { roles: ['admin'], etiqueta: 'Editar vencimiento'  },
   borrar_vencimiento:   { roles: ['admin'], etiqueta: 'Borrar vencimiento'  },
 
+  // ── Caja / Traslados ──────────────────────────────────────────────────────
+  // ✅ CAJA-TRASLADO-001
+  // Un traslado mueve saldo real de DOS cajas a la vez. Corregirlo o borrarlo
+  // vuelve a mover esos dos saldos, así que pesa lo mismo que editar un egreso
+  // pagado. Tesorería entra porque es quien digita y quien detecta el error de
+  // digitación (caso real: $620 digitado como $6.200).
+  editar_traslado:      { roles: ['admin', 'tesoreria'], etiqueta: 'Corregir traslado entre cajas' },
+  eliminar_traslado:    { roles: ['admin', 'tesoreria'], etiqueta: 'Eliminar traslado entre cajas' },
+
   // Revertir una importación borra en bloque TODO lo que ese archivo creó.
   // Es la acción más destructiva del módulo: solo admin, y con motivo escrito.
   revertir_importacion: { roles: ['admin'], etiqueta: 'Revertir importación completa' },

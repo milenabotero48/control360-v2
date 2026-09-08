@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { db, admin } = require('../config/firebase');
 const { authenticate, validarTenant } = require('../middleware/auth');
+// ✅ CAJA-TRASLADO-001: corregir o eliminar un traslado mueve saldos reales,
+// así que pasa por la MISMA matriz de PIN que el resto de acciones sensibles.
+const { verificarPin } = require('./_autorizacion');
 
 const registrarAuditoria = async (datos) => {
   try {
@@ -267,6 +270,16 @@ router.post('/traslado', async (req, res) => {
 
     const origen = origenDoc.data();
     const destino = destinoDoc.data();
+
+    // ✅ CAJA-TRASLADO-001 · CANDADO MULTI-TENANT
+    // Antes las cajas se leían por ID sin verificar el dueño: con el ID de una
+    // caja de otro suscriptor se podía mover plata entre tenants. Cierra el
+    // hueco señalado en la deuda técnica (ownership-validation sweep).
+    const adminIdTr = req.adminId || req.user.uid;
+    if (origen.userId !== adminIdTr || destino.userId !== adminIdTr) {
+      return res.status(403).json({ error: 'Caja de otro suscriptor' });
+    }
+
     const montoNum = Number(monto);
 
     if (Number(origen.saldo) < montoNum) {
@@ -304,6 +317,232 @@ router.post('/traslado', async (req, res) => {
   } catch (e) {
     console.error('POST traslado:', e);
     res.status(500).json({ error: 'Error en traslado' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ✅ CAJA-TRASLADO-001 — CORREGIR Y ELIMINAR UN TRASLADO ENTRE CAJAS
+// ───────────────────────────────────────────────────────────────────────────────
+// Problema que resuelve (caso real): se digitó $6.200 donde iban $620. El
+// traslado quedaba fijo — no había endpoint de edición ni de borrado — y las
+// dos cajas quedaban descuadradas hasta que alguien hacía un movimiento manual
+// de ajuste, que ensucia el consolidado.
+//
+// Un traslado son DOS documentos en `movimientos` unidos por `grupoTraslado`:
+//     · traslado_salida   en la caja ORIGEN
+//     · traslado_entrada  en la caja DESTINO
+// Cualquier corrección debe mover los DOS y los DOS saldos, o queda peor que
+// antes. Por eso todo va dentro de runTransaction (no batch: hay que LEER los
+// saldos y validar que ninguno quede negativo ANTES de escribir).
+//
+// PIN: matriz de _autorizacion.js → admin y tesorería.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Carga los dos movimientos del grupo y valida que el traslado sea del tenant.
+const leerParTraslado = async (tx, grupoId, adminId) => {
+  const q = db.collection('movimientos')
+    .where('userId', '==', adminId)
+    .where('grupoTraslado', '==', grupoId);
+  const snap = await tx.get(q);
+  const movs = snap.docs.map(d => ({ id: d.id, ref: d.ref, ...d.data() }));
+  const salida  = movs.find(m => m.tipo === 'traslado_salida');
+  const entrada = movs.find(m => m.tipo === 'traslado_entrada');
+  if (!salida || !entrada) return { ok: false, status: 404, error: 'Traslado no encontrado o incompleto' };
+  return { ok: true, salida, entrada };
+};
+
+// ─── PUT /api/cajas/traslado/:grupoId — corregir un traslado ──────────────────
+router.put('/traslado/:grupoId', async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user.uid;
+    const { monto, concepto, cajaOrigenId, cajaDestinoId, pin } = req.body;
+
+    const verif = await verificarPin(req.user.uid || req.user.id, pin, 'editar_traslado');
+    if (!verif.ok) return res.status(403).json({ error: verif.error, codigo: verif.codigo });
+
+    const resultado = await db.runTransaction(async (tx) => {
+      const par = await leerParTraslado(tx, req.params.grupoId, adminId);
+      if (!par.ok) return par;
+      const { salida, entrada } = par;
+
+      const montoViejo = Number(salida.monto) || 0;
+      const origenViejoId  = salida.cajaId;
+      const destinoViejoId = entrada.cajaId;
+
+      const origenNuevoId  = cajaOrigenId  || origenViejoId;
+      const destinoNuevoId = cajaDestinoId || destinoViejoId;
+      const montoNuevo = (monto === undefined || monto === null || monto === '')
+        ? montoViejo : Number(monto);
+
+      if (!(montoNuevo > 0)) return { ok: false, status: 400, error: 'Monto inválido' };
+      if (origenNuevoId === destinoNuevoId) return { ok: false, status: 400, error: 'Origen y destino no pueden ser la misma caja' };
+
+      // Efecto neto sobre cada caja: se REVIERTE el traslado viejo y se APLICA
+      // el nuevo en la misma operación. Si origen y destino no cambian, el neto
+      // es simplemente la diferencia de monto.
+      const delta = {};
+      const sumar = (id, v) => { delta[id] = (delta[id] || 0) + v; };
+      sumar(origenViejoId,  +montoViejo);
+      sumar(destinoViejoId, -montoViejo);
+      sumar(origenNuevoId,  -montoNuevo);
+      sumar(destinoNuevoId, +montoNuevo);
+
+      // LEER todas las cajas involucradas antes de escribir nada.
+      const ids = Object.keys(delta);
+      const docs = await Promise.all(ids.map(id => tx.get(db.collection('cajas').doc(id))));
+      const cajasInfo = {};
+      for (let i = 0; i < ids.length; i++) {
+        const d = docs[i];
+        if (!d.exists) return { ok: false, status: 404, error: 'Caja no encontrada' };
+        const c = d.data();
+        if (c.userId !== adminId) return { ok: false, status: 403, error: 'Caja de otro suscriptor' };
+        const saldoNuevo = (Number(c.saldo) || 0) + delta[ids[i]];
+        if (saldoNuevo < 0) {
+          return { ok: false, status: 400, error: `La corrección dejaría "${c.nombre}" en negativo (${saldoNuevo}). Revisá el monto.` };
+        }
+        cajasInfo[ids[i]] = { ref: d.ref, nombre: c.nombre, saldoAntes: Number(c.saldo) || 0, saldoNuevo };
+      }
+
+      // ── Escrituras ────────────────────────────────────────────────────────
+      for (const id of ids) {
+        if (delta[id] === 0) continue;
+        tx.update(cajasInfo[id].ref, {
+          saldo: cajasInfo[id].saldoNuevo,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+      }
+
+      const conceptoFinal = (concepto !== undefined && concepto !== null && String(concepto).trim() !== '')
+        ? String(concepto).trim()
+        : (salida.concepto || '');
+
+      // El historial vive en el movimiento: nunca se pierde el valor original.
+      const entradaHistorial = {
+        montoAntes: montoViejo, montoDespues: montoNuevo,
+        cajaOrigenAntes: origenViejoId, cajaOrigenDespues: origenNuevoId,
+        cajaDestinoAntes: destinoViejoId, cajaDestinoDespues: destinoNuevoId,
+        conceptoAntes: salida.concepto || '', conceptoDespues: conceptoFinal,
+        editadoPor: req.user.email, editadoEn: new Date().toISOString()
+      };
+
+      tx.update(salida.ref, {
+        monto: montoNuevo, concepto: conceptoFinal,
+        cajaId: origenNuevoId, cajaDestinoId: destinoNuevoId,
+        editado: true,
+        historialEdiciones: admin.firestore.FieldValue.arrayUnion(entradaHistorial),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+      tx.update(entrada.ref, {
+        monto: montoNuevo, concepto: conceptoFinal,
+        cajaId: destinoNuevoId, cajaOrigenId: origenNuevoId,
+        editado: true,
+        historialEdiciones: admin.firestore.FieldValue.arrayUnion(entradaHistorial),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      return {
+        ok: true, montoViejo, montoNuevo, conceptoFinal,
+        origenNombre: cajasInfo[origenNuevoId].nombre,
+        destinoNombre: cajasInfo[destinoNuevoId].nombre,
+        saldos: Object.keys(cajasInfo).map(id => ({
+          cajaId: id, nombre: cajasInfo[id].nombre,
+          saldoAntes: cajasInfo[id].saldoAntes, saldoNuevo: cajasInfo[id].saldoNuevo
+        }))
+      };
+    });
+
+    if (!resultado.ok) return res.status(resultado.status || 400).json({ error: resultado.error });
+
+    await registrarAuditoria({
+      accion: 'TRASLADO_CORREGIDO', modulo: 'cajas',
+      descripcion: `Traslado ${req.params.grupoId} corregido: $${resultado.montoViejo} → $${resultado.montoNuevo} ` +
+                   `("${resultado.origenNombre}" → "${resultado.destinoNombre}") por ${req.user.email}`,
+      usuarioId: adminId, usuarioNombre: req.user.email, documento: req.params.grupoId,
+      datos: {
+        grupoTraslado: req.params.grupoId,
+        montoAntes: resultado.montoViejo, montoDespues: resultado.montoNuevo,
+        concepto: resultado.conceptoFinal, saldos: resultado.saldos
+      }
+    });
+
+    res.json({ ok: true, grupoId: req.params.grupoId, monto: resultado.montoNuevo, saldos: resultado.saldos });
+  } catch (e) {
+    console.error('PUT traslado:', e);
+    res.status(500).json({ error: 'Error al corregir el traslado' });
+  }
+});
+
+// ─── DELETE /api/cajas/traslado/:grupoId — eliminar un traslado ───────────────
+// Borra los DOS movimientos y devuelve los saldos como estaban. Los documentos
+// desaparecen de la pantalla, pero el traslado completo (montos, cajas, quién y
+// cuándo) queda registrado en `audit_logs`: la constancia no se pierde.
+router.delete('/traslado/:grupoId', async (req, res) => {
+  try {
+    const adminId = req.adminId || req.user.uid;
+    // DELETE no lleva body en todos los clientes: se acepta pin por body o query.
+    const pin = (req.body && req.body.pin) || req.query.pin;
+    const motivo = ((req.body && req.body.motivo) || req.query.motivo || '').toString().trim();
+
+    const verif = await verificarPin(req.user.uid || req.user.id, pin, 'eliminar_traslado');
+    if (!verif.ok) return res.status(403).json({ error: verif.error, codigo: verif.codigo });
+
+    const resultado = await db.runTransaction(async (tx) => {
+      const par = await leerParTraslado(tx, req.params.grupoId, adminId);
+      if (!par.ok) return par;
+      const { salida, entrada } = par;
+
+      const montoViejo = Number(salida.monto) || 0;
+      const origenId  = salida.cajaId;
+      const destinoId = entrada.cajaId;
+
+      const [origenDoc, destinoDoc] = await Promise.all([
+        tx.get(db.collection('cajas').doc(origenId)),
+        tx.get(db.collection('cajas').doc(destinoId))
+      ]);
+      if (!origenDoc.exists || !destinoDoc.exists) return { ok: false, status: 404, error: 'Caja no encontrada' };
+      const origen = origenDoc.data();
+      const destino = destinoDoc.data();
+      if (origen.userId !== adminId || destino.userId !== adminId) {
+        return { ok: false, status: 403, error: 'Caja de otro suscriptor' };
+      }
+
+      // Revertir: el dinero vuelve al origen y sale del destino.
+      const saldoDestinoNuevo = (Number(destino.saldo) || 0) - montoViejo;
+      if (saldoDestinoNuevo < 0) {
+        return { ok: false, status: 400, error: `No se puede eliminar: "${destino.nombre}" quedaría en negativo. Esa plata ya se usó — corregí el traslado en vez de eliminarlo.` };
+      }
+
+      tx.update(origenDoc.ref,  { saldo: (Number(origen.saldo) || 0) + montoViejo, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      tx.update(destinoDoc.ref, { saldo: saldoDestinoNuevo,                        updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+      tx.delete(salida.ref);
+      tx.delete(entrada.ref);
+
+      return {
+        ok: true, monto: montoViejo,
+        origenNombre: origen.nombre, destinoNombre: destino.nombre,
+        concepto: salida.concepto || '', fechaOriginal: salida.createdAt || null,
+        creadoPor: salida.creadoPor || ''
+      };
+    });
+
+    if (!resultado.ok) return res.status(resultado.status || 400).json({ error: resultado.error });
+
+    await registrarAuditoria({
+      accion: 'TRASLADO_ELIMINADO', modulo: 'cajas',
+      descripcion: `Traslado ${req.params.grupoId} ELIMINADO por ${req.user.email}: $${resultado.monto} de ` +
+                   `"${resultado.origenNombre}" a "${resultado.destinoNombre}"` + (motivo ? ` · Motivo: ${motivo}` : ''),
+      usuarioId: adminId, usuarioNombre: req.user.email, documento: req.params.grupoId,
+      datos: {
+        grupoTraslado: req.params.grupoId, monto: resultado.monto,
+        origen: resultado.origenNombre, destino: resultado.destinoNombre,
+        concepto: resultado.concepto, creadoOriginalmentePor: resultado.creadoPor, motivo
+      }
+    });
+
+    res.json({ ok: true, grupoId: req.params.grupoId, monto: resultado.monto });
+  } catch (e) {
+    console.error('DELETE traslado:', e);
+    res.status(500).json({ error: 'Error al eliminar el traslado' });
   }
 });
 

@@ -274,6 +274,158 @@ function ModalTraslado({ cajas, onTraslado, onClose }) {
   );
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ CAJA-TRASLADO-001 — Corregir / eliminar un traslado ya registrado
+// ─────────────────────────────────────────────────────────────────────────────
+// Caso real: se digitó $6.200 donde iban $620. Antes el traslado quedaba fijo y
+// tocaba "arreglarlo" con un movimiento manual de ajuste, que ensucia el
+// consolidado. Ahora se corrige el traslado mismo: el backend revierte el
+// efecto viejo y aplica el nuevo en una sola transacción sobre las dos cajas.
+//
+// CORREGIR es lo que se usa para un error de digitación (el traslado sí existió).
+// ELIMINAR es para un traslado que nunca debió existir. Los movimientos se
+// borran, pero el traslado completo queda en audit_logs.
+// ═════════════════════════════════════════════════════════════════════════════
+function ModalTrasladoEditar({ traslado, cajas, onGuardar, onEliminar, onClose }) {
+  const [monto, setMonto] = useState(String(traslado?.monto ?? ''));
+  const [concepto, setConcepto] = useState(traslado?.concepto || '');
+  const [cajaOrigenId, setCajaOrigenId] = useState(traslado?.cajaId || '');
+  const [cajaDestinoId, setCajaDestinoId] = useState(traslado?.cajaDestinoId || '');
+  const [pin, setPin] = useState('');
+  const [motivo, setMotivo] = useState('');
+  const [modo, setModo] = useState('editar'); // 'editar' | 'eliminar'
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const montoOriginal = Number(traslado?.monto) || 0;
+  const montoNum = Number(monto) || 0;
+  const diferencia = montoNum - montoOriginal;
+  const origen = cajas.find(c => c.id === cajaOrigenId);
+  const destino = cajas.find(c => c.id === cajaDestinoId);
+
+  const ejecutar = async () => {
+    if (!/^\d{4}$/.test(pin)) { setError('El PIN es de 4 dígitos'); return; }
+    setSaving(true); setError('');
+    try {
+      if (modo === 'eliminar') {
+        await onEliminar({ grupoId: traslado.grupoTraslado, pin, motivo });
+      } else {
+        if (!(montoNum > 0)) { setError('Monto inválido'); setSaving(false); return; }
+        if (cajaOrigenId === cajaDestinoId) { setError('Origen y destino no pueden ser la misma caja'); setSaving(false); return; }
+        await onGuardar({ grupoId: traslado.grupoTraslado, monto: montoNum, concepto, cajaOrigenId, cajaDestinoId, pin });
+      }
+    } catch (e) {
+      setError(e?.response?.data?.error || 'No se pudo aplicar el cambio');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={S.overlay}>
+      <div style={{ ...S.modal, maxWidth: 520 }}>
+        <div style={S.modalHeader}>
+          <h3 style={S.modalTitle}>{modo === 'eliminar' ? '🗑️ Eliminar traslado' : '✏️ Corregir traslado'}</h3>
+          <button onClick={onClose} style={S.closeBtn}>✕</button>
+        </div>
+        <div style={S.modalBody}>
+
+          {/* Selector de acción */}
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+            {[{ k: 'editar', t: '✏️ Corregir' }, { k: 'eliminar', t: '🗑️ Eliminar' }].map(o => (
+              <button key={o.k} onClick={() => { setModo(o.k); setError(''); }}
+                style={{
+                  flex: 1, padding: '9px 12px', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                  border: modo === o.k ? '2px solid #4f46e5' : '1.5px solid #e2e8f0',
+                  background: modo === o.k ? '#eef2ff' : '#fff',
+                  color: modo === o.k ? '#4338ca' : '#64748b'
+                }}>{o.t}</button>
+            ))}
+          </div>
+
+          <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: 12, marginBottom: 14, fontSize: 12.5, color: '#475569' }}>
+            <div style={{ fontWeight: 700, color: '#1e293b', marginBottom: 4 }}>Traslado original</div>
+            <div>{fmt(montoOriginal)} · {traslado?.concepto || 'Sin concepto'}</div>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{traslado?.grupoTraslado}</div>
+          </div>
+
+          {modo === 'editar' ? (
+            <>
+              <div style={S.field}>
+                <label style={S.label}>Monto correcto *</label>
+                <input type="number" style={S.input} value={monto} onChange={e => setMonto(e.target.value)} min="0" />
+                {montoNum > 0 && diferencia !== 0 && (
+                  <div style={{ fontSize: 11.5, marginTop: 4, color: diferencia < 0 ? '#16a34a' : '#dc2626' }}>
+                    {diferencia < 0
+                      ? `Vuelven ${fmt(Math.abs(diferencia))} a "${origen?.nombre || 'origen'}"`
+                      : `Salen ${fmt(diferencia)} más de "${origen?.nombre || 'origen'}"`}
+                  </div>
+                )}
+              </div>
+              <div style={S.field}>
+                <label style={S.label}>Concepto</label>
+                <input style={S.input} value={concepto} onChange={e => setConcepto(e.target.value)} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div style={S.field}>
+                  <label style={S.label}>Sale de</label>
+                  <select style={S.select} value={cajaOrigenId} onChange={e => setCajaOrigenId(e.target.value)}>
+                    {cajas.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                  </select>
+                </div>
+                <div style={S.field}>
+                  <label style={S.label}>Entra a</label>
+                  <select style={S.select} value={cajaDestinoId} onChange={e => setCajaDestinoId(e.target.value)}>
+                    {cajas.filter(c => c.id !== cajaOrigenId).map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                  </select>
+                </div>
+              </div>
+              {origen && destino && montoNum > 0 && (
+                <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 10, padding: 12, fontSize: 12.5, color: '#166534', marginBottom: 14 }}>
+                  Queda: <strong>{fmt(montoNum)}</strong> · 📤 {origen.nombre} → 📥 {destino.nombre}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 10, padding: 12, marginBottom: 14, fontSize: 12.5, color: '#991b1b', lineHeight: 1.6 }}>
+                Se borran los dos movimientos y los saldos vuelven como estaban.
+                El traslado queda registrado en <strong>auditoría</strong>.
+                <div style={{ marginTop: 6 }}>
+                  Si el traslado sí existió y solo está mal el monto, usá <strong>Corregir</strong>.
+                </div>
+              </div>
+              <div style={S.field}>
+                <label style={S.label}>Motivo (queda en auditoría)</label>
+                <input style={S.input} value={motivo} onChange={e => setMotivo(e.target.value)}
+                  placeholder="Ej: traslado digitado dos veces" />
+              </div>
+            </>
+          )}
+
+          <div style={S.field}>
+            <label style={S.label}>PIN (4 dígitos) *</label>
+            <input type="password" inputMode="numeric" maxLength={4}
+              style={{ ...S.input, textAlign: 'center', letterSpacing: 10, fontWeight: 800, fontSize: 18 }}
+              value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, '').slice(0, 4)); setError(''); }}
+              placeholder="••••" onKeyDown={e => e.key === 'Enter' && ejecutar()} />
+          </div>
+
+          {error && (
+            <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: '10px 13px', fontSize: 12.5, color: '#991b1b' }}>{error}</div>
+          )}
+        </div>
+        <div style={S.modalFooter}>
+          <button onClick={onClose} style={S.btnSecondary}>Cancelar</button>
+          <button onClick={ejecutar} disabled={saving}
+            style={{ ...S.btnPrimary, background: modo === 'eliminar' ? 'linear-gradient(135deg,#dc2626,#b91c1c)' : 'linear-gradient(135deg,#6366f1,#4f46e5)' }}>
+            {saving ? 'Aplicando...' : (modo === 'eliminar' ? '🗑️ Eliminar traslado' : '✏️ Guardar corrección')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Modal Movimiento Manual — CTRL-005 ──────────────────────────────────────
 function ModalMovimiento({ cajas, onSave, onClose, ordenesPendientes = [] }) {
   const [form, setForm] = useState({ 
@@ -470,6 +622,9 @@ export default function GestionCaja({ user }) {
   // ✅ FIX CAJA-002: movimientos huérfanos (dinero registrado sin caja destino)
   const [huerfanos, setHuerfanos] = useState([]);
   const [huerfanoCaja, setHuerfanoCaja] = useState({}); // movId → cajaId elegida
+  // ✅ CAJA-TRASLADO-001: traslado seleccionado para corregir o eliminar
+  const [trasladoSel, setTrasladoSel] = useState(null);
+  const puedeEditarTraslados = ['admin', 'tesoreria'].includes(user?.role);
 
   useEffect(() => { 
     cargarDatos();
@@ -596,6 +751,27 @@ export default function GestionCaja({ user }) {
       ...p
     ]);
     setModal(null);
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ✅ CAJA-TRASLADO-001 — corregir / eliminar un traslado ya registrado
+  // Se recarga desde el servidor (no optimista): estas operaciones tocan hasta
+  // cuatro saldos a la vez y lo que importa es ver la verdad de la base.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const corregirTraslado = async ({ grupoId, monto, concepto, cajaOrigenId, cajaDestinoId, pin }) => {
+    await axios.put(`${API}/cajas/traslado/${grupoId}`,
+      { monto, concepto, cajaOrigenId, cajaDestinoId, pin }, { headers: getHeaders() });
+    setTrasladoSel(null);
+    await cargarDatos();
+    alert('✅ Traslado corregido. Los saldos de las cajas ya quedaron ajustados.');
+  };
+
+  const eliminarTraslado = async ({ grupoId, pin, motivo }) => {
+    await axios.delete(`${API}/cajas/traslado/${grupoId}`,
+      { headers: getHeaders(), data: { pin, motivo } });
+    setTrasladoSel(null);
+    await cargarDatos();
+    alert('✅ Traslado eliminado. Los saldos volvieron como estaban y quedó constancia en auditoría.');
   };
 
   // ✅ CAJA-REDISENO-001: registrar otro ingreso (recuperación de cartera,
@@ -984,11 +1160,13 @@ export default function GestionCaja({ user }) {
                 <th style={S.th}>Sale de</th>
                 <th style={S.th}>Entra a</th>
                 <th style={S.th}>Monto</th>
+                {/* ✅ CAJA-TRASLADO-001 */}
+                {puedeEditarTraslados && <th style={{ ...S.th, textAlign: 'right' }}>Acciones</th>}
               </tr>
             </thead>
             <tbody>
               {movimientos.filter(m => m.tipo === 'traslado_salida').length === 0 && (
-                <tr><td colSpan={5} style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>Sin traslados registrados</td></tr>
+                <tr><td colSpan={puedeEditarTraslados ? 6 : 5} style={{ textAlign: 'center', padding: 32, color: '#94a3b8' }}>Sin traslados registrados</td></tr>
               )}
               {movimientos.filter(m => m.tipo === 'traslado_salida').map(mv => {
                 const origen = cajas.find(c => c.id === mv.cajaId);
@@ -999,7 +1177,33 @@ export default function GestionCaja({ user }) {
                     <td style={S.td}><span style={{ fontWeight: 600, fontSize: 13, color: '#1e293b' }}>{mv.concepto}</span></td>
                     <td style={S.td}><span style={{ fontSize: 12, color: '#dc2626' }}>📤 {origen?.nombre || '—'}</span></td>
                     <td style={S.td}><span style={{ fontSize: 12, color: '#16a34a' }}>📥 {destino?.nombre || '—'}</span></td>
-                    <td style={{ ...S.td, fontWeight: 700, color: '#1e293b', fontSize: 14 }}>{fmt(mv.monto)}</td>
+                    <td style={{ ...S.td, fontWeight: 700, color: '#1e293b', fontSize: 14 }}>
+                      {fmt(mv.monto)}
+                      {/* ✅ CAJA-TRASLADO-001: deja ver que este traslado fue corregido */}
+                      {mv.editado && (
+                        <span title={`Corregido ${(mv.historialEdiciones || []).length} vez(ces)`}
+                          style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: '#b45309', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 6, padding: '1px 6px' }}>
+                          ✏️ corregido
+                        </span>
+                      )}
+                    </td>
+                    {/* ✅ CAJA-TRASLADO-001 */}
+                    {puedeEditarTraslados && (
+                      <td style={{ ...S.td, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <button
+                          onClick={() => setTrasladoSel({ ...mv, cajaDestinoId: mv.cajaDestinoId })}
+                          disabled={!mv.grupoTraslado}
+                          title={mv.grupoTraslado ? 'Corregir o eliminar este traslado' : 'Traslado antiguo sin identificador de grupo'}
+                          style={{
+                            padding: '5px 11px', borderRadius: 7, fontSize: 12, fontWeight: 700,
+                            border: '1px solid #e2e8f0', background: '#f8fafc',
+                            color: mv.grupoTraslado ? '#4338ca' : '#cbd5e1',
+                            cursor: mv.grupoTraslado ? 'pointer' : 'not-allowed'
+                          }}>
+                          ✏️ Corregir
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 );
               })}
@@ -1010,6 +1214,16 @@ export default function GestionCaja({ user }) {
 
       {/* Modales */}
       {modal === 'traslado' && <ModalTraslado cajas={cajas} onTraslado={hacerTraslado} onClose={() => setModal(null)} />}
+      {/* ✅ CAJA-TRASLADO-001 */}
+      {trasladoSel && (
+        <ModalTrasladoEditar
+          traslado={trasladoSel}
+          cajas={cajas}
+          onGuardar={corregirTraslado}
+          onEliminar={eliminarTraslado}
+          onClose={() => setTrasladoSel(null)}
+        />
+      )}
       {(modal === 'nueva-caja' || modal === 'editar-caja') && (
         <ModalCaja
           caja={modal === 'editar-caja' ? selected : null}
