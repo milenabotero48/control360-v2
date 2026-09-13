@@ -804,6 +804,223 @@ router.get('/comercial/:comercialId', async (req, res) => {
   });
 });
 
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ OPER-GERENCIAL-001 — GET /api/dashboards/operacion?mes=YYYY-MM
+// ─────────────────────────────────────────────────────────────────────────────
+// Resumen gerencial de la operación del mes:
+//   · por día: órdenes creadas, completadas, anuladas, clientes atendidos
+//   · embudo del estado actual (sin ejecutar, recogida, taller, por entregar,
+//     en ruta, cobro, cartera, completadas, anuladas)
+//   · tiempo por proceso (mediana / promedio / máximo) medido sobre
+//     historialEstados de cada orden
+//   · ciclo total creación → completada
+//   · órdenes más demoradas en su estado actual
+//   · comparación con el mes anterior
+//
+// Reglas DASHBOARD-001 que se respetan: consulta acotada por createdAt con
+// Timestamp (índice orders adminId+createdAt ya existe), select de campos,
+// caché por tenant+mes (5 min; el mes cerrado, 1 h), fallback si falta índice.
+// Solo lectura. No toca el caché de /admin.
+// ═════════════════════════════════════════════════════════════════════════════
+const TTL_OPERACION_ABIERTO = 5 * 60 * 1000;
+const TTL_OPERACION_CERRADO = 60 * 60 * 1000;
+const cacheOperacion = new Map(); // `${adminId}_${mes}` → { data, exp }
+
+const PROCESOS = [
+  { id: 'sin_ejecutar', label: 'Sin ejecutar',    estados: ['programada'] },
+  { id: 'recogida',     label: 'En recogida',     estados: ['en_ruta_recogida'] },
+  { id: 'taller',       label: 'En taller',       estados: ['en_taller', 'taller_proceso', 'reparacion_proceso', 'interna_proceso'] },
+  { id: 'por_entregar', label: 'Por entregar',    estados: ['listo_entregar', 'facturado', 'despacho'] },
+  { id: 'en_ruta',      label: 'En ruta entrega', estados: ['en_ruta_entrega'] },
+  { id: 'cobro',        label: 'Cobro / cuadre',  estados: ['entrega_cobranza', 'cuadre_dinero'] },
+  { id: 'cartera',      label: 'En cartera',      estados: ['cxc'] },
+  { id: 'completada',   label: 'Completadas',     estados: ['completada'] },
+  { id: 'anulada',      label: 'Anuladas',        estados: ['anulada'] }
+];
+const procesoDe = (estado) => (PROCESOS.find(p => p.estados.includes(estado)) || { id: 'otro', label: 'Otro' }).id;
+const PROCESOS_ABIERTOS = ['sin_ejecutar', 'recogida', 'taller', 'por_entregar', 'en_ruta', 'cobro'];
+
+const rangoMesParam = (mesParam) => {
+  const hoy = rangoMesCO();
+  const m = /^\d{4}-\d{2}$/.test(String(mesParam || '')) ? mesParam : hoy.mesCO;
+  const [year, month] = m.split('-');
+  const ultimoDia = new Date(Number(year), Number(month), 0).getDate();
+  return {
+    mesCO: m,
+    primerDia: `${year}-${month}-01`,
+    ultimaFecha: `${year}-${month}-${String(ultimoDia).padStart(2, '0')}`,
+    inicioISO: new Date(`${year}-${month}-01T00:00:00-05:00`).toISOString(),
+    finISO: new Date(`${year}-${month}-${String(ultimoDia).padStart(2, '0')}T23:59:59.999-05:00`).toISOString(),
+    dias: ultimoDia,
+    esActual: m === hoy.mesCO
+  };
+};
+const mesAnteriorDe = (mesCO) => {
+  const [y, m] = mesCO.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 2, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+};
+const fechaCO = (v) => {
+  const t = aTime(v);
+  if (!t) return null;
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
+};
+const mediana = (arr) => {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+const promedio = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+const redondear = (n) => Math.round(n * 10) / 10;
+
+// Línea de tiempo de una orden: [{ estado, inicioMs, finMs }]
+const segmentosDe = (o, ahoraMs) => {
+  const creado = aTime(o.createdAt)?.getTime() || null;
+  const hist = (Array.isArray(o.historialEstados) ? o.historialEstados : [])
+    .map(h => ({ estado: h.estado, ms: aTime(h.fecha)?.getTime() || null }))
+    .filter(h => h.estado && h.ms)
+    .sort((a, b) => a.ms - b.ms);
+  const puntos = [];
+  if (creado && (!hist.length || hist[0].ms - creado > 60 * 1000)) puntos.push({ estado: hist.length ? hist[0].estado : o.estado, ms: creado });
+  for (const h of hist) {
+    const ultimo = puntos[puntos.length - 1];
+    if (ultimo && ultimo.estado === h.estado) continue; // misma etapa repetida (aprobaciones, notas)
+    puntos.push(h);
+  }
+  const cerrada = ['completada', 'anulada'].includes(o.estado);
+  const seg = [];
+  for (let i = 0; i < puntos.length; i++) {
+    const fin = i + 1 < puntos.length ? puntos[i + 1].ms : (cerrada ? null : ahoraMs);
+    if (fin === null) break; // el estado final no dura
+    seg.push({ estado: puntos[i].estado, inicioMs: puntos[i].ms, finMs: fin, actual: i + 1 >= puntos.length });
+  }
+  return { seg, creado, cerrada, puntos };
+};
+
+const leerOrdenesMes = async (adminId, rango, warnings) => {
+  const base = db.collection('orders').where('adminId', '==', adminId);
+  const campos = ['estado', 'createdAt', 'numeroOrden', 'clienteId', 'clienteNombre', 'tipoOrden', 'lugarAtencion', 'total', 'historialEstados', 'trabajadorAsignadoNombre', 'mensajeroNombre'];
+  const snap = await leerConFallback(
+    base.where('createdAt', '>=', Timestamp.fromDate(new Date(rango.inicioISO)))
+        .where('createdAt', '<=', Timestamp.fromDate(new Date(rango.finISO)))
+        .select(...campos),
+    base.select(...campos),
+    `orders.operacion.${rango.mesCO}`, warnings
+  );
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .filter(o => dentroDeRango(o.createdAt, rango.inicioISO, rango.finISO))
+    .filter(o => !['interna', 'produccion'].includes(String(o.tipoOrden || '').toLowerCase()));
+};
+
+const resumirMes = (ordenes, rango, ahoraMs) => {
+  const porDia = {};
+  for (let d = 1; d <= rango.dias; d++) {
+    const f = `${rango.mesCO}-${String(d).padStart(2, '0')}`;
+    porDia[f] = { fecha: f, creadas: 0, completadas: 0, anuladas: 0, clientes: new Set() };
+  }
+  const embudo = Object.fromEntries(PROCESOS.map(p => [p.id, { id: p.id, label: p.label, cantidad: 0, valor: 0 }]));
+  const duraciones = {}; // procesoId → horas[]
+  const ciclos = [];
+  const demoradas = [];
+  const clientesMes = new Set();
+
+  for (const o of ordenes) {
+    const dia = fechaCO(o.createdAt);
+    const cli = o.clienteId || (o.clienteNombre || '').trim().toLowerCase();
+    if (cli) clientesMes.add(cli);
+    if (dia && porDia[dia]) { porDia[dia].creadas++; if (cli) porDia[dia].clientes.add(cli); }
+
+    const pid = procesoDe(o.estado);
+    if (embudo[pid]) { embudo[pid].cantidad++; embudo[pid].valor += Number(o.total) || 0; }
+
+    const { seg, creado, puntos } = segmentosDe(o, ahoraMs);
+    for (const s of seg) {
+      const p = procesoDe(s.estado);
+      if (!PROCESOS_ABIERTOS.includes(p) && p !== 'cartera') continue;
+      const horas = (s.finMs - s.inicioMs) / 3600000;
+      if (horas < 0 || horas > 24 * 120) continue; // datos corruptos fuera
+      (duraciones[p] = duraciones[p] || []).push(horas);
+      if (s.actual && PROCESOS_ABIERTOS.includes(p)) {
+        demoradas.push({ id: o.id, numeroOrden: o.numeroOrden, clienteNombre: o.clienteNombre, proceso: p, estado: o.estado, horas: redondear(horas), responsable: o.trabajadorAsignadoNombre || o.mensajeroNombre || '' });
+      }
+    }
+    const fin = puntos.find(pt => pt.estado === 'completada');
+    if (fin && creado) {
+      ciclos.push((fin.ms - creado) / 3600000);
+      const fc = fechaCO(fin.ms);
+      if (fc && porDia[fc]) porDia[fc].completadas++;
+    }
+    const an = puntos.find(pt => pt.estado === 'anulada');
+    if (an) { const fa = fechaCO(an.ms); if (fa && porDia[fa]) porDia[fa].anuladas++; }
+  }
+
+  const tiempos = PROCESOS.filter(p => PROCESOS_ABIERTOS.includes(p.id) || p.id === 'cartera').map(p => {
+    const arr = duraciones[p.id] || [];
+    return { id: p.id, label: p.label, ordenes: arr.length, medianaHoras: redondear(mediana(arr)), promedioHoras: redondear(promedio(arr)), maxHoras: redondear(Math.max(0, ...arr)) };
+  });
+
+  const total = ordenes.length;
+  const completadas = embudo.completada.cantidad;
+  const anuladas = embudo.anulada.cantidad;
+  const enCurso = PROCESOS_ABIERTOS.reduce((n, id) => n + embudo[id].cantidad, 0) + embudo.cartera.cantidad;
+  const hoyCO = rangoHoyCO().fechaCO;
+
+  return {
+    mes: rango.mesCO,
+    totales: {
+      ordenes: total,
+      clientes: clientesMes.size,
+      completadas,
+      enCurso,
+      anuladas,
+      cumplimiento: total - anuladas > 0 ? Math.round(completadas / (total - anuladas) * 100) : 0,
+      cicloMedianaHoras: redondear(mediana(ciclos)),
+      cicloPromedioHoras: redondear(promedio(ciclos)),
+      valorTotal: ordenes.filter(o => o.estado !== 'anulada').reduce((s, o) => s + (Number(o.total) || 0), 0),
+      diasConActividad: Object.values(porDia).filter(d => d.creadas > 0).length,
+      promedioDiario: redondear(total / Math.max(1, rango.esActual ? Math.max(1, Number(hoyCO.slice(-2))) : rango.dias))
+    },
+    porDia: Object.values(porDia).map(d => ({ ...d, clientes: d.clientes.size })).filter(d => !rango.esActual || d.fecha <= hoyCO),
+    embudo: PROCESOS.map(p => embudo[p.id]),
+    tiempos,
+    demoradas: demoradas.sort((a, b) => b.horas - a.horas).slice(0, 6)
+  };
+};
+
+router.get('/operacion', async (req, res) => {
+  const warnings = [];
+  const adminId = req.adminId || req.user.uid || req.user.id;
+  const rango = rangoMesParam(req.query.mes);
+  const clave = `${adminId}_${rango.mesCO}`;
+  const cached = cacheOperacion.get(clave);
+  if (cached && Date.now() < cached.exp) return res.json(cached.data);
+
+  try {
+    const ahoraMs = Date.now();
+    const rangoAnt = rangoMesParam(mesAnteriorDe(rango.mesCO));
+    const [ordenes, ordenesAnt] = await Promise.all([
+      leerOrdenesMes(adminId, rango, warnings),
+      leerOrdenesMes(adminId, rangoAnt, warnings).catch(() => [])
+    ]);
+    const actual = resumirMes(ordenes, rango, ahoraMs);
+    const anterior = resumirMes(ordenesAnt, rangoAnt, ahoraMs);
+    const data = {
+      ...actual,
+      esMesActual: rango.esActual,
+      anterior: { mes: anterior.mes, ordenes: anterior.totales.ordenes, clientes: anterior.totales.clientes, completadas: anterior.totales.completadas, cicloMedianaHoras: anterior.totales.cicloMedianaHoras, cumplimiento: anterior.totales.cumplimiento },
+      generadoEn: new Date().toISOString(),
+      warnings
+    };
+    cacheOperacion.set(clave, { data, exp: Date.now() + (rango.esActual ? TTL_OPERACION_ABIERTO : TTL_OPERACION_CERRADO) });
+    return res.json(data);
+  } catch (e) {
+    console.error('[dashboards/operacion]', e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
 
 // ✅ DASHBOARD-001: permite refrescar el caché desde otros módulos si hiciera falta.

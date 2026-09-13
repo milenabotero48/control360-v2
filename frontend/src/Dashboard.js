@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloque 3
+import PanelOperacion from './PanelOperacion'; // ✅ OPER-GERENCIAL-001
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -236,6 +237,9 @@ const Dashboard = ({ user }) => {
 
       {/* Ola 3 Bloque 3: Panel de Alertas Inteligentes */}
       <PanelAlertasInteligentes />
+
+      {/* ✅ OPER-GERENCIAL-001: operación del mes (solo admin) */}
+      {isAdmin && <PanelOperacion />}
 
       {/* ── PANEL DE ALERTAS (legacy del backend) ─────────────────────────── */}
       {data.alertas?.length > 0 && (
