@@ -28,6 +28,8 @@ import AnnyConversaciones from './AnnyConversaciones';
 import AnnyEntrenamiento from './AnnyEntrenamiento';
 // ✅ ANNY-DICC-049: puente entre cómo habla el cliente y el catálogo.
 import AnnyPalabrasClave from './AnnyPalabrasClave';
+// ✅ ANNY-V3-SIM: conversar con Anny antes de conectar el número.
+import AnnySimulador from './AnnySimulador';
 
 // FIX ANNY-ESTADO-025: única fuente de verdad de la conexión.
 const estaConectado = (e) => String(e?.estado || '').toLowerCase() === 'conectado';
@@ -254,6 +256,7 @@ export default function ModuloAnny({ onNavegar }) {
           { id: 'casos', label: `Escalados${casos.length ? ` (${casos.length})` : ''}` },
           { id: 'entrenamiento', label: 'Entrenamiento' },
           { id: 'palabras', label: 'Palabras clave' },
+          { id: 'simulador', label: '🧪 Simulador' }, // ✅ ANNY-V3-SIM
           { id: 'config', label: 'Configuración' }
         ].map(t => (
           <button
@@ -270,6 +273,7 @@ export default function ModuloAnny({ onNavegar }) {
       {tab === 'conversaciones' && <AnnyConversaciones />}
       {tab === 'entrenamiento' && <AnnyEntrenamiento />}
       {tab === 'palabras' && <AnnyPalabrasClave />}
+      {tab === 'simulador' && <AnnySimulador />}
       {tab === 'pedidos' && <Pedidos pedidos={pedidos} onCambio={cargarResumen} onNavegar={onNavegar} />}
       {tab === 'casos' && <Casos casos={casos} onCambio={cargarResumen} />}
       {tab === 'config' && <Configuracion />}

@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
+// ✅ ANNY-V3: días para el editor de horario de atención de Anny
+const DIAS_SEMANA = [
+  { id: 'lun', et: 'Lun' }, { id: 'mar', et: 'Mar' }, { id: 'mie', et: 'Mié' }, { id: 'jue', et: 'Jue' },
+  { id: 'vie', et: 'Vie' }, { id: 'sab', et: 'Sáb' }, { id: 'dom', et: 'Dom' }
+];
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PANEL MAESTRO DE SUSCRIPTORES — solo super-admin (Milena)
 //
@@ -104,6 +110,7 @@ const PanelSuscriptores = () => {
   const [editPerfil, setEditPerfil] = useState(null);   // suscriptor en edición
   const [nichosDisp, setNichosDisp] = useState([]);     // plantillas del backend
   const [formPerfil, setFormPerfil] = useState(null);   // campos del perfil
+  const [modelosDisp, setModelosDisp] = useState(['haiku']); // ✅ ANNY-V3
 
   // ✅ CAPACIDAD-TENANT-002: diagnóstico de órdenes atascadas por falta de módulo
   const [editAtascos, setEditAtascos] = useState(null); // suscriptor en revisión
@@ -230,6 +237,11 @@ const PanelSuscriptores = () => {
       const r = await axios.get(`${API}/anny/perfil/${s.adminId}`, { headers });
       const p = r.data.perfil || {};
       setNichosDisp(r.data.nichos || []);
+      setModelosDisp(r.data.modelos || ['haiku']);
+      // ✅ ANNY-V3: horario por tenant, tono, presentación, modelo, ventana de ráfaga
+      const h = p.horarioAtencion || {};
+      const horario = {};
+      for (const d of DIAS_SEMANA) horario[d.id] = Array.isArray(h[d.id]) ? { abierto: true, abre: h[d.id][0], cierra: h[d.id][1] } : { abierto: false, abre: '08:00', cierra: '18:00' };
       setFormPerfil({
         nicho: p.nicho || '',
         nombreAgente: p.nombreAgente || 'Anny',
@@ -238,7 +250,13 @@ const PanelSuscriptores = () => {
         reglasNegocio: p.reglasNegocio || '',
         mediosPago: p.mediosPago || '',
         avisarVentaCliente: p.avisarVentaCliente === true,
-        notificarEscalamientoA: p.notificarEscalamientoA || ''
+        notificarEscalamientoA: p.notificarEscalamientoA || '',
+        horario,
+        tono: { tratamiento: p.tono?.tratamiento || 'tu', emojis: p.tono?.emojis === true, calidez: p.tono?.calidez || 'directa' },
+        presentacion: p.presentacion || '',
+        modelo: p.modelo || 'haiku',
+        ventanaRafagaMs: Number(p.ventanaRafagaMs) || 5000,
+        identificarAlInicio: p.identificarAlInicio !== false
       });
     } catch (e) {
       setError(e.response?.data?.error || 'No se pudo leer el perfil de Anny');
@@ -249,7 +267,14 @@ const PanelSuscriptores = () => {
     setGuardando(true);
     setError('');
     try {
-      await axios.put(`${API}/anny/perfil/${editPerfil.adminId}`, formPerfil, { headers });
+      // ✅ ANNY-V3: el horario viaja como { lun: ['08:00','18:00'], sab: null, ... }
+      const horarioAtencion = {};
+      for (const d of DIAS_SEMANA) {
+        const v = formPerfil.horario?.[d.id];
+        horarioAtencion[d.id] = v && v.abierto && v.abre && v.cierra ? [v.abre, v.cierra] : null;
+      }
+      const { horario, ...resto } = formPerfil;
+      await axios.put(`${API}/anny/perfil/${editPerfil.adminId}`, { ...resto, horarioAtencion }, { headers });
       setEditPerfil(null);
       flashExito('Perfil de Anny guardado');
     } catch (e) {
@@ -604,6 +629,74 @@ const PanelSuscriptores = () => {
                 <label style={st.label}>WhatsApp para avisos de escalamiento</label>
                 <input type="text" style={st.input} placeholder="3001234567" value={formPerfil.notificarEscalamientoA}
                   onChange={e => setFormPerfil({ ...formPerfil, notificarEscalamientoA: e.target.value })} />
+
+                {/* ✅ ANNY-V3 · horario de atención (lo que Anny promete al escalar) */}
+                <label style={st.label}>Horario de atención (Anny lo usa para decir cuándo responde un asesor)</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 6 }}>
+                  {DIAS_SEMANA.map(d => {
+                    const v = formPerfil.horario[d.id];
+                    const setDia = (patch) => setFormPerfil({ ...formPerfil, horario: { ...formPerfil.horario, [d.id]: { ...v, ...patch } } });
+                    return (
+                      <div key={d.id} style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: '6px 8px', fontSize: 12, background: v.abierto ? '#fff' : '#f8fafc' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                          <input type="checkbox" checked={v.abierto} onChange={e => setDia({ abierto: e.target.checked })} />
+                          <b>{d.et}</b>
+                        </label>
+                        {v.abierto && (
+                          <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
+                            <input type="time" value={v.abre} onChange={e => setDia({ abre: e.target.value })} style={{ ...st.input, padding: '4px 6px', fontSize: 12, marginTop: 0 }} />
+                            <input type="time" value={v.cierra} onChange={e => setDia({ cierra: e.target.value })} style={{ ...st.input, padding: '4px 6px', fontSize: 12, marginTop: 0 }} />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* ✅ ANNY-V3 · tono */}
+                <label style={st.label}>Tono</label>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <select style={{ ...st.input, flex: 1, minWidth: 140 }} value={formPerfil.tono.tratamiento}
+                    onChange={e => setFormPerfil({ ...formPerfil, tono: { ...formPerfil.tono, tratamiento: e.target.value } })}>
+                    <option value="tu">Tutea al cliente</option>
+                    <option value="usted">Trata de usted</option>
+                  </select>
+                  <select style={{ ...st.input, flex: 1, minWidth: 140 }} value={formPerfil.tono.calidez}
+                    onChange={e => setFormPerfil({ ...formPerfil, tono: { ...formPerfil.tono, calidez: e.target.value } })}>
+                    <option value="directa">Directa y profesional</option>
+                    <option value="cercana">Cercana y cálida</option>
+                  </select>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                    <input type="checkbox" checked={formPerfil.tono.emojis}
+                      onChange={e => setFormPerfil({ ...formPerfil, tono: { ...formPerfil.tono, emojis: e.target.checked } })} />
+                    Emojis
+                  </label>
+                </div>
+
+                <label style={st.label}>Presentación (opcional, máx. 160 caracteres — si va vacía Anny la arma con su nombre y la empresa)</label>
+                <input type="text" style={st.input} maxLength={160} placeholder="Hola, soy Anny, asesora de Extintores del Valle." value={formPerfil.presentacion}
+                  onChange={e => setFormPerfil({ ...formPerfil, presentacion: e.target.value })} />
+
+                <label style={{ ...st.modRow, marginTop: 12, border: 'none' }}>
+                  <input type="checkbox" checked={formPerfil.identificarAlInicio}
+                    onChange={e => setFormPerfil({ ...formPerfil, identificarAlInicio: e.target.checked })} />
+                  <span><b>Preguntar nombre y empresa en el primer mensaje</b> — si se desactiva, Anny lo pide solo al cerrar el pedido.</span>
+                </label>
+
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 160 }}>
+                    <label style={st.label}>Modelo de IA</label>
+                    <select style={st.input} value={formPerfil.modelo}
+                      onChange={e => setFormPerfil({ ...formPerfil, modelo: e.target.value })}>
+                      {modelosDisp.map(m => <option key={m} value={m}>{m === 'haiku' ? 'Haiku (rápido y económico)' : m === 'sonnet' ? 'Sonnet (más criterio, mayor costo)' : m}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 160 }}>
+                    <label style={st.label}>Ventana de agrupación de mensajes (segundos)</label>
+                    <input type="number" min={2} max={12} style={st.input} value={Math.round(formPerfil.ventanaRafagaMs / 1000)}
+                      onChange={e => setFormPerfil({ ...formPerfil, ventanaRafagaMs: Math.min(12, Math.max(2, Number(e.target.value) || 5)) * 1000 })} />
+                  </div>
+                </div>
 
                 <div style={{ ...st.btns, justifyContent: 'flex-end' }}>
                   <button style={st.btnGhost} disabled={guardando} onClick={() => setEditPerfil(null)}>Cancelar</button>

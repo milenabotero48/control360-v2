@@ -3,7 +3,8 @@
 // Ubicación: backend/services/baileysService.js
 // FIX ANNY-QR-001 + ANNY-QR-003 + ANNY-QR-004 + ANNY-PEDIDOS-001
 // + FIX ANNY-SILENCIO-001 (chats silenciados / internos)
-// + FIX ANNY-ECO-001 + FIX ANNY-PAUSA-004 (esta versión)
+// + FIX ANNY-ECO-001 + FIX ANNY-PAUSA-004
+// + ✅ ANNY-LID-055 (número real) + ✅ ANNY-RAFAGA-058 (cola por chat) — v3
 // ============================================================
 // PRINCIPIOS:
 // 1. Una sesión de WhatsApp por tenant (adminId) — multi-tenant
@@ -454,65 +455,111 @@ async function enviarAvisoEscalamiento(adminId, texto, destinoPreferido, telefon
 }
 
 // ============================================================
-// Procesar un mensaje entrante o saliente-manual
+// ✅ ANNY-LID-055 — número real del cliente, no el LID
+// ------------------------------------------------------------
+// Baileys 7 entrega muchos chats con remoteJid = <lid>@lid (el
+// identificador oculto de WhatsApp) en vez de 57...@s.whatsapp.net.
+// `jid.split('@')[0]` guardaba el LID como "teléfono": link wa.me
+// roto, ficha del cliente y órdenes no encontradas, historiales
+// duplicados. Aquí se resuelve SIEMPRE al número real:
+//   1. msg.key.remoteJidAlt / senderPn (Baileys lo trae si lo sabe)
+//   2. sock.signalRepository.lidMapping.getPNForLID(lid)
+//   3. mapa persistido annyLids (lo aprendimos antes)
+//   4. último recurso: el LID tal cual (y se deja traza en log)
+// El mapa se guarda cada vez que se resuelve, así el número queda
+// aprendido para siempre.
+// ============================================================
+const _cacheLid = new Map(); // `${adminId}_${lid}` -> telefono
+
+function _numeroDeJid(j) {
+  const s = String(j || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+  return s.length >= 10 ? s : null;
+}
+
+async function resolverTelefono(adminId, sock, msg) {
+  const jid = msg.key.remoteJid || '';
+  if (jid.endsWith('@s.whatsapp.net')) return { telefono: _numeroDeJid(jid), jidRespuesta: jid, lid: null };
+  if (!jid.endsWith('@lid')) return { telefono: _numeroDeJid(jid), jidRespuesta: jid, lid: null };
+
+  const lid = jid.split('@')[0];
+  const k = `${adminId}_${lid}`;
+  let telefono = _cacheLid.get(k) || null;
+
+  if (!telefono) {
+    const alt = msg.key.remoteJidAlt || msg.key.senderPn || msg.key.participantAlt || null;
+    if (alt && String(alt).endsWith('@s.whatsapp.net')) telefono = _numeroDeJid(alt);
+  }
+  if (!telefono) {
+    try {
+      const mapping = sock?.signalRepository?.lidMapping;
+      if (mapping && typeof mapping.getPNForLID === 'function') {
+        const pn = await mapping.getPNForLID(jid);
+        if (pn) telefono = _numeroDeJid(pn);
+      }
+    } catch (e) { /* se intenta el siguiente camino */ }
+  }
+  if (!telefono) telefono = await annyService.buscarTelefonoPorLid(adminId, lid);
+
+  if (telefono) {
+    if (!_cacheLid.has(k)) {
+      _cacheLid.set(k, telefono);
+      annyService.guardarLidChat(adminId, telefono, lid).catch(() => {});
+    }
+    return { telefono, jidRespuesta: jid, lid };
+  }
+
+  console.warn(`[ANNY-LID-055] No se pudo resolver el número del LID ${lid} (tenant ${adminId}); se usa el LID como identificador`);
+  return { telefono: lid, jidRespuesta: jid, lid, sinResolver: true };
+}
+
+// "escribiendo…" mientras la ráfaga se agrupa y el modelo responde
+async function presencia(adminId, jid, estado) {
+  try {
+    const ses = sesiones.get(adminId);
+    if (ses?.sock) await ses.sock.sendPresenceUpdate(estado, jid);
+  } catch (e) { /* cosmético */ }
+}
+
+// ============================================================
+// Entrada de un mensaje de WhatsApp (entrante o manual saliente)
+// ✅ ANNY-RAFAGA-058: lo entrante NO se procesa aquí — se ENCOLA
+// por chat y se procesa en serie, agrupando ráfagas.
 // ============================================================
 async function procesarMensaje(adminId, msg) {
   if (!msg.message) return;
 
   const jid = msg.key.remoteJid || '';
-  if (jid.endsWith('@g.us') || jid === 'status@broadcast') return;
+  if (jid.endsWith('@g.us') || jid === 'status@broadcast' || jid.endsWith('@newsletter') || jid.endsWith('@broadcast')) return;
 
-  // ✅ ANNY-FOTO-040: se abre el sobre (ver-una-vez / temporal / documento
-  // con descripción) ANTES de leer nada. Sin esto, las fotos enviadas de la
-  // forma más común en WhatsApp se descartaban en silencio.
+  const ses = sesiones.get(adminId);
+  const { telefono, jidRespuesta, lid, sinResolver } = await resolverTelefono(adminId, ses?.sock, msg);
+  if (!telefono) return;
+
+  // ✅ ANNY-FOTO-040: abrir el sobre antes de leer
   const contenido = desenvolverMensaje(msg.message);
-
   let texto = extraerTexto(contenido);
-
-  // ✅ ANNY-MEDIA-024: foto o nota de voz. Antes se descartaban en silencio
-  // con `if (!texto) return;` — el cliente mandaba la foto del extintor y
-  // para Anny ese mensaje nunca existió.
   let imagenAdjunta = null;
   const medio = annyMultimedia.detectarMedio(contenido);
 
-  // ✅ ANNY-FOTO-040: traza de diagnóstico. Si una foto vuelve a perderse,
-  // el log dice exactamente en qué paso se cayó, en vez de no decir nada.
   if (!msg.key.fromMe && !texto && !medio) {
-    console.warn('[ANNY-MEDIA] Mensaje sin texto ni medio reconocido. Claves:',
-      Object.keys(contenido || {}).join(', ') || '(vacío)');
+    console.warn('[ANNY-MEDIA] Mensaje sin texto ni medio reconocido. Claves:', Object.keys(contenido || {}).join(', ') || '(vacío)');
   }
 
   if (medio && !msg.key.fromMe) {
-    // ✅ ANNY-CONSUMO-026 (FRENO): antes de gastar, se consulta el tope del
-    // suscriptor. Si llegó a su límite del mes —o si desactivó el análisis—
-    // el medio NO se procesa y el mensaje escala a un asesor. Nunca se sigue
-    // gastando en silencio por encima de lo que el plan cubre.
-    const permiso = await annyConsumo.puedeAnalizarMedio(adminId, medio.tipo)
-      .catch(() => ({ permitido: true }));
-
+    const permiso = await annyConsumo.puedeAnalizarMedio(adminId, medio.tipo).catch(() => ({ permitido: true }));
     if (!permiso.permitido) {
       const queEs = medio.tipo === 'imagen' ? 'una foto' : 'una nota de voz';
       texto = `[el cliente envió ${queEs} — no se analizó (${permiso.motivo === 'tope_mes' ? 'tope del mes alcanzado' : 'análisis desactivado'})]`;
       console.log(`[ANNY-CONSUMO] Medio ${medio.tipo} NO analizado para ${adminId}: ${permiso.motivo}`);
     } else {
       const buffer = await descargarMedia(msg).catch(() => null);
-
       if (medio.tipo === 'imagen') {
         imagenAdjunta = buffer ? annyMultimedia.prepararImagen(buffer, medio.mimetype) : null;
-        // El caption (si lo hay) se conserva: suele traer el contexto
-        // ("estos son los que necesito recargar").
         if (!texto) texto = imagenAdjunta ? '[el cliente envió una foto]' : '[el cliente envió una foto que no se pudo abrir]';
       }
-
       if (medio.tipo === 'audio') {
         const transcrito = buffer ? await annyMultimedia.transcribirAudio(buffer, medio.mimetype) : null;
-        // Si no se pudo transcribir NO se responde a ciegas: se deja constancia
-        // para que Anny lo admita y pida que le escriban o escale.
-        texto = transcrito
-          ? `[nota de voz del cliente] ${transcrito}`
-          : '[el cliente envió una nota de voz que no se pudo escuchar]';
-        // El audio se paga en créditos ElevenLabs, aparte de Anthropic:
-        // se cuenta aunque la transcripción haya fallado (el intento se cobra).
+        texto = transcrito ? `[nota de voz del cliente] ${transcrito}` : '[el cliente envió una nota de voz que no se pudo escuchar]';
         if (transcrito) annyConsumo.registrarConsumo(adminId, { conAudio: true }).catch(() => {});
       }
     }
@@ -520,187 +567,123 @@ async function procesarMensaje(adminId, msg) {
 
   if (!texto) return;
 
-  const telefono = jid.split('@')[0];
-
-  // FIX ANNY-SILENCIO-001: chat silenciado → Anny lo ignora por
-  // completo (ni responde, ni registra, ni gasta IA). Para
-  // conversaciones internas del equipo.
+  // FIX ANNY-SILENCIO-001
   if (await estaSilenciado(adminId, telefono)) return;
 
+  // ── Mensaje manual de la admin (fromMe que no es eco) ──
   if (msg.key.fromMe) {
-    // FIX ANNY-ECO-001: eco de un mensaje enviado por la propia
-    // Anny (está en el almacén de enviados) → ignorar por completo.
-    // Sin este filtro, los textos de Anny se registraban como
-    // ADMIN_MANUAL y el historial se los atribuía a la humana.
-    if (msg.key.id && mensajesEnviados.has(msg.key.id)) {
-      return;
-    }
-
-    // FIX ANNY-PAUSA-004: mensaje manual REAL de la admin →
-    // registrar en historial (aprendizaje) + pausar Anny 30 min
-    // en este chat. Cada mensaje manual refresca la pausa, así
-    // Anny no interrumpe mientras la admin atiende al cliente.
-    await annyService.registrarConversacion(adminId, {
-      telefono,
-      nombreCliente: null,
-      mensajeCliente: null,
-      respuestaAgente: texto,
-      respondidoPor: 'ADMIN_MANUAL',
-      escalado: false,
-      caseId: null
-    });
-
+    if (msg.key.id && mensajesEnviados.has(msg.key.id)) return; // ANNY-ECO-001
+    await annyService.registrarConversacion(adminId, { telefono, nombreCliente: null, mensajeCliente: null, respuestaAgente: texto, respondidoPor: 'ADMIN_MANUAL', escalado: false, caseId: null });
     await annyService.pausarAnny(adminId, telefono, 30, 'intervencion_manual');
-
-    // ✅ ANNY-ATENDIDO-052 — atender es escribirle al cliente, no
-    // entrar al panel a marcar una casilla.
-    // ------------------------------------------------------------
-    // El caso solo pasaba a RESUELTO desde el botón del panel. Quien
-    // atiende de verdad lo hace desde WhatsApp, contestándole al
-    // cliente — y el caso quedaba PENDIENTE, así que el cron de SLA
-    // seguía insistiendo con un caso ya atendido. Avisos que mienten
-    // se vuelven avisos que nadie lee, y ahí se pierde todo lo ganado.
-    //
-    // Ahora: un mensaje manual real de una persona a ese chat cierra
-    // los casos pendientes de ese teléfono. Queda constancia de que
-    // se cerró por respuesta manual, no con un click en el panel.
-    await cerrarCasosPorRespuestaManual(adminId, telefono);
+    await cerrarCasosPorRespuestaManual(adminId, telefono); // ANNY-ATENDIDO-052
     return;
   }
 
-  // Caso escalado pendiente = la admin está atendiendo → silencio
-  // ✅ ANNY-MUDA-043 + ANNY-REAVISO-044
-  // Caso escalado pendiente = el humano debería estar atendiendo.
-  // Anny calla, pero SOLO durante la ventana. Y cada mensaje del
-  // cliente dentro de la ventana dispara un RE-AVISO: que el
-  // cliente insista es la señal más fuerte de que nadie entró.
-  const casoPend = await casoPendienteDe(adminId, telefono);
-  if (casoPend && casoPend.dentroDeVentana) {
-    await annyService.registrarConversacion(adminId, {
-      telefono,
-      nombreCliente: msg.pushName || telefono,
-      mensajeCliente: texto,
-      respuestaAgente: null,
-      respondidoPor: 'EN_MANOS_DE_ADMIN',
-      escalado: true,
-      caseId: casoPend.id
-    });
+  // ── Entrante: a la cola del chat ──
+  let ventanaMs = null;
+  try { ventanaMs = (await annyService.obtenerPerfilTenant(adminId)).ventanaRafagaMs; } catch (e) { ventanaMs = null; }
 
-    if (Date.now() - casoPend.ultimoAvisoMs > REAVISO_MIN * 60 * 1000) {
-      try {
-        const perfil = await annyService.obtenerPerfilTenant(adminId);
-        await enviarAvisoEscalamiento(
-          adminId,
-          `⏰ *EL CLIENTE INSISTE* — caso sin atender hace ${Math.round(casoPend.edadMin)} min\n` +
-          `${casoPend.nombreCliente || msg.pushName || 'Sin nombre'} — ${telefono}\n` +
-          `Escribió: "${String(texto).slice(0, 120)}"`,
-          perfil?.notificarEscalamientoA,
-          telefono
-        );
-        await casoPend.ref.set({ ultimoAvisoMs: Date.now() }, { merge: true });
-      } catch (eRe) {
-        console.error('[BAILEYS] Error en re-aviso de escalado:', eRe.message);
-      }
-    }
-    return;
-  }
-
-  // Ventana vencida y el caso sigue PENDIENTE: nadie entró. Anny
-  // retoma — mejor una respuesta imperfecta que un cliente mudo.
-  if (casoPend && !casoPend.dentroDeVentana) {
-    console.log(`[BAILEYS] Caso ${casoPend.id} pendiente hace ${Math.round(casoPend.edadMin)} min sin atender — Anny retoma el chat ${telefono}`);
-  }
-
-  const resultado = await annyService.procesarMensajeEntrante({
+  annyService.cola.encolar({
     adminId,
     telefono,
-    nombreCliente: msg.pushName || telefono,
-    mensajeTexto: texto,
-    imagenAdjunta // ✅ ANNY-MEDIA-024
+    ventanaMs,
+    item: { texto, imagenAdjunta, nombreCliente: msg.pushName || telefono, jid: jidRespuesta, meta: { lid, sinResolver } },
+    alAbrir: () => presencia(adminId, jidRespuesta, 'composing'),
+    procesar: (turno) => procesarTurno(adminId, telefono, turno)
   });
+}
 
-  if (resultado?.accion === 'enviar_mensaje' && resultado.respuesta) {
-    await enviarMensaje(adminId, jid, resultado.respuesta);
-  }
+// ============================================================
+// Un TURNO = una ráfaga agrupada de un chat. Aquí sí se llama al
+// motor y se despachan respuesta y avisos.
+// ============================================================
+async function procesarTurno(adminId, telefono, turno) {
+  const jid = turno.jid;
+  const texto = turno.texto;
+  const nombreCliente = turno.nombreCliente || telefono;
 
-  // ✅ ANNY-PAGO-050: el cliente mandó un comprobante de pago.
-  // Se reenvía LA FOTO al grupo interno con el contexto. Anny ya le
-  // acusó recibo al cliente sin afirmar que el pago quedó aplicado:
-  // validar es trabajo de tesorería, no del agente.
-  if (resultado?.avisoPago) {
-    try {
-      const jidAviso = await destinoAvisos(adminId, resultado.notificarA);
-      if (jidAviso) {
-        const img = resultado.imagenComprobante;
-        if (img?.data) {
-          await enviarImagen(adminId, jidAviso, img.data, img.media_type, resultado.avisoPago);
+  try {
+    // ✅ ANNY-MUDA-043 + ANNY-REAVISO-044
+    const casoPend = await casoPendienteDe(adminId, telefono);
+    if (casoPend && casoPend.dentroDeVentana) {
+      await annyService.registrarConversacion(adminId, { telefono, nombreCliente, mensajeCliente: texto, respuestaAgente: null, respondidoPor: 'EN_MANOS_DE_ADMIN', escalado: true, caseId: casoPend.id });
+      if (Date.now() - casoPend.ultimoAvisoMs > REAVISO_MIN * 60 * 1000) {
+        try {
+          const perfil = await annyService.obtenerPerfilTenant(adminId);
+          await enviarAvisoEscalamiento(adminId,
+            `⏰ *EL CLIENTE INSISTE* — caso sin atender hace ${Math.round(casoPend.edadMin)} min\n${casoPend.nombreCliente || nombreCliente} — ${telefono}\nEscribió: "${String(texto).slice(0, 120)}"`,
+            perfil?.notificarEscalamientoA, telefono);
+          await casoPend.ref.set({ ultimoAvisoMs: Date.now() }, { merge: true });
+        } catch (eRe) { console.error('[BAILEYS] Error en re-aviso:', eRe.message); }
+      }
+      await presencia(adminId, jid, 'paused');
+      return;
+    }
+    if (casoPend && !casoPend.dentroDeVentana) {
+      console.log(`[BAILEYS] Caso ${casoPend.id} pendiente hace ${Math.round(casoPend.edadMin)} min sin atender — Anny retoma el chat ${telefono}`);
+    }
+
+    await presencia(adminId, jid, 'composing');
+    const resultado = await annyService.procesarMensajeEntrante({
+      adminId, telefono, nombreCliente, mensajeTexto: texto, imagenAdjunta: turno.imagenAdjunta
+    });
+
+    if (resultado?.accion === 'enviar_mensaje' && resultado.respuesta) {
+      await enviarMensaje(adminId, jid, resultado.respuesta);
+    }
+    await presencia(adminId, jid, 'paused');
+
+    // ✅ ANNY-PAGO-050: comprobante al grupo interno
+    if (resultado?.avisoPago) {
+      try {
+        const jidAviso = await destinoAvisos(adminId, resultado.notificarA);
+        if (jidAviso) {
+          const img = resultado.imagenComprobante;
+          if (img?.data) await enviarImagen(adminId, jidAviso, img.data, img.media_type, resultado.avisoPago);
+          else await enviarMensaje(adminId, jidAviso, resultado.avisoPago);
         } else {
-          await enviarMensaje(adminId, jidAviso, resultado.avisoPago);
+          console.warn(`[BAILEYS] Comprobante sin destino de aviso (tenant ${adminId})`);
         }
-      } else {
-        console.warn(`[BAILEYS] Comprobante de pago sin destino de aviso (tenant ${adminId})`);
-      }
-    } catch (ePago) {
-      console.error('[BAILEYS] Error reenviando comprobante de pago:', ePago.message);
+      } catch (ePago) { console.error('[BAILEYS] Error reenviando comprobante:', ePago.message); }
     }
-  }
 
-  // ✅ ANNY-AVISO-041: caso escalado → aviso interno AHORA.
-  // Este bloque es el que faltaba: sin él el escalamiento era un
-  // callejón sin salida (el cliente esperando, nadie enterado).
-  if (resultado?.avisoEscalamiento) {
-    await enviarAvisoEscalamiento(
-      adminId,
-      resultado.avisoEscalamiento,
-      resultado.notificarA,
-      resultado.telefonoCliente || telefono
-    );
-    if (resultado.caseId) {
-      db.collection('casosEscaladosAnny').doc(adminId)
-        .collection('casos').doc(resultado.caseId)
-        .set({ ultimoAvisoMs: Date.now() }, { merge: true })
-        .catch(() => {});
-    }
-  }
-
-  // FIX ANNY-PEDIDOS-001: Anny cerró una venta → avisar a la admin
-  if (resultado?.pedido && resultado?.notificarA) {
-    try {
-      const numAdmin = String(resultado.notificarA).replace(/\D/g, '');
-      if (numAdmin.length >= 10) {
-        const jidAdmin = `${numAdmin.startsWith('57') ? numAdmin : '57' + numAdmin}@s.whatsapp.net`;
-        const p = resultado.pedido;
-        const aviso = `🛒 *Nuevo pedido cerrado por Anny*\n\n` +
-          `✅ ${p.producto || ''}${p.cantidad ? ` x${p.cantidad}` : ''}\n` +
-          `💰 Total: ${p.total || 'por confirmar'}\n` +
-          `👤 ${p.nombreCliente || ''} — ${resultado.telefonoCliente || telefono}\n` +
-          `🪪 ${p.cedulaNit || ''}\n` +
-          `📧 ${p.correo || ''}\n` +
-          `📍 ${p.direccion || ''}${p.barrio ? ', ' + p.barrio : ''}\n` +
-          `📅 ${p.fecha || ''}\n\n` +
-          `Gestiónalo en Control360 → Anny → 🛒 Pedidos`;
-        await enviarMensaje(adminId, jidAdmin, aviso);
+    // ✅ ANNY-AVISO-041: escalado → aviso interno ahora
+    if (resultado?.avisoEscalamiento) {
+      await enviarAvisoEscalamiento(adminId, resultado.avisoEscalamiento, resultado.notificarA, resultado.telefonoCliente || telefono);
+      if (resultado.caseId) {
+        db.collection('casosEscaladosAnny').doc(adminId).collection('casos').doc(resultado.caseId)
+          .set({ ultimoAvisoMs: Date.now() }, { merge: true }).catch(() => {});
       }
-    } catch (eAviso) {
-      console.error('[BAILEYS] Error avisando pedido a la admin:', eAviso.message);
     }
-  }
 
-  // ✅ TALLER-RESPUESTA-001: el cliente contestó la autorización de un
-  // repuesto. Se avisa a la admin para que el equipo no quede parado en
-  // taller esperando que alguien lea el chat. La alerta también sale en el
-  // panel (tipo DEFECTO_RESPONDIDO, roles admin + taller).
-  // OJO: esto es SOLO un aviso — la autorización real la aplica el taller.
-  if (resultado?.avisoTaller && resultado?.notificarTallerA) {
-    try {
-      const numTaller = String(resultado.notificarTallerA).replace(/\D/g, '');
-      if (numTaller.length >= 10) {
-        const jidTaller = `${numTaller.startsWith('57') ? numTaller : '57' + numTaller}@s.whatsapp.net`;
-        await enviarMensaje(adminId, jidTaller, resultado.avisoTaller);
-      }
-    } catch (eTaller) {
-      console.error('[BAILEYS] Error avisando respuesta de taller:', eTaller.message);
+    // FIX ANNY-PEDIDOS-001: pedido cerrado → aviso
+    if (resultado?.pedido && resultado?.notificarA) {
+      try {
+        const jidAdmin = aJidCo(resultado.notificarA);
+        if (jidAdmin) {
+          const p = resultado.pedido;
+          const aviso = `🛒 *Nuevo pedido cerrado por Anny*\n\n` +
+            `✅ ${p.producto || ''}\n` +
+            `💰 Total: ${p.total || 'por confirmar'}\n` +
+            `👤 ${p.nombreCliente || ''}${p.empresa ? ` (${p.empresa})` : ''} — ${resultado.telefonoCliente || telefono}\n` +
+            `🪪 ${p.cedulaNit || ''}\n📧 ${p.correo || ''}\n` +
+            `📍 ${p.direccion || ''}${p.barrio ? ', ' + p.barrio : ''}${p.sucursal ? ` · sede ${p.sucursal}` : ''}\n` +
+            `📅 ${p.fecha || ''}\n\nGestiónalo en Control360 → Anny → 🛒 Pedidos`;
+          await enviarMensaje(adminId, jidAdmin, aviso);
+        }
+      } catch (eAviso) { console.error('[BAILEYS] Error avisando pedido:', eAviso.message); }
     }
+
+    // ✅ TALLER-RESPUESTA-001
+    if (resultado?.avisoTaller && resultado?.notificarTallerA) {
+      try {
+        const jidTaller = aJidCo(resultado.notificarTallerA);
+        if (jidTaller) await enviarMensaje(adminId, jidTaller, resultado.avisoTaller);
+      } catch (eTaller) { console.error('[BAILEYS] Error avisando taller:', eTaller.message); }
+    }
+  } catch (err) {
+    console.error('[BAILEYS] Error en turno:', err.message);
+    await presencia(adminId, jid, 'paused');
   }
 }
 
@@ -877,6 +860,7 @@ module.exports = {
   enviarImagen,      // ✅ ANNY-PAGO-050
   listarGrupos,      // ✅ ANNY-GRUPO-051
   invalidarCacheSilencio,
-  restaurarSesiones
+  restaurarSesiones,
+  resolverTelefono   // ✅ ANNY-LID-055
 };
-// FIN baileysService.js
+// FIN baileysService.js (v3)

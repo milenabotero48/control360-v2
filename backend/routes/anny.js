@@ -157,6 +157,8 @@ router.get('/perfil/:adminId', authenticate, soloSuperAdmin, async (req, res) =>
       misionesDisponibles: Object.keys(annyService.MISIONES),
       // ✅ ANNY-NICHO-033: plantillas por actividad económica para el selector
       nichos: Object.entries(annyService.NICHOS).map(([id, n]) => ({ id, etiqueta: n.etiqueta })),
+      // ✅ ANNY-V3: opciones para el editor de perfil
+      modelos: Object.keys(annyService.MODELOS),
       porDefecto: annyService.PERFIL_DEFAULT
     });
   } catch (err) {
@@ -172,8 +174,17 @@ router.put('/perfil/:adminId', authenticate, soloSuperAdmin, async (req, res) =>
       nombreAgente, empresa, vertical, queVende,
       fuentePrecios, reglasNegocio, notificarEscalamientoA,
       // ✅ ANNY-NICHO-033 / ANNY-VENTA-034
-      nicho, mediosPago, avisarVentaCliente
+      nicho, mediosPago, avisarVentaCliente,
+      // ✅ ANNY-V3: horario por tenant, tono, presentación, modelo, ventana de ráfaga
+      horarioAtencion, tono, presentacion, modelo, ventanaRafagaMs, identificarAlInicio
     } = req.body || {};
+
+    if (modelo !== undefined && modelo !== '' && !annyService.MODELOS[modelo]) {
+      return res.status(400).json({ error: 'modelo inválido', disponibles: Object.keys(annyService.MODELOS) });
+    }
+    if (presentacion !== undefined && String(presentacion).length > 160) {
+      return res.status(400).json({ error: 'La presentación debe tener máximo 160 caracteres.' });
+    }
 
     if (fuentePrecios && !['products', 'planes', 'ninguna'].includes(fuentePrecios)) {
       return res.status(400).json({ error: 'fuentePrecios inválida' });
@@ -214,6 +225,13 @@ router.put('/perfil/:adminId', authenticate, soloSuperAdmin, async (req, res) =>
       nicho,
       mediosPago,
       avisarVentaCliente: avisarVentaCliente !== undefined ? avisarVentaCliente === true : undefined,
+      // ✅ ANNY-V3
+      horarioAtencion,
+      tono,
+      presentacion,
+      modelo,
+      ventanaRafagaMs: ventanaRafagaMs !== undefined ? Number(ventanaRafagaMs) : undefined,
+      identificarAlInicio: identificarAlInicio !== undefined ? identificarAlInicio === true : undefined,
       notificarEscalamientoA: notificarEscalamientoA !== undefined
         ? String(notificarEscalamientoA).replace(/\D/g, '')
         : undefined
