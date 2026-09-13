@@ -603,7 +603,7 @@ router.get('/movimientos/sin-asignar', async (req, res) => {
       .get();
     const movs = snap.docs
       .map(d => ({ id: d.id, ...d.data() }))
-      .filter(m => m.resuelto !== true);
+      .filter(m => m.resuelto !== true && m.anulado !== true);
     movs.sort((a, b) =>
       (b.createdAt?.seconds || b.createdAt?._seconds || 0) -
       (a.createdAt?.seconds || a.createdAt?._seconds || 0));
@@ -890,7 +890,7 @@ router.get('/cierre-diario', async (req, res) => {
     let totalSinAsignar = 0;
     try {
       movimientosSinAsignar = movs
-        .filter(m => m.cajaId === 'sin_asignar')
+        .filter(m => m.cajaId === 'sin_asignar' && m.anulado !== true)
         .map(m => ({
           id: m.id, concepto: m.concepto || '', referencia: m.referencia || '',
           ordenId: m.ordenId || null, formaPago: m.formaPago || '',
