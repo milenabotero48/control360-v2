@@ -743,12 +743,22 @@ router.get('/cierre-diario', async (req, res) => {
 
     // ── Cargar datos del tenant (filtros de fecha EN MEMORIA — regla del
     //    proyecto: sin índices compuestos) ──────────────────────────────────
+    // ✅ PAGO-CUADRE-005: el cálculo de saldoFinalDia/movsPosteriores necesita
+    // TODOS los movimientos desde el día de interés hacia ADELANTE (para
+    // restarlos del saldo actual) — acotar la query por fecha rompería ese
+    // cálculo si se acota mal. Por seguridad, en vez de filtrar por fecha en
+    // la query, se sube el límite (5000 → 20000) y se advierte si se alcanza,
+    // dejando la optimización con índice compuesto para una iteración futura.
+    const LIMITE_MOVS = 20000;
     const [snapCajas, snapMovs, snapOrders, snapEgresos] = await Promise.all([
       db.collection('cajas').where('userId', '==', userId).get(),
-      db.collection('movimientos').where('userId', '==', userId).limit(5000).get(),
+      db.collection('movimientos').where('userId', '==', userId).limit(LIMITE_MOVS).get(),
       db.collection('orders').where('adminId', '==', userId).limit(4000).get(),
       db.collection('egresos').where('userId', '==', userId).limit(3000).get(),
     ]);
+    if (snapMovs.size >= LIMITE_MOVS) {
+      console.warn(`PAGO-CUADRE-005: cierre-diario alcanzó el límite de ${LIMITE_MOVS} movimientos para userId=${userId} — posible truncamiento silencioso, considerar índice compuesto por fecha`);
+    }
 
     let cajas = snapCajas.docs.map(d => ({ id: d.id, ...d.data() })).filter(c => c.activa !== false);
 
@@ -843,6 +853,57 @@ router.get('/cierre-diario', async (req, res) => {
     const sumar = (arr, k) => arr.reduce((a, x) => a + (Number(x[k]) || 0), 0);
     const cajasVisibles = cajasFinal.filter(c => c.saldoInicial !== null);
 
+    // ── PAGO-CUADRE-005: dinero real que aún no aparece en ninguna caja ────
+    // (a) pagos electrónicos virtuales aún sin validar — el dinero llegó al
+    //     banco pero la orden sigue pendiente de aprobación.
+    // (b) movimientos de caja creados sin poder resolver una caja destino
+    //     (cajaId:'sin_asignar') — ya están en `movs` pero el cierre normal
+    //     los descarta porque se filtra por caja real (movs.filter(cajaId===c.id)).
+    // Cada bloque va en su propio try/catch: si uno falla, no debe tumbar el
+    // resto del cuadre (que ya se calculó arriba).
+    let pagosVirtualesPendientes = [];
+    let totalPagosVirtualesPendientes = 0;
+    try {
+      const snapPagosPendientes = await db.collection('orders')
+        .where('adminId', '==', userId)
+        .where('pagoVirtualPendienteValidar', '==', true)
+        .get();
+      pagosVirtualesPendientes = snapPagosPendientes.docs.map(d => {
+        const o = d.data();
+        return {
+          ordenId: d.id,
+          numeroOrden: o.numeroOrden || '',
+          clienteNombre: o.clienteNombre || '',
+          monto: Number(o.total) || 0,
+          formaPago: o.formaPago || '',
+          fecha: o.fechaCreacion || o.createdAt || null,
+        };
+      });
+      totalPagosVirtualesPendientes = sumar(pagosVirtualesPendientes, 'monto');
+    } catch (ePagosPendientes) {
+      console.error('PAGO-CUADRE-005: error consultando pagosVirtualesPendientes:', ePagosPendientes);
+      pagosVirtualesPendientes = [];
+      totalPagosVirtualesPendientes = 0;
+    }
+
+    let movimientosSinAsignar = [];
+    let totalSinAsignar = 0;
+    try {
+      movimientosSinAsignar = movs
+        .filter(m => m.cajaId === 'sin_asignar')
+        .map(m => ({
+          id: m.id, concepto: m.concepto || '', referencia: m.referencia || '',
+          ordenId: m.ordenId || null, formaPago: m.formaPago || '',
+          monto: Number(m.monto) || 0,
+          fecha: m._ms ? new Date(m._ms).toISOString() : null,
+        }));
+      totalSinAsignar = sumar(movimientosSinAsignar, 'monto');
+    } catch (eSinAsignar) {
+      console.error('PAGO-CUADRE-005: error calculando movimientosSinAsignar:', eSinAsignar);
+      movimientosSinAsignar = [];
+      totalSinAsignar = 0;
+    }
+
     res.json({
       fecha,
       modo: modoIndividual ? 'individual' : 'consolidado',
@@ -862,6 +923,11 @@ router.get('/cierre-diario', async (req, res) => {
       // CxC y CxP son del NEGOCIO, no de una caja → solo en el consolidado.
       cxc: modoIndividual ? null : { nuevas: cxcNuevas, totalNuevas: sumar(cxcNuevas, 'monto'), cobradas: cxcCobradas, totalCobradas: sumar(cxcCobradas, 'monto') },
       cxp: modoIndividual ? null : { nuevas: cxpNuevas, totalNuevas: sumar(cxpNuevas, 'monto'), pagadasHoy: egresosPagadosHoy, totalPagadasHoy: sumar(egresosPagadosHoy, 'monto') },
+      // ✅ PAGO-CUADRE-005: dinero real aún invisible en el cuadre (ver arriba).
+      pagosVirtualesPendientes,
+      totalPagosVirtualesPendientes,
+      movimientosSinAsignar,
+      totalSinAsignar,
     });
   } catch (e) {
     console.error('GET cierre-diario:', e);

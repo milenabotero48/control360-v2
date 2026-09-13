@@ -528,7 +528,17 @@ const devolverInventario = async (items, orden = {}, usuario = {}) => {
 // Marca la orden con dineroEnCaja=true en transacción atómica. Cualquier
 // segundo intento se rechaza al ver el flag → ELIMINA la doble suma de raíz.
 // ══════════════════════════════════════════════════════════════════════════════
-const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNombre, monto, formaPago, usuarioEmail, numeroFactura, cajaIdSeleccionada = null }) => {
+const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNombre, monto, formaPago, usuarioEmail, numeroFactura, cajaIdSeleccionada = null, fechaContable = null }) => {
+  // ✅ PAGO-CUADRE-005: fecha contable opcional. Si viene una fecha válida
+  // (p.ej. la fecha real del cobro cuando un pago virtual se valida días
+  // después), el movimiento de caja se fecha con ella en vez de "hoy".
+  // Fallback seguro: fecha inválida o ausente → comportamiento idéntico al
+  // actual (serverTimestamp), sin romper los call-sites que no la pasan.
+  let fechaContableTs = null;
+  if (fechaContable) {
+    const d = new Date(fechaContable);
+    if (!isNaN(d.getTime())) fechaContableTs = admin.firestore.Timestamp.fromDate(d);
+  }
   try {
     const esCxC = formaPago === 'A crédito (CxC)' || formaPago === 'A crédito'
       || formaPago === 'credito' || formaPago === 'CXC';
@@ -615,7 +625,7 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
         alerta: 'sin_caja_mapeada',
         pendienteAsignar: true, // ✅ FIX CAJA-002: visible en Caja para asignarlo
         creadoPor: usuarioEmail,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
+        createdAt: fechaContableTs || admin.firestore.FieldValue.serverTimestamp()
       });
       // ✅ FIX CAJA-002: NO se marca dineroEnCaja — el dinero aún no está en
       // ninguna caja real. La orden sigue viva en el flujo hasta resolverlo.
@@ -702,7 +712,7 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
       concepto: `Pago ${numeroOrden} — ${clienteNombre}`,
       monto, referencia: numeroOrden, ordenId, formaPago,
       creadoPor: usuarioEmail,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      createdAt: fechaContableTs || admin.firestore.FieldValue.serverTimestamp()
     });
 
     return { tipo: 'caja', cajaId, monto, nuevoSaldo: saldoActual + monto };
@@ -2779,10 +2789,19 @@ async function aplicarValidacionPago({ req, ordenId, aprobado, motivo = '', caja
     }
     await ordenRef.update(updateAprobar);
 
+    // ✅ PAGO-CUADRE-005: cuando un pago virtual se valida días después de
+    // recibido, fechar el movimiento de caja lo más cerca posible del cobro
+    // real (no el día de la validación) para que no "desaparezca" del
+    // cuadre del día en que el cliente dice haber pagado. Se usa la mejor
+    // fecha ya disponible en la orden; si no hay ninguna, cae a "hoy"
+    // (comportamiento actual, sin cambios).
+    const fechaContable = orden.fechaCuadre || orden.fechaCompletada || orden.dineroEnCajaFecha || null;
+
     const caja = await registrarIngresoEnCaja({
       userId: adminId, ordenId: id, numeroOrden: orden.numeroOrden, clienteNombre: orden.clienteNombre,
       monto: orden.total || 0, formaPago: formaPagoFinal, usuarioEmail: req.user.email,
-      numeroFactura: orden.numeroFactura || '', cajaIdSeleccionada: cajaId || null
+      numeroFactura: orden.numeroFactura || '', cajaIdSeleccionada: cajaId || null,
+      fechaContable
     }).catch((e) => { console.error('Caja virtual:', e); return null; });
 
     if (veniaDeCartera) {

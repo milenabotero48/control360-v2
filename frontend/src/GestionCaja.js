@@ -621,6 +621,9 @@ export default function GestionCaja({ user }) {
   const [mesGrafica, setMesGrafica] = useState(() => new Date().toISOString().slice(0, 7));
   // ✅ FIX CAJA-002: movimientos huérfanos (dinero registrado sin caja destino)
   const [huerfanos, setHuerfanos] = useState([]);
+  // ✅ PAGO-CUADRE-005: pagos electrónicos virtuales aún sin validar (dinero
+  // real ya recibido en banco que todavía no aparece en ningún cuadre).
+  const [pagosVirtualesPendientes, setPagosVirtualesPendientes] = useState([]);
   const [huerfanoCaja, setHuerfanoCaja] = useState({}); // movId → cajaId elegida
   // ✅ CAJA-TRASLADO-001: traslado seleccionado para corregir o eliminar
   const [trasladoSel, setTrasladoSel] = useState(null);
@@ -693,6 +696,16 @@ export default function GestionCaja({ user }) {
       const { data } = await axios.get(`${API}/cajas/movimientos/sin-asignar`, { headers: getHeaders() });
       setHuerfanos(data || []);
     } catch { setHuerfanos([]); }
+    // ✅ PAGO-CUADRE-005: pagos electrónicos pendientes de validar, tomados del
+    // cuadre consolidado de hoy. Solo admin puede pedir el consolidado; para
+    // los demás roles se omite (evita un 403 esperado en consola).
+    if (user?.role === 'admin') {
+      try {
+        const { data } = await axios.get(`${API}/cajas/cierre-diario`,
+          { params: { fecha: hoyCO() }, headers: getHeaders() });
+        setPagosVirtualesPendientes(data?.pagosVirtualesPendientes || []);
+      } catch { setPagosVirtualesPendientes([]); }
+    }
     setLoading(false);
   };
 
@@ -948,6 +961,30 @@ export default function GestionCaja({ user }) {
           )}
         </div>
       </div>
+
+      {/* ✅ PAGO-CUADRE-005: pagos electrónicos ya recibidos en banco pero aún
+          sin validar — mientras no se validan, ese dinero real no aparece en
+          ningún cuadre de caja. Solo informativa por ahora (la validación se
+          hace desde Órdenes / Tesorería). */}
+      {esAdminUser && pagosVirtualesPendientes.length > 0 && (
+        <div style={{ background: '#fffbeb', border: '2px solid #f59e0b', borderRadius: 14, padding: '16px 20px', marginBottom: 18 }}>
+          <div style={{ fontSize: 14, fontWeight: 800, color: '#92400e', marginBottom: 4 }}>
+            🕓 Pagos electrónicos pendientes de validar ({pagosVirtualesPendientes.length}) · {fmt(pagosVirtualesPendientes.reduce((a, p) => a + (Number(p.monto) || 0), 0))}
+          </div>
+          <div style={{ fontSize: 12, color: '#a16207', marginBottom: 12 }}>
+            Estos pagos ya se recibieron por banco pero siguen sin validar — hasta que se validen, no aparecen en el cuadre de caja. Valídalos desde Órdenes o Tesorería.
+          </div>
+          {pagosVirtualesPendientes.map(p => (
+            <div key={p.ordenId} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', background: '#fff', borderRadius: 10, padding: '10px 14px', marginBottom: 8, border: '1px solid #fde68a' }}>
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#334155' }}>{p.clienteNombre || 'Cliente'} · {p.numeroOrden || ''}</div>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>{p.formaPago || ''}</div>
+              </div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: '#b45309' }}>{fmt(p.monto)}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* ✅ FIX CAJA-002: ALERTA DE DINERO SIN CAJA — antes estos movimientos
           eran invisibles y el dinero "desaparecía" del sistema (caso OS-0187).
