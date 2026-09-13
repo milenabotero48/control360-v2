@@ -8,6 +8,7 @@
 // ============================================================
 
 const { db, admin } = require('../config/firebase');
+const suscripcionEstado = require('./suscripcionEstado'); // ✅ SUSCRIPCION-BLOQUEO-001
 const { Resend }    = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -84,7 +85,7 @@ const htmlBotonesAccion = (nombreEmpresa, plan) => {
 };
 
 // ─── Enviar email de recordatorio ────────────────────────────────────────────
-const enviarRecordatorio = async ({ email, nombre, plan, diasRestantes: dias, fechaVencimiento }) => {
+const enviarRecordatorio = async ({ email, nombre, plan, diasRestantes: dias, fechaVencimiento, suspendida = false }) => {
   const nombreCorto  = String(nombre || 'Cliente').split(' ')[0];
   const venceTxt     = fechaVencimiento || '—';
   const urgente      = dias <= 1;
@@ -92,7 +93,11 @@ const enviarRecordatorio = async ({ email, nombre, plan, diasRestantes: dias, fe
 
   let asunto, titulo, mensaje;
 
-  if (vencido) {
+  if (suspendida) {
+    asunto  = `🔒 Tu cuenta Control360 fue suspendida por falta de pago`;
+    titulo  = `Tu cuenta está suspendida`;
+    mensaje = `Tu plan <strong>${NOMBRE_PLAN[plan] || plan}</strong> venció el <strong>${venceTxt}</strong> y pasó el periodo de gracia, así que el acceso a Control360 quedó suspendido para toda tu empresa. Realiza el pago, envíanos el comprobante y en pocos minutos se restablece.`;
+  } else if (vencido) {
     asunto  = `⛔ Tu suscripción Control360 ha vencido`;
     titulo  = `Tu suscripción ha vencido`;
     mensaje = `Tu plan <strong>${NOMBRE_PLAN[plan] || plan}</strong> venció el <strong>${venceTxt}</strong>. Para continuar usando Control360 sin interrupciones, realiza el pago y envíanos el comprobante.`;
@@ -194,6 +199,22 @@ const ejecutarCron = async () => {
     for (const doc of snap.docs) {
       const sus     = doc.data();
       const adminId = doc.id;
+
+      // ✅ SUSCRIPCION-BLOQUEO-001: el día que la cuenta queda bloqueada por
+      // falta de pago se envía UN correo de suspensión (una sola vez).
+      try {
+        const ev = suscripcionEstado.evaluarSuscripcion(sus);
+        if (ev.bloqueada && ev.automatica && !sus.avisoSuspensionEnviado) {
+          const uDoc = await db.collection('users').doc(adminId).get();
+          const u = uDoc.exists ? uDoc.data() : null;
+          if (u?.email && u.superAdmin !== true) {
+            await enviarRecordatorio({ email: u.email, nombre: u.empresa || u.nombre || u.email, plan: sus.plan, diasRestantes: ev.dias, fechaVencimiento: sus.fechaVencimiento, suspendida: true });
+            await doc.ref.update({ avisoSuspensionEnviado: new Date().toISOString() });
+            console.log(`[CRON] Aviso de SUSPENSIÓN enviado a ${u.email}`);
+          }
+        }
+      } catch (eSusp) { console.error('[CRON] Aviso de suspensión:', eSusp.message); }
+
       if (sus.estado === 'suspendido') continue;
 
       const dias = diasRestantes(sus.fechaVencimiento);

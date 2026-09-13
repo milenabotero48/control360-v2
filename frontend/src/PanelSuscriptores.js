@@ -1,12 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 
-// ✅ ANNY-V3: días para el editor de horario de atención de Anny
-const DIAS_SEMANA = [
-  { id: 'lun', et: 'Lun' }, { id: 'mar', et: 'Mar' }, { id: 'mie', et: 'Mié' }, { id: 'jue', et: 'Jue' },
-  { id: 'vie', et: 'Vie' }, { id: 'sab', et: 'Sáb' }, { id: 'dom', et: 'Dom' }
-];
-
 // ─────────────────────────────────────────────────────────────────────────────
 // PANEL MAESTRO DE SUSCRIPTORES — solo super-admin (Milena)
 //
@@ -70,6 +64,9 @@ const ESTADO_UI = {
   trial:      { txt: 'Prueba',     bg: '#eef2ff', col: '#5b5bd6' },
   activo:     { txt: 'Activo',     bg: '#e9f9ef', col: '#16a34a' },
   suspendido: { txt: 'Suspendido', bg: '#fde8e8', col: '#dc2626' },
+  // ✅ SUSCRIPCION-BLOQUEO-001: estados calculados por el sistema
+  gracia:     { txt: 'En gracia',  bg: '#fff8e6', col: '#b45309' },
+  sin_suscripcion: { txt: 'Sin plan', bg: '#f1f1f8', col: '#6b6b85' },
 };
 
 const hoyMas = (dias) => {
@@ -90,6 +87,10 @@ const PanelSuscriptores = () => {
 
   // Modal de plan
   const [editPlan, setEditPlan] = useState(null); // suscriptor en edición
+  // ✅ SUSCRIPCION-BLOQUEO-001
+  const [editPago, setEditPago] = useState(null);   // suscriptor al que se le registra un pago
+  const [formPago, setFormPago] = useState({ monto: '', medio: 'Transferencia', fecha: '', meses: 1, notas: '' });
+  const [pagosHist, setPagosHist] = useState([]);
   const [formPlan, setFormPlan] = useState({ plan: '', estado: 'trial', fechaInicio: '', fechaVencimiento: '', notas: '' });
 
   // Modal de módulos
@@ -110,7 +111,6 @@ const PanelSuscriptores = () => {
   const [editPerfil, setEditPerfil] = useState(null);   // suscriptor en edición
   const [nichosDisp, setNichosDisp] = useState([]);     // plantillas del backend
   const [formPerfil, setFormPerfil] = useState(null);   // campos del perfil
-  const [modelosDisp, setModelosDisp] = useState(['haiku']); // ✅ ANNY-V3
 
   // ✅ CAPACIDAD-TENANT-002: diagnóstico de órdenes atascadas por falta de módulo
   const [editAtascos, setEditAtascos] = useState(null); // suscriptor en revisión
@@ -164,6 +164,71 @@ const PanelSuscriptores = () => {
       notas: s.notas || ''
     });
     setEditPlan(s);
+  };
+
+  // ✅ SUSCRIPCION-BLOQUEO-001: registrar pago / gracia / suspender
+  const abrirPago = async (s) => {
+    setEditPago(s);
+    setPagosHist([]);
+    const precio = (planes[s.plan]?.precio) || '';
+    setFormPago({ monto: precio ? String(precio) : '', medio: 'Transferencia', fecha: new Date().toISOString().slice(0, 10), meses: 1, notas: '' });
+    try {
+      const r = await axios.get(`${API}/superadmin/suscriptores/${s.adminId}/pagos`, { headers });
+      setPagosHist(r.data.pagos || []);
+    } catch (e) { /* sin historial */ }
+  };
+
+  const registrarPago = async () => {
+    setGuardando(true); setError('');
+    try {
+      const r = await axios.post(`${API}/superadmin/suscriptores/${editPago.adminId}/pago`, formPago, { headers });
+      setEditPago(null);
+      flashExito(`Pago registrado — la cuenta queda activa hasta ${r.data.fechaVencimiento}`);
+      cargar();
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo registrar el pago');
+    } finally { setGuardando(false); }
+  };
+
+  const extenderGracia = async (s) => {
+    const dias = window.prompt(`¿Cuántos días de gracia le das a ${s.empresa || s.nombre}? (1 a 30)`, '3');
+    if (!dias) return;
+    setGuardando(true); setError('');
+    try {
+      const r = await axios.post(`${API}/superadmin/suscriptores/${s.adminId}/gracia`, { dias: Number(dias) }, { headers });
+      flashExito(`Gracia extendida hasta ${r.data.graciaHasta}`);
+      cargar();
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo extender la gracia');
+    } finally { setGuardando(false); }
+  };
+
+  const suspenderAhora = async (s) => {
+    const motivo = window.prompt(`Motivo para suspender a ${s.empresa || s.nombre} (se muestra al suscriptor):`, 'Suscripción vencida sin pago');
+    if (motivo === null) return;
+    if (!window.confirm('La empresa quedará bloqueada de inmediato para todos sus usuarios. ¿Continuar?')) return;
+    setGuardando(true); setError('');
+    try {
+      await axios.post(`${API}/superadmin/suscriptores/${s.adminId}/suspender`, { motivo }, { headers });
+      flashExito('Cuenta suspendida');
+      cargar();
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo suspender');
+    } finally { setGuardando(false); }
+  };
+
+  // ✅ SUSCRIPTOR-ELIMINAR-001: cerrar cuenta (borrado lógico + sub-usuarios)
+  const eliminarSuscriptor = async (s) => {
+    const escrito = window.prompt(`Vas a CERRAR la cuenta de ${s.empresa || s.nombre}.\nSus usuarios no podrán entrar más y desaparece de este panel (sus datos no se borran).\n\nEscribe el email ${s.email} para confirmar:`);
+    if (escrito === null) return;
+    setGuardando(true); setError('');
+    try {
+      const r = await axios.delete(`${API}/superadmin/suscriptores/${s.adminId}`, { headers, data: { confirmacion: escrito } });
+      flashExito(`Cuenta cerrada (${r.data.subUsuariosDesactivados} sub-usuario(s) desactivados)`);
+      cargar();
+    } catch (e) {
+      setError(e.response?.data?.error || 'No se pudo eliminar');
+    } finally { setGuardando(false); }
   };
 
   const guardarPlan = async () => {
@@ -237,11 +302,6 @@ const PanelSuscriptores = () => {
       const r = await axios.get(`${API}/anny/perfil/${s.adminId}`, { headers });
       const p = r.data.perfil || {};
       setNichosDisp(r.data.nichos || []);
-      setModelosDisp(r.data.modelos || ['haiku']);
-      // ✅ ANNY-V3: horario por tenant, tono, presentación, modelo, ventana de ráfaga
-      const h = p.horarioAtencion || {};
-      const horario = {};
-      for (const d of DIAS_SEMANA) horario[d.id] = Array.isArray(h[d.id]) ? { abierto: true, abre: h[d.id][0], cierra: h[d.id][1] } : { abierto: false, abre: '08:00', cierra: '18:00' };
       setFormPerfil({
         nicho: p.nicho || '',
         nombreAgente: p.nombreAgente || 'Anny',
@@ -250,13 +310,7 @@ const PanelSuscriptores = () => {
         reglasNegocio: p.reglasNegocio || '',
         mediosPago: p.mediosPago || '',
         avisarVentaCliente: p.avisarVentaCliente === true,
-        notificarEscalamientoA: p.notificarEscalamientoA || '',
-        horario,
-        tono: { tratamiento: p.tono?.tratamiento || 'tu', emojis: p.tono?.emojis === true, calidez: p.tono?.calidez || 'directa' },
-        presentacion: p.presentacion || '',
-        modelo: p.modelo || 'haiku',
-        ventanaRafagaMs: Number(p.ventanaRafagaMs) || 5000,
-        identificarAlInicio: p.identificarAlInicio !== false
+        notificarEscalamientoA: p.notificarEscalamientoA || ''
       });
     } catch (e) {
       setError(e.response?.data?.error || 'No se pudo leer el perfil de Anny');
@@ -267,14 +321,7 @@ const PanelSuscriptores = () => {
     setGuardando(true);
     setError('');
     try {
-      // ✅ ANNY-V3: el horario viaja como { lun: ['08:00','18:00'], sab: null, ... }
-      const horarioAtencion = {};
-      for (const d of DIAS_SEMANA) {
-        const v = formPerfil.horario?.[d.id];
-        horarioAtencion[d.id] = v && v.abierto && v.abre && v.cierra ? [v.abre, v.cierra] : null;
-      }
-      const { horario, ...resto } = formPerfil;
-      await axios.put(`${API}/anny/perfil/${editPerfil.adminId}`, { ...resto, horarioAtencion }, { headers });
+      await axios.put(`${API}/anny/perfil/${editPerfil.adminId}`, formPerfil, { headers });
       setEditPerfil(null);
       flashExito('Perfil de Anny guardado');
     } catch (e) {
@@ -404,11 +451,15 @@ const PanelSuscriptores = () => {
       {cargando && <div style={{ color: '#6b6b85', marginTop: 14 }}>Cargando…</div>}
 
       {!cargando && suscriptores.map((s) => {
-        const e = ESTADO_UI[s.estado] || { txt: 'Sin plan', bg: '#f1f1f8', col: '#6b6b85' };
+        // ✅ SUSCRIPCION-BLOQUEO-001: el badge muestra lo que el sistema APLICA (bloqueo real)
+        const e = s.bloqueada
+          ? { txt: '🔒 Bloqueada', bg: '#fde8e8', col: '#b91c1c' }
+          : (ESTADO_UI[s.estadoCalculado] || ESTADO_UI[s.estado] || { txt: 'Sin plan', bg: '#f1f1f8', col: '#6b6b85' });
         const venceTxt = s.fechaVencimiento
           ? `${s.fechaVencimiento}${s.diasRestantes !== null ? ` · ${s.diasRestantes >= 0 ? `${s.diasRestantes} días` : `vencido hace ${Math.abs(s.diasRestantes)} días`}` : ''}`
           : '—';
         const venceColor = s.diasRestantes === null ? '#3d3d5c' : s.diasRestantes < 0 ? '#dc2626' : s.diasRestantes <= 5 ? '#d97706' : '#16a34a';
+        const graciaTxt = s.graciaHasta ? ` · gracia hasta ${s.graciaHasta}` : (s.diasRestantes !== null && s.diasRestantes < 0 && !s.bloqueada ? ` · se bloquea en ${Math.max(0, (s.diasGracia ?? 5) + s.diasRestantes + 1)} día(s)` : '');
 
         return (
           <div key={s.adminId} style={st.card}>
@@ -430,7 +481,7 @@ const PanelSuscriptores = () => {
               </div>
               <div style={st.dato}>
                 <span style={st.datoL}>Vence</span>
-                <span style={{ ...st.datoV, color: venceColor }}>{venceTxt}</span>
+                <span style={{ ...st.datoV, color: venceColor }}>{venceTxt}{graciaTxt}</span>
               </div>
               <div style={st.dato}>
                 <span style={st.datoL}>Sub-usuarios</span>
@@ -456,7 +507,23 @@ const PanelSuscriptores = () => {
               <button style={st.btn} onClick={() => abrirPlan(s)}>
                 {s.plan ? 'Editar plan' : 'Asignar plan'}
               </button>
+              {/* ✅ SUSCRIPCION-BLOQUEO-001 */}
+              {s.plan && !s.superAdmin && (
+                <>
+                  <button style={{ ...st.btn, background: '#16a34a' }} onClick={() => abrirPago(s)}>💳 Registrar pago</button>
+                  {(s.bloqueada || (s.diasRestantes !== null && s.diasRestantes < 0)) && (
+                    <button style={st.btnGhost} onClick={() => extenderGracia(s)}>⏳ Gracia</button>
+                  )}
+                  {!s.bloqueada && (
+                    <button style={{ ...st.btnGhost, color: '#b91c1c' }} onClick={() => suspenderAhora(s)}>⛔ Suspender</button>
+                  )}
+                </>
+              )}
               <button style={st.btnGhost} onClick={() => abrirMods(s)}>Módulos</button>
+              {/* ✅ SUSCRIPTOR-ELIMINAR-001 */}
+              {!s.superAdmin && (
+                <button style={{ ...st.btnGhost, color: '#6b6b85', marginLeft: 'auto' }} onClick={() => eliminarSuscriptor(s)} title="Cerrar esta cuenta">🗑 Eliminar</button>
+              )}
               {/* ✅ CAPACIDAD-TENANT-002: solo tiene sentido si NO tiene Taller.
                   Con Taller activo su flujo es el correcto y no hay nada que reparar.
                   Lista vacía = todos los módulos = sí tiene Taller. */}
@@ -630,74 +697,6 @@ const PanelSuscriptores = () => {
                 <input type="text" style={st.input} placeholder="3001234567" value={formPerfil.notificarEscalamientoA}
                   onChange={e => setFormPerfil({ ...formPerfil, notificarEscalamientoA: e.target.value })} />
 
-                {/* ✅ ANNY-V3 · horario de atención (lo que Anny promete al escalar) */}
-                <label style={st.label}>Horario de atención (Anny lo usa para decir cuándo responde un asesor)</label>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 6 }}>
-                  {DIAS_SEMANA.map(d => {
-                    const v = formPerfil.horario[d.id];
-                    const setDia = (patch) => setFormPerfil({ ...formPerfil, horario: { ...formPerfil.horario, [d.id]: { ...v, ...patch } } });
-                    return (
-                      <div key={d.id} style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: '6px 8px', fontSize: 12, background: v.abierto ? '#fff' : '#f8fafc' }}>
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                          <input type="checkbox" checked={v.abierto} onChange={e => setDia({ abierto: e.target.checked })} />
-                          <b>{d.et}</b>
-                        </label>
-                        {v.abierto && (
-                          <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
-                            <input type="time" value={v.abre} onChange={e => setDia({ abre: e.target.value })} style={{ ...st.input, padding: '4px 6px', fontSize: 12, marginTop: 0 }} />
-                            <input type="time" value={v.cierra} onChange={e => setDia({ cierra: e.target.value })} style={{ ...st.input, padding: '4px 6px', fontSize: 12, marginTop: 0 }} />
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* ✅ ANNY-V3 · tono */}
-                <label style={st.label}>Tono</label>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  <select style={{ ...st.input, flex: 1, minWidth: 140 }} value={formPerfil.tono.tratamiento}
-                    onChange={e => setFormPerfil({ ...formPerfil, tono: { ...formPerfil.tono, tratamiento: e.target.value } })}>
-                    <option value="tu">Tutea al cliente</option>
-                    <option value="usted">Trata de usted</option>
-                  </select>
-                  <select style={{ ...st.input, flex: 1, minWidth: 140 }} value={formPerfil.tono.calidez}
-                    onChange={e => setFormPerfil({ ...formPerfil, tono: { ...formPerfil.tono, calidez: e.target.value } })}>
-                    <option value="directa">Directa y profesional</option>
-                    <option value="cercana">Cercana y cálida</option>
-                  </select>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-                    <input type="checkbox" checked={formPerfil.tono.emojis}
-                      onChange={e => setFormPerfil({ ...formPerfil, tono: { ...formPerfil.tono, emojis: e.target.checked } })} />
-                    Emojis
-                  </label>
-                </div>
-
-                <label style={st.label}>Presentación (opcional, máx. 160 caracteres — si va vacía Anny la arma con su nombre y la empresa)</label>
-                <input type="text" style={st.input} maxLength={160} placeholder="Hola, soy Anny, asesora de Extintores del Valle." value={formPerfil.presentacion}
-                  onChange={e => setFormPerfil({ ...formPerfil, presentacion: e.target.value })} />
-
-                <label style={{ ...st.modRow, marginTop: 12, border: 'none' }}>
-                  <input type="checkbox" checked={formPerfil.identificarAlInicio}
-                    onChange={e => setFormPerfil({ ...formPerfil, identificarAlInicio: e.target.checked })} />
-                  <span><b>Preguntar nombre y empresa en el primer mensaje</b> — si se desactiva, Anny lo pide solo al cerrar el pedido.</span>
-                </label>
-
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  <div style={{ flex: 1, minWidth: 160 }}>
-                    <label style={st.label}>Modelo de IA</label>
-                    <select style={st.input} value={formPerfil.modelo}
-                      onChange={e => setFormPerfil({ ...formPerfil, modelo: e.target.value })}>
-                      {modelosDisp.map(m => <option key={m} value={m}>{m === 'haiku' ? 'Haiku (rápido y económico)' : m === 'sonnet' ? 'Sonnet (más criterio, mayor costo)' : m}</option>)}
-                    </select>
-                  </div>
-                  <div style={{ flex: 1, minWidth: 160 }}>
-                    <label style={st.label}>Ventana de agrupación de mensajes (segundos)</label>
-                    <input type="number" min={2} max={12} style={st.input} value={Math.round(formPerfil.ventanaRafagaMs / 1000)}
-                      onChange={e => setFormPerfil({ ...formPerfil, ventanaRafagaMs: Math.min(12, Math.max(2, Number(e.target.value) || 5)) * 1000 })} />
-                  </div>
-                </div>
-
                 <div style={{ ...st.btns, justifyContent: 'flex-end' }}>
                   <button style={st.btnGhost} disabled={guardando} onClick={() => setEditPerfil(null)}>Cancelar</button>
                   <button style={st.btn} disabled={guardando} onClick={guardarPerfilAnny}>
@@ -758,6 +757,66 @@ const PanelSuscriptores = () => {
       )}
 
       {/* ─── MODAL: PLAN ─── */}
+      {/* ─── ✅ SUSCRIPCION-BLOQUEO-001 · MODAL: REGISTRAR PAGO ─── */}
+      {editPago && (
+        <div style={st.overlay} onClick={() => !guardando && setEditPago(null)}>
+          <div style={st.modal} onClick={(ev) => ev.stopPropagation()}>
+            <h2 style={{ ...st.h1, fontSize: 17 }}>💳 Registrar pago — {editPago.empresa || editPago.nombre || editPago.email}</h2>
+            <div style={{ fontSize: 12.5, color: '#6b6b85', marginTop: 4 }}>
+              Plan {editPago.planNombre || editPago.plan} · vence {editPago.fechaVencimiento || '—'}{editPago.bloqueada ? ' · 🔒 bloqueada' : ''}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
+              <div>
+                <label style={st.label}>Monto</label>
+                <input type="number" style={st.input} value={formPago.monto} onChange={e => setFormPago({ ...formPago, monto: e.target.value })} />
+              </div>
+              <div>
+                <label style={st.label}>Medio</label>
+                <select style={st.input} value={formPago.medio} onChange={e => setFormPago({ ...formPago, medio: e.target.value })}>
+                  {['Transferencia', 'Nequi', 'Daviplata', 'Efectivo', 'Otro'].map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={st.label}>Fecha del pago</label>
+                <input type="date" style={st.input} value={formPago.fecha} onChange={e => setFormPago({ ...formPago, fecha: e.target.value })} />
+              </div>
+              <div>
+                <label style={st.label}>Meses que cubre</label>
+                <select style={st.input} value={formPago.meses} onChange={e => setFormPago({ ...formPago, meses: Number(e.target.value) })}>
+                  {[1, 2, 3, 6, 12].map(m => <option key={m} value={m}>{m} {m === 1 ? 'mes' : 'meses'}</option>)}
+                </select>
+              </div>
+            </div>
+            <label style={st.label}>Notas (opcional)</label>
+            <input type="text" style={st.input} value={formPago.notas} onChange={e => setFormPago({ ...formPago, notas: e.target.value })} placeholder="Ref. del comprobante, acuerdo, etc." />
+
+            <div style={{ fontSize: 12, color: '#3d3d5c', background: '#f5f3ff', borderRadius: 8, padding: '8px 10px', marginTop: 10 }}>
+              El vencimiento se corre {formPago.meses} mes(es) desde {editPago.diasRestantes > 0 ? 'el vencimiento actual (no pierde días)' : 'hoy'}. La cuenta queda activa y se desbloquea de inmediato.
+            </div>
+
+            {pagosHist.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#6b6b85', textTransform: 'uppercase', marginBottom: 4 }}>Últimos pagos</div>
+                {pagosHist.slice(0, 5).map(p => (
+                  <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5, padding: '4px 0', borderBottom: '1px solid #f1f1f8' }}>
+                    <span>{p.fecha} · {p.medio}</span>
+                    <span style={{ fontWeight: 700 }}>${Number(p.monto || 0).toLocaleString('es-CO')} → {p.vencimientoNuevo}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ ...st.btns, justifyContent: 'flex-end' }}>
+              <button style={st.btnGhost} disabled={guardando} onClick={() => setEditPago(null)}>Cancelar</button>
+              <button style={{ ...st.btn, background: '#16a34a' }} disabled={guardando || !formPago.monto} onClick={registrarPago}>
+                {guardando ? 'Guardando…' : 'Registrar y activar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {editPlan && (
         <div style={st.overlay} onClick={() => !guardando && setEditPlan(null)}>
           <div style={st.modal} onClick={(ev) => ev.stopPropagation()}>

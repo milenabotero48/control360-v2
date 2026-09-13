@@ -33,6 +33,7 @@ import PanelSuscriptores from './PanelSuscriptores'; // Panel Maestro (solo supe
 import ModuloComercial from './ModuloComercial'; // Fase 3: Telemercadeo
 import Registro from './Registro'; // Registro público de suscriptores
 import BannerSuscripcion from './BannerSuscripcion'; // Alerta de vencimiento
+import SuscripcionSuspendida from './SuscripcionSuspendida'; // ✅ SUSCRIPCION-BLOQUEO-001
 import BtnWhatsApp from './BtnWhatsApp'; // Botón flotante de soporte
 import GestionVencimientos from './GestionVencimientos'; // Módulo vencimientos
 // ✅ NOVEDADES-001: canal de anuncios a suscriptores + calendario laboral
@@ -290,6 +291,7 @@ export default function AppRoot() {
   const [sidebarOpen, setSidebarOpen]     = useState(false);
   const [empresaActiva, setEmpresaActiva] = useState(null);
   const [alertasCxC, setAlertasCxC]       = useState(0);
+  const [suspendida, setSuspendida]       = useState(null); // ✅ SUSCRIPCION-BLOQUEO-001: info de la suscripción bloqueada
 
   useEffect(() => {
     // Inyectar CSS global
@@ -366,11 +368,36 @@ export default function AppRoot() {
             err?.response?.data?.error === 'SESION_DESPLAZADA') {
           handleLogout('SESION_DESPLAZADA');
         }
+        // ✅ SUSCRIPCION-BLOQUEO-001: el backend rechaza toda petición del tenant
+        // suspendido con 402 → se muestra la pantalla de pago sin importar el módulo.
+        if (err?.response?.status === 402 &&
+            err?.response?.data?.error === 'SUSCRIPCION_SUSPENDIDA') {
+          setSuspendida(err.response.data.suscripcion || {});
+        }
         return Promise.reject(err);
       }
     );
   // eslint-disable-next-line
   }, []);
+
+  // ✅ SUSCRIPCION-BLOQUEO-001: al entrar (y cada 5 min) se consulta el estado
+  // de la suscripción. Cubre las llamadas hechas con fetch, que no pasan por
+  // el interceptor de axios.
+  useEffect(() => {
+    if (!user) return;
+    let vivo = true;
+    const consultar = async () => {
+      try {
+        const r = await fetch(`${process.env.REACT_APP_API_URL || 'http://localhost:5000/api'}/auth/suscripcion-estado`, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (vivo) setSuspendida(d.bloqueada ? d : null);
+      } catch (e) { /* silencioso */ }
+    };
+    consultar();
+    const t = setInterval(consultar, 5 * 60 * 1000);
+    return () => { vivo = false; clearInterval(t); };
+  }, [user]);
 
   const navigate = (key) => {
     if (PAGINAS_PRONTO.includes(key)) return;
@@ -387,6 +414,18 @@ export default function AppRoot() {
   }
 
   if (!user) return <Login onLoginSuccess={handleLoginSuccess} />;
+
+  // ✅ SUSCRIPCION-BLOQUEO-001: cuenta suspendida → pantalla de pago a pantalla completa.
+  if (suspendida && user.superAdmin !== true) {
+    return (
+      <SuscripcionSuspendida
+        user={user}
+        info={suspendida}
+        onRestablecida={() => setSuspendida(null)}
+        onSalir={() => handleLogout()}
+      />
+    );
+  }
 
   const grupos      = buildGrupos(user.role, user.modulos, user.superAdmin === true);
   const bnKeys      = BOTTOM_NAV[user.role] || ['admin'];

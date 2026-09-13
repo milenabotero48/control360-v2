@@ -58,6 +58,8 @@ const MODULOS_POR_PLAN = {
 const { invalidarCapacidades } = require('../services/capacidadesTenant');
 
 const ESTADOS = ['trial', 'activo', 'suspendido'];
+// ✅ SUSCRIPCION-BLOQUEO-001
+const suscripcionEstado = require('../services/suscripcionEstado');
 
 // ─── MIDDLEWARE: verificar token (mismo patrón del resto del sistema) ────────
 const authenticate = async (req, res, next) => {
@@ -144,17 +146,32 @@ router.get('/suscriptores', authenticate, soloSuperAdmin, async (req, res) => {
     const suscripciones = {};
     susSnap.forEach(d => { suscripciones[d.id] = d.data(); });
 
-    // Conteo de sub-usuarios por tenant
+    // ✅ SUSCRIPTORES-LISTA-002: un suscriptor es el PROPIETARIO de su tenant.
+    // Un segundo administrador creado por un suscriptor (MULTIADMIN-001) tiene
+    // role 'admin' pero pertenece a otro tenant: no paga, no se lista aquí.
+    // Discriminante (ver MULTIADMIN-001-b): esPropietario === false, o adminId
+    // apuntando a otro id → sub-usuario. Los eliminados tampoco se listan.
+    const esPropietario = (id, u) => {
+      if (u.eliminado === true) return false;
+      if (u.esPropietario === true) return true;
+      if (u.esPropietario === false) return false;
+      return !u.adminId || u.adminId === id; // regla legacy para docs sin marca
+    };
+
+    // Conteo de sub-usuarios por tenant real (adminId manda sobre creadoPor)
     const subUsuarios = {};
     usersSnap.forEach(d => {
       const u = d.data();
-      if (u.creadoPor) subUsuarios[u.creadoPor] = (subUsuarios[u.creadoPor] || 0) + 1;
+      if (u.eliminado === true) return;
+      const tenant = (u.adminId && u.adminId !== d.id) ? u.adminId : (u.esPropietario === false ? u.creadoPor : null);
+      if (tenant) subUsuarios[tenant] = (subUsuarios[tenant] || 0) + 1;
     });
 
     const lista = [];
     usersSnap.forEach(d => {
       const u = d.data();
       if (u.role !== 'admin') return;
+      if (!esPropietario(d.id, u)) return;
 
       const sus = suscripciones[d.id] || null;
       lista.push({
@@ -170,6 +187,12 @@ router.get('/suscriptores', authenticate, soloSuperAdmin, async (req, res) => {
         plan: sus?.plan || null,
         planNombre: sus?.plan ? (PLANES[sus.plan]?.nombre || sus.plan) : null,
         estado: sus?.estado || null,
+        // ✅ SUSCRIPCION-BLOQUEO-001: lo que el sistema está aplicando de verdad
+        estadoCalculado: suscripcionEstado.evaluarSuscripcion(sus || null).estado,
+        bloqueada: suscripcionEstado.evaluarSuscripcion(sus || null).bloqueada,
+        diasGracia: sus?.diasGracia ?? suscripcionEstado.DIAS_GRACIA_DEFAULT,
+        graciaHasta: sus?.graciaHasta || null,
+        ultimoPago: sus?.ultimoPago || null,
         fechaInicio: sus?.fechaInicio || null,
         fechaVencimiento: sus?.fechaVencimiento || null,
         diasRestantes: diasRestantes(sus?.fechaVencimiento),
@@ -247,6 +270,7 @@ router.put('/suscriptores/:adminId/plan', authenticate, soloSuperAdmin, async (r
     };
 
     await db.collection('suscripciones').doc(adminId).set(datos, { merge: true });
+    suscripcionEstado.invalidarCacheSuscripcion(adminId); // ✅ SUSCRIPCION-BLOQUEO-001
 
     await registrarAuditoria({
       accion: anterior ? 'editar_suscripcion' : 'crear_suscripcion',
@@ -318,6 +342,188 @@ router.put('/suscriptores/:adminId/modulos', authenticate, soloSuperAdmin, async
   } catch (err) {
     console.error('PUT modulos:', err);
     res.status(500).json({ error: 'Error al actualizar módulos' });
+  }
+});
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ SUSCRIPCION-BLOQUEO-001 — pago, gracia y suspensión manual
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /suscriptores/:adminId/pago      { monto, medio, fecha, meses=1, notas }
+//   Registra el pago en suscripciones/{id}/pagos, corre el vencimiento
+//   `meses` a partir del MAYOR entre hoy y el vencimiento actual (si pagó
+//   antes de vencer no pierde días), deja estado 'activo', limpia la gracia
+//   extendida y el aviso de suspensión, e invalida el caché → la app del
+//   suscriptor se desbloquea en su siguiente clic.
+// POST /suscriptores/:adminId/gracia    { dias } → graciaHasta = hoy + dias
+// POST /suscriptores/:adminId/suspender { motivo } → estado 'suspendido' ya
+// ═════════════════════════════════════════════════════════════════════════════
+const sumarMeses = (yyyymmdd, meses) => {
+  const [y, m, d] = yyyymmdd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1 + meses, d));
+  // Si el día no existe en el mes destino (31 → feb), Date lo desborda; se corrige al último día.
+  if (dt.getUTCMonth() !== ((m - 1 + meses) % 12 + 12) % 12) dt.setUTCDate(0);
+  return dt.toISOString().slice(0, 10);
+};
+
+router.post('/suscriptores/:adminId/pago', authenticate, soloSuperAdmin, async (req, res) => {
+  try {
+    const { adminId } = req.params;
+    const { monto, medio = '', fecha, meses = 1, notas = '' } = req.body || {};
+    const montoNum = Number(String(monto || '').replace(/[^\d.]/g, ''));
+    const mesesNum = Math.min(12, Math.max(1, parseInt(meses, 10) || 1));
+    if (!montoNum || montoNum <= 0) return res.status(400).json({ error: 'El monto del pago es obligatorio' });
+
+    const ref = db.collection('suscripciones').doc(adminId);
+    const doc = await ref.get();
+    const sus = doc.exists ? doc.data() : null;
+    if (!sus || !sus.plan) return res.status(400).json({ error: 'Este suscriptor no tiene plan asignado. Asígnale un plan primero.' });
+
+    const hoy = suscripcionEstado.hoyCO();
+    const base = (sus.fechaVencimiento && String(sus.fechaVencimiento).slice(0, 10) > hoy) ? String(sus.fechaVencimiento).slice(0, 10) : hoy;
+    const nuevoVencimiento = sumarMeses(base, mesesNum);
+    const fechaPago = /^\d{4}-\d{2}-\d{2}$/.test(String(fecha || '')) ? fecha : hoy;
+
+    const pago = {
+      monto: montoNum, medio: String(medio).slice(0, 60), fecha: fechaPago, meses: mesesNum,
+      notas: String(notas).slice(0, 300), vencimientoAnterior: sus.fechaVencimiento || null,
+      vencimientoNuevo: nuevoVencimiento, registradoPor: req.superAdminNombre,
+      registradoEn: new Date().toISOString(), createdAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+    await ref.collection('pagos').add(pago);
+    await ref.set({
+      estado: 'activo',
+      fechaVencimiento: nuevoVencimiento,
+      graciaHasta: admin.firestore.FieldValue.delete(),
+      motivoSuspension: admin.firestore.FieldValue.delete(),
+      avisoSuspensionEnviado: admin.firestore.FieldValue.delete(),
+      ultimoPago: { monto: montoNum, fecha: fechaPago, medio: pago.medio },
+      actualizadoEn: new Date().toISOString(),
+      actualizadoPor: req.superAdminNombre
+    }, { merge: true });
+    suscripcionEstado.invalidarCacheSuscripcion(adminId);
+
+    await registrarAuditoria({
+      accion: 'pago_suscripcion',
+      descripcion: `Pago de $${montoNum.toLocaleString('es-CO')} (${pago.medio || 'sin medio'}) — vence ahora ${nuevoVencimiento}`,
+      usuarioId: req.user.uid, usuarioNombre: req.superAdminNombre, documento: adminId, datos: pago
+    });
+
+    res.json({ success: true, fechaVencimiento: nuevoVencimiento, estado: 'activo', diasRestantes: diasRestantes(nuevoVencimiento) });
+  } catch (err) {
+    console.error('POST pago suscripción:', err);
+    res.status(500).json({ error: 'Error al registrar el pago' });
+  }
+});
+
+router.post('/suscriptores/:adminId/gracia', authenticate, soloSuperAdmin, async (req, res) => {
+  try {
+    const { adminId } = req.params;
+    const dias = Math.min(30, Math.max(1, parseInt(req.body?.dias, 10) || 0));
+    if (!dias) return res.status(400).json({ error: 'Indica los días de gracia (1 a 30)' });
+    const ref = db.collection('suscripciones').doc(adminId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Suscripción no encontrada' });
+    const hoy = suscripcionEstado.hoyCO();
+    const [y, m, d] = hoy.split('-').map(Number);
+    const hasta = new Date(Date.UTC(y, m - 1, d + dias)).toISOString().slice(0, 10);
+    const patch = { graciaHasta: hasta, actualizadoEn: new Date().toISOString(), actualizadoPor: req.superAdminNombre };
+    // Si estaba suspendida a mano, la gracia la reabre (la suspensión manual manda sobre la fecha).
+    if (doc.data().estado === 'suspendido') { patch.estado = 'activo'; patch.motivoSuspension = admin.firestore.FieldValue.delete(); }
+    await ref.set(patch, { merge: true });
+    suscripcionEstado.invalidarCacheSuscripcion(adminId);
+    await registrarAuditoria({ accion: 'gracia_suscripcion', descripcion: `Gracia extendida ${dias} día(s), hasta ${hasta}`, usuarioId: req.user.uid, usuarioNombre: req.superAdminNombre, documento: adminId, datos: { dias, hasta } });
+    res.json({ success: true, graciaHasta: hasta });
+  } catch (err) {
+    console.error('POST gracia:', err);
+    res.status(500).json({ error: 'Error al extender la gracia' });
+  }
+});
+
+router.post('/suscriptores/:adminId/suspender', authenticate, soloSuperAdmin, async (req, res) => {
+  try {
+    const { adminId } = req.params;
+    const motivo = String(req.body?.motivo || '').trim().slice(0, 200) || 'Suspendida por el administrador de la plataforma';
+    const ref = db.collection('suscripciones').doc(adminId);
+    const doc = await ref.get();
+    if (!doc.exists) return res.status(404).json({ error: 'Suscripción no encontrada' });
+    const userDoc = await db.collection('users').doc(adminId).get();
+    if (userDoc.exists && userDoc.data().superAdmin === true) return res.status(400).json({ error: 'No se puede suspender la cuenta de la plataforma' });
+    await ref.set({ estado: 'suspendido', motivoSuspension: motivo, graciaHasta: admin.firestore.FieldValue.delete(), actualizadoEn: new Date().toISOString(), actualizadoPor: req.superAdminNombre }, { merge: true });
+    suscripcionEstado.invalidarCacheSuscripcion(adminId);
+    await registrarAuditoria({ accion: 'suspender_suscripcion', descripcion: `Suspendida manualmente: ${motivo}`, usuarioId: req.user.uid, usuarioNombre: req.superAdminNombre, documento: adminId, datos: { motivo } });
+    res.json({ success: true, estado: 'suspendido' });
+  } catch (err) {
+    console.error('POST suspender:', err);
+    res.status(500).json({ error: 'Error al suspender' });
+  }
+});
+
+router.get('/suscriptores/:adminId/pagos', authenticate, soloSuperAdmin, async (req, res) => {
+  try {
+    const snap = await db.collection('suscripciones').doc(req.params.adminId).collection('pagos').orderBy('registradoEn', 'desc').limit(24).get();
+    res.json({ pagos: snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: undefined })) });
+  } catch (err) {
+    res.status(500).json({ error: 'Error al leer pagos' });
+  }
+});
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ✅ SUSCRIPTOR-ELIMINAR-001 — DELETE /api/superadmin/suscriptores/:adminId
+// ─────────────────────────────────────────────────────────────────────────────
+// Cierra una cuenta (p. ej. una prueba). Es un BORRADO LÓGICO, no físico:
+//   · users/{adminId} y todos sus sub-usuarios → activo:false, eliminado:true,
+//     sessionToken borrado (los saca de la app en ese instante)
+//   · suscripciones/{adminId} → estado 'cancelado', eliminado:true
+//   · desaparece del panel; los datos operativos (órdenes, clientes, caja)
+//     NO se borran: anulación sobre eliminación, como el resto del sistema.
+// Body: { confirmacion: <email del suscriptor> } — obliga a escribirlo.
+// La cuenta de la plataforma (superAdmin) no se puede eliminar.
+// ═════════════════════════════════════════════════════════════════════════════
+router.delete('/suscriptores/:adminId', authenticate, soloSuperAdmin, async (req, res) => {
+  try {
+    const { adminId } = req.params;
+    const confirmacion = String(req.body?.confirmacion || req.query?.confirmacion || '').trim().toLowerCase();
+    const userDoc = await db.collection('users').doc(adminId).get();
+    if (!userDoc.exists) return res.status(404).json({ error: 'Suscriptor no encontrado' });
+    const u = userDoc.data();
+    if (u.superAdmin === true) return res.status(400).json({ error: 'No se puede eliminar la cuenta de la plataforma' });
+    if (adminId === req.user.uid) return res.status(400).json({ error: 'No puedes eliminar tu propia cuenta' });
+    if (!confirmacion || confirmacion !== String(u.email || '').trim().toLowerCase()) {
+      return res.status(400).json({ error: 'Escribe el email del suscriptor exactamente para confirmar' });
+    }
+
+    const ahora = new Date().toISOString();
+    const marca = { activo: false, eliminado: true, eliminadoEn: ahora, eliminadoPor: req.superAdminNombre, sessionToken: admin.firestore.FieldValue.delete() };
+
+    // Sub-usuarios del tenant (por adminId o creadoPor)
+    const [porAdmin, porCreador] = await Promise.all([
+      db.collection('users').where('adminId', '==', adminId).get(),
+      db.collection('users').where('creadoPor', '==', adminId).get()
+    ]);
+    const ids = new Set();
+    porAdmin.forEach(d => { if (d.id !== adminId) ids.add(d.id); });
+    porCreador.forEach(d => { const x = d.data(); if (d.id !== adminId && (!x.adminId || x.adminId === adminId)) ids.add(d.id); });
+
+    const lote = db.batch();
+    lote.set(userDoc.ref, marca, { merge: true });
+    ids.forEach(id => lote.set(db.collection('users').doc(id), marca, { merge: true }));
+    lote.set(db.collection('suscripciones').doc(adminId), { estado: 'cancelado', eliminado: true, eliminadoEn: ahora, actualizadoPor: req.superAdminNombre }, { merge: true });
+    await lote.commit();
+    suscripcionEstado.invalidarCacheSuscripcion(adminId);
+
+    await registrarAuditoria({
+      accion: 'eliminar_suscriptor',
+      descripcion: `Cuenta cerrada: ${u.empresa || u.nombre || u.email} (${u.email}) + ${ids.size} sub-usuario(s)`,
+      usuarioId: req.user.uid, usuarioNombre: req.superAdminNombre, documento: adminId,
+      datos: { email: u.email, subUsuarios: [...ids] }
+    });
+
+    res.json({ success: true, subUsuariosDesactivados: ids.size });
+  } catch (err) {
+    console.error('DELETE suscriptor:', err);
+    res.status(500).json({ error: 'Error al eliminar el suscriptor' });
   }
 });
 

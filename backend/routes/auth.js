@@ -409,16 +409,24 @@ router.get('/suscripcion-estado', async (req, res) => {
     const decoded = jwt2.verify(token, process.env.JWT_SECRET || 'control360secret');
     const adminId = decoded.adminId || decoded.uid;
 
+    // ✅ SUSCRIPCION-BLOQUEO-001: mismo motor que el middleware (sin caché aquí:
+    // esta ruta es la que consulta la pantalla de suspensión para saber si ya
+    // se reactivó, así que debe leer el dato fresco).
+    const susEstado = require('../services/suscripcionEstado');
     const susDoc = await db.collection('suscripciones').doc(adminId).get();
-    if (!susDoc.exists) return res.json({ dias: null, plan: null });
+    const ev = susEstado.evaluarSuscripcion(susDoc.exists ? susDoc.data() : null);
+    const { esSuperAdmin } = require('../middleware/auth');
+    const esSuper = (decoded.uid ? await esSuperAdmin(decoded.uid) : false) || (adminId !== decoded.uid && await esSuperAdmin(adminId));
 
-    const sus = susDoc.data();
-    if (!sus.fechaVencimiento) return res.json({ dias: null, plan: sus.plan });
-
-    const fin  = new Date(`${sus.fechaVencimiento}T23:59:59-05:00`);
-    const dias = Math.ceil((fin - new Date()) / (1000 * 60 * 60 * 24));
-
-    return res.json({ dias, plan: sus.plan, fechaVencimiento: sus.fechaVencimiento, estado: sus.estado });
+    return res.json({
+      dias: ev.dias,
+      plan: ev.plan,
+      fechaVencimiento: ev.fechaVencimiento,
+      estado: susDoc.exists ? (susDoc.data().estado || null) : null,
+      ...susEstado.resumenPublico(ev),
+      bloqueada: ev.bloqueada && !esSuper,
+      superAdmin: esSuper
+    });
   } catch (e) {
     return res.status(401).json({ error: 'Token inválido' });
   }
