@@ -61,7 +61,7 @@ const useIsMobile = () => {
   return mob;
 };
 
-export default function PanelOperacion() {
+function PanelOperacionInterno() {
   const isMobile = useIsMobile();
   const [mes, setMes] = useState(mesActualCO);
   const [data, setData] = useState(null);
@@ -81,6 +81,19 @@ export default function PanelOperacion() {
   }, [headers]);
 
   useEffect(() => { cargar(mes); }, [mes, cargar]);
+
+  // ✅ OPER-GERENCIAL-003: refresco cada 5 min, solo con la pestaña visible
+  // (misma regla que el dashboard general, DASHBOARD-001). Al volver a la
+  // pestaña se refresca si el dato ya venció.
+  useEffect(() => {
+    const REFRESCO_MS = 5 * 60 * 1000;
+    let ultima = Date.now();
+    const tick = () => { if (document.visibilityState === 'visible') { ultima = Date.now(); cargar(mes); } };
+    const t = setInterval(tick, REFRESCO_MS);
+    const onVis = () => { if (document.visibilityState === 'visible' && Date.now() - ultima >= REFRESCO_MS) tick(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
+  }, [mes, cargar]);
 
   const esActual = mes === mesActualCO();
   const t = data?.totales;
@@ -108,12 +121,12 @@ export default function PanelOperacion() {
       {data && t && (
         <div style={{ opacity: cargando ? 0.6 : 1, transition: 'opacity .2s' }}>
           {/* KPIs */}
-          <div style={{ ...S.kpis, gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(5, 1fr)' }}>
+          <div style={{ ...S.kpis, gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(auto-fit, minmax(190px, 1fr))' }}>
             <Kpi color="#6366f1" etiqueta="Órdenes elaboradas" valor={fmtN(t.ordenes)} pie={`${t.promedioDiario} por día · ${fmtCop(t.valorTotal)}`} delta={delta(t.ordenes, ant?.ordenes)} />
             <Kpi color="#0284c7" etiqueta="Clientes atendidos" valor={fmtN(t.clientes)} pie={`${t.diasConActividad} día(s) con actividad`} delta={delta(t.clientes, ant?.clientes)} />
             <Kpi color="#16a34a" etiqueta="Completadas" valor={fmtN(t.completadas)} pie={`${t.cumplimiento}% de cumplimiento`} delta={delta(t.completadas, ant?.completadas)} />
             <Kpi color="#f59e0b" etiqueta="En curso" valor={fmtN(t.enCurso)} pie={`${fmtN(t.anuladas)} anulada(s)`} />
-            <Kpi color="#8b5cf6" etiqueta="Ciclo completo" valor={fmtHoras(t.cicloMedianaHoras)} pie={`mediana · promedio ${fmtHoras(t.cicloPromedioHoras)}`} delta={ant?.cicloMedianaHoras ? delta(t.cicloMedianaHoras, ant.cicloMedianaHoras) : null} invertir />
+            <Kpi color="#8b5cf6" etiqueta="Ciclo completo" valor={fmtHoras(t.cicloMedianaHoras)} pie={`mediana · promedio ${fmtHoras(t.cicloPromedioHoras)}`} delta={null} invertir />
           </div>
 
           <div style={{ ...S.dosCol, gridTemplateColumns: isMobile ? '1fr' : '1.35fr 1fr' }}>
@@ -145,13 +158,13 @@ export default function PanelOperacion() {
             {/* Más demoradas */}
             <div style={S.card}>
               <div style={S.cardTitulo}>Órdenes más demoradas <span style={S.cardSub}>tiempo en su estado actual</span></div>
-              {!data.demoradas.length ? (
+              {!(data.demoradas || []).length ? (
                 <div style={S.vacio}>🎉 Ninguna orden del mes está detenida.</div>
-              ) : data.demoradas.map(d => (
+              ) : (data.demoradas || []).map(d => (
                 <div key={d.id} style={S.filaDem}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 800, color: '#111827' }}>{d.numeroOrden} <span style={{ fontWeight: 500, color: '#6b7280' }}>· {d.clienteNombre}</span></div>
-                    <div style={{ fontSize: 12, color: COLOR[d.proceso], fontWeight: 700 }}>{ICONO[d.proceso]} {data.embudo.find(e => e.id === d.proceso)?.label}{d.responsable ? <span style={{ color: '#9ca3af', fontWeight: 500 }}> · {d.responsable}</span> : null}</div>
+                    <div style={{ fontSize: 12, color: COLOR[d.proceso], fontWeight: 700 }}>{ICONO[d.proceso]} {(data.embudo || []).find(e => e.id === d.proceso)?.label || d.proceso}{d.responsable ? <span style={{ color: '#9ca3af', fontWeight: 500 }}> · {d.responsable}</span> : null}</div>
                   </div>
                   <span style={{ ...S.chipTiempo, background: d.horas > 72 ? '#fef2f2' : d.horas > 24 ? '#fffbeb' : '#f0fdf4', color: d.horas > 72 ? '#b91c1c' : d.horas > 24 ? '#b45309' : '#15803d' }}>{fmtHoras(d.horas)}</span>
                 </div>
@@ -163,12 +176,12 @@ export default function PanelOperacion() {
           <div style={S.card}>
             <button onClick={() => setVerDias(v => !v)} style={S.toggleDias}>
               {verDias ? '▾' : '▸'} Detalle día por día
-              <span style={S.cardSub}>{data.porDia.filter(d => d.creadas).length} días con órdenes</span>
+              <span style={S.cardSub}>{(data.porDia || []).filter(d => d.creadas).length} días con órdenes</span>
             </button>
             {verDias && (
               isMobile ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
-                  {[...data.porDia].reverse().filter(d => d.creadas || d.completadas || d.anuladas).map(d => (
+                  {[...(data.porDia || [])].reverse().filter(d => d.creadas || d.completadas || d.anuladas).map(d => (
                     <div key={d.fecha} style={S.diaCard}>
                       <div style={{ fontWeight: 800 }}>{diaLabel(d.fecha)}</div>
                       <div style={{ display: 'flex', gap: 10, fontSize: 12.5, flexWrap: 'wrap' }}>
@@ -185,7 +198,7 @@ export default function PanelOperacion() {
                   <table style={S.tabla}>
                     <thead><tr>{['Día', 'Elaboradas', 'Clientes', 'Completadas', 'Anuladas'].map(h => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
                     <tbody>
-                      {[...data.porDia].reverse().filter(d => d.creadas || d.completadas || d.anuladas).map(d => (
+                      {[...(data.porDia || [])].reverse().filter(d => d.creadas || d.completadas || d.anuladas).map(d => (
                         <tr key={d.fecha} style={{ borderTop: '1px solid #f3f4f6' }}>
                           <td style={{ ...S.td, fontWeight: 700 }}>{diaLabel(d.fecha)}</td>
                           <td style={{ ...S.td, color: '#6366f1', fontWeight: 800 }}>{d.creadas}</td>
@@ -202,12 +215,37 @@ export default function PanelOperacion() {
           </div>
 
           <div style={S.pie}>
-            Comparado con {mesLabel(ant.mes)}: {fmtN(ant.ordenes)} órdenes · {fmtN(ant.clientes)} clientes · {fmtN(ant.completadas)} completadas · ciclo {fmtHoras(ant.cicloMedianaHoras)}. Las órdenes internas y de producción no se cuentan.
+            {ant?.mes ? `Comparado con ${mesLabel(ant.mes)}: ${fmtN(ant.ordenes)} órdenes · ${fmtN(ant.clientes)} clientes · ${fmtN(ant.completadas)} completadas · ciclo ${fmtHoras(ant.cicloMedianaHoras)}.` : ''} Las órdenes internas y de producción no se cuentan.
           </div>
         </div>
       )}
     </div>
   );
+}
+
+// ── Blindaje (OPER-GERENCIAL-002) ───────────────────────────
+// Un error de render dentro del panel (dato inesperado de un tenant) no
+// puede dejar en blanco todo el Dashboard: se muestra un aviso y el resto
+// de la pantalla sigue funcionando.
+class LimitePanel extends React.Component {
+  constructor(p) { super(p); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error) { console.error('[PanelOperacion]', error); }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ ...S.card, marginBottom: 24, borderLeft: '4px solid #f59e0b' }}>
+          <div style={{ fontWeight: 800, color: '#111827' }}>📈 Operación del mes</div>
+          <div style={{ fontSize: 12.5, color: '#b45309', marginTop: 4 }}>No se pudo dibujar el panel con los datos de este mes. El resto del dashboard sigue disponible. Detalle técnico: {String(this.state.error?.message || this.state.error)}</div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function PanelOperacion() {
+  return <LimitePanel><PanelOperacionInterno /></LimitePanel>;
 }
 
 // ── Subcomponentes ──────────────────────────────────────────

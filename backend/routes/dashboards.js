@@ -899,9 +899,14 @@ const segmentosDe = (o, ahoraMs) => {
   return { seg, creado, cerrada, puntos };
 };
 
-const leerOrdenesMes = async (adminId, rango, warnings) => {
+// ✅ OPER-GERENCIAL-003: `liviano` omite historialEstados (el campo más pesado).
+// El mes anterior solo se usa para los deltas de órdenes/clientes/completadas,
+// así que no necesita el historial: la lectura baja casi a la mitad.
+const leerOrdenesMes = async (adminId, rango, warnings, liviano = false) => {
   const base = db.collection('orders').where('adminId', '==', adminId);
-  const campos = ['estado', 'createdAt', 'numeroOrden', 'clienteId', 'clienteNombre', 'tipoOrden', 'lugarAtencion', 'total', 'historialEstados', 'trabajadorAsignadoNombre', 'mensajeroNombre'];
+  const campos = liviano
+    ? ['estado', 'createdAt', 'clienteId', 'clienteNombre', 'tipoOrden']
+    : ['estado', 'createdAt', 'numeroOrden', 'clienteId', 'clienteNombre', 'tipoOrden', 'lugarAtencion', 'total', 'historialEstados', 'trabajadorAsignadoNombre', 'mensajeroNombre'];
   const snap = await leerConFallback(
     base.where('createdAt', '>=', Timestamp.fromDate(new Date(rango.inicioISO)))
         .where('createdAt', '<=', Timestamp.fromDate(new Date(rango.finISO)))
@@ -1002,14 +1007,15 @@ router.get('/operacion', async (req, res) => {
     const rangoAnt = rangoMesParam(mesAnteriorDe(rango.mesCO));
     const [ordenes, ordenesAnt] = await Promise.all([
       leerOrdenesMes(adminId, rango, warnings),
-      leerOrdenesMes(adminId, rangoAnt, warnings).catch(() => [])
+      leerOrdenesMes(adminId, rangoAnt, warnings, true).catch(() => [])
     ]);
     const actual = resumirMes(ordenes, rango, ahoraMs);
     const anterior = resumirMes(ordenesAnt, rangoAnt, ahoraMs);
     const data = {
       ...actual,
       esMesActual: rango.esActual,
-      anterior: { mes: anterior.mes, ordenes: anterior.totales.ordenes, clientes: anterior.totales.clientes, completadas: anterior.totales.completadas, cicloMedianaHoras: anterior.totales.cicloMedianaHoras, cumplimiento: anterior.totales.cumplimiento },
+      // cicloMedianaHoras del mes anterior ya no se calcula (lectura liviana): null → sin delta en ese KPI
+      anterior: { mes: anterior.mes, ordenes: anterior.totales.ordenes, clientes: anterior.totales.clientes, completadas: anterior.totales.completadas, cicloMedianaHoras: null, cumplimiento: anterior.totales.cumplimiento },
       generadoEn: new Date().toISOString(),
       warnings
     };
