@@ -6,6 +6,8 @@ import { exportarExcel } from './exportExcel';
 // ✅ PAGO-VALIDACION-003: criterio ÚNICO de "pago pendiente de validar".
 // Espejo de backend/services/validacionPagos.js — no editar a mano.
 import { pagoPendienteValidacion } from './utils/validacionPagos';
+// ✅ PAGO-LOTE-004: aprobar/rechazar varios pagos electrónicos de una vez
+import ValidacionPagosLote from './ValidacionPagosLote';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -82,6 +84,7 @@ const GestionOrdenes = ({ user }) => {
   const [filtroDesde, setFiltroDesde]   = useState('');
   const [filtroHasta, setFiltroHasta]   = useState('');
   const [filtroPendientesPago, setFiltroPendientesPago] = useState(false);  // Ola 2.5
+  const [mostrarLotePagos, setMostrarLotePagos] = useState(false);          // ✅ PAGO-LOTE-004
   // Ola 3: si venimos de Telemercadeo con un cliente recién convertido,
   // se abre directamente la creación de orden (el prefill lo lee NuevaOrden).
   const [vistaActual, setVistaActual]   = useState(() =>
@@ -191,6 +194,13 @@ const GestionOrdenes = ({ user }) => {
 
   return (
     <div style={s.wrapper}>
+      {/* ✅ PAGO-LOTE-004 */}
+      {mostrarLotePagos && (
+        <ValidacionPagosLote
+          onCerrar={() => { setMostrarLotePagos(false); cargarOrdenes(); }}
+          onProcesado={() => cargarOrdenes()}
+        />
+      )}
       {/* HEADER */}
       <div style={s.pageHeader}>
         <div>
@@ -315,6 +325,16 @@ const GestionOrdenes = ({ user }) => {
             }}>
               {totalPendientesPago}
             </span>
+          </button>
+        )}
+        {/* ✅ PAGO-LOTE-004: revisar el extracto y resolver varios pagos de una vez */}
+        {(user?.role === 'admin' || user?.role === 'tesoreria') && totalPendientesPago > 1 && (
+          <button
+            onClick={() => setMostrarLotePagos(true)}
+            style={{ padding: '8px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 700, border: '2px solid #0f766e', background: '#0f766e', color: '#fff' }}
+            title="Aprobar o rechazar varios pagos con un solo PIN"
+          >
+            ☑ Validar en lote
           </button>
         )}
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import PanelAlertasInteligentes from './PanelAlertasInteligentes'; // Ola 3 Bloque 3
+import ValidacionPagosLote from './ValidacionPagosLote'; // ✅ PAGO-LOTE-004
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -51,6 +52,7 @@ const DashboardTesoreria = ({ user }) => {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState('');
+  const [mostrarLote, setMostrarLote] = useState(false); // ✅ PAGO-LOTE-004
 
   const token = localStorage.getItem('token');
 
@@ -84,6 +86,8 @@ const DashboardTesoreria = ({ user }) => {
 
   return (
     <div style={{ padding: 28, maxWidth: 1400, margin: '0 auto', fontFamily: "'Segoe UI', sans-serif" }}>
+      {/* ✅ PAGO-LOTE-004 */}
+      {mostrarLote && <ValidacionPagosLote onCerrar={() => { setMostrarLote(false); cargar(); }} onProcesado={() => cargar()} />}
 
       {/* HEADER */}
       <div style={{ marginBottom: 24 }}>
@@ -120,6 +124,10 @@ const DashboardTesoreria = ({ user }) => {
                   {k.pagosElectronicosSinValidar} pago(s) electrónico(s) sin validar
                 </div>
                 <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>Revisar comprobantes de transferencia / Nequi en las órdenes</div>
+                {/* ✅ PAGO-LOTE-004 */}
+                <button onClick={() => setMostrarLote(true)} style={{ marginTop: 8, background: '#0f766e', color: '#fff', border: 'none', borderRadius: 8, padding: '7px 12px', fontSize: 12.5, fontWeight: 700, cursor: 'pointer' }}>
+                  ☑ Validar en lote
+                </button>
               </div>
             </div>
           )}

@@ -842,6 +842,51 @@ router.get('/', authenticate, async (req, res) => {
 // ══════════════════════════════════════════════════════════════════════════════
 // GET /api/orders/:id — Detalle orden
 // ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ PAGO-LOTE-004 — GET /api/orders/pagos-pendientes-validacion
+// Lista de pagos virtuales que esperan confirmación contra el banco. Usa el
+// MISMO predicado que la lista, el detalle y el KPI (validacionPagos.js).
+// Va ANTES de GET /:id para que no lo capture como un id.
+// ══════════════════════════════════════════════════════════════════════════════
+router.get('/pagos-pendientes-validacion', authenticate, async (req, res) => {
+  try {
+    if (!['admin', 'tesoreria'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Solo Admin o Tesorería pueden validar pagos electrónicos' });
+    }
+    const adminId = req.adminId || req.user.uid || req.user.id;
+    const { pagoPendienteValidacion } = require('../services/validacionPagos');
+    const snap = await db.collection('orders').where('adminId', '==', adminId).where('pagado', '==', true).limit(1500).get();
+    const snapFlag = await db.collection('orders').where('adminId', '==', adminId).where('pagoVirtualPendienteValidar', '==', true).limit(500).get();
+    const vistos = new Set();
+    const pendientes = [];
+    for (const d of [...snap.docs, ...snapFlag.docs]) {
+      if (vistos.has(d.id)) continue;
+      vistos.add(d.id);
+      const o = d.data();
+      if (!pagoPendienteValidacion(o)) continue;
+      pendientes.push({
+        id: d.id,
+        numeroOrden: o.numeroOrden || '',
+        clienteNombre: o.clienteNombre || '',
+        total: Number(o.total) || 0,
+        formaPago: o.formaPago || '',
+        estado: o.estado || '',
+        fechaPago: o.fechaPago || null,
+        pagadoPorNombre: o.pagadoPorNombre || o.pagoRegistradoPorNombre || null,
+        fotoTransferenciaUrl: o.fotoTransferenciaUrl || null,
+        cajaSugeridaId: o.cajaSugeridaId || null,
+        pagoReportadoAnny: o.pagoReportadoAnny || null,
+        createdAt: o.createdAt?.seconds ? o.createdAt.seconds * 1000 : null
+      });
+    }
+    pendientes.sort((a, b) => String(a.fechaPago || '').localeCompare(String(b.fechaPago || '')));
+    return res.json({ pendientes, total: pendientes.length, montoTotal: pendientes.reduce((s, p) => s + p.total, 0) });
+  } catch (error) {
+    console.error('Error listando pagos pendientes:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/:id', authenticate, validarTenant('orders'), async (req, res) => {
   try {
     const doc = await db.collection('orders').doc(req.params.id).get();
@@ -2669,197 +2714,207 @@ router.post('/:id/pago', authenticate, async (req, res) => {
 //
 // Body: { aprobado: bool, motivo: string, pin: string }
 // ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ PAGO-LOTE-004 — aplicarValidacionPago: ÚNICA lógica de aprobar/rechazar
+// ─────────────────────────────────────────────────────────────────────────────
+// Antes vivía dentro de POST /:id/validar-pago. Se extrae sin cambiar una sola
+// regla para que el endpoint individual y el de lote hagan EXACTAMENTE lo
+// mismo (Ola 2.5, PAGO-CIERRA-CXC-001, VALIDAR-CAJA-001, CANDADO-MONTO-001).
+// El PIN y el rol se verifican en el endpoint, no aquí.
+// Devuelve { ok:true, data } o { ok:false, status, error }.
+// ══════════════════════════════════════════════════════════════════════════════
+async function aplicarValidacionPago({ req, ordenId, aprobado, motivo = '', cajaId = null, formaPagoConfirmada = null }) {
+  const id = ordenId;
+  const userId = req.user.uid || req.user.id;
+  const adminId = req.adminId || userId;
+  const usuarioNombre = req.user.nombre || req.user.email;
+
+  const ordenRef = db.collection('orders').doc(id);
+  const ordenDoc = await ordenRef.get();
+  if (!ordenDoc.exists) return { ok: false, status: 404, error: 'Orden no encontrada' };
+  const orden = ordenDoc.data();
+
+  if (orden.adminId && orden.adminId !== adminId) return { ok: false, status: 403, error: 'No tienes acceso a esta orden' };
+  if (orden.pagoValidado === true) return { ok: false, status: 400, error: 'Este pago ya fue validado anteriormente' };
+  if (!orden.formaPago || orden.formaPago === 'Efectivo' || orden.formaPago === 'A crédito (CxC)') {
+    return { ok: false, status: 400, error: 'Esta orden no requiere validación de pago electrónico' };
+  }
+
+  const ahora = new Date().toISOString();
+
+  if (aprobado) {
+    const cerrarPorCobranza = ['entrega_cobranza', 'cxc'].includes(orden.estado);
+    const veniaDeCartera = orden.estado === 'cxc';
+    const formaPagoFinal = (typeof formaPagoConfirmada === 'string' && formaPagoConfirmada.trim())
+      ? formaPagoConfirmada.trim()
+      : orden.formaPago;
+
+    const updateAprobar = {
+      pagoValidado: true,
+      pagoValidadoPor: userId,
+      pagoValidadoPorNombre: usuarioNombre,
+      pagoValidadoEn: ahora,
+      pagoValidacionMotivo: motivo || '',
+      pagoVirtualPendienteValidar: false,
+      pagado: true,
+      montoPagado: orden.total || 0,
+      fechaPago: ahora,
+      formaPago: formaPagoFinal,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp()
+    };
+
+    if (cerrarPorCobranza) {
+      updateAprobar.estado = 'completada';
+      if (veniaDeCartera) { updateAprobar.cxcSaldo = 0; updateAprobar.cxcEstado = 'pagada'; }
+      updateAprobar.historialEstados = admin.firestore.FieldValue.arrayUnion({
+        estado: 'completada', fecha: ahora, usuarioId: userId, usuarioNombre,
+        accion: veniaDeCartera ? 'PAGO_VALIDADO_APROBADO_CIERRA_CXC' : 'PAGO_VALIDADO_APROBADO_CIERRA_COBRANZA',
+        nota: veniaDeCartera ? 'Pago electrónico aprobado — cartera cobrada, orden completada' : ''
+      });
+    } else {
+      updateAprobar.historialEstados = admin.firestore.FieldValue.arrayUnion({
+        estado: orden.estado, fecha: ahora, usuarioId: userId, usuarioNombre,
+        accion: 'PAGO_VALIDADO_APROBADO', nota: 'El pago fue aprobado. El servicio sigue su flujo.'
+      });
+    }
+    await ordenRef.update(updateAprobar);
+
+    const caja = await registrarIngresoEnCaja({
+      userId: adminId, ordenId: id, numeroOrden: orden.numeroOrden, clienteNombre: orden.clienteNombre,
+      monto: orden.total || 0, formaPago: formaPagoFinal, usuarioEmail: req.user.email,
+      numeroFactura: orden.numeroFactura || '', cajaIdSeleccionada: cajaId || null
+    }).catch((e) => { console.error('Caja virtual:', e); return null; });
+
+    if (veniaDeCartera) {
+      try {
+        const cxcSnap = await db.collection('cxc').where('ordenId', '==', id).limit(1).get();
+        if (!cxcSnap.empty) {
+          await cxcSnap.docs[0].ref.update({ estado: 'pagada', fechaPago: ahora, pagadaPor: usuarioNombre, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        }
+      } catch (eCxcDoc) { console.warn('PAGO-CIERRA-CXC-001: no se pudo cerrar doc cxc:', eCxcDoc.message); }
+    }
+
+    await auditar({
+      accion: 'PAGO_ELECTRONICO_APROBADO',
+      descripcion: `${usuarioNombre} aprobó el pago electrónico de ${orden.numeroOrden} (${formaPagoFinal})`,
+      usuarioId: userId, usuarioNombre, ordenId: id, documento: orden.numeroOrden,
+      datos: { motivo, monto: orden.total, formaPago: formaPagoFinal, cajaId: cajaId || null }
+    });
+
+    return { ok: true, data: { ok: true, aprobado: true, estado: cerrarPorCobranza ? 'completada' : orden.estado, caja, numeroOrden: orden.numeroOrden, monto: orden.total || 0 } };
+  }
+
+  // ── RECHAZAR → la orden pasa a CxC ──
+  if (!motivo || motivo.trim().length < 5) return { ok: false, status: 400, error: 'El motivo de rechazo es obligatorio (mínimo 5 caracteres)' };
+
+  await ordenRef.update({
+    pagoValidado: false, pagoRechazado: true,
+    pagoValidadoPor: userId, pagoValidadoPorNombre: usuarioNombre, pagoValidadoEn: ahora,
+    pagoValidacionMotivo: motivo.trim(),
+    pagado: false, montoPagado: 0, fechaPago: null,
+    estado: 'cxc',
+    historialEstados: admin.firestore.FieldValue.arrayUnion({
+      estado: 'cxc', fecha: ahora, usuarioId: userId, usuarioNombre, accion: 'PAGO_VALIDADO_RECHAZADO', notas: motivo.trim()
+    }),
+    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  await auditar({
+    accion: 'PAGO_ELECTRONICO_RECHAZADO',
+    descripcion: `${usuarioNombre} rechazó el pago electrónico de ${orden.numeroOrden}: ${motivo}`,
+    usuarioId: userId, usuarioNombre, ordenId: id, documento: orden.numeroOrden,
+    datos: { motivo, monto: orden.total, formaPago: orden.formaPago }
+  });
+
+  return { ok: true, data: { ok: true, aprobado: false, estado: 'cxc', motivo, numeroOrden: orden.numeroOrden, monto: orden.total || 0 } };
+}
+
 router.post('/:id/validar-pago', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
-    // ✅ VALIDAR-CAJA-001: el validador puede confirmar la forma de pago
-    // EXACTA (Nequi/Bancolombia/etc — el mensajero solo declaró "electrónico")
-    // y elegir la caja destino viendo dónde cayó realmente el dinero.
     const { aprobado, motivo = '', pin, cajaId, formaPagoConfirmada } = req.body;
 
-    // Solo Admin o Tesorería
     if (!['admin', 'tesoreria'].includes(req.user.role)) {
       return res.status(403).json({ error: 'Solo Admin o Tesorería pueden validar pagos electrónicos' });
     }
-
-    // Verificar PIN
     const userId = req.user.uid || req.user.id;
     const pinCheck = await verificarPinUsuario(userId, pin, 'validar_pago');
     if (!pinCheck.ok) return res.status(403).json({ error: pinCheck.error, codigo: pinCheck.codigo });
 
-    const ordenRef = db.collection('orders').doc(id);
-    const ordenDoc = await ordenRef.get();
-    if (!ordenDoc.exists) return res.status(404).json({ error: 'Orden no encontrada' });
-
-    const orden = ordenDoc.data();
-
-    // Aislamiento multi-tenant
-    const adminId = req.adminId || userId;
-    if (orden.adminId && orden.adminId !== adminId) {
-      return res.status(403).json({ error: 'No tienes acceso a esta orden' });
-    }
-
-    // Validar que la orden tenga un pago electrónico pendiente
-    if (orden.pagoValidado === true) {
-      return res.status(400).json({ error: 'Este pago ya fue validado anteriormente' });
-    }
-    if (!orden.formaPago || orden.formaPago === 'Efectivo' || orden.formaPago === 'A crédito (CxC)') {
-      return res.status(400).json({ error: 'Esta orden no requiere validación de pago electrónico' });
-    }
-
-    const usuarioNombre = req.user.nombre || req.user.email;
-    const ahora = new Date().toISOString();
-
-    if (aprobado) {
-      // ── APROBAR ─────────────────────────────────────────────────────────────
-      // Ola 2.5 REGLA: el pago se confirma → dinero entra a caja → marca pagado.
-      // PERO el estado del servicio solo se completa si el pago ES el evento
-      // pendiente. Si todavía está en recogida/taller/entrega, el estado
-      // sigue su curso normal.
-      // ✅ FIX PAGO-CIERRA-CXC-001: antes solo cerraba desde 'entrega_cobranza'.
-      // Una orden en CxC con pago electrónico aprobado quedaba PAGADA pero
-      // atascada en cartera para siempre (bug real OS-0018: historial con
-      // "Cuenta por Cobrar" duplicado y sin salida). El pago validado ES el
-      // cobro de esa cartera → la orden se completa.
-      const cerrarPorCobranza = ['entrega_cobranza', 'cxc'].includes(orden.estado);
-      const veniaDeCartera = orden.estado === 'cxc';
-
-      // ✅ VALIDAR-CAJA-001: forma de pago exacta confirmada por el validador.
-      const formaPagoFinal = (typeof formaPagoConfirmada === 'string' && formaPagoConfirmada.trim())
-        ? formaPagoConfirmada.trim()
-        : orden.formaPago;
-
-      const updateAprobar = {
-        pagoValidado: true,
-        pagoValidadoPor: userId,
-        pagoValidadoPorNombre: usuarioNombre,
-        pagoValidadoEn: ahora,
-        pagoValidacionMotivo: motivo || '',
-        pagoVirtualPendienteValidar: false,    // Ola 2.5 FIX: quitar bandera
-        pagado: true,
-        montoPagado: orden.total || 0,
-        fechaPago: ahora,
-        // ✅ VALIDAR-CAJA-001: se guarda la forma de pago exacta confirmada
-        formaPago: formaPagoFinal,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      };
-
-      if (cerrarPorCobranza) {
-        updateAprobar.estado = 'completada';
-        // ✅ PAGO-CIERRA-CXC-001: si venía de cartera, cerrar también los
-        // campos de CxC para que el módulo de cartera no muestre deuda fantasma.
-        if (veniaDeCartera) {
-          updateAprobar.cxcSaldo = 0;
-          updateAprobar.cxcEstado = 'pagada';
-        }
-        updateAprobar.historialEstados = admin.firestore.FieldValue.arrayUnion({
-          estado: 'completada',
-          fecha: ahora,
-          usuarioId: userId,
-          usuarioNombre,
-          accion: veniaDeCartera ? 'PAGO_VALIDADO_APROBADO_CIERRA_CXC' : 'PAGO_VALIDADO_APROBADO_CIERRA_COBRANZA',
-          nota: veniaDeCartera ? 'Pago electrónico aprobado — cartera cobrada, orden completada' : ''
-        });
-      } else {
-        // Solo registrar la aprobación en historial, sin cambiar estado.
-        updateAprobar.historialEstados = admin.firestore.FieldValue.arrayUnion({
-          estado: orden.estado,  // mismo estado
-          fecha: ahora,
-          usuarioId: userId,
-          usuarioNombre,
-          accion: 'PAGO_VALIDADO_APROBADO',
-          nota: 'El pago fue aprobado. El servicio sigue su flujo.'
-        });
-      }
-      await ordenRef.update(updateAprobar);
-
-      // FIX Ola 2.5: ahora el dinero SÍ entra a caja en este momento.
-      // Antes el flag dineroEnCaja podía estar en true de forma incorrecta
-      // (cuando el mensajero avanzaba con pago virtual). Con los fixes en
-      // logistics.js esa bandera ya no se pone en virtual, así que aquí
-      // siempre se llama a registrarIngresoEnCaja para la entrada real.
-      let caja = null;
-      caja = await registrarIngresoEnCaja({
-        userId: adminId,
-        ordenId: id,
-        numeroOrden: orden.numeroOrden,
-        clienteNombre: orden.clienteNombre,
-        monto: orden.total || 0,
-        formaPago: formaPagoFinal,
-        usuarioEmail: req.user.email,
-        numeroFactura: orden.numeroFactura || '',
-        // ✅ VALIDAR-CAJA-001: caja elegida por quien valida (manda sobre el mapeo)
-        cajaIdSeleccionada: cajaId || null
-      }).catch((e) => { console.error('Caja virtual:', e); return null; });
-
-      // ✅ PAGO-CIERRA-CXC-001: si existía documento en la colección cxc,
-      // marcarlo pagado para que no quede deuda fantasma (mejor esfuerzo).
-      if (veniaDeCartera) {
-        try {
-          const cxcSnap = await db.collection('cxc').where('ordenId', '==', id).limit(1).get();
-          if (!cxcSnap.empty) {
-            await cxcSnap.docs[0].ref.update({
-              estado: 'pagada',
-              fechaPago: ahora,
-              pagadaPor: usuarioNombre,
-              updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-          }
-        } catch (eCxcDoc) { console.warn('PAGO-CIERRA-CXC-001: no se pudo cerrar doc cxc:', eCxcDoc.message); }
-      }
-
-      await auditar({
-        accion: 'PAGO_ELECTRONICO_APROBADO',
-        descripcion: `${usuarioNombre} aprobó el pago electrónico de ${orden.numeroOrden} (${orden.formaPago})`,
-        usuarioId: userId, usuarioNombre, ordenId: id,
-        documento: orden.numeroOrden,
-        datos: { motivo, monto: orden.total, formaPago: orden.formaPago }
-      });
-
-      return res.json({ ok: true, aprobado: true, estado: cerrarPorCobranza ? 'completada' : orden.estado, caja });
-
-    } else {
-      // ── RECHAZAR ────────────────────────────────────────────────────────────
-      // El comprobante no fue válido (no llegó al banco, monto incorrecto, etc).
-      // La orden pasa a CxC: el cliente queda debiendo este dinero.
-      if (!motivo || motivo.trim().length < 5) {
-        return res.status(400).json({ error: 'El motivo de rechazo es obligatorio (mínimo 5 caracteres)' });
-      }
-
-      await ordenRef.update({
-        pagoValidado: false,
-        pagoRechazado: true,
-        pagoValidadoPor: userId,
-        pagoValidadoPorNombre: usuarioNombre,
-        pagoValidadoEn: ahora,
-        pagoValidacionMotivo: motivo.trim(),
-        pagado: false,
-        montoPagado: 0,
-        fechaPago: null,
-        estado: 'cxc',
-        historialEstados: admin.firestore.FieldValue.arrayUnion({
-          estado: 'cxc',
-          fecha: ahora,
-          usuarioId: userId,
-          usuarioNombre,
-          accion: 'PAGO_VALIDADO_RECHAZADO',
-          notas: motivo.trim()
-        }),
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-
-      await auditar({
-        accion: 'PAGO_ELECTRONICO_RECHAZADO',
-        descripcion: `${usuarioNombre} rechazó el pago electrónico de ${orden.numeroOrden}: ${motivo}`,
-        usuarioId: userId, usuarioNombre, ordenId: id,
-        documento: orden.numeroOrden,
-        datos: { motivo, monto: orden.total, formaPago: orden.formaPago }
-      });
-
-      return res.json({ ok: true, aprobado: false, estado: 'cxc', motivo });
-    }
+    // ✅ PAGO-LOTE-004: el individual y el lote comparten aplicarValidacionPago.
+    const r = await aplicarValidacionPago({ req, ordenId: id, aprobado: aprobado === true, motivo, cajaId, formaPagoConfirmada });
+    if (!r.ok) return res.status(r.status || 400).json({ error: r.error });
+    return res.json(r.data);
   } catch (error) {
     console.error('Error validando pago:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ✅ PAGO-LOTE-004 — POST /api/orders/validar-pagos-lote
+// ─────────────────────────────────────────────────────────────────────────────
+// Tesorería revisa el extracto y resuelve VARIOS pagos pendientes de una vez:
+// cada ítem trae su decisión (aprobar / rechazar), su forma exacta y su caja.
+// Un solo PIN para la tanda. Se procesa EN SERIE (una orden a la vez) por la
+// misma función que el endpoint individual → mismo candado de caja
+// (CANDADO-MONTO-001), misma auditoría por orden. Cada orden es independiente:
+// si una falla, las demás siguen y el resultado lo dice fila por fila.
+//
+// Body: { pin, items: [{ ordenId, aprobado: bool, motivo?, cajaId?, formaPagoConfirmada? }] }
+// ══════════════════════════════════════════════════════════════════════════════
+const MAX_LOTE_VALIDACION = 50;
+
+router.post('/validar-pagos-lote', authenticate, async (req, res) => {
+  try {
+    const { pin, items } = req.body || {};
+    if (!['admin', 'tesoreria'].includes(req.user.role)) {
+      return res.status(403).json({ error: 'Solo Admin o Tesorería pueden validar pagos electrónicos' });
+    }
+    if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'No hay pagos para procesar' });
+    if (items.length > MAX_LOTE_VALIDACION) return res.status(400).json({ error: `Máximo ${MAX_LOTE_VALIDACION} pagos por tanda` });
+
+    const userId = req.user.uid || req.user.id;
+    const pinCheck = await verificarPinUsuario(userId, pin, 'validar_pago');
+    if (!pinCheck.ok) return res.status(403).json({ error: pinCheck.error, codigo: pinCheck.codigo });
+
+    // Validación previa de la tanda: un rechazo sin motivo no se procesa a medias.
+    for (const it of items) {
+      if (!it || !it.ordenId) return res.status(400).json({ error: 'Ítem sin ordenId' });
+      if (it.aprobado !== true && String(it.motivo || '').trim().length < 5) {
+        return res.status(400).json({ error: `El rechazo de ${it.numeroOrden || it.ordenId} necesita un motivo (mínimo 5 caracteres)` });
+      }
+      if (it.aprobado === true && !it.cajaId) {
+        return res.status(400).json({ error: `Elige la caja destino para ${it.numeroOrden || it.ordenId}` });
+      }
+    }
+
+    const resultados = [];
+    let aprobadas = 0, rechazadas = 0, fallidas = 0, montoAprobado = 0;
+    for (const it of items) {
+      const r = await aplicarValidacionPago({
+        req, ordenId: it.ordenId, aprobado: it.aprobado === true,
+        motivo: it.motivo || '', cajaId: it.cajaId || null, formaPagoConfirmada: it.formaPagoConfirmada || null
+      });
+      if (r.ok) {
+        if (r.data.aprobado) { aprobadas++; montoAprobado += Number(r.data.monto) || 0; } else rechazadas++;
+        resultados.push({ ordenId: it.ordenId, numeroOrden: r.data.numeroOrden, ok: true, aprobado: r.data.aprobado, estado: r.data.estado, caja: r.data.caja || null });
+      } else {
+        fallidas++;
+        resultados.push({ ordenId: it.ordenId, numeroOrden: it.numeroOrden || null, ok: false, error: r.error });
+      }
+    }
+
+    await auditar({
+      accion: 'PAGOS_VALIDADOS_EN_LOTE',
+      descripcion: `${req.user.nombre || req.user.email} procesó una tanda de ${items.length} pagos: ${aprobadas} aprobados ($${montoAprobado.toLocaleString('es-CO')}), ${rechazadas} rechazados, ${fallidas} con error`,
+      usuarioId: userId, usuarioNombre: req.user.nombre || req.user.email,
+      datos: { total: items.length, aprobadas, rechazadas, fallidas, montoAprobado, ordenes: resultados.map(r => r.numeroOrden || r.ordenId) }
+    });
+
+    return res.json({ ok: true, resumen: { total: items.length, aprobadas, rechazadas, fallidas, montoAprobado }, resultados });
+  } catch (error) {
+    console.error('Error en lote de validación:', error);
     res.status(500).json({ error: error.message });
   }
 });
