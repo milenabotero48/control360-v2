@@ -1161,6 +1161,19 @@ router.post('/', authenticate, async (req, res) => {
     const esAdmin = req.user.role === 'admin';
     const marcarPagoAdelantado = pagoAdelantado === true && esPagoVirtual && !!fotoTransferenciaUrl && !esAdmin;
 
+    // ✅ PAGO-CUADRE-006: se calcula ANTES de construir la orden (y se guarda en
+    // variable reusable) porque, además de decidir los campos pagoValidado/
+    // pagoValidadoPor/etc. de la orden, también decide si hay que registrar el
+    // ingreso en caja al crear. Antes esto se calculaba inline (IIFE) solo para
+    // los campos de la orden y nunca se reutilizaba para la caja: cuando el pago
+    // virtual nacía auto-validado (admin/tesorería, PAGO-VALIDACION-003), la
+    // orden quedaba pagoValidado:true PERO el ingreso nunca entraba a ninguna
+    // caja — ni aquí (el bloque de caja solo cubría efectivo) ni después (el
+    // guard de aplicarValidacionPago rechaza validar algo que ya está validado).
+    const autoValidacion = (pagadoAlCrear || marcarPagoAdelantado)
+      ? camposValidacionAutomatica({ user: req.user, formaPago })
+      : {};
+
     // ── Mini-Ola 2.6: calcular sectorId de la orden ────────────────────────
     // Regla: si hay sucursal → toma sucursal.sectorId (fallback cliente.sectorId).
     // Si NO hay sucursal → toma cliente.sectorId.
@@ -1264,14 +1277,9 @@ router.post('/', authenticate, async (req, res) => {
       // pedirle que apruebe su propio pago es papeleo, no control. Para los
       // demás roles NADA cambia: el pago queda pendiente de que alguien lo
       // confirme contra el banco. El criterio vive en services/validacionPagos.js.
-      ...(function () {
-        const auto = (pagadoAlCrear || marcarPagoAdelantado)
-          ? camposValidacionAutomatica({ user: req.user, formaPago })
-          : {};
-        return Object.keys(auto).length
-          ? auto
-          : { pagoValidado: marcarPagoAdelantado ? false : null };
-      })(),
+      ...(Object.keys(autoValidacion).length
+        ? autoValidacion
+        : { pagoValidado: marcarPagoAdelantado ? false : null }),
       fotoTransferenciaUrl: fotoTransferenciaUrl || null,
       cobradoPorMensajero: false,
       creadoPor: req.user.uid || req.user.id,
@@ -1305,6 +1313,18 @@ router.post('/', authenticate, async (req, res) => {
         monto: Math.round(total), formaPago,
         usuarioEmail: req.user.email, numeroFactura
       });
+    } else if (marcarPagoAdelantado && autoValidacion.pagoValidado === true) {
+      // ✅ PAGO-CUADRE-006: el pago virtual se auto-validó al crearse (admin/
+      // tesorería, PAGO-VALIDACION-003) — hay que registrar el ingreso en caja
+      // AHORA, porque el flujo de validación manual nunca se ejecutará (la
+      // orden ya nació con pagoValidado:true y aplicarValidacionPago la
+      // rechaza por "ya fue validada").
+      await registrarIngresoEnCaja({
+        userId: req.adminId || req.user.uid,
+        ordenId: ref.id, numeroOrden, clienteNombre,
+        monto: Math.round(total), formaPago,
+        usuarioEmail: req.user.email, numeroFactura
+      }).catch(e => console.error('Caja (virtual auto-validado al crear):', e));
     }
 
     // ── CxC AUTOMÁTICA al crear orden a crédito (cualquier flujo) ─────────────
