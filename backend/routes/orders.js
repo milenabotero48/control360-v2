@@ -632,31 +632,42 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
       return { tipo: 'sin_caja', pendiente: true, mensaje: 'Pago registrado SIN caja asignada — asígnalo a una caja desde el módulo Caja' };
     }
 
-    // ── ✅ CANDADO-MONTO-001: CANDADO POR MONTO (transacción atómica) ──────────
+    // ── ✅ CANDADO-MONTO-001 + PAGO-CUADRE-007: TODO ATÓMICO EN UNA SOLA TX ────
     // ANTES el candado era un booleano (dineroEnCaja sí/no). Con abonos
     // parciales el booleano no alcanza: hay que resetearlo para dejar entrar
     // el siguiente abono, y cada reset reabría la puerta a duplicados (caso
     // real OS-0475: $68.000 en caja contra un total de $34.000).
-    // AHORA la orden lleva un ACUMULADOR `ingresadoCaja`: la transacción
-    // reserva el cupo disponible (total − ya ingresado) y NUNCA deja entrar
-    // a caja más que el total de la orden, venga el ingreso por la ruta que
-    // venga (pago en Órdenes, CxC, cobranza, cuadre, avanzar estado).
-    // El booleano dineroEnCaja se mantiene por compatibilidad: se enciende
-    // solo cuando el total completo ya está en caja.
+    // La orden lleva un ACUMULADOR `ingresadoCaja`: la transacción reserva el
+    // cupo disponible (total − ya ingresado) y NUNCA deja entrar a caja más
+    // que el total de la orden, venga el ingreso por la ruta que venga (pago
+    // en Órdenes, CxC, cobranza, cuadre, avanzar estado). El booleano
+    // dineroEnCaja se mantiene por compatibilidad: se enciende solo cuando el
+    // total completo ya está en caja.
     //
-    // La caja destino se valida ANTES del candado: si no existe, se aborta
-    // sin consumir cupo (si no, un cupo reservado sin dinero real bloquearía
-    // ingresos legítimos futuros de la orden).
+    // ✅ PAGO-CUADRE-007: antes, el candado (update de la orden) corría en su
+    // propia transacción y el movimiento + el saldo de la caja se escribían
+    // DESPUÉS, fuera de ella. Si el proceso moría justo entre medio (deploy,
+    // timeout, excepción), la orden quedaba marcada "dinero ya en caja" sin
+    // movimiento real ni saldo actualizado — dinero fantasma invisible en el
+    // cuadre (caso real: 9 órdenes de julio 2026). AHORA las tres escrituras
+    // (candado en la orden, saldo de la caja, movimiento) viven en la MISMA
+    // transacción: o se aplican las tres, o ninguna. Todas las lecturas
+    // (caja, orden) van primero, como exige Firestore.
     const cajaRef = db.collection('cajas').doc(cajaId);
-    const cajaDoc = await cajaRef.get();
-    if (!cajaDoc.exists) return { tipo: 'error', mensaje: 'Caja no encontrada' };
+    const ordenRef = ordenId ? db.collection('orders').doc(ordenId) : null;
 
-    if (ordenId) {
-      const ordenRef = db.collection('orders').doc(ordenId);
-      const candado = await db.runTransaction(async (tx) => {
-        const snap = await tx.get(ordenRef);
-        if (!snap.exists) return { permitido: true, montoPermitido: monto };
-        const o = snap.data();
+    const resultado = await db.runTransaction(async (tx) => {
+      // ── Lecturas primero ──────────────────────────────────────────────
+      const cajaSnap = await tx.get(cajaRef);
+      if (!cajaSnap.exists) return { tipo: 'error', mensaje: 'Caja no encontrada' };
+
+      const ordenSnap = ordenRef ? await tx.get(ordenRef) : null;
+
+      // ── Candado por monto (usa lo leído arriba, sin lecturas nuevas) ───
+      let montoFinal = monto;
+      let recorte = null;
+      if (ordenSnap && ordenSnap.exists) {
+        const o = ordenSnap.data();
         const totalOrden = Math.round(Number(o.total) || 0);
 
         // Acumulado ya ingresado a caja por esta orden.
@@ -670,12 +681,16 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
 
         const cupo = Math.max(0, totalOrden - ingresadoPrevio);
         if (cupo <= 0) {
-          return { permitido: false, ingresadoPrevio, totalOrden };
+          return {
+            tipo: 'duplicado',
+            mensaje: `El dinero de esta orden ya está completo en caja ($${ingresadoPrevio.toLocaleString('es-CO')} de $${totalOrden.toLocaleString('es-CO')}) — no se duplicó`
+          };
         }
 
         // Nunca entra más que el cupo disponible (recorta excesos).
-        const montoPermitido = Math.min(monto, cupo);
-        const nuevoIngresado = ingresadoPrevio + montoPermitido;
+        montoFinal = Math.min(monto, cupo);
+        if (montoFinal < monto) recorte = { pedido: monto, permitido: montoFinal };
+        const nuevoIngresado = ingresadoPrevio + montoFinal;
         const quedoCompleto = nuevoIngresado >= totalOrden - 1;
         tx.update(ordenRef, {
           ingresadoCaja: nuevoIngresado,
@@ -686,36 +701,38 @@ const registrarIngresoEnCaja = async ({ userId, ordenId, numeroOrden, clienteNom
           // (completo) o queda saldo cobrable por las vías normales (parcial).
           dineroEstado: quedoCompleto ? 'en_caja' : 'pendiente'
         });
-        return { permitido: true, montoPermitido, ingresadoPrevio, totalOrden };
+      }
+      // Si ordenId no existe (orden borrada) el comportamiento previo dejaba
+      // pasar el monto completo sin tocar ninguna orden — se conserva igual.
+
+      // ── Escrituras: saldo de caja + movimiento (misma transacción) ─────
+      const saldoActual = Number(cajaSnap.data().saldo) || 0;
+      tx.update(cajaRef, {
+        saldo: saldoActual + montoFinal,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
       });
 
-      if (!candado.permitido) {
-        return {
-          tipo: 'duplicado',
-          mensaje: `El dinero de esta orden ya está completo en caja ($${(candado.ingresadoPrevio || 0).toLocaleString('es-CO')} de $${(candado.totalOrden || 0).toLocaleString('es-CO')}) — no se duplicó`
-        };
-      }
-      if (candado.montoPermitido < monto) {
-        console.warn(`CANDADO-MONTO-001: ingreso recortado en ${numeroOrden} — se pidió $${monto.toLocaleString('es-CO')} pero el cupo era $${candado.montoPermitido.toLocaleString('es-CO')}`);
-      }
-      monto = candado.montoPermitido;
+      const movRef = db.collection('movimientos').doc();
+      tx.set(movRef, {
+        userId, cajaId, tipo: 'ingreso',
+        concepto: `Pago ${numeroOrden} — ${clienteNombre}`,
+        monto: montoFinal, referencia: numeroOrden, ordenId, formaPago,
+        creadoPor: usuarioEmail,
+        createdAt: fechaContableTs || admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      return { tipo: 'caja', cajaId, monto: montoFinal, nuevoSaldo: saldoActual + montoFinal, recorte };
+    });
+
+    if (resultado.tipo === 'error' || resultado.tipo === 'duplicado') {
+      return resultado;
     }
 
-    const saldoActual = Number(cajaDoc.data().saldo) || 0;
-    await cajaRef.update({
-      saldo: saldoActual + monto,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp()
-    });
+    if (resultado.recorte) {
+      console.warn(`CANDADO-MONTO-001: ingreso recortado en ${numeroOrden} — se pidió $${resultado.recorte.pedido.toLocaleString('es-CO')} pero el cupo era $${resultado.recorte.permitido.toLocaleString('es-CO')}`);
+    }
 
-    await db.collection('movimientos').add({
-      userId, cajaId, tipo: 'ingreso',
-      concepto: `Pago ${numeroOrden} — ${clienteNombre}`,
-      monto, referencia: numeroOrden, ordenId, formaPago,
-      creadoPor: usuarioEmail,
-      createdAt: fechaContableTs || admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    return { tipo: 'caja', cajaId, monto, nuevoSaldo: saldoActual + monto };
+    return { tipo: 'caja', cajaId: resultado.cajaId, monto: resultado.monto, nuevoSaldo: resultado.nuevoSaldo };
   } catch (e) {
     console.error('Error registrando ingreso en caja:', e);
     return { tipo: 'error', mensaje: e.message };
