@@ -624,6 +624,33 @@ function liquidarNomina(empleado, datos = {}) {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // ✅ NOMINA-BONO-001 — Bonificación no salarial (override fijo de la ficha)
+  // ───────────────────────────────────────────────────────────────────────
+  // Mismo patrón que auxilioTransporteManual: un valor fijo pactado por
+  // escrito con el empleado, que se persiste en la ficha y se suma acá.
+  // Es NO salarial (esSalarial: false) por definición del concepto — por eso
+  // NO entra a `baseSalarial` (línea de abajo, filtro `d.esSalarial`), que es
+  // la base que alimenta el IBC de seguridad social y el FSP en este mismo
+  // liquidarNomina. Tampoco se pasa como `devengadoAdicional` a
+  // calcularProvisionMensual, así que no afecta la provisión de prestaciones
+  // sociales (esa función no lee `otrosDevengados` ni `devengados` en absoluto,
+  // solo `opciones.devengadoAdicional` — confirmado leyendo su cuerpo).
+  // Si el body también trae este concepto en `datos.otrosDevengados`, se
+  // sumará por separado (no se deduplica): es responsabilidad del suscriptor
+  // no cargarlo dos veces.
+  // ═══════════════════════════════════════════════════════════════════════
+  const bonoFicha = Number(empleado?.bonificacionNoSalarial) || 0;
+  if (bonoFicha > 0) {
+    devengados.push({
+      concepto: 'Bonificación no salarial',
+      clave: 'bonificacion_no_salarial',
+      etiqueta: 'Bonificación no salarial',
+      valor: bonoFicha,
+      esSalarial: false
+    });
+  }
+
   // Otros devengados libres (comisiones, bonificaciones)
   for (const otro of (datos.otrosDevengados || [])) {
     const v = Number(otro.valor) || 0;

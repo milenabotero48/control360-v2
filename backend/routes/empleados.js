@@ -138,6 +138,7 @@ router.post('/', async (req, res) => {
     const {
       nombre, documento, tipoDocumento, cargo, tipoContrato, salario,
       fechaInicio, fechaFin, claseRiesgoARL, tarifaARLPersonalizada, auxilioTransporteManual,
+      bonificacionNoSalarial,
       eps, fondoPension, fondoCesantias, caja, email, telefono, notas
     } = req.body;
 
@@ -196,6 +197,8 @@ router.post('/', async (req, res) => {
         ? null : Number(tarifaARLPersonalizada),
       auxilioTransporteManual: auxilioTransporteManual === '' || auxilioTransporteManual === undefined || auxilioTransporteManual === null
         ? null : Number(auxilioTransporteManual),
+      bonificacionNoSalarial: bonificacionNoSalarial === '' || bonificacionNoSalarial === undefined || bonificacionNoSalarial === null
+        ? null : Number(bonificacionNoSalarial),
       eps: (eps || '').trim(),
       fondoPension: (fondoPension || '').trim(),
       fondoCesantias: (fondoCesantias || '').trim(),
@@ -309,6 +312,10 @@ router.put('/:id', async (req, res) => {
     if (b.auxilioTransporteManual !== undefined) {
       update.auxilioTransporteManual = (b.auxilioTransporteManual === '' || b.auxilioTransporteManual === null)
         ? null : Number(b.auxilioTransporteManual);
+    }
+    if (b.bonificacionNoSalarial !== undefined) {
+      update.bonificacionNoSalarial = (b.bonificacionNoSalarial === '' || b.bonificacionNoSalarial === null)
+        ? null : Number(b.bonificacionNoSalarial);
     }
     for (const k of ['eps', 'fondoPension', 'fondoCesantias', 'caja', 'email', 'telefono', 'notas']) {
       if (b[k] !== undefined) update[k] = String(b[k]).trim();

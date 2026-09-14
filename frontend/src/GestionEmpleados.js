@@ -48,6 +48,7 @@ function ModalEmpleado({ empleado, config, onGuardar, onCerrar }) {
     tipoContrato: 'indefinido', salario: '',
     fechaInicio: new Date().toISOString().slice(0, 10), fechaFin: '',
     claseRiesgoARL: 'III', tarifaARLPersonalizada: '', auxilioTransporteManual: '',
+    bonificacionNoSalarial: '',
     eps: '', fondoPension: '', fondoCesantias: '', caja: '',
     email: '', telefono: '', notas: '',
     ...(empleado || {})
@@ -330,6 +331,16 @@ function ModalEmpleado({ empleado, config, onGuardar, onCerrar }) {
                   </div>
                 </div>
               )}
+              <div style={S.field}>
+                <label style={S.label}>Bonificación no salarial (quincenal)</label>
+                <input type="number" style={S.input} value={form.bonificacionNoSalarial ?? ''}
+                  onChange={e => set('bonificacionNoSalarial', e.target.value)}
+                  placeholder="0" />
+                <div style={{ fontSize: 10.5, color: '#94a3b8', marginTop: 3 }}>
+                  Se suma al neto a pagar en cada comprobante. No afecta seguridad social ni prestaciones.
+                  Debe estar pactada por escrito con el empleado.
+                </div>
+              </div>
             </div>
           )}
 
