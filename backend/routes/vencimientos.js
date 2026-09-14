@@ -473,12 +473,31 @@ router.get('/resumen', async (req, res) => {
 // que una proyección incompleta — el gerente tiene que saber qué parte de su
 // base todavía no está valorizada.
 // ═════════════════════════════════════════════════════════════════════════════
+// ── ✅ VENC-KPI-003 (2026-09-14) — Navegación por mes ────────────────────────
+// Antes este endpoint solo sabía contestar por el mes en curso, así que el
+// panel no servía para cerrar un mes: al día 2 ya no había forma de ver cómo
+// terminó el anterior sin leer la tabla comparativa de reojo.
+//
+// Ahora acepta `?mes=YYYY-MM` (opcional). Es un cambio BARATO: la base ya se
+// carga completa en memoria y se agrega por mes; mover el corte no agrega ni
+// una lectura de Firestore. Sin el parámetro responde exactamente igual que
+// antes — retrocompatible.
+//
+// Qué se mueve con el mes: mesActual, histórico, proyección, corte por empresa
+// y top de equipos. Qué NO: `vencidos`, que es una foto de HOY (la plata que
+// se está yendo ahora mismo) y no del mes que se esté mirando.
 router.get('/estadisticas', async (req, res) => {
   try {
     const adminId = getAdminId(req);
     const filas = await cargarTodos(adminId);
     const hoy = hoyColombia();
     const mesHoy = hoy.slice(0, 7);
+
+    // Mes de corte. Se valida el formato para no dejar que un query raro
+    // rompa las comparaciones de string (que son las que ordenan todo acá).
+    const mesPedido = String(req.query.mes || '').trim();
+    const mesSel = /^\d{4}-(0[1-9]|1[0-2])$/.test(mesPedido) ? mesPedido : mesHoy;
+    const esMesEnCurso = mesSel === mesHoy;
 
     // ── 1. Lista de precios del suscriptor ──────────────────────────────────
     const prodSnap = await db.collection('products').where('adminId', '==', adminId).get();
@@ -551,8 +570,8 @@ router.get('/estadisticas', async (req, res) => {
       if (regreso(v)) { m.clientesRegresaron.add(cli); m.ventaRealizada += val.valor; }
       if (perdido(v)) m.clientesPerdidos.add(cli);
 
-      // Corte por empresa facturadora (solo del mes en curso hacia adelante)
-      if (k >= mesHoy) {
+      // Corte por empresa facturadora (del mes consultado hacia adelante)
+      if (k >= mesSel) {
         const emp = v.empresaNombre || 'Sin empresa asignada';
         if (!porEmpresa.has(emp)) porEmpresa.set(emp, { empresa: emp, equipos: 0, clientes: new Set(), venta: 0 });
         const e = porEmpresa.get(emp);
@@ -560,7 +579,7 @@ router.get('/estadisticas', async (req, res) => {
       }
 
       // Qué se recarga más — sirve para planear inventario
-      if (k === mesHoy) {
+      if (k === mesSel) {
         const nombreEq = v.descripcionEquipo || 'Sin especificar';
         if (!porEquipo.has(nombreEq)) porEquipo.set(nombreEq, { equipo: nombreEq, cantidad: 0, valor: 0 });
         const pe = porEquipo.get(nombreEq);
@@ -584,16 +603,19 @@ router.get('/estadisticas', async (req, res) => {
     const todosLosMeses = [...meses.values()].map(serializarMes).sort((a, b) => a.mes.localeCompare(b.mes));
 
     // ── 3. Recortes que consume la pantalla ─────────────────────────────────
-    const idxHoy = todosLosMeses.findIndex(m => m.mes === mesHoy);
-    const mesActual = todosLosMeses.find(m => m.mes === mesHoy) || {
-      mes: mesHoy, clientesEsperados: 0, clientesRegresaron: 0, clientesPerdidos: 0,
+    const idxSel = todosLosMeses.findIndex(m => m.mes === mesSel);
+    // `mesActual` conserva el nombre por retrocompatibilidad, pero representa
+    // el MES CONSULTADO (que por defecto sigue siendo el mes en curso).
+    const mesActual = todosLosMeses.find(m => m.mes === mesSel) || {
+      mes: mesSel, clientesEsperados: 0, clientesRegresaron: 0, clientesPerdidos: 0,
       tasaRetorno: 0, equipos: 0, cantidadEquipos: 0, ventaProyectada: 0, ventaRealizada: 0, equiposSinPrecio: 0,
     };
 
-    // Historia de retorno: 12 meses cerrados hacia atrás (sin incluir el actual,
-    // que todavía está corriendo y siempre se vería artificialmente bajo).
-    const historico = todosLosMeses.filter(m => m.mes < mesHoy).slice(-12);
-    const proyeccion = todosLosMeses.filter(m => m.mes >= mesHoy).slice(0, 6);
+    // Historia de retorno: 12 meses cerrados hacia atrás desde el mes
+    // consultado (sin incluirlo: si es el mes en curso todavía está corriendo
+    // y se vería artificialmente bajo).
+    const historico = todosLosMeses.filter(m => m.mes < mesSel).slice(-12);
+    const proyeccion = todosLosMeses.filter(m => m.mes >= mesSel).slice(0, 6);
 
     // Vencidos sin atender: el dinero que se está yendo hoy.
     const vencidosAbiertos = filas.filter(v => v.estado === 'VENCIDO');
@@ -607,10 +629,21 @@ router.get('/estadisticas', async (req, res) => {
       ? Math.round((ultimos6.reduce((s, m) => s + m.tasaRetorno, 0) / ultimos6.length) * 10) / 10
       : 0;
 
+    // Rango navegable: el primer y último mes con datos reales. Lo usa el panel
+    // para no dejar avanzar hacia meses vacíos ni salirse de la base cargada.
+    const rango = todosLosMeses.length
+      ? { primerMes: todosLosMeses[0].mes, ultimoMes: todosLosMeses[todosLosMeses.length - 1].mes }
+      : { primerMes: mesHoy, ultimoMes: mesHoy };
+
     return res.json({
       generadoEn: hoy,
+      // ✅ VENC-KPI-003
+      mesConsultado: mesSel,
+      mesEnCurso: mesHoy,
+      esMesEnCurso,
+      rango,
       mesActual,
-      mesAnterior: idxHoy > 0 ? todosLosMeses[idxHoy - 1] : null,
+      mesAnterior: idxSel > 0 ? todosLosMeses[idxSel - 1] : null,
       retornoPromedio6m: retornoPromedio,
       historico,
       proyeccion,

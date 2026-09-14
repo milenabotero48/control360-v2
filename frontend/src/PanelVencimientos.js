@@ -51,6 +51,30 @@ const etiquetaMes = (k) => {
   return `${MESES_CORTO[Number(m) - 1] || m} ${String(y).slice(2)}`;
 };
 
+// ── ✅ VENC-KPI-003 — Navegación por mes ──────────────────────────────────
+// Mismo patrón que el panel de Operación del Dashboard: el mes se maneja como
+// string 'YYYY-MM' y se mueve en UTC para que un cambio de mes en la frontera
+// de medianoche no salte dos meses por la zona horaria.
+const MESES_LARGO = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+
+const etiquetaMesLargo = (k) => {
+  if (!k) return '';
+  const [y, m] = k.split('-');
+  const nombre = MESES_LARGO[Number(m) - 1] || m;
+  return `${nombre.charAt(0).toUpperCase()}${nombre.slice(1)} ${y}`;
+};
+
+const mesActualCO = () => new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Bogota', year: 'numeric', month: '2-digit',
+}).format(new Date()).slice(0, 7);
+
+const moverMes = (mes, delta) => {
+  const [y, m] = mes.split('-').map(Number);
+  const d = new Date(Date.UTC(y, m - 1 + delta, 1));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+};
+
 // ── Paleta ────────────────────────────────────────────────────────────────
 const C = {
   tinta: '#1a1a2e',
@@ -89,6 +113,28 @@ const S = {
     display: 'inline-block', background: bg, color, fontSize: 11, fontWeight: 700,
     padding: '3px 9px', borderRadius: 999,
   }),
+  // ✅ VENC-KPI-003 — navegador de mes
+  nav: {
+    display: 'flex', alignItems: 'center', gap: 4, background: '#fff',
+    border: `1px solid ${C.borde}`, borderRadius: 10, padding: 4,
+  },
+  navBtn: {
+    border: 'none', background: '#f4f2f9', borderRadius: 8, width: 32, height: 32,
+    cursor: 'pointer', fontSize: 18, fontWeight: 700, color: C.violeta, lineHeight: 1,
+  },
+  navMes: {
+    fontWeight: 800, fontSize: 13, color: C.tinta, minWidth: 116, textAlign: 'center',
+    padding: '0 4px', whiteSpace: 'nowrap',
+  },
+  navHoy: {
+    background: 'none', border: 'none', padding: 0, color: C.violeta,
+    fontSize: 12, fontWeight: 700, cursor: 'pointer', textDecoration: 'underline',
+  },
+  cinta: {
+    display: 'flex', gap: 10, alignItems: 'center', background: C.violetaSuave,
+    border: `1px solid rgba(124,58,237,0.22)`, borderRadius: 12, padding: '10px 14px',
+    fontSize: 12.5, color: '#5b21b6', lineHeight: 1.55, flexWrap: 'wrap',
+  },
   aviso: {
     display: 'flex', gap: 10, alignItems: 'flex-start', background: '#fffbeb',
     border: '1px solid #fde68a', borderRadius: 12, padding: '11px 14px',
@@ -264,7 +310,7 @@ const BarrasHorizontal = ({ items, etiqueta, valor, sufijo, color = C.violeta })
 // Un gerente que ve esa columna en rojo entiende el problema sin que nadie se
 // lo explique.
 // ═══════════════════════════════════════════════════════════════════════════
-const TablaComparativa = ({ meses, mesActualKey }) => {
+const TablaComparativa = ({ meses, mesActualKey, enCurso = true }) => {
   if (!meses?.length) return <p style={S.cardPie}>Todavía no hay meses para comparar.</p>;
 
   const tdBase = { padding: '10px 10px', fontSize: 12.5, borderBottom: `1px solid ${C.borde}`, whiteSpace: 'nowrap' };
@@ -296,7 +342,11 @@ const TablaComparativa = ({ meses, mesActualKey }) => {
               <tr key={m.mes} style={{ background: esActual ? 'rgba(124,58,237,0.045)' : 'transparent' }}>
                 <td style={{ ...tdBase, fontWeight: esActual ? 800 : 700, color: esActual ? C.violeta : C.tinta }}>
                   {etiquetaMes(m.mes)}
-                  {esActual && <span style={{ ...S.chip(C.violetaSuave, C.violeta), marginLeft: 7, fontSize: 10 }}>en curso</span>}
+                  {esActual && (
+                    <span style={{ ...S.chip(C.violetaSuave, C.violeta), marginLeft: 7, fontSize: 10 }}>
+                      {enCurso ? 'en curso' : 'viendo'}
+                    </span>
+                  )}
                 </td>
                 <td style={{ ...tdBase, textAlign: 'right', color: C.tinta }}>{m.clientesEsperados.toLocaleString('es-CO')}</td>
                 <td style={{ ...tdBase, textAlign: 'right', fontWeight: 700, color: C.verde }}>{m.clientesRegresaron.toLocaleString('es-CO')}</td>
@@ -331,11 +381,14 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState(null);
   const [abierto, setAbierto] = useState(true);
+  // ✅ VENC-KPI-003 — mes que se está mirando. Arranca en el mes en curso, así
+  // que quien no navega ve exactamente lo mismo que antes.
+  const [mes, setMes] = useState(mesActualCO);
 
-  const cargar = useCallback(async () => {
+  const cargar = useCallback(async (m) => {
     setCargando(true); setError(null);
     try {
-      const r = await fetch(`${API}/vencimientos/estadisticas`, { headers: authHeaders() });
+      const r = await fetch(`${API}/vencimientos/estadisticas?mes=${m}`, { headers: authHeaders() });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'No se pudo cargar el panel');
       setDatos(await r.json());
     } catch (e) {
@@ -345,16 +398,19 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
     }
   }, []);
 
-  useEffect(() => { cargar(); }, [cargar, recargar]);
+  useEffect(() => { cargar(mes); }, [cargar, mes, recargar]);
 
-  if (cargando) {
+  // Solo la PRIMERA carga muestra el cartel de espera. Al cambiar de mes se
+  // mantiene en pantalla el mes anterior atenuado: si el panel se vaciara en
+  // cada clic, navegar seis meses sería seis parpadeos.
+  if (cargando && !datos) {
     return (
       <div style={{ ...S.panel, textAlign: 'center', color: C.gris, fontSize: 13, padding: '26px 20px' }}>
         Calculando indicadores del mes…
       </div>
     );
   }
-  if (error) {
+  if (error && !datos) {
     return (
       <div style={{ ...S.panel, borderColor: '#fecaca', background: '#fef2f2', color: '#991b1b', fontSize: 13 }}>
         No se pudieron cargar los indicadores: {error}
@@ -370,41 +426,97 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
   const diferencia = Math.round((mesActual.tasaRetorno - retornoPromedio6m) * 10) / 10;
   const mejorQuePromedio = diferencia >= 0;
 
+  // ✅ VENC-KPI-003 — el mes consultado manda sobre los textos.
+  // Un mes cerrado NO se lee igual que el mes en curso: "falta por facturar"
+  // en septiembre es una tarea pendiente; en abril es plata que ya se perdió.
+  // Decirlo con las mismas palabras sería mentir por comodidad.
+  const enCurso = datos.esMesEnCurso !== false;
+  const mesVisto = datos.mesConsultado || mesActual.mes;
+  const hoyKey = datos.mesEnCurso || mesActualCO();
+  const primerMes = datos.rango?.primerMes || mesVisto;
+  const hayAnterior = moverMes(mesVisto, -1) >= primerMes;
+  const haySiguiente = mesVisto < hoyKey;
+
   return (
     <div style={S.wrap}>
       {/* ── Encabezado plegable: un gerente lo quiere ver, una vendedora que
              solo va a llamar prefiere el espacio para la lista. ─────────── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <div>
-          <h3 style={{ ...S.panelTitulo, fontSize: 16 }}>📊 Inteligencia del mes</h3>
+          <h3 style={{ ...S.panelTitulo, fontSize: 16 }}>
+            📊 {enCurso ? 'Inteligencia del mes' : 'Inteligencia de un mes cerrado'}
+          </h3>
           <p style={{ ...S.panelSub, margin: '2px 0 0' }}>
-            {etiquetaMes(mesActual.mes)} · calculado sobre tu base completa y tu lista de precios
+            {etiquetaMesLargo(mesVisto)} · calculado sobre tu base completa y tu lista de precios
           </p>
         </div>
-        <button onClick={() => setAbierto(!abierto)} style={{
-          background: '#fff', border: `1px solid ${C.borde}`, borderRadius: 9,
-          padding: '7px 14px', fontSize: 12.5, fontWeight: 700, color: C.violeta, cursor: 'pointer',
-        }}>
-          {abierto ? '▲ Ocultar panel' : '▼ Ver panel'}
-        </button>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          {/* ✅ VENC-KPI-003 — navegador de meses (mismo patrón del Dashboard) */}
+          {abierto && (
+            <div style={S.nav}>
+              <button
+                style={{ ...S.navBtn, opacity: hayAnterior ? 1 : 0.3, cursor: hayAnterior ? 'pointer' : 'default' }}
+                disabled={!hayAnterior}
+                onClick={() => setMes(moverMes(mesVisto, -1))}
+                title="Mes anterior" aria-label="Mes anterior">‹</button>
+              <span style={S.navMes}>{etiquetaMesLargo(mesVisto)}</span>
+              <button
+                style={{ ...S.navBtn, opacity: haySiguiente ? 1 : 0.3, cursor: haySiguiente ? 'pointer' : 'default' }}
+                disabled={!haySiguiente}
+                onClick={() => setMes(moverMes(mesVisto, 1))}
+                title="Mes siguiente" aria-label="Mes siguiente">›</button>
+            </div>
+          )}
+          <button onClick={() => setAbierto(!abierto)} style={{
+            background: '#fff', border: `1px solid ${C.borde}`, borderRadius: 9,
+            padding: '7px 14px', fontSize: 12.5, fontWeight: 700, color: C.violeta, cursor: 'pointer',
+          }}>
+            {abierto ? '▲ Ocultar panel' : '▼ Ver panel'}
+          </button>
+        </div>
       </div>
 
       {abierto && (
-        <>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, opacity: cargando ? 0.55 : 1, transition: 'opacity .18s' }}>
+          {/* Aviso de contexto: sin esto, quien deja el panel en un mes viejo y
+              vuelve mañana lee cifras de archivo creyendo que son de hoy. */}
+          {!enCurso && (
+            <div style={S.cinta}>
+              <span style={{ fontSize: 15 }}>🗄️</span>
+              <span>
+                Estás viendo <strong>{etiquetaMesLargo(mesVisto)}</strong>, un mes ya cerrado. Estas cifras son
+                resultado, no proyección: lo que no se facturó en ese mes ya no se recupera ahí.
+              </span>
+              <button onClick={() => setMes(hoyKey)} style={S.navHoy}>Volver al mes en curso</button>
+            </div>
+          )}
+
+          {error && (
+            <div style={{ ...S.aviso, background: '#fef2f2', borderColor: '#fecaca', color: '#991b1b' }}>
+              <span style={{ fontSize: 15 }}>⚠️</span>
+              <span>No se pudo actualizar el panel: {error}. Se mantienen las últimas cifras cargadas.</span>
+            </div>
+          )}
+
           {/* ── KPIs ───────────────────────────────────────────────────── */}
           <div style={S.gridKpi}>
             <Kpi
-              titulo="Clientes esperados este mes"
+              titulo={enCurso ? 'Clientes esperados este mes' : 'Clientes que vencían'}
               cifra={mesActual.clientesEsperados.toLocaleString('es-CO')}
               acento={C.violeta}
-              pie={<>{mesActual.cantidadEquipos.toLocaleString('es-CO')} equipos por recargar · <strong>{pendientes}</strong> sin atender aún</>}
+              pie={enCurso
+                ? <>{mesActual.cantidadEquipos.toLocaleString('es-CO')} equipos por recargar · <strong>{pendientes}</strong> sin atender aún</>
+                : <>{mesActual.cantidadEquipos.toLocaleString('es-CO')} equipos · <strong>{pendientes}</strong> nunca volvieron</>}
             />
             <Kpi
-              titulo="Venta esperada del mes"
+              titulo={enCurso ? 'Venta esperada del mes' : 'Venta que estaba disponible'}
               cifra={fmtCorto(mesActual.ventaProyectada)}
-              acento={C.verde}
-              fondo="linear-gradient(180deg,#ffffff,#f6fffb)"
-              pie={<>Ya facturado <strong>{fmtCorto(mesActual.ventaRealizada)}</strong> · falta {fmtCorto(porCobrar)}</>}
+              acento={enCurso ? C.verde : (porCobrar > 0 ? C.ambar : C.verde)}
+              fondo={enCurso ? 'linear-gradient(180deg,#ffffff,#f6fffb)' : '#fff'}
+              pie={enCurso
+                ? <>Ya facturado <strong>{fmtCorto(mesActual.ventaRealizada)}</strong> · falta {fmtCorto(porCobrar)}</>
+                : <>Facturado <strong>{fmtCorto(mesActual.ventaRealizada)}</strong> · quedó sin facturar {fmtCorto(porCobrar)}</>}
             />
             <Kpi
               titulo="Tasa de retorno"
@@ -413,10 +525,13 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
               chip={<span style={S.chip(mejorQuePromedio ? C.verdeSuave : C.ambarSuave, mejorQuePromedio ? '#047857' : '#b45309')}>
                 {mejorQuePromedio ? '▲' : '▼'} {Math.abs(diferencia)} pts
               </span>}
-              pie={<>{mesActual.clientesRegresaron} de {mesActual.clientesEsperados} ya volvieron · promedio 6 meses: {retornoPromedio6m}%</>}
+              pie={<>{mesActual.clientesRegresaron} de {mesActual.clientesEsperados} {enCurso ? 'ya volvieron' : 'volvieron'} · promedio de los 6 meses previos: {retornoPromedio6m}%</>}
             />
+            {/* Esta tarjeta NO se mueve con el mes: es la plata que se está
+                yendo HOY. Mostrarla como si fuera del mes consultado sería el
+                error más caro del panel. */}
             <Kpi
-              titulo="Vencidos sin atender"
+              titulo="Vencidos sin atender (a hoy)"
               cifra={fmtCorto(vencidos.valor)}
               acento={C.rojo}
               fondo="linear-gradient(180deg,#ffffff,#fff7f7)"
@@ -442,7 +557,7 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
             <div style={S.aviso}>
               <span style={{ fontSize: 15 }}>⚠️</span>
               <span>
-                <strong>{mesActual.equiposSinPrecio} equipos de este mes no tienen precio</strong> porque su
+                <strong>{mesActual.equiposSinPrecio} equipos de {etiquetaMesLargo(mesVisto)} no tienen precio</strong> porque su
                 descripción no coincide con ningún producto de tu lista. No se estimaron con un promedio:
                 la venta esperada real es <em>mayor</em> a la que ves. Crea esos productos en{' '}
                 <strong>Productos</strong> o corrige la descripción del equipo para que la proyección quede completa.
@@ -452,25 +567,31 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
 
           {/* ── Gráficas ──────────────────────────────────────────────────── */}
           <div style={S.panel}>
-            <h4 style={S.panelTitulo}>Venta esperada — próximos 6 meses</h4>
+            <h4 style={S.panelTitulo}>
+              Venta esperada — 6 meses desde {etiquetaMesLargo(mesVisto)}
+            </h4>
             <p style={S.panelSub}>
               Cada barra suma los equipos que vencen ese mes valorizados con el precio al público de tu
               lista de productos. Es la caja que deberías facturar si todos los clientes regresan.
+              {!enCurso && ' Desde un mes cerrado, la primera barra ya es historia, no pronóstico.'}
             </p>
-            <GraficaProyeccion datos={proyeccion} mesActual={mesActual.mes} />
+            <GraficaProyeccion datos={proyeccion} mesActual={mesVisto} />
           </div>
 
           {/* ✅ VENC-KPI-002 — Balance de los últimos 6 meses cerrados + el
               mes en curso, para juzgar la tendencia sin navegar mes a mes. */}
           <div style={S.panel}>
-            <h4 style={S.panelTitulo}>Balance de los últimos 6 meses</h4>
+            <h4 style={S.panelTitulo}>
+              Balance de los 6 meses previos a {etiquetaMesLargo(mesVisto)}
+            </h4>
             <p style={S.panelSub}>
               Meses ya cerrados: no es proyección, es resultado. La última columna es la venta que estaba
               disponible y no se cerró — el costo real de no alcanzar a llamar.
             </p>
             <TablaComparativa
               meses={[...historico.slice(-6), mesActual]}
-              mesActualKey={mesActual.mes}
+              mesActualKey={mesVisto}
+              enCurso={enCurso}
             />
             {(() => {
               const cerrados = historico.slice(-6);
@@ -480,7 +601,7 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
                 <div style={{ ...S.aviso, background: '#fef2f2', borderColor: '#fecaca', color: '#991b1b', marginTop: 14 }}>
                   <span style={{ fontSize: 15 }}>💸</span>
                   <span>
-                    En los últimos {cerrados.length} meses quedaron <strong>{fmtCorto(perdidoTotal)}</strong> sin
+                    En los {cerrados.length} meses previos a {etiquetaMesLargo(mesVisto)} quedaron <strong>{fmtCorto(perdidoTotal)}</strong> sin
                     facturar de clientes que ya tenías y a los que solo había que llamar. Recuperar aunque sea
                     una parte cuesta menos que conseguir clientes nuevos por el mismo valor.
                   </span>
@@ -493,7 +614,8 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
             <h4 style={S.panelTitulo}>¿Cuántos clientes están regresando?</h4>
             <p style={S.panelSub}>
               De los clientes que vencían cada mes, qué porcentaje volvió a recargar. La línea punteada es tu
-              promedio de los últimos 6 meses: por debajo de ella, el mes va perdiendo clientes.
+              promedio de los 6 meses previos a {etiquetaMesLargo(mesVisto)}: por debajo de ella, el mes va
+              perdiendo clientes.
             </p>
             <GraficaRetorno datos={historico} promedio={retornoPromedio6m} />
           </div>
@@ -501,7 +623,9 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
           <div style={S.fila2}>
             <div style={S.panel}>
               <h4 style={S.panelTitulo}>Por empresa que factura</h4>
-              <p style={S.panelSub}>De este mes en adelante — sirve para proyectar por razón social.</p>
+              <p style={S.panelSub}>
+                Desde {etiquetaMesLargo(mesVisto)} en adelante — sirve para proyectar por razón social.
+              </p>
               <BarrasHorizontal
                 items={empresas.slice(0, 6)}
                 etiqueta={(e) => e.empresa}
@@ -511,8 +635,14 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
             </div>
 
             <div style={S.panel}>
-              <h4 style={S.panelTitulo}>Qué se recarga más este mes</h4>
-              <p style={S.panelSub}>Para tener el inventario listo antes de que empiecen a llamar.</p>
+              <h4 style={S.panelTitulo}>
+                {enCurso ? 'Qué se recarga más este mes' : `Qué se recargaba en ${etiquetaMesLargo(mesVisto)}`}
+              </h4>
+              <p style={S.panelSub}>
+                {enCurso
+                  ? 'Para tener el inventario listo antes de que empiecen a llamar.'
+                  : 'Sirve para comparar la mezcla de equipos contra la del mes actual.'}
+              </p>
               <BarrasHorizontal
                 items={topEquipos}
                 etiqueta={(e) => e.equipo}
@@ -528,7 +658,7 @@ export default function PanelVencimientos({ recargar = 0, onVerVencidos }) {
             Un cliente cuenta como “regresó” cuando su ciclo quedó cerrado con venta: orden asociada,
             marcado como gestionado o ciclo renovado.
           </p>
-        </>
+        </div>
       )}
     </div>
   );
