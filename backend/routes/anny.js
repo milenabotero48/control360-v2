@@ -29,6 +29,12 @@
 //   pedido abierto por teléfono.
 // - ANNY-MISION-014: /test acepta `mision` para probar cobranza,
 //   taller o renovación sin esperar al cron.
+//
+// ✅ ANNY-ESCALADO-059: "Resolver" (PUT /casos/:caseId) y "Devolver a
+//   Anny" (PUT /chats/:telefono/pausa con pausar:false) ahora apagan la
+//   marca roja del chat cuando ya no le quedan casos PENDIENTE.
+//   Devolver a Anny significa que el asesor terminó: cierra los casos
+//   abiertos de ese chat (resueltoPor: 'devuelto_a_anny').
 // ============================================================
 
 const express = require('express');
@@ -491,7 +497,13 @@ router.put('/chats/:telefono/pausa', authenticate, requireAnnyActivo, async (req
       ? await annyService.reactivarAnny(adminId, telefono)
       : await annyService.pausarAnny(adminId, telefono, Number(minutos) || 30, 'pausa_manual_panel');
 
-    return res.json({ ...resultado, telefono, pausada: pausar !== false });
+    // ✅ ANNY-ESCALADO-059: devolver el chat a Anny = el asesor terminó.
+    let casosCerrados = 0;
+    if (pausar === false) {
+      casosCerrados = await annyService.cerrarCasosDeChat(adminId, telefono, 'devuelto_a_anny', 'Cerrado desde el panel: el chat se devolvió a Anny.');
+    }
+
+    return res.json({ ...resultado, telefono, pausada: pausar !== false, casosCerrados });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -813,13 +825,25 @@ router.put('/casos/:caseId', authenticate, requireAnnyActivo, async (req, res) =
     if (respuestaAdmin !== undefined) update.respuestaAdmin = respuestaAdmin;
     if (notas !== undefined) update.notas = notas;
 
-    await db.collection('casosEscaladosAnny')
+    const refCaso = db.collection('casosEscaladosAnny')
       .doc(adminId)
       .collection('casos')
-      .doc(caseId)
-      .update(update);
+      .doc(caseId);
 
-    return res.json({ ok: true });
+    await refCaso.update(update);
+
+    // ✅ ANNY-ESCALADO-059: si el chat ya no tiene casos PENDIENTE, apagar la marca roja.
+    // El caso se lee dentro del árbol del tenant (casosEscaladosAnny/{adminId}), sin IDOR.
+    let escalado = null;
+    try {
+      const casoDoc = await refCaso.get();
+      const telCaso = casoDoc.exists ? casoDoc.data().telefono : null;
+      if (telCaso) escalado = (await annyService.sincronizarEscaladoChat(adminId, telCaso)).escalado;
+    } catch (eSync) {
+      console.error('[ANNY-ESCALADO-059] Error sincronizando marca tras resolver caso:', eSync.message);
+    }
+
+    return res.json({ ok: true, escalado });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

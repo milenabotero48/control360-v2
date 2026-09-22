@@ -28,6 +28,9 @@
 //   ANNY-ETAPAS      el sistema lleva la conversación
 //   ANNY-PROMPT-V3   12 principios + ejemplos; historial real; caché
 //   ANNY-AVISO-057   razón de escalado en una línea
+//
+// ✅ ANNY-ESCALADO-059 / ANNY-INCIDENTE-061 / ANNY-INTERNO-064:
+//   exportaciones ADITIVAS (ningún nombre existente cambia).
 // ============================================================
 
 const config = require('./anny/config');
@@ -84,6 +87,11 @@ module.exports = {
   annyEstaPausada: chats.annyEstaPausada,
   reactivarAnny: chats.reactivarAnny,
   obtenerMetricasHoy: chats.obtenerMetricasHoy,
+  cerrarCasosDeChat: chats.cerrarCasosDeChat,             // ✅ ANNY-ESCALADO-059
+  sincronizarEscaladoChat: chats.sincronizarEscaladoChat, // ✅ ANNY-ESCALADO-059
+  repararMarcasEscalado: chats.repararMarcasEscalado,     // ✅ ANNY-ESCALADO-059
+  numerosDelEquipo: chats.numerosDelEquipo,               // ✅ ANNY-INTERNO-064
+  esNumeroDelEquipo: chats.esNumeroDelEquipo,             // ✅ ANNY-INTERNO-064
 
   // contexto
   buscarClienteEnBD: contexto.buscarClienteEnBD,
@@ -101,11 +109,14 @@ module.exports = {
 
   // texto / utilidades
   compromisoDeRespuesta: horario.compromisoDeRespuesta,
+  estaEnHorario: horario.estaEnHorario,                   // ✅ ANNY-SLA-060
   recortarRespuesta: texto.recortarRespuesta,
   pidePersonaHumana: texto.pidePersonaHumana,
   buscarRespuestaConfigura: texto.buscarRespuestaConfigura,
 
   // modelo
-  sugerirRespuestaEntrenamiento
+  sugerirRespuestaEntrenamiento,
+  estadoIncidente: modelo.estadoIncidente,                // ✅ ANNY-INCIDENTE-061
+  marcarAvisoIncidente: modelo.marcarAvisoIncidente       // ✅ ANNY-INCIDENTE-061
 };
 // FIN annyService.js (v3)

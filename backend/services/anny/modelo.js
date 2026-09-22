@@ -8,9 +8,20 @@
 //   - consumo por suscriptor (ANNY-CONSUMO-026), incluye tokens
 //     leídos de caché para que la factura refleje el ahorro
 //   - ante cualquier fallo devuelve una decisión segura
+//
+// ✅ ANNY-INCIDENTE-061: el error ya no es genérico.
+//   Se clasifica la causa (sin saldo, autenticación, límite,
+//   sobrecarga, API caída, conexión, solicitud, sin herramienta).
+//   Las causas de PLATAFORMA afectan a todos los tenants a la vez:
+//   abren un incidente único (memoria + annyIncidentes/plataforma).
+//   Mientras el incidente es de saldo o autenticación, se hace
+//   corto circuito (no se llama a la API) y solo cada 2 minutos se
+//   deja pasar una llamada de prueba. La primera respuesta buena
+//   cierra el incidente.
 // ============================================================
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { db } = require('../../config/firebase');
 const annyConsumo = require('../annyConsumo');
 const { MODELOS } = require('./config');
 const { TOOL_RESPONDER } = require('./prompt');
@@ -22,7 +33,7 @@ function getClaudeClient() {
   return _client;
 }
 
-const DECISION_SEGURA = () => ({
+const DECISION_SEGURA = (errorTipo = 'DESCONOCIDO', extra = {}) => ({
   respuesta: '',
   extraidos: {},
   clienteConfirma: false,
@@ -30,13 +41,126 @@ const DECISION_SEGURA = () => ({
   escalar: null,
   comprobantePago: null,
   respuestaTaller: null,
-  _error: true
+  _error: true,
+  _errorTipo: errorTipo,                                 // ANNY-INCIDENTE-061
+  _incidente: TIPOS_PLATAFORMA.includes(errorTipo),      // ANNY-INCIDENTE-061
+  ...extra
 });
+
+// ============================================================
+// ✅ ANNY-INCIDENTE-061 — clasificación e incidente de plataforma
+// ============================================================
+const TIPOS_PLATAFORMA = ['SIN_SALDO', 'AUTENTICACION', 'LIMITE', 'SOBRECARGA', 'API_CAIDA', 'CONEXION'];
+const TIPOS_CORTOCIRCUITO = ['SIN_SALDO', 'AUTENTICACION'];
+const PRUEBA_CADA_MS = 2 * 60 * 1000;
+
+const ETIQUETA_INCIDENTE = {
+  SIN_SALDO: 'Sin saldo en la consola de Anthropic',
+  AUTENTICACION: 'API key inválida o sin permisos',
+  LIMITE: 'Límite de uso de la API alcanzado',
+  SOBRECARGA: 'API de Anthropic sobrecargada',
+  API_CAIDA: 'API de Anthropic con fallas',
+  CONEXION: 'Sin conexión con la API de Anthropic'
+};
+
+function clasificarError(err) {
+  const status = Number(err?.status) || 0;
+  const msg = String(err?.message || '') + ' ' + String(err?.error?.error?.message || '');
+  const nombre = String(err?.name || err?.constructor?.name || '');
+  if (/credit balance|insufficient credit|billing/i.test(msg)) return 'SIN_SALDO';
+  if (status === 401 || status === 403) return 'AUTENTICACION';
+  if (status === 429) return 'LIMITE';
+  if (status === 529 || /overloaded/i.test(msg)) return 'SOBRECARGA';
+  if (status >= 500) return 'API_CAIDA';
+  if (!status && /connection|timeout|ECONN|ENOTFOUND|fetch failed/i.test(nombre + ' ' + msg)) return 'CONEXION';
+  if (status === 400) return 'SOLICITUD';
+  return 'DESCONOCIDO';
+}
+
+const _incidente = {
+  activo: false,
+  tipo: null,
+  desdeMs: 0,
+  ultimoFalloMs: 0,
+  ultimoIntentoMs: 0,
+  mensaje: '',
+  resueltoMs: 0,
+  avisoAperturaMs: 0,   // lo marca el vigilante SLA al avisar a SuperAdmin
+  avisoCierrePendiente: false
+};
+
+function _persistirIncidente() {
+  db.collection('annyIncidentes').doc('plataforma').set({
+    activo: _incidente.activo,
+    tipo: _incidente.tipo,
+    etiqueta: ETIQUETA_INCIDENTE[_incidente.tipo] || null,
+    desdeMs: _incidente.desdeMs,
+    ultimoFalloMs: _incidente.ultimoFalloMs,
+    resueltoMs: _incidente.resueltoMs,
+    mensaje: String(_incidente.mensaje || '').slice(0, 300),
+    updatedMs: Date.now()
+  }, { merge: true }).catch(() => {});
+}
+
+function _abrirOActualizarIncidente(tipo, mensaje) {
+  const ahora = Date.now();
+  if (!_incidente.activo) {
+    Object.assign(_incidente, {
+      activo: true, tipo, desdeMs: ahora, ultimoFalloMs: ahora, ultimoIntentoMs: ahora,
+      mensaje, resueltoMs: 0, avisoAperturaMs: 0, avisoCierrePendiente: false
+    });
+    console.error(`[ANNY-INCIDENTE-061] Incidente ABIERTO: ${tipo} — ${mensaje}`);
+    _persistirIncidente();
+    return;
+  }
+  _incidente.tipo = tipo;
+  _incidente.ultimoFalloMs = ahora;
+  _incidente.ultimoIntentoMs = ahora;
+  _incidente.mensaje = mensaje;
+}
+
+function _cerrarIncidente() {
+  if (!_incidente.activo) return;
+  const duracionMin = Math.round((Date.now() - _incidente.desdeMs) / 60000);
+  console.log(`[ANNY-INCIDENTE-061] Incidente CERRADO (${_incidente.tipo}) tras ${duracionMin} min`);
+  _incidente.activo = false;
+  _incidente.resueltoMs = Date.now();
+  // Solo se avisa el cierre si antes se avisó la apertura.
+  _incidente.avisoCierrePendiente = _incidente.avisoAperturaMs > 0;
+  _persistirIncidente();
+}
+
+// Estado para el vigilante SLA y para el panel (copia, no referencia).
+function estadoIncidente() {
+  return { ..._incidente, etiqueta: ETIQUETA_INCIDENTE[_incidente.tipo] || null };
+}
+
+function marcarAvisoIncidente(tipoAviso) {
+  if (tipoAviso === 'apertura') _incidente.avisoAperturaMs = Date.now();
+  if (tipoAviso === 'cierre') { _incidente.avisoCierrePendiente = false; _incidente.avisoAperturaMs = 0; }
+}
 
 // ------------------------------------------------------------
 // decidir({ adminId, modelo, system, messages, maxChars })
 // ------------------------------------------------------------
-async function decidir({ adminId, modelo = 'haiku', system, messages, conImagen = false }) {
+async function decidir(args) {
+  // ✅ ANNY-INCIDENTE-061: corto circuito mientras no hay saldo / key.
+  if (_incidente.activo && TIPOS_CORTOCIRCUITO.includes(_incidente.tipo)
+      && (Date.now() - _incidente.ultimoIntentoMs) < PRUEBA_CADA_MS) {
+    return DECISION_SEGURA(_incidente.tipo, { _cortocircuito: true });
+  }
+  if (_incidente.activo) _incidente.ultimoIntentoMs = Date.now();
+
+  const primera = await _decidirUnaVez(args);
+  // Un solo reintento cuando el modelo respondió sin usar la herramienta
+  // (fallo puntual). Los errores de red/429/5xx ya los reintenta el SDK.
+  if (primera._error && primera._errorTipo === 'SIN_HERRAMIENTA') {
+    return _decidirUnaVez(args);
+  }
+  return primera;
+}
+
+async function _decidirUnaVez({ adminId, modelo = 'haiku', system, messages, conImagen = false }) {
   try {
     const message = await getClaudeClient().messages.create({
       model: MODELOS[modelo] || MODELOS.haiku,
@@ -59,10 +183,13 @@ async function decidir({ adminId, modelo = 'haiku', system, messages, conImagen 
       }
     } catch (e) { /* el contador nunca tumba la conversación */ }
 
+    // La API respondió: si había incidente, se cierra.
+    _cerrarIncidente();
+
     const bloque = (message.content || []).find(b => b.type === 'tool_use' && b.name === 'responder');
     if (!bloque || !bloque.input) {
       console.error('[ANNY] El modelo no usó la herramienta responder');
-      return DECISION_SEGURA();
+      return DECISION_SEGURA('SIN_HERRAMIENTA');
     }
     const d = bloque.input;
     return {
@@ -76,8 +203,10 @@ async function decidir({ adminId, modelo = 'haiku', system, messages, conImagen 
       _error: false
     };
   } catch (err) {
-    console.error('[ANNY] Error en Claude:', err.message);
-    return DECISION_SEGURA();
+    const tipo = clasificarError(err);
+    console.error(`[ANNY] Error en Claude (${tipo}):`, err.message);
+    if (TIPOS_PLATAFORMA.includes(tipo)) _abrirOActualizarIncidente(tipo, err.message);
+    return DECISION_SEGURA(tipo);
   }
 }
 
@@ -126,4 +255,12 @@ Responde SOLO en JSON, sin markdown:
   };
 }
 
-module.exports = { decidir, sugerirRespuestaEntrenamiento, getClaudeClient };
+module.exports = {
+  decidir,
+  sugerirRespuestaEntrenamiento,
+  getClaudeClient,
+  estadoIncidente,        // ✅ ANNY-INCIDENTE-061
+  marcarAvisoIncidente,   // ✅ ANNY-INCIDENTE-061
+  clasificarError,        // ✅ ANNY-INCIDENTE-061
+  TIPOS_PLATAFORMA        // ✅ ANNY-INCIDENTE-061
+};

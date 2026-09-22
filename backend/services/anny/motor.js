@@ -20,6 +20,13 @@
 //     avisoEscalamiento, avisoPago, imagenComprobante, pedido,
 //     avisoTaller, notificarTallerA, telefonoCliente,
 //     etapa, slots }   ← v3 (para el simulador)
+//
+// ✅ ANNY-INCIDENTE-061: si el modelo falla por causa de PLATAFORMA
+//   (sin saldo, API caída…), el cliente recibe un acuse fijo, el caso
+//   queda marcado `incidente: true` y NO se devuelve aviso individual
+//   al grupo. El vigilante SLA agrupa y avisa (ver annyNotificaciones).
+// ✅ ANNY-RESPALDO-063: los textos de respaldo ya no duplican
+//   "te escribe" ni terminan en doble punto.
 // ============================================================
 
 const { db } = require('../../config/firebase');
@@ -35,6 +42,14 @@ const prompt = require('./prompt');
 const modelo = require('./modelo');
 
 const VENTANA_CONVERSACION_MS = 24 * 60 * 60 * 1000;
+
+// ✅ ANNY-RESPALDO-063: cierra una frase con punto solo si no lo trae.
+// compromisoDeRespuesta puede terminar en "a.m." o "día." → sin "..".
+function conPunto(frase) {
+  const f = String(frase || '').trim();
+  if (!f) return '';
+  return /[.!?]$/.test(f) ? f : `${f}.`;
+}
 
 // ------------------------------------------------------------
 // Estado al abrir un turno: si la conversación lleva >24 h sin
@@ -107,7 +122,7 @@ async function procesarMensajeEntrante(props) {
     // ── Pide humano (determinístico, ANNY-HUMANO-012) ──
     if (texto.pidePersonaHumana(mensajeTexto)) {
       const caseId = await chats.registrarCasoEscalado(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, tipo: 'HUMANO', razon: 'El cliente pidió atención de una persona', prioridad: 'ALTA', asignadoA: adminId });
-      const r = `Claro, ya le aviso a un asesor. ${compromisoDeRespuesta(perfil)}.`;
+      const r = `Claro, ya le aviso a un asesor. ${conPunto(compromisoDeRespuesta(perfil))}`; // ANNY-RESPALDO-063
       await chats.pausarAnny(adminId, telefono, 60, 'cliente_pidio_asesor');
       await chats.registrarConversacion(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, respuestaAgente: r, respondidoPor: 'ESCALADO_A_ADMIN', tipo: 'HUMANO', escalado: true, caseId });
       await chats.actualizarMetricas(adminId, 'casos_escalados');
@@ -203,9 +218,19 @@ async function procesarMensajeEntrante(props) {
     }).catch(() => {});
 
     // 7b. Error del modelo → escalar honesto (nunca un "te respondemos pronto" sin dueño)
+    // ✅ ANNY-INCIDENTE-061: incidente de plataforma → acuse fijo, sin aviso individual.
+    if (decision._error && decision._incidente) {
+      const caseId = await chats.registrarCasoEscalado(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, tipo: 'ERROR', razon: 'Anny sin servicio temporalmente', incidente: true, tipoError: decision._errorTipo, asignadoA: adminId });
+      const r = `Recibimos tu mensaje y ya le avisé a un asesor. ${conPunto(compromisoDeRespuesta(perfil))}`;
+      await chats.pausarAnny(adminId, telefono, 60, 'incidente_plataforma');
+      await chats.registrarConversacion(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, respuestaAgente: r, respondidoPor: 'ESCALADO_A_ADMIN', tipo: 'ERROR', escalado: true, caseId });
+      await chats.actualizarMetricas(adminId, 'casos_escalados');
+      return { procesado: true, tipo: 'INCIDENTE_PLATAFORMA', accion: 'enviar_mensaje', respuesta: r, caseId, incidente: decision._errorTipo, telefonoCliente: telefono };
+    }
+
     if (decision._error) {
-      const caseId = await chats.registrarCasoEscalado(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, tipo: 'ERROR', razon: 'Fallo técnico al generar respuesta', asignadoA: adminId });
-      const r = `Tuve un problema para responderte en este momento. Un asesor te escribe: ${compromisoDeRespuesta(perfil).toLowerCase()}.`;
+      const caseId = await chats.registrarCasoEscalado(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, tipo: 'ERROR', razon: 'Fallo técnico al generar respuesta', tipoError: decision._errorTipo || 'DESCONOCIDO', asignadoA: adminId });
+      const r = `Tuve un problema para responderte en este momento y ya le avisé a un asesor. ${conPunto(compromisoDeRespuesta(perfil))}`; // ANNY-RESPALDO-063
       await chats.pausarAnny(adminId, telefono, 30, 'error_modelo');
       await chats.registrarConversacion(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, respuestaAgente: r, respondidoPor: 'ESCALADO_A_ADMIN', tipo: 'ERROR', escalado: true, caseId });
       await chats.actualizarMetricas(adminId, 'casos_escalados');
@@ -237,7 +262,7 @@ async function procesarMensajeEntrante(props) {
     if (decision.escalar) {
       const razon = String(decision.escalar.razon || '').replace(/\s+/g, ' ').slice(0, 120);
       const caseId = await chats.registrarCasoEscalado(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, tipo: decision.escalar.tipo, razon, asignadoA: adminId });
-      const r = `Este caso prefiero pasarlo a un asesor para no darte un dato equivocado. ${compromisoDeRespuesta(perfil)}.`;
+      const r = `Este caso prefiero pasarlo a un asesor para no darte un dato equivocado. ${conPunto(compromisoDeRespuesta(perfil))}`; // ANNY-RESPALDO-063
       await chats.pausarAnny(adminId, telefono, 45, `escalado_${decision.escalar.tipo}`);
       await chats.registrarConversacion(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, respuestaAgente: r, respondidoPor: 'ESCALADO_A_ADMIN', tipo: decision.escalar.tipo, escalado: true, caseId });
       await chats.actualizarMetricas(adminId, 'casos_escalados');
@@ -282,7 +307,7 @@ async function procesarMensajeEntrante(props) {
     const yaPedidas = faltaAhora ? ((estado.preguntasHechas || {})[faltaAhora.slot] || 0) : 0;
     if (mision.usaEtapas && nuevoEstado.clienteConfirmo && faltaAhora && faltaAhora.tipo === 'minimo' && yaPedidas >= 2 && faltaAhora.slot !== 'items') {
       const caseId = await chats.registrarCasoEscalado(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, tipo: 'DATOS', razon: `Cliente confirmó compra pero no da ${etapas.SLOTS[faltaAhora.slot]?.etiqueta || faltaAhora.slot}`, asignadoA: adminId });
-      const r = `Para no demorarte más, un asesor te contacta y lo cierran de una. ${compromisoDeRespuesta(perfil)}.`;
+      const r = `Para no demorarte más, un asesor te contacta y lo cierran de una. ${conPunto(compromisoDeRespuesta(perfil))}`; // ANNY-RESPALDO-063
       await chats.pausarAnny(adminId, telefono, 45, 'escalado_DATOS');
       await chats.registrarConversacion(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, respuestaAgente: r, respondidoPor: 'ESCALADO_A_ADMIN', tipo: 'DATOS', escalado: true, caseId });
       await chats.actualizarMetricas(adminId, 'casos_escalados');

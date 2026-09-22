@@ -14,11 +14,23 @@
 //   - historial devuelto como TURNOS con rol (cliente/anny/admin/sistema)
 //     y, en el prompt, como mensajes user/assistant reales.
 //   - score de calidad: repeticiones y turnos por chat.
+//
+// ✅ ANNY-ESCALADO-059: una sola verdad para "escalado".
+//   El panel pinta la marca roja con chatsAnny/.../{tel}.escalado,
+//   pero esa marca solo se prendía y nunca se apagaba: ni con la
+//   respuesta del asesor, ni con Resolver, ni con Devolver a Anny,
+//   ni al vencer. Ahora la marca se deriva de los casos: si el
+//   chat no tiene casos PENDIENTE, la marca se apaga.
+//     cerrarCasosDeChat · sincronizarEscaladoChat ·
+//     repararMarcasEscalado (autocuración del histórico)
+// ✅ ANNY-INTERNO-064: numerosDelEquipo / esNumeroDelEquipo —
+//   los celulares de los usuarios del tenant (mensajeros,
+//   comerciales, taller…) no se atienden como clientes.
 // ============================================================
 
 const { db, admin } = require('../../config/firebase');
 const { MISIONES } = require('./config');
-const { similitud } = require('./texto');
+const { similitud, normalizarTelefono } = require('./texto');
 const { ESTADOS_PEDIDO_ABIERTO } = require('./contexto');
 
 function colChats(adminId) { return db.collection('chatsAnny').doc(adminId).collection('chats'); }
@@ -276,6 +288,119 @@ async function registrarCasoEscalado(adminId, data) {
 }
 
 // ============================================================
+// ✅ ANNY-ESCALADO-059 — ciclo de vida del escalado
+// ============================================================
+function colCasos(adminId) { return db.collection('casosEscaladosAnny').doc(adminId).collection('casos'); }
+
+async function _casosPendientesDe(adminId, telefono) {
+  const snap = await colCasos(adminId)
+    .where('telefono', '==', String(telefono))
+    .where('estado', '==', 'PENDIENTE')
+    .limit(10)
+    .get();
+  return snap.docs;
+}
+
+// Apaga la marca roja del chat si ya no le queda ningún caso PENDIENTE.
+// Nunca la prende: prenderla es trabajo del motor al escalar.
+async function sincronizarEscaladoChat(adminId, telefono) {
+  try {
+    if (!adminId || !telefono) return { escalado: null };
+    const pendientes = await _casosPendientesDe(adminId, telefono);
+    if (pendientes.length > 0) return { escalado: true };
+    await refChat(adminId, telefono).set({ escalado: false, escaladoCerradoMs: Date.now() }, { merge: true });
+    return { escalado: false };
+  } catch (err) {
+    console.error('[ANNY-ESCALADO-059] Error sincronizando marca de escalado:', err.message);
+    return { escalado: null };
+  }
+}
+
+// Cierra todos los casos PENDIENTE de un chat y apaga la marca.
+// resueltoPor: 'respuesta_manual' | 'devuelto_a_anny' | 'orden_creada' | 'numero_interno' | ...
+async function cerrarCasosDeChat(adminId, telefono, resueltoPor, notas = '') {
+  try {
+    if (!adminId || !telefono) return 0;
+    const docs = await _casosPendientesDe(adminId, telefono);
+    if (docs.length) {
+      const lote = db.batch();
+      docs.forEach(d => lote.update(d.ref, {
+        estado: 'RESUELTO',
+        resueltoPor: resueltoPor || 'sistema',
+        resueltoMs: Date.now(),
+        notas: notas || 'Cerrado automáticamente.',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      }));
+      await lote.commit();
+      console.log(`[ANNY-ESCALADO-059] ${docs.length} caso(s) de ${telefono} cerrados (${resueltoPor}) — tenant ${adminId}`);
+    }
+    await sincronizarEscaladoChat(adminId, telefono);
+    return docs.length;
+  } catch (err) {
+    console.error('[ANNY-ESCALADO-059] Error cerrando casos del chat:', err.message);
+    return 0;
+  }
+}
+
+// Autocuración: apaga la marca de los chats que la tienen prendida
+// sin ningún caso PENDIENTE (el histórico acumulado antes de este fix).
+// Lo llama el vigilante SLA en cada ronda, con tope para no gastar lecturas.
+async function repararMarcasEscalado(adminId, limite = 50) {
+  try {
+    const snap = await colChats(adminId).where('escalado', '==', true).limit(limite).get();
+    let apagadas = 0;
+    for (const d of snap.docs) {
+      const r = await sincronizarEscaladoChat(adminId, d.id);
+      if (r.escalado === false) apagadas += 1;
+    }
+    if (apagadas) console.log(`[ANNY-ESCALADO-059] ${apagadas} marca(s) de escalado sin casos abiertos apagadas — tenant ${adminId}`);
+    return apagadas;
+  } catch (err) {
+    console.error('[ANNY-ESCALADO-059] Error reparando marcas:', err.message);
+    return 0;
+  }
+}
+
+// ============================================================
+// ✅ ANNY-INTERNO-064 — números del equipo del tenant
+// ------------------------------------------------------------
+// Sub-usuarios del tenant (users.creadoPor == adminId). A propósito
+// NO incluye el documento del dueño: así la admin puede seguir
+// probando a Anny desde su propio celular.
+// ============================================================
+const _cacheEquipo = new Map(); // adminId → { set, exp }
+const EQUIPO_CACHE_MS = 10 * 60 * 1000;
+
+async function numerosDelEquipo(adminId) {
+  const c = _cacheEquipo.get(adminId);
+  if (c && Date.now() < c.exp) return c.set;
+  const set = new Set();
+  try {
+    const snap = await db.collection('users').where('creadoPor', '==', adminId).get();
+    snap.forEach(d => {
+      const u = d.data() || {};
+      if (u.activo === false) return;
+      for (const campo of [u.celular, u.phone, u.telefono]) {
+        const n = normalizarTelefono(campo);
+        if (n && n.length >= 10) set.add(n);
+      }
+    });
+  } catch (err) {
+    console.error('[ANNY-INTERNO-064] Error leyendo números del equipo:', err.message);
+  }
+  _cacheEquipo.set(adminId, { set, exp: Date.now() + EQUIPO_CACHE_MS });
+  return set;
+}
+
+async function esNumeroDelEquipo(adminId, telefono) {
+  try {
+    const n = normalizarTelefono(telefono);
+    if (!n) return false;
+    return (await numerosDelEquipo(adminId)).has(n);
+  } catch (err) { return false; }
+}
+
+// ============================================================
 // Pedidos (ANNY-IDEM-016: máximo un pedido abierto por hilo)
 // ============================================================
 async function registrarPedido(adminId, telefono, pedido) {
@@ -345,6 +470,11 @@ module.exports = {
   annyEstaPausada,
   reactivarAnny,
   registrarCasoEscalado,
+  cerrarCasosDeChat,          // ✅ ANNY-ESCALADO-059
+  sincronizarEscaladoChat,    // ✅ ANNY-ESCALADO-059
+  repararMarcasEscalado,      // ✅ ANNY-ESCALADO-059
+  numerosDelEquipo,           // ✅ ANNY-INTERNO-064
+  esNumeroDelEquipo,          // ✅ ANNY-INTERNO-064
   registrarPedido,
   actualizarMetricas,
   obtenerMetricasHoy,

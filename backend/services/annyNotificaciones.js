@@ -2,6 +2,7 @@
 // Control360 — Notificaciones salientes vía Anny (Baileys)  v22
 // Ubicación: backend/services/annyNotificaciones.js
 // FIX ANNY-NOTIF-001 + ANNY-VENC-001 + ANNY-VENC-002 + ANNY-VENC-003
+// + ✅ ANNY-SLA-060 + ✅ ANNY-INCIDENTE-061 + ✅ ANNY-ESCALADO-059 (vigilante SLA)
 // ============================================================
 // FIX ANNY-VENC-003: los 320 vencimientos daban 0 candidatos.
 // Causa: fechaVencimiento importada como Timestamp (no string).
@@ -642,20 +643,36 @@ function iniciarCronCobranzaAnny() {
 // ============================================================
 // ✅ ANNY-SLA-048 — vigilante de casos escalados.
 // ------------------------------------------------------------
-// Un aviso que sale UNA sola vez es un aviso que se pierde entre
-// 200 chats. Este cron revisa cada 5 minutos los casos PENDIENTE
-// y vuelve a avisar con urgencia creciente:
-//
+// Revisa cada 5 minutos los casos PENDIENTE.
 //   > 15 min sin atender  → recordatorio al asesor
-//   > 45 min sin atender  → alerta al admin (notificarPedidosA)
-//   > 24 h sin atender    → se marca VENCIDO y deja de insistir
+//   > 45 min sin atender  → alerta al admin
+//   > 24 h sin atender    → VENCIDO, deja de insistir
 //
-// No responde al cliente ni cierra casos: solo insiste hasta que
-// una persona entre. Cerrar el caso lo hace un humano en el panel.
+// ✅ ANNY-SLA-060 — cuándo PARA de insistir:
+//   1. Solo avisa DENTRO del horario del tenant. Lo que ocurre de
+//      noche espera y sale en el primer resumen al abrir.
+//   2. UN mensaje por ronda por tenant con todos los casos que
+//      tocan (antes: un mensaje por caso). Máximo 2 avisos por caso.
+//   3. Cierra solo: si existe una orden creada DESPUÉS del escalado
+//      para ese celular → RESUELTO (resueltoPor: 'orden_creada').
+//      Lectura de órdenes como máximo cada 15 min por caso; no toca
+//      orders.js ni la máquina de estados.
+//   4. Casos de números del equipo (ANNY-INTERNO-064) se cierran.
+// ✅ ANNY-ESCALADO-059 — al cerrar o vencer un caso se apaga la
+//   marca roja del chat; además cada ronda autocura hasta 50 chats
+//   que tengan la marca prendida sin casos abiertos (histórico).
+// ✅ ANNY-INCIDENTE-061 — casos marcados `incidente: true`:
+//   · mientras el incidente sigue activo: ni avisos ni vencimiento;
+//   · al volver el servicio: salen UNA vez en el resumen del grupo;
+//   · SuperAdmin recibe un aviso de apertura (y reaviso máx. 1/hora)
+//     y uno de cierre, por el WhatsApp del tenant SuperAdmin.
 // ============================================================
 const SLA_RECORDATORIO_MIN = 15;
 const SLA_ALERTA_ADMIN_MIN = 45;
 const SLA_VENCIMIENTO_MIN = 24 * 60;
+const SLA_REVISAR_ORDEN_MS = 15 * 60 * 1000;   // ANNY-SLA-060
+const SLA_MAX_ITEMS_MENSAJE = 15;              // ANNY-SLA-060
+const INCIDENTE_REAVISO_MS = 60 * 60 * 1000;   // ANNY-INCIDENTE-061
 
 function _ms(v) {
   if (!v) return 0;
@@ -666,7 +683,41 @@ function _ms(v) {
   return 0;
 }
 
+// ANNY-INCIDENTE-061: caché de la marca superAdmin del dueño del tenant
+const _cacheSuperAdmin = new Map(); // adminId → { es, exp }
+async function _tenantEsSuperAdmin(adminId) {
+  const c = _cacheSuperAdmin.get(adminId);
+  if (c && Date.now() < c.exp) return c.es;
+  let es = false;
+  try {
+    const doc = await db.collection('users').doc(adminId).get();
+    es = !!(doc.exists && doc.data().superAdmin === true);
+  } catch (e) { es = false; }
+  _cacheSuperAdmin.set(adminId, { es, exp: Date.now() + 30 * 60 * 1000 });
+  return es;
+}
+
+// ANNY-SLA-060: una línea por caso dentro del resumen agrupado
+function _lineaCaso(c, edadMin) {
+  const tel = String(c.telefono || '').replace(/\D/g, '');
+  const edad = edadMin >= 120 ? `${Math.round(edadMin / 60)} h` : `${Math.round(edadMin)} min`;
+  const MOTIVOS = { ERROR: 'sin respuesta de Anny', HUMANO: 'pidió asesor', DATOS: 'faltan datos', PRECIO: 'precio', QUEJA: 'queja' };
+  const motivo = MOTIVOS[c.tipo] || String(c.tipo || 'caso').toLowerCase();
+  return `• ${c.nombreCliente || 'Sin nombre'} — ${edad} · ${motivo}\n  wa.me/${tel}`;
+}
+
+function _bloque(titulo, items) {
+  if (!items.length) return '';
+  const visibles = items.slice(0, SLA_MAX_ITEMS_MENSAJE).map(i => i.linea);
+  const resto = items.length - visibles.length;
+  return `${titulo}\n${visibles.join('\n')}${resto > 0 ? `\n…y ${resto} más en el panel` : ''}`;
+}
+
 async function revisarCasosEscalados() {
+  const incidente = (typeof annyService.estadoIncidente === 'function') ? annyService.estadoIncidente() : { activo: false };
+  const incidentesPorTenant = []; // { adminId, esperando }
+  let tenantSuperAdmin = null;
+
   try {
     const cfgSnap = await db.collection('annyConfig')
       .where('conexionEstado', '==', 'conectado')
@@ -676,67 +727,186 @@ async function revisarCasosEscalados() {
       const adminId = cfgDoc.id;
       const cfg = cfgDoc.data() || {};
 
-      let perfil = {};
-      try { perfil = await annyService.obtenerPerfilTenant(adminId); } catch (e) { perfil = {}; }
+      try {
+        if (!tenantSuperAdmin && await _tenantEsSuperAdmin(adminId)) tenantSuperAdmin = adminId;
 
-      const destinoAsesor = perfil.notificarEscalamientoA || cfg.notificarPedidosA || null;
-      const destinoAdmin = cfg.notificarPedidosA || perfil.notificarEscalamientoA || null;
+        let perfil = {};
+        try { perfil = await annyService.obtenerPerfilTenant(adminId); } catch (e) { perfil = {}; }
 
-      const snap = await db.collection('casosEscaladosAnny')
-        .doc(adminId)
-        .collection('casos')
-        .where('estado', '==', 'PENDIENTE')
-        .limit(100)
-        .get();
+        const enHorario = annyService.estaEnHorario(perfil.horarioAtencion);
+        const destinoAsesor = perfil.notificarEscalamientoA || cfg.notificarPedidosA || null;
+        const destinoAdmin = cfg.notificarPedidosA || perfil.notificarEscalamientoA || null;
+        const hayGrupo = !!cfg.notificarGrupoJid;
 
-      if (snap.empty) continue;
+        // ANNY-ESCALADO-059: autocuración del histórico de marcas
+        await annyService.repararMarcasEscalado(adminId, 50);
 
-      let pendientes = 0;
-      for (const doc of snap.docs) {
-        const c = doc.data() || {};
-        const creadoMs = _ms(c.createdAt) || Date.now();
-        const edadMin = (Date.now() - creadoMs) / 60000;
-        pendientes += 1;
+        const snap = await db.collection('casosEscaladosAnny')
+          .doc(adminId)
+          .collection('casos')
+          .where('estado', '==', 'PENDIENTE')
+          .limit(100)
+          .get();
 
-        // Caducidad: deja de insistir, pero NO lo cierra como resuelto.
-        if (edadMin > SLA_VENCIMIENTO_MIN) {
-          await doc.ref.set({ estado: 'VENCIDO', vencidoEn: Date.now() }, { merge: true });
-          continue;
+        if (snap.empty) continue;
+
+        const equipo = await annyService.numerosDelEquipo(adminId);
+        const telefonosCerrados = new Set();
+        const recordatorios = [];   // nivel 0 → 1
+        const urgentes = [];        // nivel <2 → 2
+        const recuperados = [];     // incidentes ya superados
+        let esperandoIncidente = 0;
+
+        for (const doc of snap.docs) {
+          const c = doc.data() || {};
+          const tel = String(c.telefono || '');
+          const creadoMs = _ms(c.createdAt) || Date.now();
+          const edadMin = (Date.now() - creadoMs) / 60000;
+          const telNorm = tel.replace(/\D/g, '').replace(/^57(?=\d{10}$)/, '');
+
+          // ANNY-INTERNO-064: casos abiertos a números del equipo
+          if (telNorm && equipo.has(telNorm)) {
+            await doc.ref.set({ estado: 'RESUELTO', resueltoPor: 'numero_interno', resueltoMs: Date.now(), notas: 'Cerrado: el número pertenece al equipo del tenant.' }, { merge: true });
+            telefonosCerrados.add(tel);
+            continue;
+          }
+
+          const esIncidente = c.incidente === true;
+
+          // Caducidad: no aplica a incidentes que siguen abiertos
+          if (edadMin > SLA_VENCIMIENTO_MIN && !(esIncidente && incidente.activo)) {
+            await doc.ref.set({ estado: 'VENCIDO', vencidoEn: Date.now() }, { merge: true });
+            telefonosCerrados.add(tel);
+            continue;
+          }
+
+          // ANNY-SLA-060: ¿ya hay una orden creada después del escalado?
+          if (edadMin >= SLA_RECORDATORIO_MIN && (Date.now() - (Number(c.ordenRevisadaMs) || 0)) > SLA_REVISAR_ORDEN_MS) {
+            try {
+              const ordenes = await annyService.obtenerOrdenesServicio(adminId, tel);
+              const posterior = (ordenes || []).find(o => o.creadaMs > creadoMs);
+              if (posterior) {
+                await doc.ref.set({
+                  estado: 'RESUELTO', resueltoPor: 'orden_creada', resueltoMs: Date.now(),
+                  notas: `Cerrado automáticamente: se creó la orden ${posterior.numero || ''} para este cliente.`.trim()
+                }, { merge: true });
+                telefonosCerrados.add(tel);
+                continue;
+              }
+              await doc.ref.set({ ordenRevisadaMs: Date.now() }, { merge: true });
+            } catch (eOrd) { /* si falla la lectura, sigue el flujo normal */ }
+          }
+
+          const nivel = Number(c.nivelSLA) || 0;
+
+          if (esIncidente) {
+            if (incidente.activo) { esperandoIncidente += 1; continue; }
+            if (enHorario && !c.recuperadoAvisado) recuperados.push({ ref: doc.ref, linea: _lineaCaso(c, edadMin) });
+            continue;
+          }
+
+          if (!enHorario) continue; // ANNY-SLA-060: de noche no se insiste
+
+          if (edadMin >= SLA_ALERTA_ADMIN_MIN && nivel < 2) {
+            urgentes.push({ ref: doc.ref, linea: _lineaCaso(c, edadMin) });
+          } else if (edadMin >= SLA_RECORDATORIO_MIN && nivel < 1) {
+            recordatorios.push({ ref: doc.ref, linea: _lineaCaso(c, edadMin) });
+          }
         }
 
-        const nivel = Number(c.nivelSLA) || 0;
+        // ANNY-ESCALADO-059: apagar marcas de los chats que quedaron sin casos
+        for (const tel of telefonosCerrados) await annyService.sincronizarEscaladoChat(adminId, tel);
 
-        if (edadMin >= SLA_ALERTA_ADMIN_MIN && nivel < 2) {
-          await enviarAvisoInterno(
-            adminId,
-            `🔴 *CASO SIN ATENDER HACE ${Math.round(edadMin)} MIN*\n` +
-            `${c.nombreCliente || 'Sin nombre'} — ${c.telefono || ''}\n` +
-            `${c.tipo || ''} · ${c.razon || ''}\n` +
-            `El cliente lleva casi una hora esperando. Abrir: https://wa.me/${String(c.telefono || '').replace(/\D/g, '')}`,
-            destinoAdmin
-          );
-          await doc.ref.set({ nivelSLA: 2, ultimoAvisoMs: Date.now() }, { merge: true });
-        } else if (edadMin >= SLA_RECORDATORIO_MIN && nivel < 1) {
-          await enviarAvisoInterno(
-            adminId,
-            `⏳ *Recordatorio — caso escalado sin atender (${Math.round(edadMin)} min)*\n` +
-            `${c.nombreCliente || 'Sin nombre'} — ${c.telefono || ''}\n` +
-            `${c.tipo || ''} · ${c.razon || ''}\n` +
-            `Abrir: https://wa.me/${String(c.telefono || '').replace(/\D/g, '')}`,
-            destinoAsesor
-          );
-          await doc.ref.set({ nivelSLA: 1, ultimoAvisoMs: Date.now() }, { merge: true });
+        if (esperandoIncidente > 0) incidentesPorTenant.push({ adminId, esperando: esperandoIncidente });
+
+        // ── ANNY-SLA-060: UN mensaje por ronda ──
+        const bloques = [
+          _bloque(`🔴 *Más de ${SLA_ALERTA_ADMIN_MIN} min sin atender* (${urgentes.length})`, urgentes),
+          _bloque(`⏳ *Clientes esperando asesor* (${recordatorios.length})`, recordatorios),
+          _bloque(`🔁 *Anny estuvo sin servicio — estos clientes no recibieron respuesta* (${recuperados.length})`, recuperados)
+        ].filter(Boolean);
+
+        if (bloques.length) {
+          const texto = `${bloques.join('\n\n')}\n\nAl responderles desde el WhatsApp de la empresa el caso se cierra solo.\nControl360 → Anny → Escalados`;
+          const enviado = await enviarAvisoInterno(adminId, texto, destinoAsesor);
+
+          // Alerta separada al admin solo si no hay grupo y el admin es otro destino
+          if (urgentes.length && !hayGrupo && destinoAdmin && destinoAdmin !== destinoAsesor) {
+            await sleep(300);
+            await enviarAvisoInterno(adminId, `${_bloque(`🔴 *Casos sin atender hace más de ${SLA_ALERTA_ADMIN_MIN} min* (${urgentes.length})`, urgentes)}\n\nControl360 → Anny → Escalados`, destinoAdmin);
+          }
+
+          if (enviado) {
+            const lote = db.batch();
+            const ahora = Date.now();
+            urgentes.forEach(i => lote.set(i.ref, { nivelSLA: 2, ultimoAvisoMs: ahora }, { merge: true }));
+            recordatorios.forEach(i => lote.set(i.ref, { nivelSLA: 1, ultimoAvisoMs: ahora }, { merge: true }));
+            recuperados.forEach(i => lote.set(i.ref, { recuperadoAvisado: true, nivelSLA: 2, ultimoAvisoMs: ahora }, { merge: true }));
+            await lote.commit();
+            console.log(`[ANNY-SLA-060] Tenant ${adminId}: 1 resumen (${urgentes.length} urgentes, ${recordatorios.length} recordatorios, ${recuperados.length} recuperados)`);
+          }
         }
 
-        await sleep(300); // no saturar la sesión de WhatsApp
-      }
-
-      if (pendientes >= 10) {
-        console.warn(`[ANNY-SLA] Tenant ${adminId} acumula ${pendientes} casos escalados pendientes`);
+        if (snap.size >= 10) {
+          console.warn(`[ANNY-SLA] Tenant ${adminId} acumula ${snap.size} casos escalados pendientes`);
+        }
+      } catch (errTenant) {
+        // Un tenant con error no detiene la ronda de los demás
+        console.error(`[ANNY-SLA] Error en tenant ${adminId}:`, errTenant.message);
       }
     }
   } catch (err) {
     console.error('[ANNY-SLA] Error revisando casos escalados:', err.message);
+  }
+
+  // ── ANNY-INCIDENTE-061: aviso a SuperAdmin ──
+  try {
+    await _avisarIncidenteSuperAdmin(incidente, tenantSuperAdmin, incidentesPorTenant);
+  } catch (e) {
+    console.error('[ANNY-INCIDENTE-061] Error avisando a SuperAdmin:', e.message);
+  }
+}
+
+// El aviso de plataforma va DIRECTO al WhatsApp de SuperAdmin
+// (ADMIN_WHATSAPP), no al grupo comercial. Sale por la sesión del
+// tenant SuperAdmin; si esa sesión no está conectada, queda en log.
+async function _avisarIncidenteSuperAdmin(incidente, tenantSuperAdmin, porTenant) {
+  if (typeof annyService.marcarAvisoIncidente !== 'function') return;
+  const abrirPendiente = incidente.activo && (!incidente.avisoAperturaMs || (Date.now() - incidente.avisoAperturaMs) > INCIDENTE_REAVISO_MS);
+  const cierrePendiente = !incidente.activo && incidente.avisoCierrePendiente;
+  if (!abrirPendiente && !cierrePendiente) return;
+
+  if (!tenantSuperAdmin) {
+    console.warn(`[ANNY-INCIDENTE-061] ${incidente.activo ? 'Incidente activo' : 'Incidente cerrado'} (${incidente.tipo}) — sin sesión de SuperAdmin conectada para avisar`);
+    return;
+  }
+
+  const destino = aJid(process.env.ADMIN_WHATSAPP || '');
+  if (!destino) {
+    // A propósito NO cae al grupo comercial: un problema de plataforma no es trabajo del equipo.
+    console.warn('[ANNY-INCIDENTE-061] ADMIN_WHATSAPP no está configurado en Railway — el aviso de incidente queda solo en log');
+    return;
+  }
+  const minutos = Math.max(1, Math.round((Date.now() - (incidente.desdeMs || Date.now())) / 60000));
+  let texto;
+
+  if (abrirPendiente) {
+    const esperando = porTenant.reduce((a, t) => a + t.esperando, 0);
+    texto = `🛑 *ANNY SIN SERVICIO* — hace ${minutos} min\n` +
+      `Causa: ${incidente.etiqueta || incidente.tipo}\n` +
+      `Clientes con acuse automático esperando asesor: ${esperando} (${porTenant.length} empresa${porTenant.length === 1 ? '' : 's'})\n` +
+      (incidente.tipo === 'SIN_SALDO' ? 'Recarga en la consola de Anthropic (Plans & Billing) y activa la recarga automática.\n' : '') +
+      'Anny vuelve sola en cuanto la API responda.';
+  } else {
+    texto = `✅ *Anny recuperó el servicio*\nEstuvo sin servicio por ${incidente.etiqueta || incidente.tipo}. ` +
+      'Los clientes que quedaron esperando salen en el próximo resumen de cada grupo, dentro del horario.';
+  }
+
+  const enviado = await baileysService.enviarMensaje(tenantSuperAdmin, destino.jid, texto);
+
+  if (enviado) {
+    annyService.marcarAvisoIncidente(abrirPendiente ? 'apertura' : 'cierre');
+    console.log(`[ANNY-INCIDENTE-061] Aviso de ${abrirPendiente ? 'apertura' : 'cierre'} enviado a SuperAdmin`);
   }
 }
 
@@ -746,7 +916,7 @@ function iniciarCronSLAEscalados() {
       console.error('[ANNY-SLA] Error en cron:', err.message)
     );
   }, 5 * 60 * 1000);
-  console.log('✅ Cron SLA de escalados activo — recordatorio 15 min, alerta admin 45 min');
+  console.log('✅ Cron SLA de escalados activo — resumen agrupado en horario (ANNY-SLA-060), incidentes a SuperAdmin (ANNY-INCIDENTE-061)');
 }
 
 module.exports = {

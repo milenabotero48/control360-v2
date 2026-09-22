@@ -5,6 +5,10 @@
 // + FIX ANNY-SILENCIO-001 (chats silenciados / internos)
 // + FIX ANNY-ECO-001 + FIX ANNY-PAUSA-004
 // + ✅ ANNY-LID-055 (número real) + ✅ ANNY-RAFAGA-058 (cola por chat) — v3
+// + ✅ ANNY-ESCALADO-059 (la respuesta del asesor cierra casos Y apaga la marca)
+// + ✅ ANNY-PAUSA-062 (pausa de 60 min tras respuesta manual)
+// + ✅ ANNY-INTERNO-064 (números del equipo no se atienden como clientes)
+// + ✅ ANNY-SLA-060 ("el cliente insiste": un solo re-aviso por caso, en horario)
 // ============================================================
 // PRINCIPIOS:
 // 1. Una sesión de WhatsApp por tenant (adminId) — multi-tenant
@@ -29,7 +33,7 @@
 //     ignoran por completo.
 // 12. FIX ANNY-PAUSA-004: un fromMe que NO es eco = la admin
 //     escribió manualmente desde el teléfono/WhatsApp Web →
-//     se registra ADMIN_MANUAL y se PAUSA Anny 30 minutos en
+//     se registra ADMIN_MANUAL y se PAUSA Anny 60 minutos en
 //     ese chat. Cada mensaje manual refresca la pausa. Anny
 //     verifica la pausa en annyService antes de responder.
 // ============================================================
@@ -338,7 +342,9 @@ async function casoPendienteDe(adminId, telefono) {
       nombreCliente: c.nombreCliente || '',
       edadMin,
       dentroDeVentana: edadMin < VENTANA_SILENCIO_MIN,
-      ultimoAvisoMs: Number(c.ultimoAvisoMs) || creadoMs
+      ultimoAvisoMs: Number(c.ultimoAvisoMs) || creadoMs,
+      incidente: c.incidente === true,   // ✅ ANNY-INCIDENTE-061
+      reavisado: c.reavisado === true    // ✅ ANNY-SLA-060
     };
   } catch (err) {
     console.error('[BAILEYS] Error consultando casos pendientes:', err.message);
@@ -349,33 +355,17 @@ async function casoPendienteDe(adminId, telefono) {
 // ✅ ANNY-ATENDIDO-052: cierra los casos pendientes de un chat
 // cuando una persona del equipo le escribe al cliente. Silencioso
 // a propósito: no manda avisos, solo deja de insistir.
+// ✅ ANNY-ESCALADO-059: antes cerraba el caso pero dejaba la marca
+// roja del chat prendida para siempre (el panel seguía mostrando
+// "Escalado · esperando asesor"). Ahora delega en chats.cerrarCasosDeChat,
+// que cierra los casos y apaga la marca en una sola operación.
 async function cerrarCasosPorRespuestaManual(adminId, telefono) {
-  try {
-    const snap = await db.collection('casosEscaladosAnny')
-      .doc(adminId)
-      .collection('casos')
-      .where('telefono', '==', telefono)
-      .where('estado', '==', 'PENDIENTE')
-      .limit(10)
-      .get();
-
-    if (snap.empty) return 0;
-
-    const lote = db.batch();
-    snap.docs.forEach(d => lote.update(d.ref, {
-      estado: 'RESUELTO',
-      resueltoPor: 'respuesta_manual',
-      resueltoMs: Date.now(),
-      notas: 'Cerrado automáticamente: el equipo le respondió al cliente por WhatsApp.'
-    }));
-    await lote.commit();
-
-    console.log(`[BAILEYS] ${snap.size} caso(s) de ${telefono} cerrados por respuesta manual`);
-    return snap.size;
-  } catch (err) {
-    console.error('[BAILEYS] Error cerrando casos por respuesta manual:', err.message);
-    return 0;
-  }
+  return annyService.cerrarCasosDeChat(
+    adminId,
+    telefono,
+    'respuesta_manual',
+    'Cerrado automáticamente: el equipo le respondió al cliente por WhatsApp.'
+  );
 }
 
 // ============================================================
@@ -535,6 +525,11 @@ async function procesarMensaje(adminId, msg) {
   const { telefono, jidRespuesta, lid, sinResolver } = await resolverTelefono(adminId, ses?.sock, msg);
   if (!telefono) return;
 
+  // ✅ ANNY-INTERNO-064: un mensajero, comercial o técnico del tenant que
+  // escribe (o a quien se le escribe) no es un cliente: ni respuesta, ni
+  // caso, ni registro, ni gasto de IA. Va antes de descargar medios.
+  if (await annyService.esNumeroDelEquipo(adminId, telefono)) return;
+
   // ✅ ANNY-FOTO-040: abrir el sobre antes de leer
   const contenido = desenvolverMensaje(msg.message);
   let texto = extraerTexto(contenido);
@@ -574,8 +569,8 @@ async function procesarMensaje(adminId, msg) {
   if (msg.key.fromMe) {
     if (msg.key.id && mensajesEnviados.has(msg.key.id)) return; // ANNY-ECO-001
     await annyService.registrarConversacion(adminId, { telefono, nombreCliente: null, mensajeCliente: null, respuestaAgente: texto, respondidoPor: 'ADMIN_MANUAL', escalado: false, caseId: null });
-    await annyService.pausarAnny(adminId, telefono, 30, 'intervencion_manual');
-    await cerrarCasosPorRespuestaManual(adminId, telefono); // ANNY-ATENDIDO-052
+    await annyService.pausarAnny(adminId, telefono, 60, 'intervencion_manual'); // ✅ ANNY-PAUSA-062
+    await cerrarCasosPorRespuestaManual(adminId, telefono); // ANNY-ATENDIDO-052 + ANNY-ESCALADO-059
     return;
   }
 
@@ -607,13 +602,18 @@ async function procesarTurno(adminId, telefono, turno) {
     const casoPend = await casoPendienteDe(adminId, telefono);
     if (casoPend && casoPend.dentroDeVentana) {
       await annyService.registrarConversacion(adminId, { telefono, nombreCliente, mensajeCliente: texto, respuestaAgente: null, respondidoPor: 'EN_MANOS_DE_ADMIN', escalado: true, caseId: casoPend.id });
-      if (Date.now() - casoPend.ultimoAvisoMs > REAVISO_MIN * 60 * 1000) {
+      // ✅ ANNY-SLA-060: un solo re-aviso por caso, solo en horario, y nunca
+      // para casos de incidente (esos los agrupa el vigilante SLA).
+      if (!casoPend.incidente && !casoPend.reavisado
+          && Date.now() - casoPend.ultimoAvisoMs > REAVISO_MIN * 60 * 1000) {
         try {
           const perfil = await annyService.obtenerPerfilTenant(adminId);
-          await enviarAvisoEscalamiento(adminId,
-            `⏰ *EL CLIENTE INSISTE* — caso sin atender hace ${Math.round(casoPend.edadMin)} min\n${casoPend.nombreCliente || nombreCliente} — ${telefono}\nEscribió: "${String(texto).slice(0, 120)}"`,
-            perfil?.notificarEscalamientoA, telefono);
-          await casoPend.ref.set({ ultimoAvisoMs: Date.now() }, { merge: true });
+          if (annyService.estaEnHorario(perfil?.horarioAtencion)) {
+            await enviarAvisoEscalamiento(adminId,
+              `⏰ *EL CLIENTE INSISTE* — caso sin atender hace ${Math.round(casoPend.edadMin)} min\n${casoPend.nombreCliente || nombreCliente} — ${telefono}\nEscribió: "${String(texto).slice(0, 120)}"`,
+              perfil?.notificarEscalamientoA, telefono);
+            await casoPend.ref.set({ ultimoAvisoMs: Date.now(), reavisado: true }, { merge: true });
+          }
         } catch (eRe) { console.error('[BAILEYS] Error en re-aviso:', eRe.message); }
       }
       await presencia(adminId, jid, 'paused');
