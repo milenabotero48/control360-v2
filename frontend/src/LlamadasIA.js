@@ -46,6 +46,38 @@ const formatFecha = (d) => {
   return f.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 };
 
+// ✅ LUCY-MES-004 — helpers de mes en hora Colombia (UTC-5), mismo criterio
+// que el backend: el mes se decide por la hora de Colombia, no la del navegador.
+const mesActualCO = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 7);
+
+const NOMBRE_MES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+
+const mesBonito = (mes) => {
+  if (!/^\d{4}-\d{2}$/.test(String(mes || ''))) return '';
+  const [a, m] = mes.split('-');
+  return `${NOMBRE_MES[Number(m) - 1]} ${a}`;
+};
+
+// Lista de meses seleccionables: 6 atrás (recuperar lo que quedó pendiente)
+// y 1 adelante (adelantar la corrida del mes entrante).
+const mesesSeleccionables = () => {
+  const base = new Date(Date.now() - 5 * 3600 * 1000);
+  const out = [];
+  for (let i = -6; i <= 1; i++) {
+    const d = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + i, 1));
+    out.push(d.toISOString().slice(0, 7));
+  }
+  return out;
+};
+
+const OPCIONES_PAQUETE = [
+  { valor: '25',  etiqueta: '25 llamadas' },
+  { valor: '50',  etiqueta: '50 llamadas' },
+  { valor: '100', etiqueta: '100 llamadas' },
+  { valor: '200', etiqueta: '200 llamadas' },
+  { valor: '',    etiqueta: 'Todas (sin tope)' },
+];
+
 export default function LlamadasIA({ user, onNavegar }) {
   const [lista, setLista] = useState([]);
   const [resumen, setResumen] = useState(null);
@@ -65,6 +97,11 @@ export default function LlamadasIA({ user, onNavegar }) {
   const [tipoPrueba, setTipoPrueba] = useState('empresa'); // 'vehicular' | 'empresa'
   const [preorden, setPreorden] = useState(null); // LUCY-PREORDEN-001
   const [corrida, setCorrida] = useState(null);   // LUCY-ASINCRONO-001
+  // ✅ LUCY-MES-004 / LUCY-PAQUETE-005: qué mes se llama y de a cuántos.
+  // Por defecto el mes actual y un paquete de 50 — con minutos limitados es
+  // preferible cerrar bien 50 que arrancar 600 y quedarse a mitad de camino.
+  const [mesCorrida, setMesCorrida] = useState(mesActualCO());
+  const [paquete, setPaquete] = useState('50');
   const [ocupado, setOcupado] = useState(false);
   const [aviso, setAviso] = useState(null); // { tipo: 'ok'|'error', texto }
 
@@ -110,10 +147,16 @@ export default function LlamadasIA({ user, onNavegar }) {
 
   // ─── Acciones de operación (FIX LUCY-ELEVEN-004) ───────────────────────────
   const lanzarAhora = async () => {
-    if (!window.confirm('¿Lanzar las llamadas de vencimientos de TU empresa ahora? Lucy llamará a los clientes pendientes de este mes.')) return;
+    // ✅ LUCY-MES-004 / LUCY-PAQUETE-005: la confirmación dice EXACTAMENTE qué
+    // se va a hacer. Antes decía "este mes" sin que se pudiera elegir otro.
+    const cuantas = paquete ? `las primeras ${paquete} llamadas` : 'TODAS las llamadas pendientes';
+    if (!window.confirm(`¿Lanzar ${cuantas} de los vencimientos de ${mesBonito(mesCorrida)}?\n\nLucy empieza por los clientes que aún no han recibido ninguna llamada, del vencimiento más próximo al más lejano.`)) return;
     setOcupado(true);
     try {
-      const r = await fetch(`${API}/llamadas-ia/ejecutar-motor`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({}) });
+      const r = await fetch(`${API}/llamadas-ia/ejecutar-motor`, {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ mes: mesCorrida, maxLlamadas: paquete ? Number(paquete) : null }),
+      });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Error al lanzar el motor');
 
@@ -203,11 +246,15 @@ export default function LlamadasIA({ user, onNavegar }) {
     try {
       const r = await fetch(`${API}/llamadas-ia/programar`, {
         method: 'POST', headers: authHeaders(),
-        body: JSON.stringify({ fecha: progFecha, hora: progHora }),
+        body: JSON.stringify({
+          fecha: progFecha, hora: progHora,
+          mes: mesCorrida,                                  // ✅ LUCY-MES-004
+          maxLlamadas: paquete ? Number(paquete) : null,    // ✅ LUCY-PAQUETE-005
+        }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || 'Error al programar');
-      mostrarAviso('ok', `Corrida programada para el ${progFecha} a las ${progHora} (hora Colombia)`);
+      mostrarAviso('ok', `Corrida de ${mesBonito(mesCorrida)}${paquete ? ` (paquete de ${paquete})` : ''} programada para el ${progFecha} a las ${progHora} (hora Colombia)`);
       setModalProgramar(false);
       setProgFecha('');
       cargar();
@@ -332,6 +379,13 @@ export default function LlamadasIA({ user, onNavegar }) {
 
   const inp = { width: '100%', padding: '9px 10px', borderRadius: 8, border: '1.5px solid #e5e7eb', fontSize: 13, boxSizing: 'border-box', fontFamily: 'inherit' };
   const btnAccion = { border: 'none', borderRadius: 10, padding: '10px 16px', fontWeight: 800, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' };
+  // ✅ LUCY-MES-004 / LUCY-PAQUETE-005 — mismo alto que los botones para que la
+  // fila de controles se lea pareja en escritorio y se apile bien en móvil.
+  const selectControl = {
+    border: '1.5px solid #e5e7eb', borderRadius: 10, padding: '9px 12px',
+    fontWeight: 700, fontSize: 12, color: '#1a1a2e', background: '#fff',
+    cursor: 'pointer', maxWidth: '100%',
+  };
 
   // ─── Estado: Lucy no activada para este tenant ─────────────────────────────
   if (activa === false) {
@@ -362,17 +416,42 @@ export default function LlamadasIA({ user, onNavegar }) {
           <div style={{ fontSize: 11, color: '#6b7280' }}>Seguimiento automático de vencimientos por voz</div>
         </div>
         {esAdmin && (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {/* ✅ LUCY-MES-004 / LUCY-PAQUETE-005 — qué mes y de a cuántos.
+                Van ANTES del botón: se lee como una frase, "llamar septiembre,
+                de a 50", y así nadie lanza a ciegas. */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <label htmlFor="lucy-mes" style={{ fontSize: 10, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: 0.3 }}>Mes a llamar</label>
+              <select id="lucy-mes" value={mesCorrida} onChange={(e) => setMesCorrida(e.target.value)} disabled={ocupado}
+                style={{ ...selectControl, minWidth: 150 }}>
+                {mesesSeleccionables().map(m => (
+                  <option key={m} value={m}>
+                    {mesBonito(m)}{m === mesActualCO() ? ' (actual)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <label htmlFor="lucy-paquete" style={{ fontSize: 10, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: 0.3 }}>Paquete</label>
+              <select id="lucy-paquete" value={paquete} onChange={(e) => setPaquete(e.target.value)} disabled={ocupado}
+                style={{ ...selectControl, minWidth: 140 }}>
+                {OPCIONES_PAQUETE.map(o => (
+                  <option key={o.valor} value={o.valor}>{o.etiqueta}</option>
+                ))}
+              </select>
+            </div>
+
             <button onClick={lanzarAhora} disabled={ocupado}
-              style={{ ...btnAccion, background: '#1a1a2e', color: '#fff', opacity: ocupado ? 0.6 : 1 }}>
+              style={{ ...btnAccion, background: '#1a1a2e', color: '#fff', opacity: ocupado ? 0.6 : 1, alignSelf: 'flex-end' }}>
               📞 Lanzar ahora
             </button>
             <button onClick={() => setModalProgramar(true)} disabled={ocupado}
-              style={{ ...btnAccion, background: '#e0f2fe', color: '#0369a1' }}>
+              style={{ ...btnAccion, background: '#e0f2fe', color: '#0369a1', alignSelf: 'flex-end' }}>
               🗓 Programar
             </button>
             <button onClick={() => setModalPrueba(true)} disabled={ocupado}
-              style={{ ...btnAccion, background: '#fff8e6', color: '#b45309' }}>
+              style={{ ...btnAccion, background: '#fff8e6', color: '#b45309', alignSelf: 'flex-end' }}>
               🧪 Llamada de prueba
             </button>
           </div>
@@ -402,6 +481,12 @@ export default function LlamadasIA({ user, onNavegar }) {
               display: 'inline-block', animation: 'c360pulse 1.2s infinite',
             }} />
             <span style={{ fontWeight: 800, fontSize: 12.5, letterSpacing: 0.5 }}>LUCY ESTÁ LLAMANDO</span>
+            {/* ✅ LUCY-MES-004: qué mes está llamando, a la vista siempre */}
+            {corrida.mes && (
+              <span style={{ fontSize: 10.5, fontWeight: 700, padding: '2px 9px', borderRadius: 999, background: 'rgba(255,255,255,0.14)' }}>
+                {mesBonito(corrida.mes)}{corrida.paquete ? ` · paquete de ${corrida.paquete}` : ''}
+              </span>
+            )}
             <span style={{ marginLeft: 'auto', fontSize: 11.5, color: '#a5b4fc' }}>
               {corrida.lanzadas || 0}{corrida.totalObjetivo ? ` de ${corrida.totalObjetivo}` : ''} llamada(s) lanzada(s)
             </span>
@@ -506,11 +591,19 @@ export default function LlamadasIA({ user, onNavegar }) {
       {corrida?.estado === 'terminada' && (
         <div style={{ background: '#f9fafb', border: '1.5px solid #e5e7eb', borderRadius: 12, padding: '12px 14px', marginBottom: 12 }}>
           <div style={{ fontWeight: 800, fontSize: 11, color: '#374151', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 }}>
-            Última corrida
+            Última corrida{corrida.mes ? ` · ${mesBonito(corrida.mes)}` : ''}
           </div>
           <div style={{ fontSize: 13, color: '#1a1a2e', fontWeight: 700 }}>
             {corrida.llamadasLanzadas || 0} llamada(s) lanzada(s) de {corrida.vencimientosEvaluados ?? '—'} vencimiento(s) evaluado(s)
           </div>
+
+          {/* ✅ LUCY-PAQUETE-005: el paquete se llenó — el siguiente continúa
+              donde quedó este, porque la cola se ordena por intentos. */}
+          {corrida.paquete && (corrida.llamadasLanzadas || 0) >= corrida.paquete && (
+            <div style={{ marginTop: 8, background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: '8px 10px', fontSize: 12, color: '#1e40af' }}>
+              Se completó el paquete de {corrida.paquete}. Vuelve a darle <strong>Lanzar ahora</strong> con el mismo mes cuando quieras el siguiente: Lucy continúa por los que todavía no han recibido ninguna llamada.
+            </div>
+          )}
           {(() => {
             const m = corrida.motivos || {};
             const filas = [
@@ -802,8 +895,14 @@ export default function LlamadasIA({ user, onNavegar }) {
         <div onClick={() => setModalProgramar(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 400, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
           <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 16, width: '100%', maxWidth: 380, padding: '20px 18px' }}>
             <div style={{ fontWeight: 800, fontSize: 15, color: '#1a1a2e', marginBottom: 4 }}>🗓 Programar llamadas</div>
-            <div style={{ fontSize: 11.5, color: '#6b7280', marginBottom: 14 }}>
+            <div style={{ fontSize: 11.5, color: '#6b7280', marginBottom: 12 }}>
               Lucy llamará a los clientes con vencimientos pendientes de tu empresa el día y hora que elijas (hora Colombia).
+            </div>
+            {/* ✅ LUCY-MES-004 / LUCY-PAQUETE-005: se programa lo que está
+                elegido arriba. Mostrarlo evita programar un mes sin querer. */}
+            <div style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 8, padding: '8px 10px', marginBottom: 14, fontSize: 12, color: '#374151' }}>
+              Se programará: <strong>{mesBonito(mesCorrida)}</strong>{paquete ? <> · paquete de <strong>{paquete}</strong></> : <> · <strong>todas</strong> las pendientes</>}
+              <div style={{ fontSize: 10.5, color: '#9ca3af', marginTop: 2 }}>Para cambiarlo, cierra esta ventana y ajusta el mes o el paquete arriba.</div>
             </div>
             <div style={{ marginBottom: 10 }}>
               <label style={{ fontSize: 11, fontWeight: 700, color: '#374151', display: 'block', marginBottom: 4 }}>Fecha</label>

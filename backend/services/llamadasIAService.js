@@ -76,6 +76,21 @@ const UMBRAL_PRIORIDAD_DEFAULT = Number(process.env.LLAMADA_IA_UMBRAL_PRIORIDAD)
 const FACTOR_CONTESTACION = Number(process.env.LLAMADA_IA_FACTOR_CONTESTACION) || 0.45;
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ LUCY-TIMBRE-006 (2026-09-22) — cuánto suena antes de colgar
+// ─────────────────────────────────────────────────────────────────────────────
+// ElevenLabs deja 60 s por defecto. En Colombia un timbre dura ~6 s, así que
+// 60 s son ~10 timbres: el cliente que no va a contestar igual no contesta, y
+// muchos números alcanzan a pasar al buzón — el buzón CONTESTA, Lucy le habla
+// a una grabadora y eso sí consume minutos facturables.
+// 20 s ≈ 3 timbres. Configurable por tenant en llamadas_ia_config.segundosTimbre.
+const SEGUNDOS_TIMBRE_DEFAULT = Number(process.env.LLAMADA_IA_SEGUNDOS_TIMBRE) || 20;
+const SEGUNDOS_TIMBRE_MIN = 10;
+const SEGUNDOS_TIMBRE_MAX = 60;
+
+// ✅ LUCY-PAQUETE-005: tamaño máximo de un paquete manual.
+const MAX_LLAMADAS_TOPE = 1000;
+
+// ═════════════════════════════════════════════════════════════════════════════
 // CONTROL DE CONCURRENCIA — el plan de ElevenLabs limita llamadas SIMULTÁNEAS
 // (Free 4 · Starter 6 · Creator 10 · Pro 20 · Scale 30). Superar el límite
 // dispara tarifa de ráfaga (~2× el minuto) o rechazo de llamadas.
@@ -101,6 +116,10 @@ const mesActualColombia = () => {
   const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000);
   return ahoraCO.toISOString().slice(0, 7); // "YYYY-MM"
 };
+
+// ✅ LUCY-MES-004: un mes válido es exactamente "YYYY-MM". Se valida en el
+// motor y en la ruta: un mes inventado consultaría un rango vacío en silencio.
+const esMesValido = (mes) => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(mes || ''));
 
 const ahoraColombiaISO = () => {
   // "YYYY-MM-DDTHH:mm" en hora Colombia — comparable como string
@@ -342,6 +361,9 @@ const obtenerConfigTenant = async (adminId) => {
     // ✅ LUCY-CAPACIDAD-001: intentos por cliente/mes configurables por tenant.
     // Antes estaba quemado en 2 dentro del motor.
     maxIntentos: Number(data.maxIntentos) || MAX_INTENTOS_DEFAULT,
+    // ✅ LUCY-TIMBRE-006: segundos de timbre antes de colgar (≈6 s por timbre).
+    segundosTimbre: Math.min(SEGUNDOS_TIMBRE_MAX, Math.max(SEGUNDOS_TIMBRE_MIN,
+      Number(data.segundosTimbre) || SEGUNDOS_TIMBRE_DEFAULT)),
     // ✅ LUCY-PRIORIDAD-001: a partir de cuántos equipos por vencer un cliente
     // se considera prioritario y NO espera a que Lucy agote sus intentos.
     // 0 desactiva la regla (todos siguen el flujo normal de Lucy).
@@ -505,32 +527,83 @@ const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, 
 // Lanza UNA llamada saliente vía ElevenLabs Agents (número Twilio importado)
 // Devuelve { ok, conversationId, error? }
 // ═════════════════════════════════════════════════════════════════════════════
-const lanzarLlamadaElevenLabs = async ({ telefono, variables }) => {
+// ✅ LUCY-TIMBRE-006: `telephony_call_config.ringing_timeout_secs` le dice al
+// proveedor cuánto dejar sonar antes de rendirse (por defecto 60 s).
+//
+// REPLIEGUE DEFENSIVO: si esa opción no estuviera disponible en la cuenta o
+// cambiara de nombre, el proveedor responde 4xx y NO se lanzaría ni una sola
+// llamada — una corrida entera perdida por un campo opcional. El primer
+// rechazo QUE SEA DEL CAMPO reintenta sin él y apaga el timbre por el resto
+// de la corrida, para no pagar dos peticiones por cada número.
+//
+// OJO CON EL FALSO POSITIVO: un número inválido también devuelve 4xx. Si se
+// tratara cualquier error como "campo no soportado", un solo teléfono malo
+// dejaría sin timbre a toda la corrida. Por eso se exige que el mensaje hable
+// del campo. La bandera se reinicia en cada corrida (ver ejecutarMotorLlamadas):
+// un rechazo de hoy no puede apagar la función para siempre.
+let _timbreNoSoportado = false;
+
+const _reiniciarRepliegueTimbre = () => { _timbreNoSoportado = false; };
+
+// ¿El rechazo es POR EL CAMPO del timbre, o por otra cosa (número inválido,
+// saldo, agente mal configurado)? Solo el primero justifica reintentar.
+const _rechazoEsPorElTimbre = (status, mensaje) => {
+  if (status !== 400 && status !== 422) return false;
+  const m = String(mensaje || '').toLowerCase();
+  return /telephony_call_config|ringing_timeout|unknown field|unexpected field|extra fields|additional propert|not permitted|unrecognized/.test(m);
+};
+
+const _postLlamadaElevenLabs = async (cuerpo) => {
+  const resp = await fetch('https://api.elevenlabs.io/v1/convai/twilio/outbound-call', {
+    method: 'POST',
+    headers: {
+      'xi-api-key': ELEVEN_API_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(cuerpo),
+  });
+  const data = await resp.json().catch(() => ({}));
+  return { resp, data };
+};
+
+const lanzarLlamadaElevenLabs = async ({ telefono, variables, segundosTimbre = null }) => {
   try {
     if (!ELEVEN_API_KEY || !ELEVEN_AGENT_ID || !ELEVEN_PHONE_ID) {
       return { ok: false, error: 'Faltan variables ELEVENLABS_* en el entorno (Railway)' };
     }
-    const resp = await fetch('https://api.elevenlabs.io/v1/convai/twilio/outbound-call', {
-      method: 'POST',
-      headers: {
-        'xi-api-key': ELEVEN_API_KEY,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        agent_id: ELEVEN_AGENT_ID,
-        agent_phone_number_id: ELEVEN_PHONE_ID,
-        to_number: telefono,
-        conversation_initiation_client_data: {
-          dynamic_variables: variables, // adminId/registroId incluidos — vuelven en el webhook
-        },
-      }),
-    });
 
-    const data = await resp.json().catch(() => ({}));
+    const base = {
+      agent_id: ELEVEN_AGENT_ID,
+      agent_phone_number_id: ELEVEN_PHONE_ID,
+      to_number: telefono,
+      conversation_initiation_client_data: {
+        dynamic_variables: variables, // adminId/registroId incluidos — vuelven en el webhook
+      },
+    };
+
+    const conTimbre = Number(segundosTimbre) > 0 && !_timbreNoSoportado;
+    const cuerpo = conTimbre
+      ? { ...base, telephony_call_config: { ringing_timeout_secs: Math.round(Number(segundosTimbre)) } }
+      : base;
+
+    let { resp, data } = await _postLlamadaElevenLabs(cuerpo);
+
+    if ((!resp.ok || data.success === false) && conTimbre) {
+      const mensaje = data?.detail?.message || data?.message || JSON.stringify(data?.detail || data || '');
+      if (_rechazoEsPorElTimbre(resp.status, mensaje)) {
+        _timbreNoSoportado = true;
+        console.warn('[LLAMADAS-IA] LUCY-TIMBRE-006: el proveedor rechazó ringing_timeout_secs — se reintenta sin el campo y se apaga el timbre por esta corrida:', mensaje);
+        ({ resp, data } = await _postLlamadaElevenLabs(base));
+      }
+      // Si el rechazo NO es del campo (número inválido, etc.) se devuelve el
+      // error tal cual: reintentar sin timbre fallaría igual y gastaría otra
+      // petición por cada número malo de la base.
+    }
+
     if (!resp.ok || data.success === false) {
       return { ok: false, error: data?.detail?.message || data?.message || `HTTP ${resp.status}` };
     }
-    return { ok: true, conversationId: data.conversation_id || data.callSid || null };
+    return { ok: true, conversationId: data.conversation_id || data.callSid || null, timbreAplicado: conTimbre && !_timbreNoSoportado };
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -667,6 +740,56 @@ const leerSenalControl = async (adminId) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ LUCY-LECTURAS-007 (2026-09-22) — intentos del mes en UNA consulta
+// ─────────────────────────────────────────────────────────────────────────────
+// ANTES: dentro del bucle, por CADA vencimiento, una consulta a `llamadas_ia`
+// para contar los intentos de ese cliente. Con 589 vencimientos eran 589
+// consultas por corrida. Además impedía ordenar la cola: para saber quién ya
+// tenía llamadas había que estar dentro del bucle, o sea demasiado tarde.
+//
+// AHORA: una sola consulta por tenant devuelve las llamadas del mes y se arma
+// un mapa `clienteId|fechaVencimiento → { intentos, final }`. La clave incluye
+// la FECHA exacta, no el mes, para conservar la semántica anterior: dos
+// vencimientos del mismo cliente en fechas distintas cuentan por separado.
+//
+// ÍNDICE: la consulta combina igualdad (adminId) con rango (mesVencimiento) y
+// necesita el índice compuesto `llamadas_ia: adminId ASC + mesVencimiento ASC`.
+// Si no existe, Firestore rechaza la consulta: se devuelve `null` y el motor
+// vuelve solo al camino anterior (una consulta por cliente). Lucy nunca se
+// queda sin llamar por un índice que falte.
+// ═════════════════════════════════════════════════════════════════════════════
+const RESULTADOS_FINALES = ['cerrada', 'reagendada', 'inactivo_cliente', 'escalado_asesor', 'no_interesado'];
+
+const claveIntento = (clienteId, fechaVencimiento) => `${clienteId}|${fechaVencimiento}`;
+
+const construirMapaIntentos = async (adminId, mes) => {
+  try {
+    const snap = await db.collection('llamadas_ia')
+      .where('adminId', '==', adminId)
+      .where('mesVencimiento', '>=', `${mes}-01`)
+      .where('mesVencimiento', '<=', `${mes}-31`)
+      .get();
+
+    const mapa = new Map();
+    snap.forEach(doc => {
+      const l = doc.data() || {};
+      if (l.esPrueba === true) return; // una llamada de prueba no gasta intentos
+      if (!l.clienteId || !l.mesVencimiento) return;
+      const k = claveIntento(l.clienteId, l.mesVencimiento);
+      const actual = mapa.get(k) || { intentos: 0, final: false };
+      actual.intentos += 1;
+      if (RESULTADOS_FINALES.includes(l.resultado)) actual.final = true;
+      mapa.set(k, actual);
+    });
+    console.log(`[LLAMADAS-IA] LUCY-LECTURAS-007: ${snap.size} llamada(s) del mes ${mes} leídas en 1 consulta (tenant ${adminId})`);
+    return mapa;
+  } catch (e) {
+    console.warn(`[LLAMADAS-IA] LUCY-LECTURAS-007: no se pudo leer el mapa de intentos (${e.message}). Se usa el camino anterior, una consulta por cliente. Crea el índice compuesto llamadas_ia: adminId ASC + mesVencimiento ASC.`);
+    return null;
+  }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 // MOTOR PRINCIPAL
 // opciones:
 //   soloAdminId    → limita la corrida a UN tenant (manual/programada). El cron
@@ -677,15 +800,33 @@ const leerSenalControl = async (adminId) => {
 const ejecutarMotorLlamadas = async (opciones = {}) => {
   // ✅ LUCY-PARADA-001: soloVencimientoIds llega solo al REANUDAR una corrida
   // pausada — limita el motor a los vencimientos que quedaron en cola.
-  const { soloAdminId = null, ignorarHorario = false, soloVencimientoIds = null } = opciones;
-  const mesActual = mesActualColombia();
-  console.log(`[LLAMADAS-IA] Motor — mes ${mesActual}${soloAdminId ? ` — SOLO tenant ${soloAdminId}` : ' — todos los tenants activos'}`);
+  // ✅ LUCY-MES-004: `mes` ("YYYY-MM") elige QUÉ mes se llama. Por defecto el
+  //    actual, que es lo que hacía siempre. Sirve para recuperar un mes que se
+  //    quedó atrás sin esperar al cron.
+  // ✅ LUCY-PAQUETE-005: `maxLlamadas` corta la corrida al llegar a ese número
+  //    de llamadas LANZADAS (no evaluadas) en el tenant.
+  const {
+    soloAdminId = null,
+    ignorarHorario = false,
+    soloVencimientoIds = null,
+    mes = null,
+    maxLlamadas = null,
+  } = opciones;
+
+  const mesObjetivo = esMesValido(mes) ? mes : mesActualColombia();
+  const topePaquete = Number.isFinite(Number(maxLlamadas)) && Number(maxLlamadas) > 0
+    ? Math.min(MAX_LLAMADAS_TOPE, Math.floor(Number(maxLlamadas)))
+    : null;
+
+  _reiniciarRepliegueTimbre();   // ✅ LUCY-TIMBRE-006: cada corrida vuelve a intentarlo
+
+  console.log(`[LLAMADAS-IA] Motor — mes ${mesObjetivo}${topePaquete ? ` — paquete de ${topePaquete}` : ' — sin tope de paquete'}${soloAdminId ? ` — SOLO tenant ${soloAdminId}` : ' — todos los tenants activos'}`);
 
   try {
-    // 1) Vencimientos del MES ACTUAL no gestionados
+    // 1) Vencimientos del MES OBJETIVO no gestionados
     let vencQuery = db.collection('vencimientos')
-      .where('fechaVencimiento', '>=', `${mesActual}-01`)
-      .where('fechaVencimiento', '<=', `${mesActual}-31`)
+      .where('fechaVencimiento', '>=', `${mesObjetivo}-01`)
+      .where('fechaVencimiento', '<=', `${mesObjetivo}-31`)
       .where('gestionado', '==', false);
     // ✅ FIX LUCY-ELEVEN-001c: si la corrida es de un solo tenant, se filtra
     // desde la consulta — imposible tocar vencimientos de otros suscriptores.
@@ -757,12 +898,51 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
         ciudad:    userDoc.exists ? userDoc.data().ciudad : '',
       };
 
+      // ✅ LUCY-LECTURAS-007 + LUCY-PAQUETE-005 — ORDEN DE LA COLA
+      // ─────────────────────────────────────────────────────────────────────
+      // El problema que esto resuelve: la consulta de vencimientos no tiene
+      // `orderBy`, así que Firestore devolvía SIEMPRE el mismo orden. Cuando la
+      // corrida se cortaba (tope de minutos, pausa, reinicio), la siguiente
+      // arrancaba desde el primero y gastaba el intento 2 en los mismos de
+      // arriba; los del final nunca recibían ni el primero.
+      //
+      // Orden decidido con Sandra: primero quien NUNCA ha recibido llamada y,
+      // entre ellos, el vencimiento más próximo. Así el paquete 2 continúa
+      // donde quedó el 1 sin necesidad de guardar un cursor, que se pierde con
+      // un reinicio. Se ordena en memoria: no hace falta índice nuevo.
+      const mapaIntentos = await construirMapaIntentos(adminId, mesObjetivo);
+
+      const intentosDe = (v) => {
+        if (!mapaIntentos) return 0; // sin mapa no se puede ordenar por intentos
+        return (mapaIntentos.get(claveIntento(v.clienteId, v.fechaVencimiento)) || {}).intentos || 0;
+      };
+
+      vencimientos.sort((a, b) => {
+        const ia = intentosDe(a), ib = intentosDe(b);
+        if (ia !== ib) return ia - ib;                                   // 0 intentos primero
+        return String(a.fechaVencimiento || '').localeCompare(String(b.fechaVencimiento || '')); // vence antes, llama antes
+      });
+
+      if (topePaquete) {
+        const nuncaLlamados = vencimientos.filter(v => intentosDe(v) === 0).length;
+        console.log(`[LLAMADAS-IA] LUCY-PAQUETE-005: ${vencimientos.length} vencimiento(s) en cola (${nuncaLlamados} sin llamar) — se lanzarán máximo ${topePaquete}`);
+      }
+
       // Cache de sedes por corrida — evita releer `companies` en cada llamada.
       const cacheSedes = new Map();
       let lanzadasEnLote = 0;
+      let lanzadasTenant = 0;   // ✅ LUCY-PAQUETE-005
 
       for (let idx = 0; idx < vencimientos.length; idx++) {
         const venc = vencimientos[idx];
+
+        // ✅ LUCY-PAQUETE-005 — PAQUETE COMPLETO
+        // Cuenta llamadas LANZADAS, no evaluadas: los omitidos (sin teléfono,
+        // ya gestionado, sin sede) no gastan cupo del paquete.
+        if (topePaquete && lanzadasTenant >= topePaquete) {
+          console.log(`[LLAMADAS-IA] LUCY-PAQUETE-005: paquete de ${topePaquete} completo — quedan ${vencimientos.length - idx} en cola para el siguiente`);
+          break;
+        }
 
         // ✅ LUCY-PARADA-001 — PUNTO DE CONTROL
         // Se consulta ANTES de marcar cada número. Solo aplica a corridas de un
@@ -789,17 +969,28 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
         try {
           if (minutosDisponibles <= 0) { omitidasPorTope++; continue; }
 
-          // 4) Anti-duplicado + máximo 2 intentos
-          const existentesSnap = await db.collection('llamadas_ia')
-            .where('adminId', '==', adminId)
-            .where('clienteId', '==', venc.clienteId)
-            .where('mesVencimiento', '==', venc.fechaVencimiento)
-            .get();
+          // 4) Anti-duplicado + máximo de intentos
+          // ✅ LUCY-LECTURAS-007: del mapa armado arriba (1 consulta por tenant).
+          // Si el mapa no se pudo armar (índice ausente), se cae al camino
+          // anterior: una consulta por cliente. Misma decisión, más lecturas.
+          let intentosPrevios;
+          let yaTieneResultadoFinal;
 
-          const intentos = existentesSnap.docs.map(d => d.data());
-          const yaTieneResultadoFinal = intentos.some(i =>
-            ['cerrada', 'reagendada', 'inactivo_cliente', 'escalado_asesor', 'no_interesado'].includes(i.resultado)
-          );
+          if (mapaIntentos) {
+            const reg = mapaIntentos.get(claveIntento(venc.clienteId, venc.fechaVencimiento)) || { intentos: 0, final: false };
+            intentosPrevios = reg.intentos;
+            yaTieneResultadoFinal = reg.final;
+          } else {
+            const existentesSnap = await db.collection('llamadas_ia')
+              .where('adminId', '==', adminId)
+              .where('clienteId', '==', venc.clienteId)
+              .where('mesVencimiento', '==', venc.fechaVencimiento)
+              .get();
+            const previos = existentesSnap.docs.map(d => d.data()).filter(l => l.esPrueba !== true);
+            intentosPrevios = previos.length;
+            yaTieneResultadoFinal = previos.some(i => RESULTADOS_FINALES.includes(i.resultado));
+          }
+
           if (yaTieneResultadoFinal) { motivos.ya_gestionado++; continue; }
 
           // ✅ LUCY-PRIORIDAD-001: si este vencimiento ya pasó a telemercadeo
@@ -814,7 +1005,7 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
           }
 
           // ✅ LUCY-CAPACIDAD-001: intentos configurables (antes quemado en 2).
-          const numeroIntento = intentos.length + 1;
+          const numeroIntento = intentosPrevios + 1;
           if (numeroIntento > config.maxIntentos) { motivos.intentos_agotados++; continue; }
 
           // 5) Cliente y teléfono
@@ -874,7 +1065,10 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
             adminId, registroId: registroRef.id, cliente, vencimiento: venc, tenantInfo, sede, perfil,
           });
 
-          const resultadoLanzamiento = await lanzarLlamadaElevenLabs({ telefono, variables });
+          // ✅ LUCY-TIMBRE-006: cuelga a los N segundos si nadie contesta.
+          const resultadoLanzamiento = await lanzarLlamadaElevenLabs({
+            telefono, variables, segundosTimbre: config.segundosTimbre,
+          });
 
           await registroRef.set({
             adminId,
@@ -904,13 +1098,24 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
           if (resultadoLanzamiento.ok) {
             totalLanzadas++;
             lanzadasEnLote++;
+            lanzadasTenant++;   // ✅ LUCY-PAQUETE-005
+            // El mapa se mantiene al día dentro de la corrida: si el mismo
+            // cliente apareciera otra vez, ya cuenta con este intento.
+            if (mapaIntentos) {
+              const k = claveIntento(venc.clienteId, venc.fechaVencimiento);
+              const reg = mapaIntentos.get(k) || { intentos: 0, final: false };
+              mapaIntentos.set(k, { ...reg, intentos: reg.intentos + 1 });
+            }
             // ✅ LUCY-ASINCRONO-001: avance en vivo para el panel — a quién
             // está llamando Lucy en este momento y cuánto lleva.
             if (soloAdminId) {
               await guardarCorrida(adminId, {
                 estado: 'en_curso',
+                mes: mesObjetivo,                                  // ✅ LUCY-MES-004
+                paquete: topePaquete,                              // ✅ LUCY-PAQUETE-005
                 lanzadas: totalLanzadas,
-                totalObjetivo: vencimientos.length,
+                totalObjetivo: topePaquete ? Math.min(topePaquete, vencimientos.length) : vencimientos.length,
+                enCola: vencimientos.length,
                 llamandoAhora: telefonoRaw,
                 clienteAhora: cliente.nombre || '',
                 tipoAhora: perfil.tipoUso,
@@ -948,12 +1153,14 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
       if (detencion) break;
     }
 
-    console.log(`[LLAMADAS-IA] Motor completado — ${tenantsProcesados} tenant(s), ${totalLanzadas} llamada(s), ${omitidasPorTope} omitida(s) por tope`, motivos);
+    console.log(`[LLAMADAS-IA] Motor completado — mes ${mesObjetivo}, ${tenantsProcesados} tenant(s), ${totalLanzadas} llamada(s), ${omitidasPorTope} omitida(s) por tope`, motivos);
     const resumen = {
       tenantsProcesados,
       llamadasLanzadas: totalLanzadas,
       omitidasPorTope,
       vencimientosEvaluados: vencSnap.size,
+      mes: mesObjetivo,        // ✅ LUCY-MES-004 — qué mes se llamó
+      paquete: topePaquete,    // ✅ LUCY-PAQUETE-005 — tope pedido, null = sin tope
       motivos, // ✅ LUCY-DIAGNOSTICO-002 — desglose visible en el panel
     };
     // ✅ LUCY-ASINCRONO-001: el resumen se persiste porque el motor ya NO
@@ -1042,7 +1249,12 @@ const lanzarLlamadaPrueba = async ({ adminId, telefono, tipoUso = 'empresa' }) =
     perfil,
   });
 
-  const resultadoLanzamiento = await lanzarLlamadaElevenLabs({ telefono: telefonoE164, variables });
+  // ✅ LUCY-TIMBRE-006: la prueba usa el MISMO timbre que una llamada real —
+  // es la forma de verificar el ajuste sin gastar una corrida entera.
+  const configPrueba = await obtenerConfigTenant(adminId).catch(() => ({ segundosTimbre: SEGUNDOS_TIMBRE_DEFAULT }));
+  const resultadoLanzamiento = await lanzarLlamadaElevenLabs({
+    telefono: telefonoE164, variables, segundosTimbre: configPrueba.segundosTimbre,
+  });
 
   await registroRef.set({
     adminId,
@@ -1230,8 +1442,15 @@ const ejecutarProgramadasVencidas = async () => {
         ejecutadaAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       // Scoped al tenant + ignora ventana horaria (el humano eligió la hora)
-      await ejecutarMotorLlamadas({ soloAdminId: prog.adminId, ignorarHorario: true })
-        .catch(e => console.error('[LLAMADAS-IA-CRON] Error en programada:', e.message));
+      // ✅ LUCY-MES-004 / LUCY-PAQUETE-005: la programación guarda el mes y el
+      // tamaño del paquete que eligió el humano; si no los guardó (corridas
+      // creadas antes de este cambio), el motor usa el mes actual y sin tope.
+      await ejecutarMotorLlamadas({
+        soloAdminId: prog.adminId,
+        ignorarHorario: true,
+        mes: prog.mes || null,
+        maxLlamadas: prog.maxLlamadas || null,
+      }).catch(e => console.error('[LLAMADAS-IA-CRON] Error en programada:', e.message));
     }
   } catch (e) {
     console.error('[LLAMADAS-IA-CRON] Error revisando programadas:', e.message);
@@ -1252,6 +1471,11 @@ module.exports = {
   solicitarControlCorrida, // ✅ LUCY-PARADA-001
   leerSenalControl,
   corridaEstaViva,         // ✅ LUCY-PARADA-002
+  esMesValido,             // ✅ LUCY-MES-004 — validación compartida con la ruta
+  mesActualColombia,       // ✅ LUCY-MES-004 — mes por defecto del panel
+  MAX_LLAMADAS_TOPE,       // ✅ LUCY-PAQUETE-005
+  SEGUNDOS_TIMBRE_MIN,     // ✅ LUCY-TIMBRE-006
+  SEGUNDOS_TIMBRE_MAX,     // ✅ LUCY-TIMBRE-006
 };
 
 // ════════════════════════════════════════════════════════════════════════════

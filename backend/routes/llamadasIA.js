@@ -35,7 +35,34 @@ const {
   obtenerUltimaCorrida,
   solicitarControlCorrida,
   corridaEstaViva,
+  esMesValido,            // ✅ LUCY-MES-004
+  mesActualColombia,      // ✅ LUCY-MES-004
+  MAX_LLAMADAS_TOPE,      // ✅ LUCY-PAQUETE-005
+  SEGUNDOS_TIMBRE_MIN,    // ✅ LUCY-TIMBRE-006
+  SEGUNDOS_TIMBRE_MAX,    // ✅ LUCY-TIMBRE-006
 } = require('../services/llamadasIAService');
+
+// ✅ LUCY-MES-004 / LUCY-PAQUETE-005 — validación compartida por /ejecutar-motor
+// y /programar. Devuelve { error } o { mes, maxLlamadas } ya normalizados.
+// `mes` vacío = mes actual (el comportamiento de siempre).
+// `maxLlamadas` vacío = sin tope (el comportamiento de siempre).
+const leerOpcionesCorrida = (body = {}) => {
+  const mesPedido = body.mes ? String(body.mes) : null;
+  if (mesPedido && !esMesValido(mesPedido)) {
+    return { error: 'El mes debe tener el formato AAAA-MM (por ejemplo 2026-09)' };
+  }
+
+  let maxLlamadas = null;
+  if (body.maxLlamadas !== undefined && body.maxLlamadas !== null && body.maxLlamadas !== '') {
+    const n = Number(body.maxLlamadas);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_LLAMADAS_TOPE) {
+      return { error: `El paquete debe ser un entero entre 1 y ${MAX_LLAMADAS_TOPE}` };
+    }
+    maxLlamadas = n;
+  }
+
+  return { mes: mesPedido, maxLlamadas };
+};
 
 const LUCY_WEBHOOK_SECRET = process.env.LUCY_WEBHOOK_SECRET || process.env.VAPI_WEBHOOK_SECRET;
 
@@ -369,6 +396,8 @@ router.get('/config', async (req, res) => {
       topeMinutosMes: config?.topeMinutosMes ?? null,
       minutosConsumidosMes: config?.minutosConsumidosMes ?? null,
       maxIntentos: config?.maxIntentos ?? null,
+      segundosTimbre: config?.segundosTimbre ?? null,   // ✅ LUCY-TIMBRE-006
+      mesActual: mesActualColombia(),                   // ✅ LUCY-MES-004
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -435,6 +464,16 @@ router.put('/superadmin/config/:adminId', async (req, res) => {
       cambios.maxIntentos = intentos;
     }
 
+    // ✅ LUCY-TIMBRE-006: segundos de timbre antes de colgar (~6 s por timbre
+    // en Colombia, así que 20 s ≈ 3 timbres). Opcional: si no viene, no se toca.
+    if (req.body?.segundosTimbre !== undefined) {
+      const seg = Number(req.body.segundosTimbre);
+      if (!Number.isInteger(seg) || seg < SEGUNDOS_TIMBRE_MIN || seg > SEGUNDOS_TIMBRE_MAX) {
+        return res.status(400).json({ error: `segundosTimbre debe ser un entero entre ${SEGUNDOS_TIMBRE_MIN} y ${SEGUNDOS_TIMBRE_MAX}` });
+      }
+      cambios.segundosTimbre = seg;
+    }
+
     // merge: NUNCA se toca el histórico de consumo del tenant.
     await db.collection('llamadas_ia_config').doc(adminId).set(cambios, { merge: true });
 
@@ -443,7 +482,7 @@ router.put('/superadmin/config/:adminId', async (req, res) => {
       descripcion: `Tope de minutos de Lucy fijado en ${Math.round(tope)} min/mes para el suscriptor ${adminId}`,
       usuarioId: getAdminId(req),
       usuarioNombre: req.user?.nombre || '',
-      datos: { adminIdObjetivo: adminId, topeMinutosMes: Math.round(tope), maxIntentos: cambios.maxIntentos },
+      datos: { adminIdObjetivo: adminId, topeMinutosMes: Math.round(tope), maxIntentos: cambios.maxIntentos, segundosTimbre: cambios.segundosTimbre },
     });
 
     const config = await obtenerConfigTenant(adminId);
@@ -468,12 +507,17 @@ router.post('/ejecutar-motor', async (req, res) => {
     const adminIdSesion = getAdminId(req);
     const adminIdObjetivo = (superAdmin && req.body?.adminId) ? req.body.adminId : adminIdSesion;
 
+    // ✅ LUCY-MES-004 / LUCY-PAQUETE-005
+    const opciones = leerOpcionesCorrida(req.body);
+    if (opciones.error) return res.status(400).json({ error: opciones.error });
+    const mesCorrida = opciones.mes || mesActualColombia();
+
     await auditar({
       accion: 'lanzar_motor_manual',
-      descripcion: `Lanzamiento manual de llamadas IA para tenant ${adminIdObjetivo}`,
+      descripcion: `Lanzamiento manual de llamadas IA para tenant ${adminIdObjetivo} — mes ${mesCorrida}${opciones.maxLlamadas ? `, paquete de ${opciones.maxLlamadas}` : ', sin tope'}`,
       usuarioId: adminIdSesion,
       usuarioNombre: req.user?.nombre || '',
-      datos: { adminIdObjetivo },
+      datos: { adminIdObjetivo, mes: mesCorrida, maxLlamadas: opciones.maxLlamadas },
     });
 
     // ✅ LUCY-ASINCRONO-001: NO se espera al motor. Con el ritmo de llamadas
@@ -491,6 +535,8 @@ router.post('/ejecutar-motor', async (req, res) => {
 
     await guardarCorrida(adminIdObjetivo, {
       estado: 'en_curso', lanzadas: 0, totalObjetivo: null,
+      mes: mesCorrida,                      // ✅ LUCY-MES-004
+      paquete: opciones.maxLlamadas,        // ✅ LUCY-PAQUETE-005
       llamandoAhora: null, clienteAhora: null,
       iniciadaPor: req.user?.nombre || adminIdSesion,
       iniciadaAt: new Date().toISOString(),
@@ -501,7 +547,12 @@ router.post('/ejecutar-motor', async (req, res) => {
       pendientesCount: 0,
     });
 
-    ejecutarMotorLlamadas({ soloAdminId: adminIdObjetivo, ignorarHorario: true })
+    ejecutarMotorLlamadas({
+      soloAdminId: adminIdObjetivo,
+      ignorarHorario: true,
+      mes: opciones.mes,                    // ✅ LUCY-MES-004 (null = mes actual)
+      maxLlamadas: opciones.maxLlamadas,    // ✅ LUCY-PAQUETE-005 (null = sin tope)
+    })
       .catch(async (e) => {
         console.error('[LLAMADAS-IA] Corrida en segundo plano falló:', e.message);
         await guardarCorrida(adminIdObjetivo, { estado: 'error', error: e.message });
@@ -509,7 +560,9 @@ router.post('/ejecutar-motor', async (req, res) => {
 
     return res.status(202).json({
       iniciado: true,
-      mensaje: 'Lucy empezó a llamar. El avance se actualiza solo en esta pantalla.',
+      mes: mesCorrida,
+      maxLlamadas: opciones.maxLlamadas,
+      mensaje: `Lucy empezó a llamar los vencimientos de ${mesCorrida}${opciones.maxLlamadas ? ` — paquete de ${opciones.maxLlamadas}` : ''}. El avance se actualiza solo en esta pantalla.`,
     });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -700,6 +753,10 @@ router.post('/programar', async (req, res) => {
       return res.status(400).json({ error: 'Fecha u hora inválidas (formato AAAA-MM-DD y HH:mm)' });
     }
 
+    // ✅ LUCY-MES-004 / LUCY-PAQUETE-005: la programación conserva la decisión.
+    const opciones = leerOpcionesCorrida(req.body);
+    if (opciones.error) return res.status(400).json({ error: opciones.error });
+
     const fechaHora = `${fecha}T${hora}`;
     const ahoraCO = new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 16);
     if (fechaHora <= ahoraCO) {
@@ -709,6 +766,8 @@ router.post('/programar', async (req, res) => {
     const ref = await db.collection('llamadas_ia_programadas').add({
       adminId,
       fechaHora,
+      mes: opciones.mes,                 // ✅ LUCY-MES-004 (null = mes actual al ejecutar)
+      maxLlamadas: opciones.maxLlamadas, // ✅ LUCY-PAQUETE-005 (null = sin tope)
       estado: 'pendiente',
       creadaPor: req.user?.nombre || adminId,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -719,10 +778,10 @@ router.post('/programar', async (req, res) => {
       descripcion: `Corrida de llamadas IA programada para ${fecha} ${hora}`,
       usuarioId: adminId,
       usuarioNombre: req.user?.nombre || '',
-      datos: { fechaHora },
+      datos: { fechaHora, mes: opciones.mes, maxLlamadas: opciones.maxLlamadas },
     });
 
-    return res.json({ ok: true, id: ref.id, fechaHora });
+    return res.json({ ok: true, id: ref.id, fechaHora, mes: opciones.mes, maxLlamadas: opciones.maxLlamadas });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
