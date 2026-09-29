@@ -39,7 +39,8 @@ const TabEmpresas = ({ token }) => {
   const [mensaje, setMensaje] = useState(null);
   const fileInputRef = useRef();
   // ✅ SEDE-PRINCIPAL-001: horarioAtencion, telefonoPrincipal y esPrincipal
-  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false });
+  // ✅ NOTA-FIJA-IMPRESION-001: notaFijaImpresion para todas las órdenes
+  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false, notaFijaImpresion: '' });
   const [errores, setErrores] = useState({});
 
   useEffect(() => { cargarEmpresas(); }, []);
@@ -142,7 +143,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
 
   const handleEditar = (emp) => {
     setEditando(emp.id);
-    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '', anchoImpresoraPos: emp.anchoImpresoraPos || 58, horarioAtencion: emp.horarioAtencion || '', telefonoPrincipal: emp.telefonoPrincipal || 'phone', esPrincipal: emp.esPrincipal === true });
+    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '', anchoImpresoraPos: emp.anchoImpresoraPos || 58, horarioAtencion: emp.horarioAtencion || '', telefonoPrincipal: emp.telefonoPrincipal || 'phone', esPrincipal: emp.esPrincipal === true, notaFijaImpresion: emp.notaFijaImpresion || '' });
     setLogoPreview(emp.logo || null); setLogoFile(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -155,7 +156,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
     } catch { mostrarMensaje('Error al eliminar', 'error'); }
   };
 
-  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
+  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false, notaFijaImpresion: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
 
   const campo = (label, key, tipo = 'text', placeholder = '') => (
     <div style={S.campo}>
@@ -285,6 +286,40 @@ const comprimirImagen = (file, maxWidth, quality) => {
                     <div style={{ fontSize: 11, color: '#9ca3af' }}>{o.desc}</div>
                   </button>
                 ))}
+              </div>
+            </div>
+
+            {/* ✅ NOTA-FIJA-IMPRESION-001: nota que aparece en todas las órdenes impresas */}
+            <div style={{ marginTop: 22, padding: '16px 18px', background: '#fff5e6', border: '1.5px solid #fed7aa', borderRadius: 12 }}>
+              <label style={{ display: 'block', fontSize: 13, fontWeight: 800, color: '#92400e', marginBottom: 8 }}>
+                📌 Nota fija en órdenes impresas (opcional)
+              </label>
+              <div style={{ fontSize: 11.5, color: '#b45309', marginBottom: 12 }}>
+                Aparecerá en todas las órdenes de servicio que imprimas (tirilla y media carta), justo antes del footer.
+              </div>
+              <textarea
+                value={formData.notaFijaImpresion || ''}
+                onChange={(e) => {
+                  let val = e.target.value;
+                  if (val.length > 200) val = val.substring(0, 200);
+                  setFormData({ ...formData, notaFijaImpresion: val });
+                }}
+                placeholder="Ej: Cotización sin compromiso de venta • Válida por 30 días"
+                style={{
+                  width: '100%',
+                  minHeight: 60,
+                  padding: 12,
+                  fontSize: 13,
+                  fontFamily: 'inherit',
+                  border: '1px solid #fed7aa',
+                  borderRadius: 8,
+                  boxSizing: 'border-box',
+                  resize: 'vertical',
+                  color: '#374151',
+                }}
+              />
+              <div style={{ fontSize: 11, color: '#92400e', marginTop: 6, textAlign: 'right' }}>
+                {(formData.notaFijaImpresion || '').length}/200 caracteres
               </div>
             </div>
             <div style={{ display: 'flex', gap: 12, marginTop: 24 }}>

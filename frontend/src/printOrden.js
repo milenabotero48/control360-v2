@@ -149,6 +149,7 @@ export const generarHTMLImpresionOrden = (orden, empresa, formato = 'carta') => 
     <div class="total-final" style="display:flex;justify-content:space-between;margin-top:4px"><span>TOTAL:</span><span>${formatCOP(orden.total)}</span></div>
   </div>
   ${orden.pagado ? `<div class="pago-box">✅ PAGADO — ${orden.formaPago || ''} — ${formatCOP(orden.montoPagado)}</div>` : ''}
+  ${empresa.notaFijaImpresion ? `<div class="notas">📌 ${empresa.notaFijaImpresion}</div>` : ''}
   <div class="footer">
     Elaborado con Control360 | 📞 3148361622<br/>
     <em>Sistema operativo para empresas de servicios</em>
