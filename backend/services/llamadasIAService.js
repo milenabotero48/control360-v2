@@ -233,6 +233,13 @@ const clasificarActivo = (descripcionEquipo, reglasTenant = null) => {
 // ═════════════════════════════════════════════════════════════════════════════
 const HORARIO_FALLBACK = 'lunes a viernes de 8:00 a.m. a 5:30 p.m. y sábados de 8:00 a.m. a 12:00 m.';
 
+// ✅ LUCY-SINSEDE-008: celular que el suscriptor registró en su perfil. Es el
+// contacto que Lucy da cuando la sede no tiene teléfono propio o dirección.
+const telefonoContactoTenant = (u) => {
+  const d = u || {};
+  return String(d.celular || d.telefono || d.phone || d.whatsapp || '').trim();
+};
+
 const obtenerSede = async (adminId, empresaId, cacheSedes) => {
   const clave = empresaId || '__principal__';
   if (cacheSedes.has(clave)) return cacheSedes.get(clave);
@@ -361,6 +368,10 @@ const obtenerConfigTenant = async (adminId) => {
     // ✅ LUCY-CAPACIDAD-001: intentos por cliente/mes configurables por tenant.
     // Antes estaba quemado en 2 dentro del motor.
     maxIntentos: Number(data.maxIntentos) || MAX_INTENTOS_DEFAULT,
+    // ✅ LUCY-SINSEDE-008: llamar aunque la sede no tenga dirección (Lucy no
+    // dicta dirección; da el nombre y el celular de la empresa). Por defecto SÍ.
+    // Para volver a la regla estricta de SEDE-PRINCIPAL-001: llamarSinDireccion=false.
+    llamarSinDireccion: data.llamarSinDireccion !== false,
     // ✅ LUCY-TIMBRE-006: segundos de timbre antes de colgar (≈6 s por timbre).
     segundosTimbre: Math.min(SEGUNDOS_TIMBRE_MAX, Math.max(SEGUNDOS_TIMBRE_MIN,
       Number(data.segundosTimbre) || SEGUNDOS_TIMBRE_DEFAULT)),
@@ -503,10 +514,13 @@ const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, 
     medios_pago:        tenantInfo.mediosPago || 'efectivo, transferencia y Nequi',
 
     // ── Datos de la SEDE que atiende a este cliente ──────────────────────────
-    direccion_empresa:  sedeSegura.direccion || tenantInfo.direccion || '',
+    // ✅ LUCY-SINSEDE-008: con sede incompleta NO se entrega ninguna dirección
+    // (ni la del perfil del tenant: un suscriptor con varias ciudades dictaría
+    // la equivocada). Solo nombre de empresa y celular de contacto.
+    direccion_empresa:  sedeSegura.completa ? (sedeSegura.direccion || tenantInfo.direccion || '') : '',
     ciudad_empresa:     sedeSegura.ciudad    || tenantInfo.ciudad    || '',
     horario_empresa:    sedeSegura.horario   || HORARIO_FALLBACK,
-    telefono_empresa:   sedeSegura.telefono  || '',
+    telefono_empresa:   sedeSegura.telefono  || tenantInfo.telefono || '',   // ✅ LUCY-SINSEDE-008: respaldo = celular del perfil
     nombre_sede:        sedeSegura.nombre    || '',
     // Bandera para el guion: si es "no", Lucy NO dicta dirección y remite a un
     // asesor. Nunca inventa una sede.
@@ -873,6 +887,7 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
       fuera_de_horario: 0,
       fallo_proveedor: 0,
       sin_sede: 0, // ✅ SEDE-PRINCIPAL-001
+      llamada_sin_direccion: 0, // ✅ LUCY-SINSEDE-008: llamadas lanzadas sin dirección de sede
     };
 
     for (const [adminId, vencimientos] of Object.entries(porTenant)) {
@@ -896,6 +911,7 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
         nombre:    userDoc.exists ? (userDoc.data().empresa || userDoc.data().nombre) : 'Control360',
         direccion: userDoc.exists ? userDoc.data().direccion : '',
         ciudad:    userDoc.exists ? userDoc.data().ciudad : '',
+        telefono:  userDoc.exists ? telefonoContactoTenant(userDoc.data()) : '',   // ✅ LUCY-SINSEDE-008
       };
 
       // ✅ LUCY-LECTURAS-007 + LUCY-PAQUETE-005 — ORDEN DE LA COLA
@@ -1051,10 +1067,19 @@ const ejecutarMotorLlamadas = async (opciones = {}) => {
           // cuesta el cliente y obliga a rellamar (minutos ya pagados); una
           // llamada no hecha solo cuesta esperar. El vencimiento queda listado
           // con el motivo para que se corrija la ficha del cliente.
+          // ✅ LUCY-SINSEDE-008 (decisión de Milena, 2026-10-07): se llama IGUAL
+          // sin dirección. Lucy recuerda el vencimiento y da nombre + celular
+          // de la empresa (sede_confirmada='no' → guion sin dirección). Solo se
+          // omite si el suscriptor apagó la opción o no hay NINGÚN celular de
+          // contacto que dar: llamar sin poder decir cómo contactarnos no sirve.
           if (!sede.completa) {
-            motivos.sin_sede++;
-            console.warn(`[LLAMADAS-IA] Vencimiento ${venc.id} sin sede con dirección — omitido`);
-            continue;
+            const contacto = sede.telefono || tenantInfo.telefono;
+            if (!config.llamarSinDireccion || !contacto) {
+              motivos.sin_sede++;
+              console.warn(`[LLAMADAS-IA] Vencimiento ${venc.id} sin sede con dirección${!contacto ? ' ni celular de contacto' : ''} — omitido`);
+              continue;
+            }
+            motivos.llamada_sin_direccion++;
           }
 
           // 6) ✅ FIX LUCY-ELEVEN-001b: registroRef se declara ANTES de usarse
@@ -1215,6 +1240,7 @@ const lanzarLlamadaPrueba = async ({ adminId, telefono, tipoUso = 'empresa' }) =
     nombre:    userDoc.exists ? (userDoc.data().empresa || userDoc.data().nombre) : 'Control360',
     direccion: userDoc.exists ? userDoc.data().direccion : '',
     ciudad:    userDoc.exists ? userDoc.data().ciudad : '',
+    telefono:  userDoc.exists ? telefonoContactoTenant(userDoc.data()) : '',   // ✅ LUCY-SINSEDE-008
   };
 
   // ✅ LUCY-SEDE-001: la prueba usa la MISMA resolución de sede que la
