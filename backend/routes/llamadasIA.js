@@ -171,7 +171,15 @@ routerPublico.post('/consultar-precio', async (req, res) => {
       if (!nombreProd.includes(palabraServicio)) return;
 
       let puntaje = 0;
-      tokens.forEach(t => { if (nombreProd.includes(t)) puntaje++; });
+      // ✅ LUCY-V2-009: un token NUMÉRICO ("5") solo cuenta si es el número
+      // completo — antes "5" coincidía con "15", "25" y "50" y Lucy podía dar el
+      // precio de otro tamaño. Palabras ("RECARGA", "ABC") siguen por contención.
+      tokens.forEach(t => {
+        const coincide = /^\d+$/.test(t)
+          ? new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(nombreProd)
+          : nombreProd.includes(t);
+        if (coincide) puntaje++;
+      });
 
       if (puntaje > mejorPuntaje) {
         mejorPuntaje = puntaje;

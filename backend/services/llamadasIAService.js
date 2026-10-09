@@ -492,6 +492,19 @@ const registrarConsumoMinutos = async (adminId, segundos) => {
 // y "Extintor ABC 5lbs" son productos distintos).
 // Lucy NUNCA crea la orden: registra el cierre y un humano la crea.
 // ═════════════════════════════════════════════════════════════════════════════
+// ✅ LUCY-V2-009: dirección DEL CLIENTE (no de la empresa). La ficha del cliente
+// la guarda en `direccionPrincipal` o dentro de la sucursal del vencimiento;
+// antes se leía `cliente.direccion`, que no existe, y Lucy siempre decía
+// "no registrada". Orden: sucursal del vencimiento → principal → legado.
+const direccionDelCliente = (cliente, vencimiento) => {
+  const suc = String(vencimiento?.sucursal || '').trim().toUpperCase();
+  if (suc && Array.isArray(cliente.sucursales)) {
+    const s = cliente.sucursales.find(x => String(x.nombre || '').trim().toUpperCase() === suc);
+    if (s && String(s.direccion || '').trim()) return String(s.direccion).trim();
+  }
+  return String(cliente.direccionPrincipal || cliente.direccion || '').trim();
+};
+
 const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, tenantInfo, sede, perfil }) => {
   // ✅ LUCY-SEDE-001: la dirección/horario/teléfono que dice Lucy salen de la
   // SEDE del cliente (companies), no de un texto fijo del tenant.
@@ -506,7 +519,10 @@ const construirVariablesLlamada = ({ adminId, registroId, cliente, vencimiento, 
     nombre_cliente:     cliente.contacto ? String(cliente.contacto).trim() : primerNombre(cliente.nombre),
     empresa_cliente:    cliente.nombre || '',
     equipos:            vencimiento.descripcionEquipo || 'su extintor',
-    direccion_cliente:  cliente.direccion || 'no registrada',
+    direccion_cliente:  direccionDelCliente(cliente, vencimiento) || 'no registrada',
+    // ✅ LUCY-V2-009: datos que Lucy CONFIRMA (no pregunta) si el cliente pide domicilio.
+    nit_cliente:        String(cliente.nit || '').trim() || 'no registrado',
+    cantidad_equipos:   String(Number(vencimiento.cantidad) || 1),
     telefono_cliente:   String(vencimiento.telefono || cliente.celular || cliente.telefono || ''),
     tipo_servicio:      cliente.tipoServicioHistorico || 'oficina',
     valor_domicilio:    tenantInfo.valorDomicilio || 'según su sector',
