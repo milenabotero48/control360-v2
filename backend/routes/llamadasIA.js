@@ -26,6 +26,7 @@ const express = require('express');
 const router = express.Router();          // autenticado
 const routerPublico = express.Router();   // público (Tools + webhook ElevenLabs)
 const { db, admin } = require('../config/firebase');
+const { elegirRecarga } = require('../services/precioRecarga');   // ✅ LUCY-V2-009
 const {
   ejecutarMotorLlamadas,
   procesarResultadoLlamada,
@@ -145,7 +146,7 @@ routerPublico.post('/consultar-precio', async (req, res) => {
     // ✅ FIX LUCY-ELEVEN-002a: body plano de ElevenLabs; se tolera el formato
     // Vapi legado (message.toolCalls) por si queda alguna prueba vieja apuntando aquí.
     const args = req.body?.message?.toolCalls?.[0]?.function?.arguments || req.body || {};
-    const { adminId, descripcionEquipo, esRecarga = true } = args;
+    const { adminId, descripcionEquipo } = args;   // esRecarga se ignora (LUCY-V2-009)
 
     if (!adminId || !descripcionEquipo) {
       return res.json({ encontrado: false, mensaje: 'Faltan datos para consultar el precio' });
@@ -158,40 +159,16 @@ routerPublico.post('/consultar-precio', async (req, res) => {
       .limit(500)
       .get();
 
-    const tokens = String(descripcionEquipo).toUpperCase().match(/[A-ZÁÉÍÓÚÑ0-9]+/g) || [];
-    const esRecargaBool = esRecarga === true || esRecarga === 'true';
-    const palabraServicio = esRecargaBool ? 'RECARGA' : 'EXTINTOR';
+    // ✅ LUCY-V2-009: Lucy solo cotiza RECARGAS. El parámetro `esRecarga` se
+    // ignora a propósito (lo llenaba el modelo y un error daba el precio del
+    // equipo nuevo). Ver services/precioRecarga.js.
+    const mejorMatch = elegirRecarga(prodSnap.docs.map(d => d.data()), descripcionEquipo);
 
-    let mejorMatch = null;
-    let mejorPuntaje = 0;
-
-    prodSnap.docs.forEach(d => {
-      const data = d.data();
-      const nombreProd = (data.nombre || '').toUpperCase();
-      if (!nombreProd.includes(palabraServicio)) return;
-
-      let puntaje = 0;
-      // ✅ LUCY-V2-009: un token NUMÉRICO ("5") solo cuenta si es el número
-      // completo — antes "5" coincidía con "15", "25" y "50" y Lucy podía dar el
-      // precio de otro tamaño. Palabras ("RECARGA", "ABC") siguen por contención.
-      tokens.forEach(t => {
-        const coincide = /^\d+$/.test(t)
-          ? new RegExp(`(^|[^0-9])${t}(?![0-9])`).test(nombreProd)
-          : nombreProd.includes(t);
-        if (coincide) puntaje++;
-      });
-
-      if (puntaje > mejorPuntaje) {
-        mejorPuntaje = puntaje;
-        mejorMatch = data;
-      }
-    });
-
-    if (mejorMatch && mejorPuntaje > 0) {
+    if (mejorMatch) {
       return res.json({
         encontrado: true,
-        precio: mejorMatch.precioVenta || 0,
-        precioTexto: `${Number(mejorMatch.precioVenta || 0).toLocaleString('es-CO')} pesos`,
+        precio: mejorMatch.precioVenta,
+        precioTexto: `${Number(mejorMatch.precioVenta).toLocaleString('es-CO')} pesos por unidad`,
         nombreProducto: mejorMatch.nombre,
       });
     }
