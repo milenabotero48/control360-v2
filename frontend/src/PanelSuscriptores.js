@@ -310,6 +310,7 @@ const PanelSuscriptores = () => {
         reglasNegocio: p.reglasNegocio || '',
         mediosPago: p.mediosPago || '',
         avisarVentaCliente: p.avisarVentaCliente === true,
+        modoSoloAvisos: p.modoSoloAvisos === true,   // ✅ ANNY-AVISOS-065
         notificarEscalamientoA: p.notificarEscalamientoA || ''
       });
     } catch (e) {
@@ -690,6 +691,18 @@ const PanelSuscriptores = () => {
                   <span>
                     <b>Confirmar ventas por WhatsApp</b> — al registrar una orden, Anny le escribe
                     al cliente con el resumen y los medios de pago.
+                  </span>
+                </label>
+
+                {/* ✅ ANNY-AVISOS-065 — apagar la atención sin apagar el módulo */}
+                <label style={{ ...st.modRow, marginTop: 8, border: 'none' }}>
+                  <input type="checkbox" checked={formPerfil.modoSoloAvisos}
+                    onChange={e => setFormPerfil({ ...formPerfil, modoSoloAvisos: e.target.checked })} />
+                  <span>
+                    <b>Modo solo avisos</b> — Anny deja de atender conversaciones. Sigue enviando
+                    cobranza, confirmación de ventas, avisos de taller y vencimientos, y sigue
+                    procesando comprobantes de pago. A quien escriba por su cuenta le responde un
+                    acuse fijo con el horario y avisa al equipo.
                   </span>
                 </label>
 

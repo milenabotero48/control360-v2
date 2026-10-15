@@ -196,6 +196,11 @@ const PERFIL_DEFAULT = {
   notificarEscalamientoA: null,
   mediosPago: '',
   avisarVentaCliente: false,
+  // ✅ ANNY-AVISOS-065: true = Anny NO conversa con los clientes.
+  // Solo ejecuta misiones de SALIDA (cobranza, venta registrada, taller,
+  // vencimientos) y procesa comprobantes de pago. A quien escriba por su
+  // cuenta le responde un acuse fijo, sin IA, y avisa al equipo.
+  modoSoloAvisos: false,
   horarioAtencion: HORARIO_DEFAULT,
   tono: TONO_DEFAULT,
   presentacion: '',
@@ -339,6 +344,7 @@ async function obtenerPerfilTenant(adminId) {
       fuentePrecios: p.fuentePrecios || plantilla.fuentePrecios,
       reglasNegocio: p.reglasNegocio || plantilla.reglasNegocio || '',
       notificarEscalamientoA: p.notificarEscalamientoA || cfg.notificarPedidosA || null,
+      modoSoloAvisos: p.modoSoloAvisos === true,   // ✅ ANNY-AVISOS-065
       mediosPago: p.mediosPago || '',
       avisarVentaCliente: p.avisarVentaCliente === true,
       // ✅ ANNY-V3 — campos nuevos del tenant
@@ -365,6 +371,7 @@ async function actualizarPerfilTenant(adminId, perfil) {
       'nombreAgente', 'empresa', 'vertical', 'queVende',
       'fuentePrecios', 'reglasNegocio', 'notificarEscalamientoA',
       'nicho', 'mediosPago', 'avisarVentaCliente',
+      'modoSoloAvisos',   // ✅ ANNY-AVISOS-065
       // ✅ ANNY-V3
       'horarioAtencion', 'tono', 'presentacion', 'modelo', 'ventanaRafagaMs', 'identificarAlInicio'
     ];

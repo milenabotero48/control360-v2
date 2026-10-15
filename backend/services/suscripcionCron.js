@@ -22,7 +22,9 @@ const BANCO = {
   cc:       process.env.BANCO_CC       || '',
 };
 const ADMIN_EMAIL     = process.env.ADMIN_EMAIL     || 'tucontrol360@gmail.com';
-const ADMIN_WHATSAPP  = process.env.ADMIN_WHATSAPP  || '573234152442';
+// ✅ SOPORTE-TEL-001 (2026-10-14): número de soporte cambiado — el anterior se perdió.
+// OJO: si ADMIN_WHATSAPP está puesta en Railway, MANDA la variable, no este valor.
+const ADMIN_WHATSAPP  = process.env.ADMIN_WHATSAPP  || '573124132339';
 const FRONTEND_URL    = process.env.FRONTEND_URL    || 'https://app.tucontrol360.com';
 const LANDING_PLANES  = 'https://tucontrol360.com/#planes';
 

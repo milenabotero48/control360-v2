@@ -29,6 +29,9 @@
 // ============================================================
 
 const { db, admin } = require('../config/firebase');
+// ✅ CARTERA-SHARED-001: días vencidos y bloqueo salen del mismo servicio que
+// alimenta el panel de CxC. Una sola verdad contable.
+const carteraService = require('./carteraService');
 const annyService = require('./annyService');
 const baileysService = require('./baileysService');
 
@@ -197,9 +200,54 @@ async function enviarAvisoInterno(adminId, texto, destinoExplicito = null) {
 // COBRANZA CxC — órdenes en cartera con >10 días de completadas
 // Misión: COBRANZA (Anny NO vende dentro de un cobro)
 // ============================================================
+// ✅ ANNY-COBRANZA-066 — detalle de las órdenes en el mensaje
+// ------------------------------------------------------------
+// Lo que el cliente necesita para pagar es la REFERENCIA: el número de
+// factura, porque contra eso paga. Si la orden no tiene factura emitida,
+// se le nombra el número de orden. Se listan máximo 5 líneas: un WhatsApp
+// con 20 renglones no lo lee nadie.
+const MAX_LINEAS_DETALLE = 5;
+
+function _detalleOrdenes(ordenes, hoyMs) {
+  const visibles = ordenes.slice(0, MAX_LINEAS_DETALLE);
+  const lineas = visibles.map(o => {
+    const dias = o.fechaConciliacion
+      ? Math.floor((hoyMs - new Date(o.fechaConciliacion).getTime()) / 86400000)
+      : null;
+    const diasTxt = Number.isFinite(dias) && dias >= 0 ? ` (${dias} días)` : '';
+    return `• ${o.referencia}: $${o.saldoPendiente.toLocaleString('es-CO')}${diasTxt}`;
+  });
+  const resto = ordenes.length - visibles.length;
+  if (resto > 0) lineas.push(`• y ${resto} documento(s) más`);
+  return lineas.join('\n');
+}
+
+// ============================================================
+// ✅ ANNY-COBRANZA-066 (2026-10-09) — COBRANZA POR CLIENTE
+// ------------------------------------------------------------
+// Qué cambió respecto de la versión anterior:
+//
+//   1. UN mensaje por CLIENTE, no uno por orden. Un cliente con cuatro
+//      órdenes vencidas recibía cuatro WhatsApps seguidos.
+//   2. Los días se cuentan desde la FACTURA (carteraService), igual que
+//      el panel. Antes se contaban desde el historial de estados y los
+//      dos números no coincidían.
+//   3. No se cobra antes de `diasMinimoCobranza` (15 por defecto). Pedido
+//      de Sandra: con uno o dos días de mora muchas veces el servicio ni
+//      se ha prestado todavía.
+//   4. Una orden que requiere factura y aún no la tiene NO se cobra: su
+//      plazo no ha empezado a correr.
+//   5. Se nombra la FACTURA; si no la hay, la ORDEN.
+//   6. Se incluyen los medios de pago del suscriptor (perfil.mediosPago).
+//   7. Al cliente BLOQUEADO se le dice que está bloqueado y se le pide el
+//      comprobante con urgencia — es otro mensaje, no el mismo con adorno.
+//   8. No se repite el aviso antes de `diasAlertaCobranza` días (7 por
+//      defecto). Antes solo se evitaba repetir el MISMO día.
+// ============================================================
 async function ejecutarCobranzaCxC() {
-  console.log('[ANNY-NOTIF] Iniciando cobranza CxC semanal...');
+  console.log('[ANNY-NOTIF] Iniciando cobranza CxC...');
   let enviados = 0;
+  const resumen = [];
 
   try {
     const cfgSnap = await db.collection('annyConfig')
@@ -207,65 +255,72 @@ async function ejecutarCobranzaCxC() {
       .get();
 
     const hoyStr = new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+    const hoyMs = Date.now();
 
     for (const cfgDoc of cfgSnap.docs) {
       const adminId = cfgDoc.id;
 
-      const activo = await annyService.tenantTieneAnnyActiva(adminId);
-      if (!activo) continue;
+      try {
+        const activo = await annyService.tenantTieneAnnyActiva(adminId);
+        if (!activo) continue;
 
-      const snap = await db.collection('orders')
-        .where('adminId', '==', adminId)
-        .where('estado', '==', 'cxc')
-        .get();
+        const perfil = await annyService.obtenerPerfilTenant(adminId).catch(() => ({}));
+        const { candidatos, config, motivos } = await carteraService.candidatosCobranza(adminId, { hoyStr });
 
-      for (const doc of snap.docs) {
-        try {
-          const o = doc.data();
+        console.log(`[ANNY-NOTIF] Tenant ${adminId}: ${candidatos.length} cliente(s) a cobrar (desde ${config.diasMinimoCobranza} días, bloqueo ${config.diasBloqueoCartera})`, motivos);
 
-          const saldo = (o.total || 0) - (o.montoPagado || 0);
-          if (saldo <= 0) continue;
+        const empresaTxt = perfil.empresa && perfil.empresa !== 'la empresa' ? ` de ${perfil.empresa}` : '';
+        const pagoTxt = perfil.mediosPago
+          ? `\n\nMedios de pago: ${perfil.mediosPago}`
+          : '';
 
-          const celular = (o.clienteCelular || '').replace(/\D/g, '');
-          if (celular.length < 10) continue;
+        for (const c of candidatos) {
+          try {
+            const saldoTxt = `$${c.saldoExigible.toLocaleString('es-CO')}`;
+            const detalle = _detalleOrdenes(c.ordenesExigibles, hoyMs);
+            const nombre = c.clienteNombre ? ` ${c.clienteNombre}` : '';
 
-          const fechaCompletada =
-            (o.historialEstados || []).find(h => h.estado === 'completada')?.fecha ||
-            (o.historialEstados || []).find(h => h.estado === 'cxc')?.fecha ||
-            aISO(o.fechaFactura) ||
-            aISO(o.createdAt);
+            const msg = c.bloqueado
+              ? `Hola${nombre} 👋 Te escribo de cartera${empresaTxt}.\n\n` +
+                `Tu cuenta quedó *bloqueada* para nuevos servicios por cartera vencida ` +
+                `(${c.diasVencido} días). Saldo pendiente ${saldoTxt}:\n${detalle}` +
+                `${pagoTxt}\n\n` +
+                `Para reactivarla necesitamos el comprobante de pago con *urgencia*. ` +
+                `Envíamelo por aquí apenas lo tengas.`
+              : `Hola${nombre} 👋 Te escribo de cartera${empresaTxt}.\n\n` +
+                `Tienes un saldo pendiente de ${saldoTxt}:\n${detalle}` +
+                `${pagoTxt}\n\n` +
+                `Cuando hagas el pago me envías el comprobante por aquí y lo registramos de una.`;
 
-          if (!fechaCompletada) continue;
-          const dias = Math.floor((Date.now() - new Date(fechaCompletada).getTime()) / 86400000);
-          if (dias <= 10) continue;
+            const ok = await notificarClienteWhatsApp(adminId, c.celular, msg, 'COBRANZA');
+            if (ok) {
+              enviados += 1;
+              resumen.push({ adminId, cliente: c.clienteNombre, dias: c.diasVencido, bloqueado: c.bloqueado });
+              // Se marca en TODAS las órdenes cobradas: la cadencia es por
+              // cliente, así que cualquiera de sus órdenes sirve de sello.
+              const lote = db.batch();
+              c.ordenesExigibles.forEach(o => { if (o.ref) lote.update(o.ref, { ultimaCobranzaAnny: hoyStr }); });
+              await lote.commit().catch(e => console.error('[ANNY-NOTIF] No se pudo sellar la cobranza:', e.message));
+            }
 
-          if (o.ultimaCobranzaAnny === hoyStr) continue;
-
-          // ANNY-BREV-011: mensaje corto, sin bloques ni adornos.
-          const msg = `Hola ${o.clienteNombre || ''} 👋 Te escribo de cartera: ` +
-            `la orden ${o.numeroOrden} tiene un saldo pendiente de ` +
-            `$${saldo.toLocaleString('es-CO')} (${dias} días desde el servicio). ` +
-            `¿Me confirmas cuándo lo podemos coordinar?`;
-
-          const ok = await notificarClienteWhatsApp(adminId, celular, msg, 'COBRANZA');
-          if (ok) {
-            enviados += 1;
-            await doc.ref.update({ ultimaCobranzaAnny: hoyStr });
+            await sleep(4000);
+          } catch (errCliente) {
+            console.error('[ANNY-NOTIF] Error cobrando a un cliente:', errCliente.message);
           }
-
-          await sleep(4000);
-        } catch (errOrden) {
-          console.error('[ANNY-NOTIF] Error en orden de cobranza:', errOrden.message);
         }
+      } catch (errTenant) {
+        // Un tenant con problema no detiene la cobranza de los demás.
+        console.error(`[ANNY-NOTIF] Error en cobranza del tenant ${adminId}:`, errTenant.message);
       }
     }
 
-    console.log(`[ANNY-NOTIF] Cobranza CxC terminada — ${enviados} mensajes enviados`);
+    const bloqueados = resumen.filter(r => r.bloqueado).length;
+    console.log(`[ANNY-NOTIF] Cobranza terminada — ${enviados} cliente(s) contactado(s), ${bloqueados} bloqueado(s)`);
   } catch (err) {
     console.error('[ANNY-NOTIF] Error en cobranza CxC:', err.message);
   }
 
-  return { enviados };
+  return { enviados, detalle: resumen };
 }
 
 // ============================================================
@@ -280,7 +335,9 @@ async function ejecutarCobranzaCxC() {
 // ============================================================
 async function notificarVentaCliente(adminId, datos = {}) {
   try {
-    const { celular, nombreCliente, numeroOrden, descripcion, total } = datos;
+    // ✅ ANNY-COBRANZA-066: se nombra la FACTURA cuando ya existe, porque es
+    // contra ese documento que el cliente paga. Si aún no hay, la orden.
+    const { celular, nombreCliente, numeroOrden, numeroFactura, descripcion, total } = datos;
     if (!celular) return { ok: false, error: 'sin_celular' };
 
     const activo = await annyService.tenantTieneAnnyActiva(adminId);
@@ -290,7 +347,9 @@ async function notificarVentaCliente(adminId, datos = {}) {
     if (perfil.avisarVentaCliente !== true) return { ok: false, error: 'aviso_desactivado' };
 
     const totalTxt = Number(total) > 0 ? ` por $${Number(total).toLocaleString('es-CO')}` : '';
-    const ordenTxt = numeroOrden ? ` (orden ${numeroOrden})` : '';
+    const ordenTxt = numeroFactura
+      ? ` (factura ${numeroFactura})`
+      : (numeroOrden ? ` (orden ${numeroOrden})` : '');
     const queTxt = descripcion ? `: ${String(descripcion).slice(0, 120)}` : '';
     const pagoTxt = perfil.mediosPago
       ? ` Puedes pagar así: ${perfil.mediosPago}.`
@@ -701,7 +760,7 @@ async function _tenantEsSuperAdmin(adminId) {
 function _lineaCaso(c, edadMin) {
   const tel = String(c.telefono || '').replace(/\D/g, '');
   const edad = edadMin >= 120 ? `${Math.round(edadMin / 60)} h` : `${Math.round(edadMin)} min`;
-  const MOTIVOS = { ERROR: 'sin respuesta de Anny', HUMANO: 'pidió asesor', DATOS: 'faltan datos', PRECIO: 'precio', QUEJA: 'queja' };
+  const MOTIVOS = { ERROR: 'sin respuesta de Anny', HUMANO: 'pidió asesor', DATOS: 'faltan datos', PRECIO: 'precio', QUEJA: 'queja', ATENCION: 'escribió al WhatsApp' };
   const motivo = MOTIVOS[c.tipo] || String(c.tipo || 'caso').toLowerCase();
   return `• ${c.nombreCliente || 'Sin nombre'} — ${edad} · ${motivo}\n  wa.me/${tel}`;
 }

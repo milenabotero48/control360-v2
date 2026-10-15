@@ -181,6 +181,8 @@ router.put('/perfil/:adminId', authenticate, soloSuperAdmin, async (req, res) =>
       fuentePrecios, reglasNegocio, notificarEscalamientoA,
       // ✅ ANNY-NICHO-033 / ANNY-VENTA-034
       nicho, mediosPago, avisarVentaCliente,
+      // ✅ ANNY-AVISOS-065: apagar la atención dejando vivas las misiones de salida
+      modoSoloAvisos,
       // ✅ ANNY-V3: horario por tenant, tono, presentación, modelo, ventana de ráfaga
       horarioAtencion, tono, presentacion, modelo, ventanaRafagaMs, identificarAlInicio
     } = req.body || {};
@@ -231,6 +233,8 @@ router.put('/perfil/:adminId', authenticate, soloSuperAdmin, async (req, res) =>
       nicho,
       mediosPago,
       avisarVentaCliente: avisarVentaCliente !== undefined ? avisarVentaCliente === true : undefined,
+      // ✅ ANNY-AVISOS-065
+      modoSoloAvisos: modoSoloAvisos !== undefined ? modoSoloAvisos === true : undefined,
       // ✅ ANNY-V3
       horarioAtencion,
       tono,

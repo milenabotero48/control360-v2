@@ -9,6 +9,13 @@ const { Resend } = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// ✅ SOPORTE-TEL-001 (2026-10-14): número de soporte cambiado — el anterior se perdió.
+// El correo de bienvenida llevaba el número quemado en el HTML. Ahora sale de
+// la MISMA variable que usa suscripcionCron.js, para no volver a tener dos
+// números distintos circulando entre el correo y la app.
+const SOPORTE_WA = process.env.ADMIN_WHATSAPP || '573124132339';
+const SOPORTE_WA_LEGIBLE = '+' + SOPORTE_WA.replace(/^57/, '57 ').replace(/(\d{3})(\d{3})(\d{4})$/, '$1 $2 $3');
+
 // ─── Módulos por plan (tabla validada Jun 2026) ───────────────────────────────
 const MODULOS_POR_PLAN = {
   punto_venta: [
@@ -509,7 +516,7 @@ router.post('/registro', async (req, res) => {
             </div>
             <div style="background:#fff8e6;border-radius:10px;padding:14px 18px;margin:16px 0;border:1px solid #f3d98a;">
               <div style="font-size:11px;font-weight:800;color:#8a6d1a;margin-bottom:6px;">¿NECESITAS AYUDA?</div>
-              <p style="font-size:13px;color:#374151;margin:0;">Escríbenos por WhatsApp: <a href="https://wa.me/573234152442" style="color:#7c3aed;font-weight:700;">+57 323 415 2442</a></p>
+              <p style="font-size:13px;color:#374151;margin:0;">Escríbenos por WhatsApp: <a href="https://wa.me/${SOPORTE_WA}" style="color:#7c3aed;font-weight:700;">${SOPORTE_WA_LEGIBLE}</a></p>
             </div>
             <a href="${process.env.FRONTEND_URL||'https://app.tucontrol360.com'}"
                style="display:block;text-align:center;background:#7c3aed;color:white;padding:14px;border-radius:10px;text-decoration:none;font-weight:700;font-size:15px;margin:20px 0;">

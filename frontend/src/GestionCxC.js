@@ -646,7 +646,12 @@ const ModalGestion = ({ cliente, gestiones, onGuardar, onCerrar }) => {
 
 // ─── MODAL CONFIGURACIÓN ──────────────────────────────────────────────────────
 const ModalConfig = ({ config, onGuardar, onCerrar }) => {
-  const [form, setForm] = useState({ diasBloqueoCartera: config.diasBloqueoCartera || 30, diasAlertaCobranza: config.diasAlertaCobranza || 7 });
+  const [form, setForm] = useState({
+    diasBloqueoCartera: config.diasBloqueoCartera || 30,
+    diasAlertaCobranza: config.diasAlertaCobranza || 7,
+    // ✅ ANNY-COBRANZA-066: desde cuántos días de mora cobra Anny
+    diasMinimoCobranza: config.diasMinimoCobranza || 15,
+  });
   const [guardando, setGuardando] = useState(false);
 
   return (
@@ -663,11 +668,21 @@ const ModalConfig = ({ config, onGuardar, onCerrar }) => {
               onChange={e => setForm(p => ({ ...p, diasBloqueoCartera: e.target.value }))} />
             <span style={{ fontSize: 12, color: '#9ca3af' }}>Al superar este número de días, el cliente queda bloqueado para nuevas órdenes</span>
           </div>
+          {/* ✅ ANNY-COBRANZA-066 — los tres números de la cartera, en orden */}
+          <div style={s.campo}>
+            <label style={s.label}>Días de mora para que Anny empiece a cobrar</label>
+            <input type="number" min="1" style={s.input} value={form.diasMinimoCobranza}
+              onChange={e => setForm(p => ({ ...p, diasMinimoCobranza: e.target.value }))} />
+            <span style={{ fontSize: 12, color: '#9ca3af' }}>
+              Antes de este número de días Anny no escribe. Los días se cuentan desde la factura;
+              una orden que requiere factura y aún no la tiene no entra a cobranza.
+            </span>
+          </div>
           <div style={s.campo}>
             <label style={s.label}>Días entre alertas de cobranza</label>
             <input type="number" min="1" style={s.input} value={form.diasAlertaCobranza}
               onChange={e => setForm(p => ({ ...p, diasAlertaCobranza: e.target.value }))} />
-            <span style={{ fontSize: 12, color: '#9ca3af' }}>Cada cuántos días se genera alerta de seguimiento</span>
+            <span style={{ fontSize: 12, color: '#9ca3af' }}>Cada cuántos días se le vuelve a escribir al mismo cliente</span>
           </div>
         </div>
         <div style={s.modalFooter}>
@@ -802,6 +817,10 @@ const GestionCxC = ({ user }) => {
   const [clientes, setClientes]       = useState([]);
   const [loading, setLoading]         = useState(true);
   const [diasBloqueo, setDiasBloqueo] = useState(30);
+  // ✅ ANNY-COBRANZA-066: la configuración de cartera ya se pedía al backend
+  // (resConfig) pero no se guardaba en ningún lado, así que el modal siempre
+  // mostraba los valores por defecto aunque hubiera otros guardados.
+  const [configCartera, setConfigCartera] = useState({ diasBloqueoCartera: 30, diasAlertaCobranza: 7, diasMinimoCobranza: 15 });
   const [cajas, setCajas]             = useState([]);
   const [formasPago, setFormasPago]   = useState([]);
   const [formasPagoConfig, setFormasPagoConfig] = useState([]);
@@ -835,6 +854,11 @@ const GestionCxC = ({ user }) => {
       ]);
       setClientes(resCxc.data.clientes || []);
       setDiasBloqueo(resCxc.data.diasBloqueo || 30);
+      setConfigCartera({
+        diasBloqueoCartera: resConfig.data?.diasBloqueoCartera || 30,
+        diasAlertaCobranza: resConfig.data?.diasAlertaCobranza || 7,
+        diasMinimoCobranza: resConfig.data?.diasMinimoCobranza || 15,
+      });
       setCajas(Array.isArray(resCajas.data) ? resCajas.data : []);
 
       // Formas de pago desde configuración
@@ -903,9 +927,17 @@ const GestionCxC = ({ user }) => {
   };
 
   const guardarConfig = async (data) => {
-    await axios.put(`${API}/cxc/config`, data, { headers });
-    await cargar();
-    toast('Configuración guardada ✓');
+    try {
+      await axios.put(`${API}/cxc/config`, data, { headers });
+      await cargar();
+      toast('Configuración guardada ✓');
+    } catch (e) {
+      // ✅ ANNY-COBRANZA-066: el backend rechaza combinaciones imposibles
+      // (cobrar a los 40 días si el bloqueo es a los 30). Antes el error se
+      // perdía y la pantalla se cerraba como si hubiera guardado.
+      setError(e.response?.data?.error || 'No se pudo guardar la configuración');
+      setTimeout(() => setError(''), 6000);
+    }
   };
 
   const toast = (msg) => { setExito(msg); setTimeout(() => setExito(''), 3000); };
@@ -1167,7 +1199,7 @@ const GestionCxC = ({ user }) => {
       )}
       {modalConfig && (
         <ModalConfig
-          config={{ diasBloqueoCartera: diasBloqueo }}
+          config={configCartera}
           onGuardar={guardarConfig}
           onCerrar={() => setModalConfig(false)}
         />

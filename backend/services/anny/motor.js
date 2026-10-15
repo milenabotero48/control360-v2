@@ -27,6 +27,15 @@
 //   al grupo. El vigilante SLA agrupa y avisa (ver annyNotificaciones).
 // ✅ ANNY-RESPALDO-063: los textos de respaldo ya no duplican
 //   "te escribe" ni terminan en doble punto.
+//
+// ✅ ANNY-AVISOS-065 (2026-10-09) — MODO SOLO AVISOS
+//   Con `perfil.modoSoloAvisos`, Anny deja de atender: no conversa,
+//   no cotiza, no toma pedidos. Sigue haciendo lo que hace bien, que
+//   es SALIR a avisar (cobranza, venta registrada, taller, vencimientos)
+//   y procesar COMPROBANTES DE PAGO, que es determinístico y es lo que
+//   la cobranza le va a pedir al cliente.
+//   A quien escriba por su cuenta: acuse fijo con el horario, caso para
+//   el equipo y pausa de 60 min para no repetir el acuse cada mensaje.
 // ============================================================
 
 const { db } = require('../../config/firebase');
@@ -45,6 +54,34 @@ const VENTANA_CONVERSACION_MS = 24 * 60 * 60 * 1000;
 
 // ✅ ANNY-RESPALDO-063: cierra una frase con punto solo si no lo trae.
 // compromisoDeRespuesta puede terminar en "a.m." o "día." → sin "..".
+// ✅ ANNY-AVISOS-065 — respuesta de un cliente que escribe estando en modo
+// solo avisos. Texto FIJO, sin modelo: no hay forma de que diga algo raro.
+async function _acuseSoloAvisos({ adminId, telefono, nombreCliente, mensajeTexto, perfil, motivo }) {
+  const caseId = await chats.registrarCasoEscalado(adminId, {
+    telefono, nombreCliente, mensajeCliente: mensajeTexto,
+    tipo: 'ATENCION',
+    razon: motivo || 'El cliente escribió — Anny está en modo solo avisos',
+    prioridad: 'ALTA', asignadoA: adminId,
+  });
+
+  const r = `Hola, recibí tu mensaje y ya le avisé a un asesor. ${conPunto(compromisoDeRespuesta(perfil))}`;
+
+  // 60 min: si el cliente manda cinco mensajes seguidos no recibe cinco acuses.
+  await chats.pausarAnny(adminId, telefono, 60, 'modo_solo_avisos');
+  await chats.registrarConversacion(adminId, {
+    telefono, nombreCliente, mensajeCliente: mensajeTexto, respuestaAgente: r,
+    respondidoPor: 'ESCALADO_A_ADMIN', tipo: 'ATENCION', escalado: true, caseId,
+  });
+  await chats.actualizarMetricas(adminId, 'casos_escalados');
+
+  return {
+    procesado: true, tipo: 'SOLO_AVISOS', accion: 'enviar_mensaje', respuesta: r, caseId,
+    notificarA: perfil.notificarEscalamientoA,
+    avisoEscalamiento: `💬 CLIENTE ESCRIBIÓ (Anny no atiende)\n${nombreCliente || 'Sin nombre'} — ${telefono}\n"${String(mensajeTexto).slice(0, 120)}"`,
+    telefonoCliente: telefono,
+  };
+}
+
 function conPunto(frase) {
   const f = String(frase || '').trim();
   if (!f) return '';
@@ -117,6 +154,16 @@ async function procesarMensajeEntrante(props) {
       const r = 'No logré abrir la foto. ¿Me la reenvías o me escribes lo que necesitas? Así te ayudo de una vez.';
       await chats.registrarConversacion(adminId, { telefono, nombreCliente, mensajeCliente: mensajeTexto, respuestaAgente: r, respondidoPor: 'AGENTE_AUTOMATICO', tipo: 'FOTO_NO_PROCESADA', escalado: false, caseId: null });
       return { procesado: true, tipo: 'FOTO_NO_PROCESADA', accion: 'enviar_mensaje', respuesta: r };
+    }
+
+    // ── ✅ ANNY-AVISOS-065 — GATE DE MODO SOLO AVISOS ──
+    // Va ANTES de cargar catálogo, base de conocimiento y modelo: en este
+    // modo esas lecturas no se usan para nada y cuestan.
+    // Excepción: si llega una IMAGEN se deja pasar, porque puede ser un
+    // comprobante de pago y ese sí hay que leerlo (ANNY-PAGO-050).
+    if (perfil.modoSoloAvisos === true && !imagenAdjunta) {
+      console.log(`[ANNY-AVISOS-065] ${telefono}: mensaje entrante con atención apagada — acuse fijo y caso para el equipo`);
+      return _acuseSoloAvisos({ adminId, telefono, nombreCliente, mensajeTexto, perfil });
     }
 
     // ── Pide humano (determinístico, ANNY-HUMANO-012) ──
@@ -256,6 +303,18 @@ async function procesarMensajeEntrante(props) {
         notificarA: perfil.notificarEscalamientoA,
         telefonoCliente: telefono
       };
+    }
+
+    // ── ✅ ANNY-AVISOS-065 — SEGUNDO CORTE ──
+    // Solo se llega aquí en modo solo avisos cuando venía una imagen y el
+    // modelo YA descartó que fuera comprobante (la rama 7c sale antes).
+    // Entonces es una foto cualquiera: no se conversa, acuse fijo y al equipo.
+    if (perfil.modoSoloAvisos === true) {
+      console.log(`[ANNY-AVISOS-065] ${telefono}: la imagen no era comprobante — acuse fijo y caso para el equipo`);
+      return _acuseSoloAvisos({
+        adminId, telefono, nombreCliente, mensajeTexto, perfil,
+        motivo: 'El cliente envió una imagen que no es comprobante de pago',
+      });
     }
 
     // 7d. Escalado por criterio del modelo (ANNY-AVISO-057: razón corta)

@@ -17,6 +17,11 @@ const registrarIngresoEnCaja = ordersRouter.registrarIngresoEnCaja;
 // tocar pagoValidado y la orden quedaba pendiente de validar para siempre.
 const { camposValidacionAutomatica } = require('../services/validacionPagos');
 
+// ✅ CARTERA-SHARED-001: el cálculo de días vencidos y bloqueo vive ahora en un
+// solo lugar. Antes esta ruta y la cobranza de Anny lo calculaban por separado
+// con reglas distintas: el panel decía 30 días y el WhatsApp del cliente 45.
+const carteraService = require('../services/carteraService');
+
 // ─── AUDITORÍA ────────────────────────────────────────────────────────────────
 const auditar = async ({ accion, descripcion, usuarioId, usuarioEmail, datos = {} }) => {
   try {
@@ -61,105 +66,29 @@ const puedeManejarCaja = async (req) => {
 router.get('/', authenticate, async (req, res) => {
   try {
     const userId = req.adminId || req.user.uid || req.user.id;
-    console.log('CXC GET - userId:', userId, 'role:', req.user.role);
 
-    // Leer config de bloqueo
-    const configDoc = await db.collection('configuracion').doc(userId).get();
-    const diasBloqueo = configDoc.exists ? (configDoc.data().diasBloqueoCartera ?? 30) : 30;
-    console.log('CXC - configExists:', configDoc.exists, 'diasBloqueo:', diasBloqueo);
+    // ✅ CARTERA-SHARED-001: toda la lógica (qué órdenes son cartera, saldo,
+    // días desde la factura, bloqueo) vive en services/carteraService.js y la
+    // comparte con la cobranza de Anny. La respuesta de esta ruta NO cambia:
+    // mismos campos, mismo orden, para no tocar el frontend.
+    const { clientes, config } = await carteraService.carteraPorCliente(userId);
 
-    // Traer órdenes en estado CXC o con forma de pago CxC no pagadas
-    // AISLAMIENTO SAAS: filtrar por adminId (sin orderBy para evitar índice compuesto)
-    // ✅ FIX: incluir todas las variantes de formaPago CxC
-// ✅ SALDO-UNICO-001: además de estado/formaPago crédito, se incluye TODA
-// orden con cxcEstado 'parcial' — abonos y saldos generados por taller
-// (caso OS-192) sin importar su estado operativo o su forma de pago original.
-const [snapEstado, snapFP1, snapFP2, snapFP3, snapParcial] = await Promise.all([
-  db.collection('orders').where('adminId', '==', userId).where('estado', '==', 'cxc').get(),
-  db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'CXC').where('pagado', '==', false).get(),
-  db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'A crédito (CxC)').where('pagado', '==', false).get(),
-  db.collection('orders').where('adminId', '==', userId).where('formaPago', '==', 'A crédito').where('pagado', '==', false).get(),
-  db.collection('orders').where('adminId', '==', userId).where('cxcEstado', '==', 'parcial').get(),
-]);
+    // `ref` es el DocumentReference de Firestore que usa la cobranza para
+    // marcar el aviso; no puede viajar al navegador.
+    const lista = clientes.map(c => ({
+      clienteId: c.clienteId,
+      clienteNombre: c.clienteNombre,
+      clienteNit: c.clienteNit,
+      clienteCelular: c.clienteCelular,
+      ordenes: c.ordenes.map(({ ref, ultimaCobranzaAnny, referencia, ...o }) => o),
+      totalPendiente: c.totalPendiente,
+      fechaMasAntigua: c.fechaMasAntigua,
+      diasVencido: c.diasVencido,
+      bloqueado: c.bloqueado,
+      ...(c.tieneFacturasPendientes ? { tieneFacturasPendientes: true } : {}),
+    }));
 
-// Combinar sin duplicados
-const docsVistos = new Set();
-const snap = { forEach: (fn) => {
-  [...snapEstado.docs, ...snapFP1.docs, ...snapFP2.docs, ...snapFP3.docs, ...snapParcial.docs].forEach(doc => {
-    if (!docsVistos.has(doc.id)) { docsVistos.add(doc.id); fn(doc); }
-  });
-}};
-
-    const hoy = new Date();
-    const mapaClientes = {};
-
-    snap.forEach(doc => {
-      const o = { id: doc.id, ...doc.data() };
-
-      // FIX: excluir órdenes anuladas (pueden tener formaPago CxC y pagado:false)
-      if (o.estado === 'anulada') return;
-
-      // FIX: excluir órdenes con saldo real cero o negativo (ya cobradas completamente)
-      const saldoReal = (o.total || 0) - (o.montoPagado || 0);
-      if (saldoReal <= 0) return;
-
-      const clienteId = o.clienteId;
-      if (!mapaClientes[clienteId]) {
-        mapaClientes[clienteId] = {
-          clienteId,
-          clienteNombre: o.clienteNombre,
-          clienteNit: o.clienteNit || '',
-          clienteCelular: o.clienteCelular || '',
-          ordenes: [],
-          totalPendiente: 0,
-          fechaMasAntigua: o.createdAt,
-          diasVencido: 0,
-          bloqueado: false,
-        };
-      }
-      const cliente = mapaClientes[clienteId];
-      const saldoPendiente = (o.total || 0) - (o.montoPagado || 0);
-      const facturaPendiente = !!o.requiereFactura && !o.numeroFactura;
-
-      // Fechas legibles (arregla el bug del timestamp crudo de Firestore).
-      const fCreacion = fechaISO(o.createdAt);
-      const fFactura = fechaISO(o.fechaFactura);
-      // La cartera se cuenta desde la FACTURA. Si aún no hay factura, se usa
-      // la fecha de la orden como referencia provisional.
-      const fechaBase = fFactura || fCreacion;
-
-      cliente.ordenes.push({
-        id: o.id,
-        numeroOrden: o.numeroOrden,
-        numeroFactura: o.numeroFactura || '',
-        requiereFactura: !!o.requiereFactura,
-        facturaPendiente,
-        total: o.total || 0,
-        montoPagado: o.montoPagado || 0,
-        saldoPendiente,
-        formaPago: o.formaPago,
-        fechaCreacion: fCreacion,        // fecha de la orden (legible)
-        fechaFactura: fFactura,          // fecha de la factura (legible)
-        fechaConciliacion: fechaBase,    // la que cuenta para la cartera
-        empresaNombre: o.empresaNombre || '',
-      });
-      cliente.totalPendiente += saldoPendiente;
-      if (facturaPendiente) cliente.tieneFacturasPendientes = true;
-
-      // Días vencidos contados desde la FACTURA (no desde la orden).
-      const fechaRef = fechaBase ? new Date(fechaBase) : hoy;
-      const dias = Math.floor((hoy - fechaRef) / (1000 * 60 * 60 * 24));
-      if (dias > cliente.diasVencido) {
-        cliente.diasVencido = dias;
-        cliente.fechaMasAntigua = fechaBase;
-      }
-      // Una orden sin factura todavía NO bloquea (su plazo no ha empezado).
-      if (dias >= diasBloqueo && !facturaPendiente) cliente.bloqueado = true;
-    });
-
-    // Ordenar por días vencido descendente (más urgente primero)
-    const lista = Object.values(mapaClientes).sort((a, b) => b.diasVencido - a.diasVencido);
-    res.json({ clientes: lista, diasBloqueo });
+    res.json({ clientes: lista, diasBloqueo: config.diasBloqueoCartera });
   } catch (e) {
     console.error('GET CXC:', e);
     res.status(500).json({ error: e.message });
@@ -496,6 +425,8 @@ router.get('/config', authenticate, async (req, res) => {
     res.json({
       diasBloqueoCartera: data.diasBloqueoCartera || 30,
       diasAlertaCobranza: data.diasAlertaCobranza || 7,
+      // ✅ ANNY-COBRANZA-066: desde cuántos días de mora cobra Anny.
+      diasMinimoCobranza: data.diasMinimoCobranza || carteraService.DIAS_MINIMO_COBRANZA_DEFAULT,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -508,10 +439,23 @@ router.get('/config', authenticate, async (req, res) => {
 router.put('/config', authenticate, async (req, res) => {
   try {
     const userId = req.adminId || req.user.uid || req.user.id;
-    const { diasBloqueoCartera, diasAlertaCobranza } = req.body;
+    const { diasBloqueoCartera, diasAlertaCobranza, diasMinimoCobranza } = req.body;
+
+    // ✅ ANNY-COBRANZA-066: cobrar antes que la factura venza molesta al
+    // cliente; cobrar después del bloqueo llega tarde. Se valida el orden.
+    const bloqueo = Number(diasBloqueoCartera) || 30;
+    const minimo = Number(diasMinimoCobranza) || carteraService.DIAS_MINIMO_COBRANZA_DEFAULT;
+    if (minimo < 1 || minimo > 365) {
+      return res.status(400).json({ error: 'Los días mínimos para cobrar deben estar entre 1 y 365' });
+    }
+    if (minimo > bloqueo) {
+      return res.status(400).json({ error: `Anny no puede empezar a cobrar a los ${minimo} días si el bloqueo ocurre a los ${bloqueo}` });
+    }
+
     await db.collection('configuracion').doc(userId).set({
-      diasBloqueoCartera: Number(diasBloqueoCartera) || 30,
+      diasBloqueoCartera: bloqueo,
       diasAlertaCobranza: Number(diasAlertaCobranza) || 7,
+      diasMinimoCobranza: minimo,
       updatedAt: admin.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
     res.json({ ok: true });

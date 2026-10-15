@@ -10,7 +10,8 @@
 
 import React, { useState } from 'react';
 
-const WHATSAPP = '573234152442';
+// ✅ SOPORTE-TEL-001 (2026-10-14): número de soporte cambiado — el anterior se perdió.
+const WHATSAPP = '573124132339';
 const MENSAJE  = encodeURIComponent('Hola Sandra, tengo una consulta sobre Control360 🙌');
 
 export default function BtnWhatsApp() {

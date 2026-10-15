@@ -1471,6 +1471,7 @@ router.post('/', authenticate, async (req, res) => {
         celular: nuevaOrden.clienteCelular,
         nombreCliente: clienteNombre,
         numeroOrden,
+        numeroFactura,   // ✅ ANNY-COBRANZA-066: se nombra la factura si ya existe
         descripcion: (items || []).map(i => i.nombre || i.descripcion || '').filter(Boolean).slice(0, 3).join(', '),
         total
       }).then(r => {

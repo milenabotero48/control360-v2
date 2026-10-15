@@ -15,7 +15,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
-const ADMIN_WHATSAPP = '573234152442';
+// ✅ SOPORTE-TEL-001 (2026-10-14): número de soporte cambiado — el anterior se perdió.
+const ADMIN_WHATSAPP = '573124132339';
 const LANDING_PLANES = 'https://tucontrol360.com/#planes';
 
 const PRECIO_PLAN = { punto_venta: '$50.000', independiente: '$75.000', empresa: '$100.000' };
