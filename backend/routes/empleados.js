@@ -97,7 +97,7 @@ router.get('/config', async (req, res) => {
     seguridadSocial: N.SEGURIDAD_SOCIAL,
     clasesRiesgoARL: N.CLASES_RIESGO_ARL,
     conceptosHoras: N.conceptosHoras(new Date().toISOString().slice(0, 10)),
-    horasMes: N.HORAS_MES_LEGAL,
+    horasMes: N.horasMesLegal(),   // NOMINA-HORAS-001: divisor vigente hoy (Ley 2101/2021)
     aniosDisponibles: Object.keys(N.TABLA_ANUAL).map(Number).sort()
   });
 });

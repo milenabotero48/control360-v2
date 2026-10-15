@@ -493,6 +493,45 @@ const emp5050 = {
 check('promedio ponderado por días', N.promedioSalario(emp5050, '2025-10-01', '2026-09-30'), 1500000, 15000);
 
 // ═════════════════════════════════════════════════════════════════════════════
+seccion('NOMINA-HORAS-001 · Divisor de horas por vigencia (Ley 2101 de 2021)');
+// ═════════════════════════════════════════════════════════════════════════════
+// Cálculos hechos a mano, independientes del motor:
+//   divisor = horas semanales × 5   (semanales ÷ 6 días × 30 días)
+//   hora ordinaria con SMMLV 2026 = 1.750.905 ÷ 210 = 8.337,64
+check('antes del 15-jul-2023: 48 h → 240', N.horasMesLegal('2023-07-14'), 240);
+check('15-jul-2023: 47 h → 235', N.horasMesLegal('2023-07-15'), 235);
+check('15-jul-2024: 46 h → 230', N.horasMesLegal('2024-07-15'), 230);
+check('14-jul-2025: aún 46 h → 230', N.horasMesLegal('2025-07-14'), 230);
+check('15-jul-2025: 44 h → 220', N.horasMesLegal('2025-07-15'), 220);
+check('14-jul-2026: último día con 44 h → 220', N.horasMesLegal('2026-07-14'), 220);
+check('15-jul-2026: 42 h → 210', N.horasMesLegal('2026-07-15'), 210);
+check('oct-2026: 42 h → 210', N.horasMesLegal('2026-10-15'), 210);
+check('jornada semanal vigente en oct-2026 = 42', N.jornadaSemanalVigente('2026-10-15'), 42);
+
+check('hora ordinaria SMMLV con 210 = 8.338', N.valorHoraOrdinaria(SMMLV_2026, '2026-10-15'), 1750905 / 210, 0.01);
+check('hora ordinaria SMMLV con 220 (jun-2026) = 7.959', N.valorHoraOrdinaria(SMMLV_2026, '2026-06-15'), 1750905 / 220, 0.01);
+
+const hx = N.calcularHorasExtras(SMMLV_2026, { extra_diurna: 10, recargo_nocturno: 8, recargo_dominical: 8 }, '2026-10-15');
+check('extra diurna 10 h (×1,25) = 104.221', hx.detalle.find(d => d.clave === 'extra_diurna').valor, 104221, 1);
+check('recargo nocturno 8 h (35 %) = 23.345', hx.detalle.find(d => d.clave === 'recargo_nocturno').valor, 23345, 1);
+check('recargo dominical 8 h (90 % desde jul-2026) = 60.031', hx.detalle.find(d => d.clave === 'recargo_dominical').valor, 60031, 1);
+check('total horas = 187.597', hx.total, 187597, 2);
+check('devuelve el divisor usado (210)', hx.horasMes, 210);
+
+const hxJun = N.calcularHorasExtras(SMMLV_2026, { extra_diurna: 10 }, '2026-06-15');
+check('extra diurna 10 h en jun-2026 sigue con 220 = 99.483', hxJun.total, 99483, 1);
+check('el cambio de divisor sube la hora ≈ 4,76 %', hx.valorHoraOrdinaria / hxJun.valorHoraOrdinaria - 1, 0.0476, 0.001);
+
+// De punta a punta: la quincena 1–15 oct-2026 con 10 extras diurnas
+const empHoras = { tipoContrato: 'indefinido', salario: SMMLV_2026, fechaInicio: '2025-01-01', activo: true };
+const liqHoras = N.liquidarNomina(empHoras, {
+  anio: 2026, mes: 10, desde: '2026-10-01', hasta: '2026-10-15', diasTrabajados: 15,
+  horas: { extra_diurna: 10 }, fechaPago: '2026-10-15', empresaExonerada: true, anticipos: []
+});
+check('liquidarNomina: línea extra_diurna = 104.221', liqHoras.devengados.find(d => d.clave === 'extra_diurna').valor, 104221, 1);
+check('liquidarNomina: informa horasMes = 210', liqHoras.horasExtras.horasMes, 210);
+
+// ═════════════════════════════════════════════════════════════════════════════
 // RESULTADOS
 // ═════════════════════════════════════════════════════════════════════════════
 console.log('\n══════════════════════════════════════════════════════════════');

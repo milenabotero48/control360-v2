@@ -664,7 +664,7 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
                   </div>
                   <div style={{ fontSize: 10.5, color: '#94a3b8', marginBottom: 10 }}>
                     Jornada nocturna desde las 7 p.m. (Ley 2466 de 2025). Valor hora ordinaria:{' '}
-                    <strong>{fmt(preview?.horasExtras?.valorHoraOrdinaria || 0)}</strong> sobre {config?.horasMes || 220} h/mes.
+                    <strong>{fmt(preview?.horasExtras?.valorHoraOrdinaria || 0)}</strong> sobre {preview?.horasExtras?.horasMes || config?.horasMes || 210} h/mes{/* NOMINA-HORAS-001 */}.
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(210px,1fr))', gap: 10 }}>
                     {Object.entries(conceptosHoras).map(([clave, cfg]) => (

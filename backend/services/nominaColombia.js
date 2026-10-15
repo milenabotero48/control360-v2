@@ -25,6 +25,7 @@
 //   · Código Sustantivo del Trabajo (CST)
 //   · Ley 1819 de 2016 art. 65 (exoneración de aportes, antes Ley 1607/2012)
 //   · Ley 2466 de 2025 — reforma laboral (jornada nocturna y recargos)
+//   · Ley 2101 de 2021 — reducción gradual de la jornada máxima semanal
 //   · Decreto 1469 de 2025 — salario mínimo y auxilio de transporte 2026
 //
 // ⚠️ Los valores anuales se declaran por año en TABLA_ANUAL. Cada diciembre
@@ -302,7 +303,41 @@ const recargoDominicalVigente = (fechaISO) => {
   return 80;
 };
 
-const HORAS_MES_LEGAL = 220;   // 44 horas semanales tras la reforma (Ley 2101/2021)
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX NOMINA-HORAS-001 · Divisor de horas por VIGENCIA (Ley 2101 de 2021)
+//
+// ANTES: HORAS_MES_LEGAL = 220 fijo. Desde el 15/jul/2026 la jornada máxima baja
+// a 42 horas semanales y el divisor pasa a 210: con 220 el valor de la hora
+// (y por tanto extras y recargos) quedaba ~4,5 % por debajo de lo legal.
+//
+// La jornada baja de forma escalonada cada 15 de julio, así que el divisor
+// depende de la FECHA del período liquidado (igual que el recargo dominical):
+//     hasta 14/jul/2023 → 48 h → 240
+//     desde 15/jul/2023 → 47 h → 235
+//     desde 15/jul/2024 → 46 h → 230
+//     desde 15/jul/2025 → 44 h → 220
+//     desde 15/jul/2026 → 42 h → 210
+// Divisor = horas semanales ÷ 6 días × 30 días = horas semanales × 5.
+// Se usa la fecha de fin del período (fechaPago): si una nómina cruza el 15 de
+// julio, se aplica la jornada vigente al cierre (la más favorable al trabajador).
+// ─────────────────────────────────────────────────────────────────────────────
+const JORNADA_SEMANAL_VIGENCIAS = [
+  { desde: '2026-07-15', horas: 42 },
+  { desde: '2025-07-15', horas: 44 },
+  { desde: '2024-07-15', horas: 46 },
+  { desde: '2023-07-15', horas: 47 },
+  { desde: '0000-01-01', horas: 48 }
+];
+
+// Fecha de hoy en Colombia (UTC-5), formato YYYY-MM-DD
+const hoyColombiaISO = () => new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
+
+const jornadaSemanalVigente = (fechaISO) => {
+  const f = String(fechaISO || '').slice(0, 10) || hoyColombiaISO();
+  return JORNADA_SEMANAL_VIGENCIAS.find(v => f >= v.desde).horas;
+};
+
+const horasMesLegal = (fechaISO) => jornadaSemanalVigente(fechaISO) * 5;
 
 const conceptosHoras = (fechaISO) => {
   const dom = recargoDominicalVigente(fechaISO);
@@ -318,7 +353,7 @@ const conceptosHoras = (fechaISO) => {
 };
 
 // Valor de una hora ordinaria
-const valorHoraOrdinaria = (salarioMensual) => (Number(salarioMensual) || 0) / HORAS_MES_LEGAL;
+const valorHoraOrdinaria = (salarioMensual, fechaISO) => (Number(salarioMensual) || 0) / horasMesLegal(fechaISO);
 
 /**
  * Calcula el valor de las horas extras y recargos de un período.
@@ -327,7 +362,7 @@ const valorHoraOrdinaria = (salarioMensual) => (Number(salarioMensual) || 0) / H
  * el salario). Una HORA EXTRA paga la hora completa más el porcentaje.
  */
 const calcularHorasExtras = (salarioMensual, horas = {}, fechaISO) => {
-  const vh = valorHoraOrdinaria(salarioMensual);
+  const vh = valorHoraOrdinaria(salarioMensual, fechaISO);   // NOMINA-HORAS-001
   const conceptos = conceptosHoras(fechaISO);
   const detalle = [];
   let total = 0;
@@ -345,7 +380,7 @@ const calcularHorasExtras = (salarioMensual, horas = {}, fechaISO) => {
     total += valor;
   }
 
-  return { valorHoraOrdinaria: Math.round(vh), horasMes: HORAS_MES_LEGAL, detalle, total };
+  return { valorHoraOrdinaria: Math.round(vh), horasMes: horasMesLegal(fechaISO), detalle, total };   // NOMINA-HORAS-001
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1655,7 +1690,9 @@ module.exports = {
   PRESTACIONES,
   SEGURIDAD_SOCIAL,
   CLASES_RIESGO_ARL,
-  HORAS_MES_LEGAL,
+  JORNADA_SEMANAL_VIGENCIAS,   // NOMINA-HORAS-001
+  jornadaSemanalVigente,
+  horasMesLegal,
   conceptosHoras,
   recargoDominicalVigente,
   valorHoraOrdinaria,
