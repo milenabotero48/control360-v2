@@ -29,6 +29,9 @@ import PanelPasivoLaboral from './components/nomina/PanelPasivoLaboral';
 // ✅ NOMINA-COLILLA-001: la colilla que el trabajador firma. Antes había que
 // volver a digitarla en Excel, y ahí se colaban los errores de transcripción.
 import { imprimirComprobanteNomina } from './components/nomina/comprobanteNomina';
+// ✅ NOMINA-PRESTAMO-001: comprobante de préstamo de nómina (se descuenta en la
+// quincena que sigue). Vive en su propia carpeta por la misma razón que el pasivo.
+import PanelPrestamos from './components/nomina/PanelPrestamos';
 
 const API = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 const fmt = (n) => new Intl.NumberFormat('es-CO', {
@@ -1085,6 +1088,8 @@ export default function GestionEmpleados({ user }) {
     // Sin esta pestaña el pasivo del balance solo crecía.
     { k: 'pasivo', l: '🏦 Pasivo laboral', c: '#4338ca' },
     { k: 'nomina', l: '🧾 Nómina', c: '#16a34a' },
+    // ✅ NOMINA-PRESTAMO-001: préstamos de quincena con comprobante firmado
+    { k: 'prestamos', l: '💵 Préstamos', c: '#d97706' },
     // ✅ NOMINA-PROVISIONES-001: la exoneración vive acá y no en Mi Empresa
     // porque es donde el suscriptor está pensando en costo laboral.
     { k: 'ajustes', l: '⚙️ Ajustes', c: '#64748b' },
@@ -1555,6 +1560,11 @@ export default function GestionEmpleados({ user }) {
       {/* ═══════════════════════════════════════════════════════════════════════
           TAB · PASIVO LABORAL — ✅ NOMINA-PASIVO-001
           ═══════════════════════════════════════════════════════════════════ */}
+      {/* ✅ NOMINA-PRESTAMO-001 — TAB · PRÉSTAMOS DE NÓMINA */}
+      {tab === 'prestamos' && (
+        <PanelPrestamos user={user} empleados={empleados} cajas={cajas} empresas={empresas} />
+      )}
+
       {tab === 'pasivo' && (
         <PanelPasivoLaboral
           empleados={empleados} cajas={cajas} empresas={empresas}

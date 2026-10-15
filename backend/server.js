@@ -73,6 +73,8 @@ app.use('/api/empleados', authenticate, require('./routes/empleados'));
 // liquidación de contrato con indemnización y causación retroactiva.
 // Va en su propio archivo: empleados.js ya pasaba de 890 líneas.
 app.use('/api/prestaciones', authenticate, require('./routes/prestaciones'));
+// ✅ NOMINA-PRESTAMO-001: comprobante de préstamo de nómina (descuento en la quincena siguiente)
+app.use('/api/prestamos-nomina', authenticate, require('./routes/prestamosNomina'));
 // ✅ NOVEDADES-001: anuncios a suscriptores y calendario laboral
 app.use('/api/novedades', authenticate, require('./routes/novedades'));
 app.use('/api/configuracion', authenticate, require('./routes/configuracion'));

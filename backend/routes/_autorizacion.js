@@ -39,6 +39,12 @@ const MATRIZ_ACCIONES = {
   editar_egreso_pagado: { roles: ['admin'],              etiqueta: 'Editar egreso ya pagado'   },
   anular_egreso:        { roles: ['admin'],              etiqueta: 'Anular egreso pagado'      },
 
+  // ── Préstamos de nómina (NOMINA-PRESTAMO-001) ─────────────────────────────
+  // Mueven dinero de caja y respaldan un descuento de salario: mismo nivel que
+  // editar o anular un egreso pagado.
+  editar_prestamo_nomina: { roles: ['admin'], etiqueta: 'Editar préstamo de nómina' },
+  anular_prestamo_nomina: { roles: ['admin'], etiqueta: 'Anular préstamo de nómina' },
+
   // ── Órdenes ───────────────────────────────────────────────────────────────
   anular_orden:         { roles: ['admin'],              etiqueta: 'Anular orden de servicio'  },
   validar_pago:         { roles: ['admin', 'tesoreria'], etiqueta: 'Validar pago electrónico'  },
