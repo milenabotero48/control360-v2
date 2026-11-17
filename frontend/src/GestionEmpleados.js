@@ -695,7 +695,7 @@ function ModalNomina({ empleados, config, cajas, empresas, onGenerado, onCerrar 
                     💵 {anticipos.detalle.length} anticipo(s) del período — se descuentan automáticamente
                   </div>
                   <div style={{ fontSize: 11, color: '#a16207', marginBottom: 10, lineHeight: 1.55 }}>
-                    Estos son los préstamos que el empleado pidió durante la quincena.
+                    Estos son los adelantos que el empleado pidió durante la quincena.
                     <strong> No son un gasto adicional</strong>: eran una cuenta por cobrar y acá se cruzan.
                     Al generar el comprobante quedan marcados como cruzados y dejan de contar aparte.
                   </div>
@@ -1088,8 +1088,8 @@ export default function GestionEmpleados({ user }) {
     // Sin esta pestaña el pasivo del balance solo crecía.
     { k: 'pasivo', l: '🏦 Pasivo laboral', c: '#4338ca' },
     { k: 'nomina', l: '🧾 Nómina', c: '#16a34a' },
-    // ✅ NOMINA-PRESTAMO-001: préstamos de quincena con comprobante firmado
-    { k: 'prestamos', l: '💵 Préstamos', c: '#d97706' },
+    // ✅ NOMINA-PRESTAMO-001: préstamos de quincena con comprobante firmado · NOMINA-PRESTAMO-002: en pantalla y en el papel se llama "adelanto de nómina"
+    { k: 'prestamos', l: '💵 Adelantos', c: '#d97706' },
     // ✅ NOMINA-PROVISIONES-001: la exoneración vive acá y no en Mi Empresa
     // porque es donde el suscriptor está pensando en costo laboral.
     { k: 'ajustes', l: '⚙️ Ajustes', c: '#64748b' },

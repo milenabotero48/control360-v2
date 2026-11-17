@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // PanelPrestamos.js — Pestaña "Préstamos" del módulo de Empleados
 // ─────────────────────────────────────────────────────────────────────────────
-// NOMINA-PRESTAMO-001
+// NOMINA-PRESTAMO-001 · NOMINA-PRESTAMO-002: en pantalla y en el papel se llama "adelanto de nómina"
 //
 // Aquí vive el control de los préstamos de quincena: cuáles están pendientes de
 // descuento, cuáles ya se descontaron en nómina y cuáles se anularon. El dinero
@@ -52,7 +52,7 @@ const ModalAnularPrestamo = ({ prestamo, onListo, onCerrar }) => {
     try {
       const r = await api.post(`/prestamos-nomina/${prestamo.id}/anular`, { motivo: motivo.trim(), pin });
       onListo(r.data);
-    } catch (e) { setError(errorDe(e, 'No se pudo anular el préstamo')); setGuardando(false); }
+    } catch (e) { setError(errorDe(e, 'No se pudo anular el adelanto')); setGuardando(false); }
   };
 
   return (
@@ -68,7 +68,7 @@ const ModalAnularPrestamo = ({ prestamo, onListo, onCerrar }) => {
         <div style={S.modalBody}>
           <Aviso nivel="media" titulo="No se borra: se anula">
             El dinero vuelve a la caja, el comprobante queda visible como ANULADO con tu motivo y tu usuario,
-            y su número no se reutiliza. Un préstamo anulado ya no se descuenta en la nómina.
+            y su número no se reutiliza. Un adelanto anulado ya no se descuenta en la nómina.
           </Aviso>
           <div style={{ ...S.field, marginTop: 14 }}>
             <label style={S.label}>¿Por qué se anula? *</label>
@@ -81,7 +81,7 @@ const ModalAnularPrestamo = ({ prestamo, onListo, onCerrar }) => {
           <div style={S.modalFooter}>
             <button onClick={onCerrar} style={S.btnSecondary} disabled={guardando}>Cancelar</button>
             <button onClick={anular} style={{ ...S.btnPeligro, opacity: guardando ? 0.6 : 1 }} disabled={guardando}>
-              {guardando ? 'Anulando…' : 'Anular préstamo'}
+              {guardando ? 'Anulando…' : 'Anular adelanto'}
             </button>
           </div>
         </div>
@@ -133,7 +133,7 @@ const ConfigTope = ({ esAdmin }) => {
               style={{ ...S.input, width: 80, padding: '6px 9px' }} /> %
           </label>
           <Aviso nivel="info">
-            El tope solo <b>advierte</b>: si un préstamo lo supera, se puede prestar de todas formas con una
+            El tope solo <b>advierte</b>: si un adelanto lo supera, se puede entregar de todas formas con una
             confirmación y un motivo. Valida con tu abogado laboral qué modo te conviene.
           </Aviso>
           {esAdmin ? (
@@ -171,7 +171,7 @@ const PanelPrestamos = ({ user, empleados = [], cajas = [], empresas = [] }) => 
       const r = await api.get(`/prestamos-nomina${q.toString() ? `?${q}` : ''}`);
       setLista(r.data.prestamos || []);
       setResumen(r.data.resumen || { total: 0, activos: 0, valorPendiente: 0 });
-    } catch (e) { setError(errorDe(e, 'No se pudieron cargar los préstamos')); }
+    } catch (e) { setError(errorDe(e, 'No se pudieron cargar los adelantos')); }
     setCargando(false);
   }, [filtroEstado, filtroEmpleado]);
 
@@ -187,11 +187,11 @@ const PanelPrestamos = ({ user, empleados = [], cajas = [], empresas = [] }) => 
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
         <div>
-          <h3 style={{ ...S.cardTitle, fontSize: 17 }}>💵 Préstamos de nómina</h3>
+          <h3 style={{ ...S.cardTitle, fontSize: 17 }}>💵 Adelantos de nómina</h3>
           <p style={S.cardSub}>Lo que se presta en la quincena y se descuenta en la siguiente. Cada uno genera su comprobante para firmar.</p>
         </div>
         <button style={S.btnPrimary} onClick={() => setModal({ tipo: 'nuevo' })} disabled={empleados.length === 0}>
-          + Nuevo préstamo
+          + Nuevo adelanto
         </button>
       </div>
 
@@ -250,7 +250,7 @@ const PanelPrestamos = ({ user, empleados = [], cajas = [], empresas = [] }) => 
               {cargando && <tr><td style={S.td} colSpan={8}>Cargando…</td></tr>}
               {!cargando && lista.length === 0 && (
                 <tr><td style={{ ...S.td, textAlign: 'center', padding: 28, color: '#94a3b8' }} colSpan={8}>
-                  Todavía no hay préstamos registrados.
+                  Todavía no hay adelantos registrados.
                 </td></tr>
               )}
               {!cargando && lista.map(p => (

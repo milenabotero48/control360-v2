@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // ModalPrestamo.js — Crear o corregir un préstamo de nómina
 // ─────────────────────────────────────────────────────────────────────────────
-// NOMINA-PRESTAMO-001
+// NOMINA-PRESTAMO-001 · NOMINA-PRESTAMO-002: en pantalla y en el papel se llama "adelanto de nómina"
 //
 // Quien atiende solo escribe lo que no puede saber el sistema: a quién, cuánto y
 // de qué caja sale. Todo lo demás se calcula y se muestra ANTES de guardar:
@@ -75,12 +75,12 @@ const ModalPrestamo = ({ prestamo, empleados = [], cajas = [], empresas = [], on
   const guardar = async () => {
     setError('');
     if (!form.empleadoId) return setError('Selecciona al trabajador');
-    if (!(valorNum > 0)) return setError('Escribe el valor del préstamo');
+    if (!(valorNum > 0)) return setError('Escribe el valor del adelanto');
     if (!form.cajaId) return setError('Selecciona la caja o el banco de donde sale el dinero');
     if (empresas.length > 0 && !form.empresaId) return setError('Selecciona la empresa que presta');
     if (excedido && !confirmo) return setError('Confirma que quieres prestar por encima del máximo de descuento');
     if (excedido && motivoExceso.trim().length < 10) return setError('Escribe el motivo del exceso (mínimo 10 caracteres)');
-    if (editando && motivo.trim().length < 10) return setError('Explica por qué corriges el préstamo (mínimo 10 caracteres)');
+    if (editando && motivo.trim().length < 10) return setError('Explica por qué corriges el adelanto (mínimo 10 caracteres)');
     if (editando && pin.length !== 4) return setError('El PIN debe tener 4 dígitos');
 
     setGuardando(true);
@@ -103,7 +103,7 @@ const ModalPrestamo = ({ prestamo, empleados = [], cajas = [], empresas = [], on
         setSim(s => ({ ...(s || {}), tope: d.tope, advertencia: d.advertencia, fechaDescuento: d.fechaDescuento || s?.fechaDescuento }));
         setError('El cupo cambió mientras llenabas el formulario. Revisa la advertencia y confirma de nuevo.');
       } else {
-        setError(errorDe(e, 'No se pudo guardar el préstamo'));
+        setError(errorDe(e, 'No se pudo guardar el adelanto'));
       }
       setGuardando(false);
     }
@@ -116,7 +116,7 @@ const ModalPrestamo = ({ prestamo, empleados = [], cajas = [], empresas = [], on
       <div style={S.modal(640)}>
         <div style={S.modalHeader}>
           <div>
-            <h3 style={S.modalTitle}>{editando ? `Corregir préstamo ${prestamo.numero}` : '💵 Nuevo préstamo de nómina'}</h3>
+            <h3 style={S.modalTitle}>{editando ? `Corregir adelanto ${prestamo.numero}` : '💵 Nuevo adelanto de nómina'}</h3>
             <p style={S.cardSub}>
               {editando
                 ? 'Conserva su número. Cada cambio queda en el historial con tu motivo.'
@@ -147,7 +147,7 @@ const ModalPrestamo = ({ prestamo, empleados = [], cajas = [], empresas = [], on
 
           <div style={S.row2}>
             <div style={S.field}>
-              <label style={S.label}>Valor del préstamo *</label>
+              <label style={S.label}>Valor del adelanto *</label>
               <input style={S.input} type="number" min="0" inputMode="numeric" value={form.valor}
                 placeholder="50000" onChange={e => set('valor', e.target.value)} />
               {sim?.valorEnLetras && valorNum > 0 && (
@@ -214,7 +214,7 @@ const ModalPrestamo = ({ prestamo, empleados = [], cajas = [], empresas = [], on
                   <textarea style={{ ...S.input, height: 60, resize: 'vertical', fontFamily: 'inherit' }}
                     value={motivoExceso} onChange={e => setMotivoExceso(e.target.value)}
                     placeholder="Ej: calamidad doméstica, autorizado por gerencia" />
-                  <span style={{ fontSize: 11, color: '#94a3b8' }}>Queda en el préstamo y en auditoría.</span>
+                  <span style={{ fontSize: 11, color: '#94a3b8' }}>Queda en el adelanto y en auditoría.</span>
                 </div>
               )}
             </div>

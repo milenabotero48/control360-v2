@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // comprobantePrestamo.js — Comprobante de préstamo de nómina para firmar
 // ─────────────────────────────────────────────────────────────────────────────
-// NOMINA-PRESTAMO-001
+// NOMINA-PRESTAMO-001 · NOMINA-PRESTAMO-002: en pantalla y en el papel se llama "adelanto de nómina"
 //
 // El trabajador firma ESTE papel: es la autorización escrita que exige el CST
 // (arts. 149 y 151) para descontarle el préstamo del salario. Por eso el texto
@@ -38,7 +38,7 @@ export function imprimirComprobantePrestamo({ prestamo: p }) {
 
   const html = `<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
-<title>Comprobante de préstamo ${esc(p.numero)}</title>
+<title>Comprobante de adelanto de nómina ${esc(p.numero)}</title>
 <style>
   @page { size: A4; margin: 18mm 16mm; }
   * { box-sizing: border-box; }
@@ -78,7 +78,7 @@ ${anulado ? '<div class="marca">ANULADO</div>' : ''}
     <div class="nit">NIT ${esc(p.empresaNit || '—')}</div>
   </div>
   <div class="titulo">
-    <h1>Comprobante de préstamo de nómina</h1>
+    <h1>Comprobante de adelanto de nómina</h1>
     <div class="numero">No. ${esc(p.numero)}</div>
   </div>
 </div>
@@ -104,9 +104,9 @@ ${anulado ? `<div class="anulado-info"><b>Documento anulado</b>${p.motivoAnulaci
   <h2>Autorización de descuento</h2>
   Yo, <b>${esc(p.empleadoNombre)}</b>, identificado(a) con ${esc(tipoDoc)} No. <b>${esc(p.empleadoDocumento)}</b>,
   autorizo de manera expresa, previa y escrita a <b>${esc(empresa)}</b> para descontar de mi salario,
-  en el pago correspondiente al <b>${fecha(p.fechaDescuento)}</b>, el valor total de este préstamo,
+  en el pago correspondiente al <b>${fecha(p.fechaDescuento)}</b>, el valor total de este adelanto de nómina,
   <b>${money(p.valor)}</b> (${esc(p.valorEnLetras)}), en una sola cuota y <b>sin intereses</b>.
-  Esta autorización aplica únicamente a este préstamo. Si mi contrato termina antes de esa fecha,
+  Esta autorización aplica únicamente a este adelanto. Si mi contrato termina antes de esa fecha,
   autorizo que el saldo se descuente de mi liquidación final (arts. 149 y 151 del Código Sustantivo del Trabajo).
 </div>
 
