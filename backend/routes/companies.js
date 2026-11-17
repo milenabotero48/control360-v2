@@ -106,7 +106,7 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, web, whatsapp, anchoImpresoraPos,
-            esPrincipal, horarioAtencion, telefonoPrincipal } = req.body;
+            esPrincipal, horarioAtencion, telefonoPrincipal, mediosPago, annyCriterio } = req.body;
 
     if (!name)                      return res.status(400).json({ error: 'Nombre requerido' });
     if (!validarNIT(nit))           return res.status(400).json({ error: 'NIT inválido: mínimo 8 dígitos' });
@@ -141,11 +141,15 @@ router.post('/', async (req, res) => {
       esPrincipal:       esPrincipal === true,
       horarioAtencion:   (horarioAtencion || '').trim(),
       telefonoPrincipal: TELEFONOS_VALIDOS.includes(telefonoPrincipal) ? telefonoPrincipal : 'phone',
+      // ✅ ANNY-EMPRESA-067 — lo que Anny usa para esta empresa
+      mediosPago:   String(mediosPago || '').trim().slice(0, 600),
+      annyCriterio: String(annyCriterio || '').trim().slice(0, 200),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
 
     const docRef = await db.collection('companies').add(newCompany);
+    try { require('../services/anny/empresa').invalidarEmpresas(req.user.uid); } catch (e) { /* ANNY-EMPRESA-067 */ }
     if (newCompany.esPrincipal) {
       await desmarcarOtrasPrincipales(req.user.uid, docRef.id);
     }
@@ -160,7 +164,7 @@ router.put('/:id', async (req, res) => {
   try {
     // Aceptamos configCertificado pero IGNORAMOS pinAutorizacion (deprecado).
     const { name, nit, address, ciudad, phone, cellphone, email, iva, logo, configCertificado, web, whatsapp, anchoImpresoraPos,
-            esPrincipal, horarioAtencion, telefonoPrincipal } = req.body;
+            esPrincipal, horarioAtencion, telefonoPrincipal, mediosPago, annyCriterio } = req.body;
 
     // ✅ SEDE-PRINCIPAL-001 — VALIDACIÓN DE PROPIEDAD (no existía)
     // Esta ruta actualizaba la empresa por id SIN comprobar que perteneciera al
@@ -220,8 +224,12 @@ router.put('/:id', async (req, res) => {
       updateData.telefonoPrincipal = telefonoPrincipal;
     }
     if (esPrincipal !== undefined) updateData.esPrincipal = esPrincipal === true;
+    // ✅ ANNY-EMPRESA-067 — medios de pago y criterio de esta empresa para Anny
+    if (mediosPago !== undefined)   updateData.mediosPago   = String(mediosPago || '').trim().slice(0, 600);
+    if (annyCriterio !== undefined) updateData.annyCriterio = String(annyCriterio || '').trim().slice(0, 200);
 
     await db.collection('companies').doc(req.params.id).update(updateData);
+    try { require('../services/anny/empresa').invalidarEmpresas(userId); } catch (e) { /* ANNY-EMPRESA-067 */ }
 
     // Una sola sede principal por suscriptor.
     if (updateData.esPrincipal === true) {

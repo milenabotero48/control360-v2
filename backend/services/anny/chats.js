@@ -153,6 +153,7 @@ async function obtenerDocChat(adminId, telefono) {
       misionActiva: mision,
       contacto: { nombre: d.contactoNombre || null, empresa: d.contactoEmpresa || null, presentada: d.annySePresento === true },
       estado,
+      empresaId: d.empresaIdAnny || null,   // ✅ ANNY-EMPRESA-067
       ultimaFechaMs: Number(d.ultimaFechaMs) || 0,
       calidad: d.calidad || {}
     };
@@ -188,6 +189,20 @@ async function guardarContactoChat(adminId, telefono, contacto = {}) {
     await refChat(adminId, telefono).set(patch, { merge: true });
   } catch (err) {
     console.error('[ANNY] Error guardando contacto:', err.message);
+  }
+}
+
+// ✅ ANNY-EMPRESA-067: empresa que atiende a un cliente NUEVO, definida por
+// su respuesta a la pregunta de Anny. Vive en el chat, no en el estado
+// de la conversación: no se pierde cuando el estado se reinicia.
+async function guardarEmpresaChat(adminId, telefono, empresaId) {
+  try {
+    if (!empresaId) return false;
+    await refChat(adminId, telefono).set({ empresaIdAnny: String(empresaId) }, { merge: true });
+    return true;
+  } catch (err) {
+    console.error('[ANNY-EMPRESA-067] Error guardando empresa del chat:', err.message);
+    return false;
   }
 }
 
@@ -473,6 +488,7 @@ module.exports = {
   cerrarCasosDeChat,          // ✅ ANNY-ESCALADO-059
   sincronizarEscaladoChat,    // ✅ ANNY-ESCALADO-059
   repararMarcasEscalado,      // ✅ ANNY-ESCALADO-059
+  guardarEmpresaChat,         // ✅ ANNY-EMPRESA-067
   numerosDelEquipo,           // ✅ ANNY-INTERNO-064
   esNumeroDelEquipo,          // ✅ ANNY-INTERNO-064
   registrarPedido,

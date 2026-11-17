@@ -200,6 +200,7 @@ async function _decidirUnaVez({ adminId, modelo = 'haiku', system, messages, con
       escalar: (d.escalar && typeof d.escalar === 'object' && d.escalar.tipo) ? { tipo: String(d.escalar.tipo).toUpperCase(), razon: String(d.escalar.razon || '').slice(0, 120) } : null,
       comprobantePago: (d.comprobantePago && typeof d.comprobantePago === 'object') ? d.comprobantePago : null,
       respuestaTaller: (d.respuestaTaller === 'APROBADO' || d.respuestaTaller === 'RECHAZADO') ? d.respuestaTaller : null,
+      empresaCliente: typeof d.empresaCliente === 'string' ? d.empresaCliente.trim().slice(0, 60) : null,   // ✅ ANNY-EMPRESA-067
       _error: false
     };
   } catch (err) {

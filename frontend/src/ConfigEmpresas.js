@@ -40,7 +40,7 @@ const TabEmpresas = ({ token }) => {
   const fileInputRef = useRef();
   // ✅ SEDE-PRINCIPAL-001: horarioAtencion, telefonoPrincipal y esPrincipal
   // ✅ NOTA-FIJA-IMPRESION-001: notaFijaImpresion para todas las órdenes
-  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false, notaFijaImpresion: '' });
+  const [formData, setFormData] = useState({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false, notaFijaImpresion: '', mediosPago: '', annyCriterio: '' });
   const [errores, setErrores] = useState({});
 
   useEffect(() => { cargarEmpresas(); }, []);
@@ -143,7 +143,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
 
   const handleEditar = (emp) => {
     setEditando(emp.id);
-    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '', anchoImpresoraPos: emp.anchoImpresoraPos || 58, horarioAtencion: emp.horarioAtencion || '', telefonoPrincipal: emp.telefonoPrincipal || 'phone', esPrincipal: emp.esPrincipal === true, notaFijaImpresion: emp.notaFijaImpresion || '' });
+    setFormData({ name: emp.name || '', nit: emp.nit || '', address: emp.address || '', ciudad: emp.ciudad || '', phone: emp.phone || '', cellphone: emp.cellphone || '', email: emp.email || '', iva: emp.iva?.toString() || '', web: emp.web || '', whatsapp: emp.whatsapp || '', anchoImpresoraPos: emp.anchoImpresoraPos || 58, horarioAtencion: emp.horarioAtencion || '', telefonoPrincipal: emp.telefonoPrincipal || 'phone', esPrincipal: emp.esPrincipal === true, notaFijaImpresion: emp.notaFijaImpresion || '', mediosPago: emp.mediosPago || '', annyCriterio: emp.annyCriterio || '' });
     setLogoPreview(emp.logo || null); setLogoFile(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -156,7 +156,7 @@ const comprimirImagen = (file, maxWidth, quality) => {
     } catch { mostrarMensaje('Error al eliminar', 'error'); }
   };
 
-  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false, notaFijaImpresion: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
+  const resetForm = () => { setFormData({ name: '', nit: '', address: '', ciudad: '', phone: '', cellphone: '', email: '', iva: '', web: '', whatsapp: '', anchoImpresoraPos: 58, horarioAtencion: '', telefonoPrincipal: 'phone', esPrincipal: false, notaFijaImpresion: '', mediosPago: '', annyCriterio: '' }); setEditando(null); setLogoPreview(null); setLogoFile(null); setErrores({}); };
 
   const campo = (label, key, tipo = 'text', placeholder = '') => (
     <div style={S.campo}>
@@ -196,6 +196,50 @@ const comprimirImagen = (file, maxWidth, quality) => {
             {/* debe ir, en qué horario y a qué número llamar. Si estos datos    */}
             {/* están mal, se manda gente a la dirección equivocada.            */}
             {/* ═══════════════════════════════════════════════════════════════ */}
+            {/* ✅ ANNY-EMPRESA-067 — medios de pago y criterio de ESTA empresa para Anny */}
+            <div style={{ marginTop: 22, padding: '16px 18px', background: '#ecfdf5', border: '1.5px solid #a7f3d0', borderRadius: 12 }}>
+              <label style={{ display: 'block', fontSize: 13, fontWeight: 800, color: '#065f46', marginBottom: 4 }}>
+                💬 Datos que Anny usa por WhatsApp
+              </label>
+              <div style={{ fontSize: 11.5, color: '#047857', marginBottom: 14 }}>
+                Anny le da a cada cliente solo la cuenta de la empresa que lo factura, y el precio con el IVA de esa empresa.
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 5 }}>
+                  Medios de pago de esta empresa
+                </label>
+                <textarea
+                  rows={3}
+                  maxLength={600}
+                  value={formData.mediosPago || ''}
+                  placeholder="Banco, tipo y número de cuenta, titular y NIT. También Nequi o llave si aplica."
+                  onChange={(e) => setFormData({ ...formData, mediosPago: e.target.value })}
+                  style={{ ...S.input, width: '100%', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit' }}
+                />
+                <span style={{ fontSize: 11, color: '#9ca3af', marginTop: 4, display: 'block' }}>
+                  Anny lo copia tal cual. Apenas una empresa tenga este dato, Anny deja de usar el texto general de medios de pago.
+                </span>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 5 }}>
+                  ¿Cuándo le corresponde esta empresa a un cliente nuevo?
+                </label>
+                <input
+                  type="text"
+                  maxLength={200}
+                  value={formData.annyCriterio || ''}
+                  placeholder="Ej.: el cliente necesita factura electrónica"
+                  onChange={(e) => setFormData({ ...formData, annyCriterio: e.target.value })}
+                  style={{ ...S.input, width: '100%', boxSizing: 'border-box' }}
+                />
+                <span style={{ fontSize: 11, color: '#9ca3af', marginTop: 4, display: 'block' }}>
+                  Solo aplica si tienes varias empresas. Con este dato en cada una, Anny hace una pregunta al cliente nuevo antes de dar precio o cuenta.
+                </span>
+              </div>
+            </div>
+
             <div style={{ marginTop: 22, padding: '16px 18px', background: '#f5f3ff', border: '1.5px solid #ddd6fe', borderRadius: 12 }}>
               <label style={{ display: 'block', fontSize: 13, fontWeight: 800, color: '#5b21b6', marginBottom: 4 }}>
                 ☎️ Datos que Lucy dice en la llamada

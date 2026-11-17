@@ -47,7 +47,7 @@ Usa la herramienta "responder" en cada turno. Extrae en "extraidos" únicamente 
 // ============================================================
 // Capa NICHO + TENANT + MISIÓN
 // ============================================================
-function capaTenant({ perfil, nicho, mision, misionNombre, catalogoModo }) {
+function capaTenant({ perfil, nicho, mision, misionNombre, catalogoModo, pagoPorEmpresa }) {
   const t = perfil.tono || {};
   const tono = [
     t.tratamiento === 'usted' ? 'Tratas al cliente de USTED.' : 'Tuteas al cliente.',
@@ -72,7 +72,7 @@ Eres ${perfil.nombreAgente}, asesora de ${perfil.empresa}, empresa de ${perfil.v
 Qué ofrece la empresa: ${perfil.queVende}.
 ${tono}
 Horario de atención de la empresa: ${describirHorario(perfil.horarioAtencion)}.
-${perfil.mediosPago ? `Medios de pago: ${perfil.mediosPago}.` : ''}
+${pagoPorEmpresa ? 'Medios de pago: dependen de la empresa que factura a cada cliente. Usa SOLO los que el contexto del sistema te entregue en ese mensaje; si no te entrega ninguno, no des cuentas.' : (perfil.mediosPago ? `Medios de pago: ${perfil.mediosPago}.` : '')}
 
 REGLAS DEL NEGOCIO (criterio de oficio de esta empresa)
 ${perfil.reglasNegocio || '(sin reglas adicionales)'}
@@ -91,11 +91,14 @@ ${ejemplos || '(sin ejemplos)'}`;
 // ============================================================
 // Bloque de contexto del sistema (va en el ÚLTIMO mensaje user)
 // ============================================================
-function bloqueContexto({ instruccion, maxChars, fichaCliente, estadoPedido, ordenes, seleccion, estado, defectoPendiente, imagen, cartera, contacto, conocimiento }) {
+function bloqueContexto({ instruccion, maxChars, fichaCliente, estadoPedido, ordenes, seleccion, estado, defectoPendiente, imagen, cartera, contacto, conocimiento, empresaTxt, factorIva = 1, ocultarPrecios = false }) {
   const L = [];
+  // ✅ ANNY-EMPRESA-067: el precio que ve el modelo ya trae el IVA de la empresa del cliente
+  const px = (n) => ocultarPrecios ? '(precio: se informa al definir la empresa)' : `$${Math.round((Number(n) || 0) * factorIva).toLocaleString('es-CO')}`;
   L.push(`[CONTEXTO DEL SISTEMA — esto NO lo escribió el cliente]`);
   L.push(`Largo máximo de tu respuesta: ${maxChars} caracteres.`);
   if (instruccion) L.push(instruccion);
+  if (empresaTxt) L.push(empresaTxt);   // ✅ ANNY-EMPRESA-067
 
   // Quién escribe
   if (contacto?.nombre || contacto?.empresa) {
@@ -135,9 +138,9 @@ function bloqueContexto({ instruccion, maxChars, fichaCliente, estadoPedido, ord
   // Precios
   if (seleccion) {
     if (seleccion.modo === 'diccionario') {
-      L.push('PRECIO YA RESUELTO por las palabras del cliente (catálogo vigente): ' + seleccion.productos.map(p => `"${p.coincidio}" → ${p.nombre}: $${p.precio.toLocaleString('es-CO')}`).join(' · ') + '. Dalo directo, sin pedir especificaciones antes.');
+      L.push('PRECIO YA RESUELTO por las palabras del cliente (catálogo vigente): ' + seleccion.productos.map(p => `"${p.coincidio}" → ${p.nombre}: ${px(p.precio)}`).join(' · ') + (ocultarPrecios ? '.' : '. Dalo directo, sin pedir especificaciones antes.'));
     } else if (seleccion.modo === 'filtrado') {
-      L.push(`CATÁLOGO RELEVANTE${seleccion.familia ? ` (familia: ${seleccion.familia})` : ''}:\n` + seleccion.productos.map(p => `- ${p.categoria ? `[${p.categoria}] ` : ''}${p.nombre}: $${p.precio.toLocaleString('es-CO')}`).join('\n'));
+      L.push(`CATÁLOGO RELEVANTE${seleccion.familia ? ` (familia: ${seleccion.familia})` : ''}:\n` + seleccion.productos.map(p => `- ${p.categoria ? `[${p.categoria}] ` : ''}${p.nombre}: ${px(p.precio)}`).join('\n'));
     }
   }
 
@@ -149,7 +152,7 @@ function bloqueContexto({ instruccion, maxChars, fichaCliente, estadoPedido, ord
   // Slots ya capturados (para que no los vuelva a pedir)
   const s = estado?.slots || {};
   const capturados = [];
-  if (s.items?.length) capturados.push(`items: ${s.items.map(i => `${i.cantidad}x ${i.nombre}${i.precio ? ` $${i.precio.toLocaleString('es-CO')}` : ''}`).join(', ')}`);
+  if (s.items?.length) capturados.push(`items: ${s.items.map(i => `${i.cantidad}x ${i.nombre}${i.precio ? ` ${px(i.precio)}` : ''}`).join(', ')}`);
   for (const k of ['necesidad', 'direccion', 'barrio', 'sucursal', 'fecha', 'cedulaNit', 'correo']) if (s[k]) capturados.push(`${k}: ${s[k]}`);
   if (capturados.length) L.push('Ya sabes (no lo pidas de nuevo): ' + capturados.join(' | '));
 
@@ -260,16 +263,18 @@ const TOOL_RESPONDER = {
           referencia: { type: ['string', 'null'] }
         }
       },
-      respuestaTaller: { type: ['string', 'null'], description: 'Solo si hay autorización de taller pendiente: "APROBADO", "RECHAZADO" o null' }
+      respuestaTaller: { type: ['string', 'null'], description: 'Solo si hay autorización de taller pendiente: "APROBADO", "RECHAZADO" o null' },
+      // ✅ ANNY-EMPRESA-067
+      empresaCliente: { type: ['string', 'null'], description: 'Solo cuando el contexto pide definir la empresa y el cliente ya dio la respuesta: el id entre corchetes de la opción que aplica. En cualquier otro caso, null.' }
     },
     required: ['respuesta', 'extraidos', 'clienteConfirma', 'cambioDeTema', 'escalar', 'comprobantePago']
   }
 };
 
-function construirSystem({ perfil, nicho, mision, misionNombre, catalogoModo }) {
+function construirSystem({ perfil, nicho, mision, misionNombre, catalogoModo, pagoPorEmpresa }) {
   return [
     { type: 'text', text: MOTOR },
-    { type: 'text', text: capaTenant({ perfil, nicho, mision, misionNombre, catalogoModo }), cache_control: { type: 'ephemeral' } }
+    { type: 'text', text: capaTenant({ perfil, nicho, mision, misionNombre, catalogoModo, pagoPorEmpresa }), cache_control: { type: 'ephemeral' } }
   ];
 }
 

@@ -175,6 +175,7 @@ async function carteraPorCliente(adminId) {
       fechaFactura: fFactura,
       fechaConciliacion: fechaBase,
       empresaNombre: o.empresaNombre || '',
+      empresaId: o.empresaId || '',                 // ✅ ANNY-EMPRESA-067
       ref: o.ref,                                   // para marcar la cobranza
       ultimaCobranzaAnny: o.ultimaCobranzaAnny || null,
     });

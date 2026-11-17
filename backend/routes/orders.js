@@ -1472,6 +1472,7 @@ router.post('/', authenticate, async (req, res) => {
         nombreCliente: clienteNombre,
         numeroOrden,
         numeroFactura,   // ✅ ANNY-COBRANZA-066: se nombra la factura si ya existe
+        empresaId: nuevaOrden.empresaId,   // ✅ ANNY-EMPRESA-067: la cuenta de pago sale de la empresa de la orden
         descripcion: (items || []).map(i => i.nombre || i.descripcion || '').filter(Boolean).slice(0, 3).join(', '),
         total
       }).then(r => {

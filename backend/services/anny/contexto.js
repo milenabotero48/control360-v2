@@ -47,6 +47,7 @@ async function buscarClienteEnBD(adminId, telefonoRaw) {
       direccion: c.direccionPrincipal || '',
       ciudad: c.ciudad || '',
       empresaNombre: c.empresaNombre || '',
+      empresaId: c.empresaId || '',   // ✅ ANNY-EMPRESA-067: empresa que lo factura
       sucursales,
       vencimientos,
       saldoCxC
@@ -139,6 +140,7 @@ async function obtenerOrdenesServicio(adminId, telefonoRaw) {
         fechaProgramada: o.fechaProgramada || null,
         horaProgramada: o.horaProgramada || null,
         total: Number(o.total) || 0,
+        empresaId: o.empresaId || '',   // ✅ ANNY-EMPRESA-067
         saldo: Math.max(0, (Number(o.total) || 0) - (Number(o.montoPagado) || 0)),
         creadaMs: (o.createdAt?.seconds || 0) * 1000
       }))
@@ -198,7 +200,8 @@ async function obtenerEstadoPedidoHilo(adminId, telefono) {
       id: p.id,
       estado: p.estado || 'NUEVO',
       producto: p.producto || '',
-      total: p.total || '',
+      // ✅ ANNY-EMPRESA-067: al cliente se le habló con IVA incluido
+      total: p.totalConIva ? `$${Number(p.totalConIva).toLocaleString('es-CO')} IVA incluido` : (p.total || ''),
       datosPendientes: Array.isArray(p.datosPendientes) ? p.datosPendientes : [],
       abierto: !!abierto,
       creadoMs: (p.createdAt?.seconds || 0) * 1000

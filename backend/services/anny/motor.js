@@ -49,6 +49,7 @@ const chats = require('./chats');
 const etapas = require('./etapas');
 const prompt = require('./prompt');
 const modelo = require('./modelo');
+const empresaMod = require('./empresa');   // ✅ ANNY-EMPRESA-067
 
 const VENTANA_CONVERSACION_MS = 24 * 60 * 60 * 1000;
 
@@ -182,7 +183,7 @@ async function procesarMensajeEntrante(props) {
     }
 
     // ── 2. Contexto en paralelo ──────────────────────────────
-    const [respuestas, historial, fichaCliente, catalogo, estadoPedido, defectoPendiente, docChat, ordenesServicio, diccionario] = await Promise.all([
+    const [respuestasTodas, historial, fichaCliente, catalogo, estadoPedido, defectoPendiente, docChat, ordenesServicio, diccionario, empresas] = await Promise.all([
       cfg.obtenerRespuestasTenant(adminId),
       chats.obtenerHistorialReciente(adminId, telefono),
       contexto.buscarClienteEnBD(adminId, telefono),
@@ -191,12 +192,23 @@ async function procesarMensajeEntrante(props) {
       tallerRespuestas.buscarDefectoPendiente(adminId, telefono).catch(() => null),
       chats.obtenerDocChat(adminId, telefono),
       contexto.obtenerOrdenesServicio(adminId, telefono).catch(() => []),
-      conocimiento.obtenerDiccionarioTenant(adminId).catch(() => ({}))
+      conocimiento.obtenerDiccionarioTenant(adminId).catch(() => ({})),
+      empresaMod.obtenerEmpresasTenant(adminId).catch(() => [])   // ✅ ANNY-EMPRESA-067
     ]);
 
     if (!misionNombre) misionNombre = docChat.misionActiva;
     const mision = cfg.obtenerMision(misionNombre);
     const contactoChat = docChat.contacto;
+
+    // ── ✅ ANNY-EMPRESA-067 — EMPRESA QUE ATIENDE A ESTE CLIENTE ──
+    // Se resuelve aquí, antes del modelo: de ella salen el IVA del precio
+    // y la cuenta de pago. El modelo no elige ninguno de los dos.
+    const empresaCtx = empresaMod.resolverEmpresa({ empresas, fichaCliente, ordenes: ordenesServicio, empresaIdChat: docChat.empresaId });
+    const factorIva = empresaMod.factorIva(empresaCtx);
+    // Con cuentas por empresa, el Entrenamiento que traiga datos de pago se
+    // excluye (atajo y contexto): era la otra vía por donde salía la cuenta que no era.
+    const respuestas = empresaCtx.pagoPorEmpresa ? empresaMod.filtrarRespuestasPago(respuestasTodas) : respuestasTodas;
+    if (empresaCtx.modo !== 'sin_empresas') console.log(`[ANNY-EMPRESA-067] ${telefono}: ${empresaCtx.modo}${empresaCtx.empresa ? ` → ${empresaCtx.empresa.nombre} (${empresaCtx.origen}, IVA ${empresaCtx.empresa.iva}%)` : ''}`);
 
     const ultimoTs = historial.length ? historial[historial.length - 1].ts : 0;
     const conversacionActiva = ultimoTs > 0 && (Date.now() - ultimoTs) < VENTANA_CONVERSACION_MS;
@@ -246,15 +258,29 @@ async function procesarMensajeEntrante(props) {
     // ── 6. Modelo ────────────────────────────────────────────
     const system = prompt.construirSystem({
       perfil, nicho, mision, misionNombre,
-      catalogoModo: perfil.fuentePrecios === 'products' ? 'products' : 'sin_catalogo'
+      catalogoModo: perfil.fuentePrecios === 'products' ? 'products' : 'sin_catalogo',
+      pagoPorEmpresa: empresaCtx.pagoPorEmpresa   // ✅ ANNY-EMPRESA-067
     });
     const contextoTxt = prompt.bloqueContexto({
       instruccion, maxChars, fichaCliente, estadoPedido, ordenes: ordenesServicio, seleccion, estado, defectoPendiente,
-      imagen: !!imagenAdjunta, cartera: fichaCliente.existe ? fichaCliente.saldoCxC : null, contacto: contactoChat, conocimiento: kbRelevante
+      imagen: !!imagenAdjunta, cartera: fichaCliente.existe ? fichaCliente.saldoCxC : null, contacto: contactoChat, conocimiento: kbRelevante,
+      // ✅ ANNY-EMPRESA-067
+      empresaTxt: empresaMod.textoContexto(empresaCtx), factorIva, ocultarPrecios: empresaCtx.modo === 'por_definir'
     });
     const messages = prompt.construirMensajes({ historial, mensajeTexto, contextoTxt, imagenAdjunta });
 
     const decision = await modelo.decidir({ adminId, modelo: perfil.modelo, system, messages, conImagen: !!imagenAdjunta });
+
+    // ── ✅ ANNY-EMPRESA-067 — el cliente respondió la pregunta que define la empresa ──
+    // Se guarda en el chat y el turno se rehace UNA vez, ya con el IVA y la
+    // cuenta de esa empresa: así el precio lo sigue poniendo el sistema.
+    if (empresaCtx.modo === 'por_definir' && !decision._error && !props._empresaDefinida) {
+      const elegida = empresaMod.validarEleccion(decision.empresaCliente, empresaCtx.opciones);
+      if (elegida && await chats.guardarEmpresaChat(adminId, telefono, elegida.id)) {
+        console.log(`[ANNY-EMPRESA-067] ${telefono}: empresa definida por respuesta del cliente → ${elegida.nombre}`);
+        return procesarMensajeEntrante({ ...props, _empresaDefinida: true });
+      }
+    }
 
     // ── 7. Post-proceso ──────────────────────────────────────
     // 7a. Contacto
@@ -383,6 +409,14 @@ async function procesarMensajeEntrante(props) {
     let pedidoParaAviso = null;
     if (etapaFinal === 'CIERRE_LISTO' && mision.permitePedido) {
       const pedido = etapas.construirPedido(nuevoEstado, nicho, fichaCliente, telefono);
+      // ✅ ANNY-EMPRESA-067: el pedido conserva los precios base (los lee el prellenado
+      // de la orden, que suma el IVA) y además guarda con qué empresa e IVA se le habló al cliente.
+      if (empresaCtx.modo === 'resuelta') {
+        pedido.empresaFacturaId = empresaCtx.empresa.id;
+        pedido.empresaFacturaNombre = empresaCtx.empresa.nombre;
+        pedido.ivaPct = empresaCtx.empresa.iva;
+        pedido.totalConIva = Math.round(pedido.totalNumero * factorIva);
+      }
       const res = await chats.registrarPedido(adminId, telefono, pedido);
       if (res) {
         etapaFinal = 'CONFIRMADO';
@@ -394,9 +428,12 @@ async function procesarMensajeEntrante(props) {
             notificarA = cfgDoc.exists ? (cfgDoc.data().notificarPedidosA || null) : null;
           } catch (e) { notificarA = null; }
           // Si el modelo no confirmó en texto, se confirma determinísticamente.
-          const totalTxt = pedido.total.replace(/\./g, '');
+          // ✅ ANNY-EMPRESA-067: el total que se le confirma es el que va a pagar (con IVA si la empresa lo cobra)
+          const totalCliente = pedido.totalConIva || pedido.totalNumero;
+          const totalClienteTxt = `$${totalCliente.toLocaleString('es-CO')}${pedido.ivaPct > 0 ? ' IVA incluido' : ''}`;
+          const totalTxt = `$${totalCliente}`;
           if (!respuesta.replace(/\./g, '').includes(totalTxt) && pedido.totalNumero > 0) {
-            respuesta = texto.recortarRespuesta(`${respuesta} Te confirmo el pedido: ${pedido.producto}, total ${pedido.total}.`, maxChars + 80, perfil.tono?.emojis);
+            respuesta = texto.recortarRespuesta(`${respuesta} Te confirmo el pedido: ${pedido.producto}, total ${totalClienteTxt}.`, maxChars + 80, perfil.tono?.emojis);
           }
         }
       }

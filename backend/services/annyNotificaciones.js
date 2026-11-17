@@ -33,6 +33,7 @@ const { db, admin } = require('../config/firebase');
 // alimenta el panel de CxC. Una sola verdad contable.
 const carteraService = require('./carteraService');
 const annyService = require('./annyService');
+const empresaMod = require('./anny/empresa');   // ✅ ANNY-EMPRESA-067: cuenta de pago según la empresa de la orden
 const baileysService = require('./baileysService');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -270,14 +271,16 @@ async function ejecutarCobranzaCxC() {
         console.log(`[ANNY-NOTIF] Tenant ${adminId}: ${candidatos.length} cliente(s) a cobrar (desde ${config.diasMinimoCobranza} días, bloqueo ${config.diasBloqueoCartera})`, motivos);
 
         const empresaTxt = perfil.empresa && perfil.empresa !== 'la empresa' ? ` de ${perfil.empresa}` : '';
-        const pagoTxt = perfil.mediosPago
-          ? `\n\nMedios de pago: ${perfil.mediosPago}`
-          : '';
+        // ✅ ANNY-EMPRESA-067: la cuenta depende de la empresa de las órdenes que se cobran
+        const empresasTenant = await empresaMod.obtenerEmpresasTenant(adminId).catch(() => []);
 
         for (const c of candidatos) {
           try {
             const saldoTxt = `$${c.saldoExigible.toLocaleString('es-CO')}`;
             const detalle = _detalleOrdenes(c.ordenesExigibles, hoyMs);
+            // ✅ ANNY-EMPRESA-067: una sola empresa → su cuenta; varias → ninguna (mejor nada que la equivocada)
+            const mediosCobro = empresaMod.mediosPagoSalida(empresasTenant, c.ordenesExigibles.map(o => o.empresaId), perfil);
+            const pagoTxt = mediosCobro ? `\n\nMedios de pago: ${mediosCobro}` : '';
             const nombre = c.clienteNombre ? ` ${c.clienteNombre}` : '';
 
             const msg = c.bloqueado
@@ -337,7 +340,7 @@ async function notificarVentaCliente(adminId, datos = {}) {
   try {
     // ✅ ANNY-COBRANZA-066: se nombra la FACTURA cuando ya existe, porque es
     // contra ese documento que el cliente paga. Si aún no hay, la orden.
-    const { celular, nombreCliente, numeroOrden, numeroFactura, descripcion, total } = datos;
+    const { celular, nombreCliente, numeroOrden, numeroFactura, descripcion, total, empresaId } = datos;   // ✅ ANNY-EMPRESA-067: empresaId
     if (!celular) return { ok: false, error: 'sin_celular' };
 
     const activo = await annyService.tenantTieneAnnyActiva(adminId);
@@ -351,8 +354,10 @@ async function notificarVentaCliente(adminId, datos = {}) {
       ? ` (factura ${numeroFactura})`
       : (numeroOrden ? ` (orden ${numeroOrden})` : '');
     const queTxt = descripcion ? `: ${String(descripcion).slice(0, 120)}` : '';
-    const pagoTxt = perfil.mediosPago
-      ? ` Puedes pagar así: ${perfil.mediosPago}.`
+    // ✅ ANNY-EMPRESA-067: medios de pago de la empresa de ESTA orden
+    const mediosVenta = empresaMod.mediosPagoSalida(await empresaMod.obtenerEmpresasTenant(adminId).catch(() => []), [empresaId], perfil);
+    const pagoTxt = mediosVenta
+      ? ` Puedes pagar así: ${mediosVenta}.`
       : ' ¿Te comparto los medios de pago?';
 
     const msg = `Hola${nombreCliente ? ' ' + nombreCliente : ''} 👋 ` +
